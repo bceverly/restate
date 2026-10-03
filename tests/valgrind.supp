@@ -3,28 +3,31 @@
 #
 # valgrind suppressions for memory that is not restate's.
 #
-# Each entry names exactly one allocation made inside the C library, and says
-# why it is not a leak. scripts/memcheck.sh counts every kind of leak,
-# "still reachable" included, so an entry here is the difference between a
-# check that is strict about restate and one that is strict about glibc.
+# Each entry names allocations made inside the C library, and says why they
+# are not leaks. scripts/memcheck.sh counts every kind of leak, "still
+# reachable" included, so an entry here is the difference between a check that
+# is strict about restate and one that is strict about glibc.
 #
-# glibc's NSS loads a module with dlopen the first time getpwuid or getgrgid
-# has to look past /etc/passwd -- a uid with no name, in the unit tests -- and
-# keeps it loaded for the life of the process. Reachable, owned by the loader,
-# and freed by nothing anyone can call.
+# Looking up a user or group name goes through NSS, which loads modules with
+# dlopen -- libnss_systemd on a systemd machine, as GitHub's runners are,
+# libnss_sss with SSSD, others elsewhere -- and those keep caches, thread-local
+# storage and the loaded objects themselves for the life of the process.
+# Reachable, owned by the C library and the modules it loaded, and freed by
+# nothing a program can call. Only "reachable" is suppressed: a block NSS
+# actually lost would still be reported.
 {
-   glibc-nss-module-load
+   nss-getpwuid
    Memcheck:Leak
    match-leak-kinds: reachable
    ...
-   fun:__nss_module_load
+   fun:getpwuid_r*
    ...
 }
 {
-   glibc-nss-module-dlopen
+   nss-getgrgid
    Memcheck:Leak
    match-leak-kinds: reachable
    ...
-   fun:module_load
+   fun:getgrgid_r*
    ...
 }

@@ -14,8 +14,11 @@
 # already says (0.1.0.0 to begin with) rather than a bump of nothing.
 #
 # What it does, in order, after a single confirmation:
-#   1. Works out the next version and asks you to confirm it.
-#   2. Writes it into VERSION, rebuilds, and regenerates the manpage.
+#   1. Works out the next version, refuses an existing tag, a version older
+#      than the newest release, or uncommitted changes, and asks you to
+#      confirm it.
+#   2. Writes it into VERSION, rebuilds, regenerates the manpage and the
+#      README's Usage block, and checks the manpage names the new version.
 #   3. Commits and pushes that change.
 #   4. Creates an annotated tag and pushes the tag.
 #
@@ -108,19 +111,32 @@ fi
 
 TAG="v$NEXT"
 
-# Re-using a tag would move a release that may already have been built and
-# published, so say so plainly rather than silently overwriting.
+# Everything below is checked BEFORE anything changes, because each of these
+# used to be found halfway through: after the version commit had already been
+# pushed, with only the tag left to fail.
+
+# A tag that exists names a release that may already have been built and
+# published. Moving it is a decision, not something to do by accident.
 if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null 2>&1; then
-  warn "Tag $TAG already exists."
-  warn "Delete it first if you really mean to move it:"
-  warn "    git tag -d $TAG && git push --delete origin $TAG"
+  die "Tag $TAG already exists. Release a newer version, or, if $TAG was never
+       published and you mean to move it, delete it first:
+           git push --delete origin $TAG && git tag -d $TAG"
 fi
 
-# A release built from a dirty tree is a release nobody can reproduce.
+# A version has to move forward: one at or below the newest tag would sort
+# before releases that already exist.
+if [ -n "$LATEST" ] && [ "$NEXT" != "$LATEST" ] \
+   && [ "$(printf '%s\n%s\n' "$LATEST" "$NEXT" | sort -V | tail -1)" != "$NEXT" ]; then
+  die "v$NEXT is older than the newest release, v$LATEST."
+fi
+
+# A release built from a dirty tree is a release nobody can reproduce -- and it
+# is not even the tree that is being looked at: uncommitted changes would be
+# left out of it. Commit them, or stash them, first.
 if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-  warn "The working tree has uncommitted changes:"
   git status --short --untracked-files=no | sed 's/^/      /'
-  warn "They will NOT be part of the release unless you commit them first."
+  die "The working tree has uncommitted changes (above). Commit them first:
+       a release has to be exactly what is committed."
 fi
 
 # ---------------------------------------------------------------------------
@@ -160,6 +176,18 @@ fi
 info "Rebuilding so the binary and the manpage carry $NEXT…"
 make --no-print-directory build > /dev/null || die "The build failed; nothing was committed."
 BUILT="$(./bin/restate --version | head -1 | awk '{print $2}')"
+
+# The manpage and the README's Usage block, regenerated outright rather than
+# left to the build's timestamps. The manpage's footer names the version, and
+# a release once went out with the previous one in it because the build
+# decided, from the files' dates, that the page did not need rewriting.
+scripts/gen-man.sh ./bin/restate man/restate.8 \
+  || die "Could not regenerate the manpage; nothing was committed."
+scripts/gen-readme-usage.sh ./bin/restate README.md \
+  || die "Could not regenerate the README's Usage block; nothing was committed."
+grep -q "^\.TH RESTATE 8 \"[^\"]*\" \"restate $NEXT\"" man/restate.8 \
+  || die "man/restate.8 does not name version $NEXT after regenerating it."
+ok "man/restate.8 names $NEXT"
 # The "-dev" suffix is expected here and is not a problem: at this point the
 # version bump is not committed and the tag does not exist, so scripts/version.sh
 # is correctly saying this tree is not the release. What matters is the number
@@ -190,7 +218,7 @@ fi
 git remote get-url origin > /dev/null 2>&1 \
   || die "No 'origin' remote configured; nothing to push to."
 
-git add VERSION man/restate.8 || die "Could not stage the version files."
+git add VERSION man/restate.8 README.md || die "Could not stage the version files."
 
 # An empty diff means the files already carried this version, which is fine on
 # a re-run; skip the commit rather than failing on "nothing to commit".

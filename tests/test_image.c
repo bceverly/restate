@@ -531,12 +531,30 @@ void test_image(void)
             rs_gzip_set_paths(NULL, 0);
             CHECK(rs_gzip_path() != NULL);
 
-            /* One killed underneath us; then waited for a second time. */
-            rs_buf_reset(&err);
-            CHECK(rs_gzip_compress(devnull, &gz, &err));
-            CHECK(kill(gz.pid, SIGKILL) == 0);
-            CHECK(!rs_gzip_finish(&gz, false, &err));
-            CHECK_CONTAINS(err.data, "killed by a signal");
+            /*
+             * One killed underneath us; then waited for a second time.
+             *
+             * Not killed the moment it is started: posix_spawn can return
+             * before the child is running -- NetBSD's does -- and a signal
+             * sent in that window can be lost, leaving a gzip that runs and
+             * exits 0. So it is first made to prove it is running: a megabyte
+             * is written into it, which no pipe can hold, so the writes only
+             * finish once gzip is reading. Then it is killed.
+             */
+            {
+                static const char zero[65536];
+                int               k;
+
+                rs_buf_reset(&err);
+                CHECK(rs_gzip_compress(devnull, &gz, &err));
+                for (k = 0; k < 16; k++)
+                {
+                    CHECK(write(gz.fd, zero, sizeof(zero)) == (ssize_t)sizeof(zero));
+                }
+                CHECK(kill(gz.pid, SIGKILL) == 0);
+                CHECK(!rs_gzip_finish(&gz, false, &err));
+                CHECK_CONTAINS(err.data, "killed by a signal");
+            }
             rs_buf_reset(&err);
             CHECK(!rs_gzip_finish(&gz, false, &err));
             CHECK_CONTAINS(err.data, "waiting for gzip");

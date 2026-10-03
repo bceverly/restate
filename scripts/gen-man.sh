@@ -18,8 +18,9 @@
 # Only the prose sections below are written here: the part a generator cannot
 # invent, and short enough to keep correct by reading it.
 #
-# The date in the .TH line is the one thing --check ignores, and a page whose
-# content has not changed keeps the date it already has. A date taken from a
+# The date in the .TH line is the one thing --check ignores -- the date, not
+# the line, which also names the version -- and a page whose content has not
+# changed keeps the date it already has. A date taken from a
 # file's mtime changes on every fresh checkout, and a freshness check that
 # fails on a clean clone is a check people learn to ignore.
 set -euo pipefail
@@ -384,8 +385,11 @@ Report bugs at
 TRAILER
 } > "$TMP"
 
-# Everything except the .TH line, which carries the date.
-strip_date() { grep -v '^\.TH RESTATE 8 ' "$1" || true; }
+# The page with the date in its .TH line blanked out -- the date only, not
+# the line. The same line carries the version, and ignoring the whole of it
+# once let a release go out with the previous version in the manpage's
+# footer, because a page differing only there was judged unchanged.
+strip_date() { sed 's/^\(\.TH RESTATE 8 \)"[^"]*"/\1"DATE"/' "$1"; }
 
 if [ "$CHECK" -eq 1 ]; then
   [ -f "$OUTPUT" ] || { echo "gen-man.sh: $OUTPUT does not exist; run 'make man'" >&2; exit 1; }
