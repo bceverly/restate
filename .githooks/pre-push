@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate — installed by scripts/install-hooks.sh
+#
+# Runs the TESTS before every push. Lint runs at pre-commit, where it is fast
+# enough to belong and where a finding is cheapest to fix; running it again
+# here would only make pushing slower for an answer already known.
+#
+# The tests are here rather than at pre-commit deliberately: with the
+# sanitizers and the coverage gate they take a couple of minutes, and
+# interrupting every save point for that teaches people to pass --no-verify,
+# which switches off the push check too. A push is when the work leaves this
+# machine, which is the moment worth spending two minutes on.
+#
+# Set RESTATE_SKIP_HOOK=1 to push anyway.
+set -uo pipefail
+
+if [ "${RESTATE_SKIP_HOOK:-0}" = "1" ]; then
+  echo "pre-push: skipped (RESTATE_SKIP_HOOK=1)"
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$REPO_ROOT" || exit 0
+
+printf '\n\033[1mpre-push\033[0m \033[2m(RESTATE_SKIP_HOOK=1 to skip)\033[0m\n'
+
+if ! make --no-print-directory build > /dev/null < /dev/null; then
+  printf '\n\033[91m✗ the build failed — not pushing\033[0m\n\n'
+  exit 1
+fi
+
+# Git feeds a pre-push hook the list of refs being pushed on stdin. Nothing
+# here reads it, but the test suite inherits it -- and `restate diff -` reads
+# standard input, so a test that ran it bare would be handed git's ref list as
+# a manifest. Redirecting from /dev/null once, here, means no test can acquire
+# that input by accident.
+if ! make --no-print-directory test < /dev/null; then
+  printf '\n\033[91m✗ tests failed — not pushing\033[0m\n\n'
+  exit 1
+fi
+
+printf '\n\033[92m✓ tests, sanitizers, valgrind and the 80%% coverage gate all passed\033[0m\n\n'
+exit 0

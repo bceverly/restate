@@ -1,0 +1,30 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# valgrind suppressions for memory that is not restate's.
+#
+# Each entry names exactly one allocation made inside the C library, and says
+# why it is not a leak. scripts/memcheck.sh counts every kind of leak,
+# "still reachable" included, so an entry here is the difference between a
+# check that is strict about restate and one that is strict about glibc.
+#
+# glibc's NSS loads a module with dlopen the first time getpwuid or getgrgid
+# has to look past /etc/passwd -- a uid with no name, in the unit tests -- and
+# keeps it loaded for the life of the process. Reachable, owned by the loader,
+# and freed by nothing anyone can call.
+{
+   glibc-nss-module-load
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:__nss_module_load
+   ...
+}
+{
+   glibc-nss-module-dlopen
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:module_load
+   ...
+}

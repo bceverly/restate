@@ -1,0 +1,14 @@
+# Keep the GitHub Actions this project uses current.
+#
+# Only the actions: restate is C linked against nothing but libc, so there is
+# no application ecosystem to update -- the absence is deliberate.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

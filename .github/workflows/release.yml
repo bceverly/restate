@@ -1,0 +1,210 @@
+# Publish a release when a version tag is pushed.
+#
+# `make release` writes the version into VERSION, commits, tags and pushes --
+# and the tag push is what lands here. There is no such thing as an untagged
+# release.
+#
+#   gate     wait for CI, Security and CodeQL to have passed on this commit
+#   build    the source tarball, built and tested from that tarball on a clean
+#            runner, its SHA-256 checksums, and a signed build-provenance
+#            attestation (SLSA) that says which workflow made it from which
+#            commit
+#   publish  a GitHub release with the tarball, the checksums and the notes
+#
+# Distribution packages come later: a Launchpad PPA for Ubuntu first, then the
+# BSDs and macOS. See ROADMAP.md. Until then the release is the source, which
+# `make build && sudo make install` turns into an installed program.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.1.0.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ==========================================================================
+  # A tag push runs neither CI nor the scans -- they are wired to branches --
+  # so this waits for the runs that already happened on this exact commit,
+  # which `make release` pushed to main before tagging it.
+  gate:
+    name: Wait for CI, Security and CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for the checks on this commit to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TIMEOUT_MINUTES: "60"
+        run: |
+          set -euo pipefail
+          WANTED="CI Security CodeQL"
+          DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+          echo "Waiting for [$WANTED] on $SHA"
+          while :; do
+            PENDING=""
+            FAILED=""
+            MISSING=""
+            for NAME in $WANTED; do
+              READ=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
+                     --jq ".workflow_runs[] | select(.name==\"$NAME\") |
+                           [.status, (.conclusion // \"pending\")] | @tsv" \
+                     | head -1 || true)
+              if [ -z "$READ" ]; then MISSING="$MISSING $NAME"; continue; fi
+              STATUS=$(printf '%s' "$READ" | cut -f1)
+              CONCLUSION=$(printf '%s' "$READ" | cut -f2)
+              if [ "$STATUS" != completed ]; then
+                PENDING="$PENDING $NAME($STATUS)"
+              elif [ "$CONCLUSION" != success ] && [ "$CONCLUSION" != skipped ]; then
+                FAILED="$FAILED $NAME($CONCLUSION)"
+              fi
+            done
+            if [ -n "$FAILED" ]; then
+              echo "::error::Refusing to release --$FAILED did not pass on $SHA"
+              exit 1
+            fi
+            # A tag on a commit that never reached a branch has no runs at all.
+            if [ -n "$MISSING" ] && [ "$(date +%s)" -gt $(( DEADLINE - (TIMEOUT_MINUTES - 5) * 60 )) ]; then
+              echo "::error::No run found for$MISSING on $SHA after 5 minutes."
+              echo "::error::Was this commit pushed to a branch before it was tagged?"
+              exit 1
+            fi
+            if [ -z "$PENDING" ] && [ -z "$MISSING" ]; then
+              echo "All required checks passed on $SHA."
+              break
+            fi
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::Timed out after ${TIMEOUT_MINUTES}m waiting for$PENDING$MISSING"
+              exit 1
+            fi
+            echo "  still waiting:$PENDING$MISSING"
+            sleep 30
+          done
+
+  # ==========================================================================
+  build:
+    name: Build the release
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # to sign the attestation
+      attestations: write  # to store it
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The tag and VERSION must agree: a tag pushed by hand is exactly the
+      # case where they might not.
+      - name: Check the tag matches VERSION
+        id: version
+        run: |
+          set -eu
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="$(cat VERSION)"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match VERSION ($VERSION)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # git archive: exactly the committed tree, nothing from the workspace.
+      - name: Make the source tarball
+        run: |
+          set -eu
+          V="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          git archive --format=tar --prefix="restate-$V/" HEAD | gzip -9n > "dist/restate-$V.tar.gz"
+
+      # The tarball has to build and pass its tests on its own, without the
+      # git repository it came from -- which is how everyone downloading it
+      # will build it.
+      - name: Build and test from the tarball
+        run: |
+          set -eu
+          V="${{ steps.version.outputs.version }}"
+          mkdir -p /tmp/fromtar
+          tar -xzf "dist/restate-$V.tar.gz" -C /tmp/fromtar
+          cd "/tmp/fromtar/restate-$V"
+          make build WERROR=-Werror
+          make test-unit test-cli
+          ./bin/restate --version | head -1 | grep -qx "restate $V"
+
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  # ==========================================================================
+  publish:
+    name: Publish the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          cat > notes.md <<NOTES
+          restate $V
+
+          Build and install from source (Ubuntu 26.04 and any Linux, the BSDs
+          with gmake, macOS):
+
+              tar -xzf restate-$V.tar.gz && cd restate-$V
+              make build && sudo make install
+
+          Verify the download:
+
+              sha256sum -c SHA256SUMS
+              gh attestation verify restate-$V.tar.gz --repo $REPO
+          NOTES
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$REPO" \
+              --title "restate $V" --notes-file notes.md --verify-tag
+          fi

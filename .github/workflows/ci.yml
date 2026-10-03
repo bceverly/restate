@@ -1,0 +1,453 @@
+# Build, lint and test on every push and pull request.
+#
+# Each concern is its own job so a failure names itself in the checks list, and
+# so they run in parallel. Everything here is exactly what `make` does locally --
+# same targets, same scripts, same thresholds -- so a clean local run means a
+# clean CI run. The tools each script would otherwise skip are installed first,
+# because a scanner that is not installed reports "skipped" and passes, and a
+# job that passes by doing nothing is worse than no job.
+
+name: CI
+
+on:
+  # Every branch: pushed work that is not yet a pull request is exactly the work
+  # most likely to be broken. 'branches' rather than a bare 'push:' so a tag
+  # push does not run this twice -- the release workflow waits on the runs from
+  # the commit the tag names, which already exist by then.
+  push:
+    branches: ['**']
+  # For pull requests from a FORK, whose push never reaches this repository.
+  # Jobs are guarded so a PR from a branch here does not run everything twice.
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only: nothing here needs write access to the repository.
+permissions:
+  contents: read
+
+jobs:
+  # ==========================================================================
+  lint:
+    name: Lint
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # scripts/lint.sh skips any tool it cannot find, so they all go in.
+      - name: Install the analyzers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cppcheck clang-tidy shellcheck
+          ACTIONLINT_VERSION=1.7.7
+          curl -sSfL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: make build
+        run: make build
+
+      - name: make lint
+        run: make lint
+
+      # A pull request that adds an option and forgets `make man` fails here
+      # rather than shipping a manpage that documents the previous release.
+      - name: The manpage and README usage are current
+        run: make man-check
+
+  # ==========================================================================
+  test:
+    name: Tests (${{ matrix.cc }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      # Knowing it breaks under clang *and* passes under gcc is the point.
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential ${{ matrix.cc }}
+
+      - name: make build
+        run: make build
+
+      # -Werror is off by default so a newer compiler cannot stop somebody
+      # building from source. Here is where a new warning should fail.
+      - name: Build again with -Werror
+        run: make clean && make build WERROR=-Werror
+
+      - name: make test-unit
+        run: make test-unit
+
+      - name: make test-cli
+        run: make test-cli
+
+  # ==========================================================================
+  # The first install target, in its own image: Ubuntu 26.04 LTS. Built,
+  # tested, and installed for real the way the README says to, then found by
+  # man(1) -- which is the question that matters about a manpage.
+  ubuntu-2604:
+    name: Tests (Ubuntu 26.04)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install what the README says a developer needs
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          # The base image is "minimized": dpkg deletes manpages as packages
+          # unpack, and /usr/bin/man is replaced by a stub that prints a notice
+          # and exits 0 -- so `man -w restate` would pass without looking.
+          # Both are undone, so the manpage check below checks something.
+          rm -f /etc/dpkg/dpkg.cfg.d/excludes
+          apt-get install -y -qq --no-install-recommends \
+            build-essential git ca-certificates man-db
+          if dpkg-divert --list /usr/bin/man | grep -q man.REAL; then
+            rm -f /usr/bin/man
+            dpkg-divert --quiet --remove --rename /usr/bin/man
+          fi
+
+      - uses: actions/checkout@v7
+
+      - name: Say what this actually is
+        run: |
+          . /etc/os-release && echo "$PRETTY_NAME"
+          cc --version | head -1
+          make --version | head -1
+
+      # The checkout belongs to another uid inside the container; scripts/
+      # version.sh asks git about it, and git refuses an unsafe directory.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: make build
+        run: make build WERROR=-Werror
+
+      - name: make test-unit and test-cli
+        run: make test-unit test-cli
+
+      - name: make install, staged and then for real
+        run: |
+          make install DESTDIR="$PWD/staged"
+          test -x staged/usr/local/sbin/restate
+          test "$(stat -c '%a' staged/usr/local/sbin/restate)" = 755
+          test "$(stat -c '%a' staged/usr/local/share/man/man8/restate.8)" = 644
+          rm -rf staged
+          make install
+          /usr/local/sbin/restate --version
+          # The path, not just a zero exit: see the install step above.
+          # Resolved, because Ubuntu's /usr/local/man is a link to share/man
+          # and man(1) reports the page through it.
+          test "$(realpath "$(man -w restate)")" = /usr/local/share/man/man8/restate.8
+          man -w restate
+          /usr/local/sbin/restate classify /etc/passwd /usr/bin/ls /var/cache/apt
+          make uninstall
+          test ! -e /usr/local/sbin/restate
+
+  # ==========================================================================
+  # aarch64: plain char is unsigned there and the ABI differs. Native runners,
+  # so this costs no more than the x86 legs.
+  arm:
+    name: Tests (aarch64)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Confirm this really is aarch64
+        run: |
+          arch="$(uname -m)"
+          echo "running on $arch"
+          test "$arch" = "aarch64"
+
+      - name: make build
+        run: make build WERROR=-Werror
+
+      - name: make test-unit and test-cli
+        run: make test-unit test-cli
+
+  # ==========================================================================
+  # macOS, on a native runner: Apple's linker, Apple's libc, BSD userland.
+  macos:
+    name: Tests (macOS)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Say what this actually is
+        run: |
+          uname -srm
+          cc --version | head -1
+          make --version | head -1
+          bash --version | head -1
+
+      - name: make build
+        run: make build WERROR=-Werror
+
+      - name: make test-unit and test-cli
+        run: make test-unit test-cli
+
+      # stat is spelled -f here, not -c; that is why this cannot reuse the
+      # Linux check.
+      - name: make install, staged and then for real
+        run: |
+          make install DESTDIR="$PWD/staged"
+          test -x staged/usr/local/sbin/restate
+          test "$(stat -f '%Lp' staged/usr/local/sbin/restate)" = 755
+          rm -rf staged
+          sudo make install
+          /usr/local/sbin/restate --version
+          man -w restate
+
+  # ==========================================================================
+  # The three BSDs, each in a QEMU virtual machine. The configuration, the
+  # pinned action and the versions are the ones proven in ../tmd's CI.
+  #
+  # gmake and bash are installed rather than worked around: the Makefile is
+  # GNU make, and the scripts are bash.
+  freebsd:
+    name: Tests (FreeBSD)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start the FreeBSD VM
+        uses: cross-platform-actions/action@e0b9770014ba65d5e0815f15b74031c3a635f641 # v1.6.0
+        timeout-minutes: 15
+        with:
+          operating_system: freebsd
+          version: "14.3"
+
+      - name: Build and test
+        shell: cpa.sh {0}
+        run: |
+          set -e
+          # One package per line: pkg aborts the whole batch over one name it
+          # cannot resolve.
+          sudo pkg install -y bash
+          sudo pkg install -y gmake
+          for t in bash gmake; do
+            command -v "$t" > /dev/null 2>&1 || { echo "not installed: $t" >&2; exit 1; }
+          done
+          uname -srm
+          cc --version | head -1
+          gmake build WERROR=-Werror
+          gmake test-unit test-cli
+          gmake install DESTDIR="$PWD/staged"
+          test -x staged/usr/local/sbin/restate
+          find staged -name restate.8 | grep -q .
+          rm -rf staged
+          sudo gmake install
+          /usr/local/sbin/restate --version
+          man -w restate
+          /usr/local/sbin/restate classify /usr/local/bin/x /usr/local/etc/x
+
+  openbsd:
+    name: Tests (OpenBSD)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start the OpenBSD VM
+        uses: cross-platform-actions/action@e0b9770014ba65d5e0815f15b74031c3a635f641 # v1.6.0
+        timeout-minutes: 15
+        with:
+          operating_system: openbsd
+          version: "7.9"
+
+      # OpenBSD has no sudo in base -- hence doas in the installer -- though
+      # the VM image provides sudo for CI's benefit.
+      - name: Build and test
+        shell: cpa.sh {0}
+        run: |
+          set -e
+          sudo pkg_add -I bash gmake
+          for t in bash gmake; do
+            command -v "$t" > /dev/null 2>&1 || { echo "not installed: $t" >&2; exit 1; }
+          done
+          uname -srm
+          cc --version | head -1
+          gmake build WERROR=-Werror
+          gmake test-unit test-cli
+          gmake install DESTDIR="$PWD/staged"
+          test -x staged/usr/local/sbin/restate
+          find staged -name restate.8 | grep -q .
+          rm -rf staged
+          sudo gmake install
+          /usr/local/sbin/restate --version
+          man -w restate
+
+  netbsd:
+    name: Tests (NetBSD)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # Two attempts at the VM: NetBSD is the guest that fails to come up for
+      # reasons that have nothing to do with this repository.
+      - name: Start the NetBSD VM
+        id: vm1
+        continue-on-error: true
+        uses: cross-platform-actions/action@e0b9770014ba65d5e0815f15b74031c3a635f641 # v1.6.0
+        timeout-minutes: 15
+        with:
+          operating_system: netbsd
+          version: "10.1"
+
+      - name: Wait before retrying the VM
+        if: steps.vm1.outcome == 'failure'
+        run: |
+          echo "::warning::the NetBSD VM did not start; retrying once in 60s"
+          sleep 60
+
+      - name: Start the NetBSD VM (retry)
+        if: steps.vm1.outcome == 'failure'
+        uses: cross-platform-actions/action@e0b9770014ba65d5e0815f15b74031c3a635f641 # v1.6.0
+        timeout-minutes: 15
+        with:
+          operating_system: netbsd
+          version: "10.1"
+
+      - name: Build and test
+        shell: cpa.sh {0}
+        run: |
+          set -e
+          # The image's pkgin points at FTP, which times out; use the HTTPS CDN.
+          REL="$(uname -r)"
+          echo "https://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/amd64/${REL}/All" \
+            | sudo tee /usr/pkg/etc/pkgin/repositories.conf
+          n=0
+          until [ "$n" -ge 5 ]; do
+            sudo pkgin -y update && sudo pkgin -y install bash gmake && break
+            n=$((n + 1))
+            echo "pkgin attempt $n failed; retrying in 15s..." >&2
+            sleep 15
+          done
+          if [ "$n" -ge 5 ]; then
+            echo "pkgin could not install bash and gmake; the mirror is unreachable" >&2
+            exit 1
+          fi
+          uname -srm
+          cc --version | head -1
+          gmake build WERROR=-Werror
+          gmake test-unit test-cli
+          gmake install DESTDIR="$PWD/staged"
+          test -x staged/usr/local/sbin/restate
+          find staged -name restate.8 | grep -q .
+          rm -rf staged
+          sudo gmake install
+          /usr/local/sbin/restate --version
+          man -w restate
+
+  # ==========================================================================
+  # Separate from `test` because it is slow, and because its failures are of a
+  # different kind: not "the answer is wrong" but "the program did something it
+  # is not allowed to do".
+  memory:
+    name: Sanitizers and valgrind
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential valgrind
+
+      - name: make test-memory
+        run: make test-memory
+
+      - name: Upload the sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sanitizer-logs
+          path: |
+            .sanitize/*.log
+            .sanitize.failed/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ==========================================================================
+  coverage:
+    name: Coverage (80% gate, every file)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install gcovr
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential gcovr
+
+      # Both suites against one instrumented build: the unit tests never reach
+      # main.c, and the end-to-end tests are what cover it.
+      - name: make coverage
+        run: make coverage
+
+      # The badge in the README is generated from the number just measured. If
+      # it differs from the committed one, say so, so the README is not left
+      # claiming a number the code no longer has.
+      - name: The committed coverage badge is current
+        run: |
+          if ! git diff --quiet -- docs/badges/coverage.svg; then
+            echo "::warning::docs/badges/coverage.svg is stale; run 'make coverage' and commit it"
+          fi
+
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            .coverage/coverage.xml
+            .coverage/*.gcov
+            .coverage/index*.html
+          retention-days: 14
+          if-no-files-found: ignore

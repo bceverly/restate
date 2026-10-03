@@ -1,0 +1,52 @@
+# OpenSSF Scorecard: an outside opinion of this repository's security
+# practices -- branch protection, pinned dependencies, token permissions,
+# signed releases, fuzzing, SAST and the rest -- published so the README badge
+# and https://scorecard.dev can show it.
+#
+# Read its findings in the Security tab. Some of them are settings only the
+# repository owner can change (branch protection, required reviews); README.md,
+# "GitHub configuration", lists them.
+
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 4 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # To upload the results to code scanning.
+      security-events: write
+      # To publish the results, which the badge reads.
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scorecard
+          path: results.sarif
+          retention-days: 7
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif

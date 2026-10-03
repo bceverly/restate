@@ -1,0 +1,119 @@
+# Security scanning.
+#
+# The `security` job runs exactly what `make security` runs locally -- same
+# script, same tools, same thresholds -- so a clean local run means a clean CI
+# run. The scanners are installed first, because scripts/security.sh *skips*
+# any tool it cannot find; without installing them the job would pass by doing
+# nothing.
+#
+# CodeQL and the OpenSSF Scorecard have workflows of their own, so each has a
+# badge of its own. The long fuzz run is here, on a schedule, because nobody
+# wants fifteen minutes of fuzzing on every push.
+
+name: Security
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC. The code may not change, but the scanners' rules do.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ==========================================================================
+  # hardening-check · gcc -fanalyzer · cppcheck+CERT · scan-build · flawfinder
+  # · semgrep · the sanitizers · a fuzz run · gitleaks · Lucky 13 · linkage
+  # ==========================================================================
+  security:
+    name: Security scan
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gitleaks scans history, which a single-commit checkout lacks.
+          fetch-depth: 0
+
+      - name: Install the scanners
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential clang clang-tools cppcheck flawfinder \
+            valgrind devscripts llvm
+          # Pinned, and the same version scripts/install-dev.sh installs.
+          GITLEAKS_VERSION=8.21.2
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          python3 -m pip install --quiet --break-system-packages semgrep \
+            || echo "::warning::semgrep install failed; that scan will skip"
+
+      # The hardening check reads the built binary, so it has to exist.
+      - name: make build
+        run: make build
+
+      - name: make security
+        env:
+          SECURITY_FUZZ_SECONDS: "120"
+        run: make security
+
+      - name: Upload the scanner reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-reports
+          path: |
+            .security-reports/
+            .fuzz/crash.bin
+            .fuzz/findings/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ==========================================================================
+  # A long fuzz run, coverage-guided. Short on a push; fifteen minutes on the
+  # weekly schedule. The findings are kept so a crash can be replayed.
+  fuzz:
+    name: Fuzz (${{ github.event_name == 'schedule' && '15 minutes' || '3 minutes' }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install clang and the symbolizer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential clang llvm
+
+      - name: make fuzz
+        env:
+          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '900' || '180' }}
+        run: make fuzz
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings
+          path: |
+            .fuzz/crash.bin
+            .fuzz/findings/
+            .fuzz/*.log
+          retention-days: 30
+          if-no-files-found: ignore

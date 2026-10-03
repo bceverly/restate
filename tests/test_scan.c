@@ -1,0 +1,313 @@
+/*
+ * Copyright (c) 2026 Bryan C. Everly
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include "scan.h"
+#include "test.h"
+
+/* Builds a small tree that exercises every kind of entry. */
+static void build_tree(const char *root)
+{
+    char *p;
+
+    p = rs_xasprintf("%s/etc", root);
+    (void)mkdir(p, 0755);
+    free(p);
+    p = rs_xasprintf("%s/usr", root);
+    (void)mkdir(p, 0755);
+    free(p);
+    p = rs_xasprintf("%s/tmp", root);
+    (void)mkdir(p, 01777);
+    free(p);
+    p = rs_xasprintf("%s/var", root);
+    (void)mkdir(p, 0755);
+    free(p);
+    p = rs_xasprintf("%s/var/cache", root);
+    (void)mkdir(p, 0755);
+    free(p);
+    rs_test_write(root, "etc/hosts", "127.0.0.1 localhost\n", 0644);
+    rs_test_write(root, "etc/empty", "", 0600);
+    rs_test_write(root, "usr/tool", "#!/bin/sh\n", 0755);
+    rs_test_write(root, "tmp/junk", "junk", 0644);
+    rs_test_write(root, "var/cache/blob", "blob", 0644);
+    rs_test_write(root, "etc/daemon.pid", "123\n", 0644);
+    p = rs_xasprintf("%s/etc/link", root);
+    CHECK(symlink("hosts", p) == 0);
+    free(p);
+    p = rs_xasprintf("%s/etc/fifo", root);
+    CHECK(mkfifo(p, 0600) == 0);
+    free(p);
+}
+
+static struct rs_rules test_rules_set(void)
+{
+    struct rs_rules rs;
+    struct rs_buf   err;
+    const char     *text = "baseline /usr\n"
+                           "ephemeral /tmp\n"
+                           "expendable /var/cache\n"
+                           "ephemeral *.pid\n";
+
+    rs_rules_init(&rs);
+    rs_buf_init(&err);
+    (void)rs_rules_parse(&rs, text, strlen(text), "test", &err);
+    rs_buf_free(&err);
+    return rs;
+}
+
+static int quiet_scan(const void *arg)
+{
+    const struct rs_scan_opts *o = arg;
+    struct rs_index            m;
+    struct rs_scan_stats       st;
+    struct rs_buf              err;
+    int                        unreadable;
+
+    rs_index_init(&m);
+    rs_buf_init(&err);
+    (void)rs_scan(o, &m, &st, &err);
+    unreadable = (int)st.unreadable;
+    rs_buf_free(&err);
+    rs_index_free(&m);
+    return unreadable;
+}
+
+void test_scan(void)
+{
+    char                  *root = rs_test_tmpdir();
+    struct rs_rules        rules = test_rules_set();
+    struct rs_scan_opts    o;
+    struct rs_scan_stats   st;
+    struct rs_index        m;
+    struct rs_buf          err;
+    const struct rs_entry *e;
+
+    build_tree(root);
+    rs_buf_init(&err);
+    memset(&o, 0, sizeof(o));
+    o.root = root;
+    o.rules = &rules;
+    o.hash = true;
+
+    TEST_CASE("scan: every kind of entry, classified");
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    CHECK_INT(st.unreadable, 0);
+    CHECK(rs_index_find(&m, "/") != NULL);
+    e = rs_index_find(&m, "/etc/hosts");
+    CHECK(e != NULL);
+    if (e)
+    {
+        CHECK_INT(e->type, 'f');
+        CHECK_INT(e->mode, 0644);
+        CHECK_INT(e->size, 20);
+        CHECK_INT(e->hash_state, RS_HASH_PRESENT);
+        CHECK_INT(e->cls, RS_CLASS_STATE);
+    }
+    e = rs_index_find(&m, "/etc/empty");
+    CHECK(e && strcmp(e->hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+    e = rs_index_find(&m, "/etc/link");
+    CHECK(e && e->type == 'l' && e->target && strcmp(e->target, "hosts") == 0);
+    e = rs_index_find(&m, "/etc/fifo");
+    CHECK(e && e->type == 'p' && e->hash_state == RS_HASH_NONE);
+    e = rs_index_find(&m, "/usr/tool");
+    CHECK(e && e->cls == RS_CLASS_BASELINE);
+    CHECK(rs_index_find(&m, "/tmp") == NULL);
+    CHECK(rs_index_find(&m, "/tmp/junk") == NULL);
+    CHECK(rs_index_find(&m, "/var/cache") == NULL);
+    CHECK(rs_index_find(&m, "/etc/daemon.pid") == NULL);
+    CHECK(rs_index_find(&m, "/var") != NULL);
+    CHECK_INT(st.skipped_ephemeral, 2);
+    CHECK_INT(st.skipped_expendable, 1);
+    CHECK_INT(st.by_class[RS_CLASS_BASELINE], 2);
+    CHECK(st.bytes_hashed > 0);
+    rs_index_free(&m);
+
+    TEST_CASE("scan: --all keeps expendable paths, --no-hash keeps no digests");
+    o.all = true;
+    o.hash = false;
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    e = rs_index_find(&m, "/var/cache/blob");
+    CHECK(e && e->cls == RS_CLASS_EXPENDABLE && e->hash_state == RS_HASH_NONE);
+    CHECK_INT(st.bytes_hashed, 0);
+    rs_index_free(&m);
+    o.all = false;
+    o.hash = true;
+
+    TEST_CASE("scan: --one-file-system on a single filesystem changes nothing");
+    o.one_fs = true;
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    CHECK_INT(st.skipped_mounts, 0);
+    CHECK(rs_index_find(&m, "/etc/hosts") != NULL);
+    rs_index_free(&m);
+    o.one_fs = false;
+
+    TEST_CASE("scan: sockets are never recorded");
+    {
+        struct sockaddr_un sun;
+        char              *sock = rs_xasprintf("%s/etc/s", root);
+        int                fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+        memset(&sun, 0, sizeof(sun));
+        sun.sun_family = AF_UNIX;
+        if (fd >= 0 && strlen(sock) < sizeof(sun.sun_path))
+        {
+            memcpy(sun.sun_path, sock, strlen(sock));
+            if (bind(fd, (struct sockaddr *)&sun, sizeof(sun)) == 0)
+            {
+                rs_index_init(&m);
+                CHECK(rs_scan(&o, &m, &st, &err));
+                CHECK_INT(st.skipped_sockets, 1);
+                CHECK(rs_index_find(&m, "/etc/s") == NULL);
+                rs_index_free(&m);
+                (void)unlink(sock);
+            }
+        }
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        free(sock);
+    }
+
+    TEST_CASE("scan: --verbose names what it skips");
+    {
+        char *out;
+        char *errtext;
+
+        o.verbose = true;
+        CHECK_INT(rs_test_capture(quiet_scan, &o, &out, &errtext), 0);
+        CHECK_CONTAINS(errtext, "skipped /tmp (ephemeral)");
+        CHECK_CONTAINS(errtext, "skipped /var/cache (expendable)");
+        free(out);
+        free(errtext);
+        o.verbose = false;
+    }
+
+    TEST_CASE("scan: unreadable paths are counted, not fatal");
+    if (geteuid() != 0)
+    {
+        char *locked = rs_xasprintf("%s/etc/locked", root);
+        char *secret = rs_xasprintf("%s/etc/secret", root);
+        char *out;
+        char *errtext;
+
+        (void)mkdir(locked, 0700);
+        rs_test_write(root, "etc/locked/inside", "x", 0644);
+        (void)chmod(locked, 0);
+        rs_test_write(root, "etc/secret", "s", 0600);
+        (void)chmod(secret, 0);
+        CHECK_INT(rs_test_capture(quiet_scan, &o, &out, &errtext), 2);
+        CHECK_CONTAINS(errtext, "/etc/locked");
+        CHECK_CONTAINS(errtext, "/etc/secret");
+        free(out);
+        free(errtext);
+        rs_index_init(&m);
+        rs_quiet = true;
+        CHECK(rs_scan(&o, &m, &st, &err));
+        rs_quiet = false;
+        e = rs_index_find(&m, "/etc/secret");
+        CHECK(e && e->hash_state == RS_HASH_UNREADABLE);
+        CHECK(rs_index_find(&m, "/etc/locked") != NULL);
+        rs_index_free(&m);
+        (void)chmod(locked, 0700);
+        (void)chmod(secret, 0600);
+        free(locked);
+        free(secret);
+    }
+
+    TEST_CASE("scan: hashing refuses anything but the file it was promised");
+    {
+        char        hex[RS_SHA256_HEX_SIZE];
+        char       *etc = rs_xasprintf("%s/etc", root);
+        int         dirfd = open(etc, O_RDONLY);
+        struct stat st_hosts;
+        struct stat st_empty;
+        uint64_t    bytes = 0;
+
+        CHECK(dirfd >= 0);
+        CHECK(fstatat(dirfd, "hosts", &st_hosts, AT_SYMLINK_NOFOLLOW) == 0);
+        CHECK(fstatat(dirfd, "empty", &st_empty, AT_SYMLINK_NOFOLLOW) == 0);
+        CHECK(rs_hash_file_at(dirfd, "hosts", &st_hosts, hex, &bytes));
+        CHECK_INT(bytes, 20);
+        CHECK(rs_hash_file_at(dirfd, "hosts", NULL, hex, NULL));
+        /* A different file than the stat described: swapped under us. */
+        CHECK(!rs_hash_file_at(dirfd, "hosts", &st_empty, hex, NULL));
+        CHECK_INT(errno, ESTALE);
+        /* A symlink is not followed. */
+        CHECK(!rs_hash_file_at(dirfd, "link", NULL, hex, NULL));
+        /* A FIFO opens without blocking and is then refused. */
+        CHECK(!rs_hash_file_at(dirfd, "fifo", NULL, hex, NULL));
+        CHECK(!rs_hash_file_at(dirfd, "missing", NULL, hex, NULL));
+        (void)close(dirfd);
+        free(etc);
+    }
+
+    TEST_CASE("scan: nesting deeper than the limit is reported, not followed");
+    {
+        char *deep = rs_xasprintf("%s/etc/d1", root);
+        char *p;
+        char *errtext;
+        char *out;
+
+        (void)mkdir(deep, 0755);
+        p = rs_xasprintf("%s/d2", deep);
+        (void)mkdir(p, 0755);
+        free(p);
+        p = rs_xasprintf("%s/d2/d3", deep);
+        (void)mkdir(p, 0755);
+        free(p);
+        /* Two levels below the root are entered -- /etc and /etc/d1 -- and the
+         * directory at the third, /etc/d1/d2, is recorded but not entered. */
+        o.max_depth = 2;
+        CHECK_INT(rs_test_capture(quiet_scan, &o, &out, &errtext), 1);
+        CHECK_CONTAINS(errtext, "/etc/d1/d2");
+        free(out);
+        free(errtext);
+        rs_index_init(&m);
+        rs_quiet = true;
+        CHECK(rs_scan(&o, &m, &st, &err));
+        rs_quiet = false;
+        CHECK(rs_index_find(&m, "/etc/d1/d2") != NULL);
+        CHECK(rs_index_find(&m, "/etc/d1/d2/d3") == NULL);
+        rs_index_free(&m);
+        o.max_depth = 0;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/etc/d1/d2/d3") != NULL);
+        rs_index_free(&m);
+        free(deep);
+    }
+
+    TEST_CASE("scan: a root that is not there, or not a directory");
+    {
+        char *file = rs_xasprintf("%s/etc/hosts", root);
+
+        o.root = "/nonexistent/restate-root";
+        rs_index_init(&m);
+        rs_buf_reset(&err);
+        CHECK(!rs_scan(&o, &m, &st, &err));
+        CHECK_CONTAINS(err.data, "/nonexistent/restate-root");
+        rs_index_free(&m);
+        o.root = file;
+        rs_buf_reset(&err);
+        CHECK(!rs_scan(&o, &m, &st, &err));
+        rs_index_free(&m);
+        free(file);
+    }
+
+    rs_buf_free(&err);
+    rs_rules_free(&rules);
+    rs_test_rmtree(root);
+    free(root);
+}

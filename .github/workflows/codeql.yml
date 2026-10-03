@@ -1,0 +1,43 @@
+# CodeQL, GitHub's semantic code analysis, with the security-extended queries.
+#
+# Its own workflow, rather than a job in security.yml, so the README badge
+# says what CodeQL thinks and nothing else -- and because it reports into the
+# repository's code-scanning tab rather than to a log.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (c-cpp)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          queries: security-extended
+
+      # CodeQL builds its database by watching a real compile, so this is
+      # `make build` rather than autobuild guessing at it.
+      - name: Build
+        run: make build
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:c-cpp"

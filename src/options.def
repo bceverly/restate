@@ -1,0 +1,46 @@
+/*
+ * Copyright (c) 2026 Bryan C. Everly
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+/*
+ * The option table -- the one place an option is defined.
+ *
+ * Included with RS_OPT defined differently each time: once to build the
+ * getopt_long table, once to build the short-option string, and once to print
+ * the help. scripts/gen-man.sh then generates the manpage from that help, so
+ * adding an option here updates the parser, --help, the manpage and the
+ * README's Usage block together.
+ *
+ *   RS_OPT(code, long name, argument, argument name, help)
+ *
+ * `code` is the short letter, or one of the OPT_* constants above 255 (in
+ * opts.h) for an option with no short form.
+ */
+
+RS_OPT('r', "root",             required_argument, "DIR",
+       "treat DIR as the root of the tree to scan or verify (default /)")
+RS_OPT('o', "output",           required_argument, "FILE",
+       "write to FILE instead of standard output; created mode 0600, replaced atomically")
+RS_OPT('R', "rules",            required_argument, "FILE",
+       "read more rules from FILE, applied after the built-in ones; repeatable")
+RS_OPT('N', "no-default-rules", no_argument,       NULL,
+       "start from no rules at all rather than the built-in set")
+RS_OPT(OPT_OS, "os",            required_argument, "NAME",
+       "use the built-in rules for NAME (linux, freebsd, openbsd, netbsd, darwin) "
+       "rather than this system's")
+RS_OPT('a', "all",              no_argument,       NULL,
+       "record expendable paths too: caches, logs, downloaded packages")
+RS_OPT('B', "baseline-content", no_argument,       NULL,
+       "capture: keep the content of baseline files too, not only their digests")
+RS_OPT('x', "one-file-system",  no_argument,       NULL,
+       "record mount points but do not descend into other filesystems")
+RS_OPT('n', "no-hash",          no_argument,       NULL,
+       "record metadata only; much faster, but content is then judged by size and mtime")
+RS_OPT('q', "quiet",            no_argument,       NULL,
+       "no warnings and no summary; errors are still reported")
+RS_OPT('v', "verbose",          no_argument,       NULL,
+       "report every path the rules skip, and why")
+RS_OPT('h', "help",             no_argument,       NULL,
+       "print this help and exit")
+RS_OPT('V', "version",          no_argument,       NULL,
+       "print the version and exit")

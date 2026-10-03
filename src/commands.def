@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2026 Bryan C. Everly
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+/*
+ * The command table, included the same way as options.def.
+ *
+ *   RS_CMD(id, name, arguments, minimum, maximum, help)
+ *
+ * `maximum` of -1 means "any number". The help text flows into --help, the
+ * manpage and the README exactly as the option help does.
+ */
+
+RS_CMD(CMD_CAPTURE,  "capture",  "",           0,  0,
+       "walk the tree and write an image (-o FILE.tgz): index.json and the "
+       "content of everything kept")
+RS_CMD(CMD_SCAN,     "scan",     "",           0,  0,
+       "walk the tree and write its index alone, as JSON, with no content")
+RS_CMD(CMD_DIFF,     "diff",     "OLD NEW",    2,  2,
+       "compare two images or indexes: A added, D deleted, M modified, and how")
+RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
+       "compare an image or index against the tree as it is now")
+RS_CMD(CMD_CLASSIFY, "classify", "PATH...",    1, -1,
+       "show the class each path falls under, and the rule that decided it")
+RS_CMD(CMD_RULES,    "rules",    "",           0,  0,
+       "print the rules in effect, in the format --rules reads")

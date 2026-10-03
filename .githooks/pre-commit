@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate — installed by scripts/install-hooks.sh
+#
+# Refuses the commit unless `make lint` passes perfectly — no findings, no
+# warnings, and nothing skipped.
+#
+# "Nothing skipped" is the part that matters and the part a plain `make lint`
+# does not give you. Every script in this project reports a tool it cannot find
+# as skipped rather than failing, which is what makes a fresh checkout usable —
+# and also what lets a clean local run hide two analyzers that were never
+# installed. At commit time that trade is the wrong way round, so a skip here
+# is a failure and `make install-dev` is the fix.
+#
+# Lint only. The tests run at pre-push: they take a couple of minutes with the
+# sanitizers and the coverage gate, and a commit is a save point rather than a
+# release. Set RESTATE_SKIP_HOOK=1 to bypass.
+set -uo pipefail
+
+if [ "${RESTATE_SKIP_HOOK:-0}" = "1" ]; then
+  echo "pre-commit: skipped (RESTATE_SKIP_HOOK=1)"
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$REPO_ROOT" || exit 0
+
+printf '\n\033[1mpre-commit\033[0m \033[2m(RESTATE_SKIP_HOOK=1 to skip)\033[0m\n'
+
+# The binary has to exist before lint runs: the manpage freshness check and the
+# version check both read it. `make lint` depends on `build` and would do this
+# anyway; doing it here means a broken build says "build", not "lint".
+if ! make --no-print-directory build > /dev/null; then
+  printf '\n\033[91m✗ the build failed — not committing\033[0m\n\n'
+  exit 1
+fi
+
+# Captured rather than streamed, so the skip check below can read it and so a
+# clean run stays quiet. On failure the whole thing is printed.
+LINT_OUTPUT="$(make --no-print-directory lint 2>&1)"
+LINT_STATUS=$?
+
+if [ "$LINT_STATUS" -ne 0 ]; then
+  printf '%s\n' "$LINT_OUTPUT"
+  printf '\n\033[91m✗ lint failed — not committing\033[0m\n\n'
+  exit 1
+fi
+
+# A tool that is not installed passes by doing nothing. Not here.
+if printf '%s' "$LINT_OUTPUT" | grep -q 'Skipped:'; then
+  printf '%s\n' "$LINT_OUTPUT"
+  printf '\n\033[91m✗ lint passed but skipped a tool — not committing\033[0m\n'
+  printf '  A scanner that is not installed reports "skipped" and passes, which\n'
+  printf '  is a clean result that proves nothing. Install them all:\n\n'
+  printf '      \033[96mmake install-dev\033[0m\n\n'
+  printf '  Or commit anyway with \033[96mRESTATE_SKIP_HOOK=1 git commit ...\033[0m\n\n'
+  exit 1
+fi
+
+printf '\033[92m✓ lint is clean, with every analyzer present\033[0m\n\n'
+exit 0
