@@ -21,7 +21,9 @@
 enum {
     OPT_OS = 256,
     OPT_CACHE,
-    OPT_MIRROR
+    OPT_MIRROR,
+    OPT_TARGET,
+    OPT_ENCRYPT_TO
 };
 
 enum rs_command {
@@ -44,6 +46,9 @@ struct rs_options {
     const char     *os;
     const char     *cache;
     const char     *mirror;
+    const char     *target;       /* "vm" or "metal", or NULL: the same machine */
+    const char    **recipients;   /* --encrypt-to: public key files */
+    size_t          nrecipients;
     bool            all;
     bool            baseline_content;
     bool            one_fs;

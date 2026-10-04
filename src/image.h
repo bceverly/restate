@@ -39,6 +39,8 @@ struct rs_image_writer {
     int                  content_fd;   /* the unlinked temporary */
     struct rs_tar_writer tar;
     char                *dest;
+    const char *const   *recipients;   /* public key files to encrypt to; see pgp.h */
+    size_t               nrecipients;
 };
 
 /* Creates the temporary content file beside `dest`. */

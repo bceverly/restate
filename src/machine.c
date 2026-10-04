@@ -14,6 +14,8 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "bsd.h"
+
 /* Text files read here are small; anything larger is not what it claims. */
 #define TEXT_MAX ((size_t)4 * 1024 * 1024)
 /* A LUKS2 header, binary part and JSON area together, is at most 4 MiB. */
@@ -974,6 +976,191 @@ static void describe_virtualization(const char *sysroot, const char *root, struc
     }
 }
 
+/*
+ * The value of KEY=value in a shell-style file such as /etc/default/locale,
+ * unquoted, or NULL. The last assignment wins, as it does when the file is
+ * sourced.
+ */
+static char *shell_var(const char *text, const char *key)
+{
+    size_t      klen = strlen(key);
+    const char *p = text;
+    char       *found = NULL;
+
+    while (p && *p)
+    {
+        const char *nl = strchr(p, '\n');
+        size_t      len = nl ? (size_t)(nl - p) : strlen(p);
+
+        while (len > 0 && (*p == ' ' || *p == '\t'))
+        {
+            p++;
+            len--;
+        }
+        if (len > klen && strncmp(p, key, klen) == 0 && p[klen] == '=')
+        {
+            const char *v = p + klen + 1;
+            size_t      vlen = len - klen - 1;
+
+            while (vlen > 0 && (v[vlen - 1] == ' ' || v[vlen - 1] == '\r'))
+            {
+                vlen--;
+            }
+            if (vlen >= 2 && (v[0] == '"' || v[0] == '\'') && v[vlen - 1] == v[0])
+            {
+                v++;
+                vlen -= 2;
+            }
+            free(found);
+            found = vlen > 0 ? rs_xstrndup(v, vlen) : NULL;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    return found;
+}
+
+/*
+ * The locale, keyboard and time zone: what an installer asks first, and what
+ * an unattended install has to be told.
+ */
+static void describe_locale(const char *root, struct rs_jval *sys)
+{
+    char *path = path_join(root, "/etc/default/locale");
+    char *text = read_text(path);
+    char *v;
+
+    free(path);
+    if (!text)
+    {
+        path = path_join(root, "/etc/locale.conf");
+        text = read_text(path);
+        free(path);
+    }
+    v = text ? shell_var(text, "LANG") : NULL;
+    rs_jobj_str(sys, "locale", v);
+    free(v);
+    free(text);
+
+    path = path_join(root, "/etc/default/keyboard");
+    text = read_text(path);
+    free(path);
+    v = text ? shell_var(text, "XKBLAYOUT") : NULL;
+    rs_jobj_str(sys, "keyboard_layout", v);
+    free(v);
+    v = text ? shell_var(text, "XKBVARIANT") : NULL;
+    rs_jobj_str(sys, "keyboard_variant", v);
+    free(v);
+    free(text);
+
+    /* /etc/timezone where Debian still writes it; otherwise the zone the
+     * /etc/localtime link points into. */
+    v = read_line(root, "/etc/timezone");
+    if (!v)
+    {
+        char    target[512];
+        ssize_t n;
+
+        path = path_join(root, "/etc/localtime");
+        /* Only parsed as text for the zone's name, never followed, and
+         * terminated by hand below. */
+        n = readlink(path, target, sizeof(target) - 1); /* Flawfinder: ignore */
+        free(path);
+        if (n > 0)
+        {
+            const char *zone;
+
+            target[n] = '\0';
+            zone = strstr(target, "zoneinfo/");
+            if (zone && zone[9] != '\0')
+            {
+                v = rs_xstrdup(zone + 9);
+            }
+        }
+    }
+    rs_jobj_str(sys, "timezone", v);
+    free(v);
+}
+
+/*
+ * Installed packages that matter when a machine moves between hardware and a
+ * hypervisor: the ones that only make sense on real hardware, the ones that
+ * only make sense in a guest, and the SSH server an unattended install should
+ * put back. The full package inventory is a later version's; this is the part
+ * `--target` needs now.
+ */
+static void describe_packages(const char *root, struct rs_jval *sys)
+{
+    static const char *const hardware[] = {
+        "intel-microcode", "amd64-microcode", "ipmitool", "freeipmi-tools", "lm-sensors",
+        "thermald", "tlp", "fwupd", "smartmontools", "nvme-cli", "mdadm", "nvidia-driver-*",
+        "bolt", "fprintd", "iio-sensor-proxy"
+    };
+    static const char *const guest[] = {
+        "qemu-guest-agent", "spice-vdagent", "open-vm-tools", "open-vm-tools-desktop",
+        "hyperv-daemons", "linux-cloud-tools-virtual", "virtualbox-guest-utils",
+        "virtualbox-guest-x11", "xe-guest-utilities", "linux-image-virtual"
+    };
+    char           *path = path_join(root, "/var/lib/dpkg/status");
+    char           *status = read_text(path);
+    struct rs_jval *hw;
+    struct rs_jval *gu;
+    const char     *p;
+
+    free(path);
+    if (!status)
+    {
+        return;
+    }
+    rs_jobj_bool(sys, "ssh_server", dpkg_installed(status, "openssh-server"));
+    hw = rs_jobj_add(sys, "hardware_packages");
+    rs_jval_set_array(hw);
+    gu = rs_jobj_add(sys, "guest_packages");
+    rs_jval_set_array(gu);
+    /* One pass over the stanzas: a pattern such as nvidia-driver-* needs every
+     * package name, not a lookup of one. */
+    for (p = status; p && *p; )
+    {
+        const char *end = strstr(p, "\n\n");
+        size_t      slen = end ? (size_t)(end - p) : strlen(p);
+        char       *stanza = rs_xstrndup(p, slen);
+        char       *name = NULL;
+
+        if (strncmp(stanza, "Package: ", 9) == 0)
+        {
+            name = rs_xstrndup(stanza + 9, strcspn(stanza + 9, "\n"));
+        }
+        if (name && strstr(stanza, "\nStatus: install ok installed"))
+        {
+            size_t i;
+
+            for (i = 0; i < sizeof(hardware) / sizeof(hardware[0]); i++)
+            {
+                size_t n = strlen(hardware[i]);
+                bool   prefix = hardware[i][n - 1] == '*';
+
+                if (prefix ? strncmp(name, hardware[i], n - 1) == 0
+                           : strcmp(name, hardware[i]) == 0)
+                {
+                    rs_jval_set_string(rs_jarr_add(hw), name);
+                    break;
+                }
+            }
+            for (i = 0; i < sizeof(guest) / sizeof(guest[0]); i++)
+            {
+                if (strcmp(name, guest[i]) == 0)
+                {
+                    rs_jval_set_string(rs_jarr_add(gu), name);
+                    break;
+                }
+            }
+        }
+        free(name);
+        free(stanza);
+        p = end ? end + 2 : NULL;
+    }
+    free(status);
+}
+
 static void describe_system(const char *sysroot, const char *root, struct rs_jval *machine)
 {
     struct rs_jval *sys = rs_jobj_add(machine, "system");
@@ -1001,6 +1188,24 @@ static void describe_system(const char *sysroot, const char *root, struct rs_jva
     {
         rs_jobj_str(sys, "kernel_name", u.sysname);
         rs_jobj_str(sys, "architecture", u.machine);
+        /* OpenBSD, NetBSD and macOS have no os-release: the kernel's name and
+         * release are the system's. */
+        if (!rs_jobject_str(sys, "id"))
+        {
+            char  *id = rs_xstrdup(u.sysname);
+            size_t i;
+
+            for (i = 0; id[i] != '\0'; i++)
+            {
+                unsigned char c = (unsigned char)id[i];
+
+                id[i] = (char)((c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c);
+            }
+            rs_jobj_str(sys, "id", id);
+            rs_jobj_str(sys, "name", u.sysname);
+            rs_jobj_str(sys, "version_id", u.release);
+            free(id);
+        }
     }
     s = read_line(sysroot, "/proc/sys/kernel/osrelease");
     rs_jobj_str(sys, "kernel", s);
@@ -1011,7 +1216,9 @@ static void describe_system(const char *sysroot, const char *root, struct rs_jva
     s = read_line(root, "/var/log/installer/media-info");
     rs_jobj_str(sys, "install_media", s);
     free(s);
+    describe_locale(root, sys);
     describe_type(root, sys);
+    describe_packages(root, sys);
     describe_virtualization(sysroot, root, sys);
 }
 
@@ -1800,7 +2007,14 @@ void rs_machine_describe(const char *sysroot, const char *root, struct rs_jval *
     describe_hardware(sysroot, out);
     if (!exists(sysroot, "/sys/block"))
     {
-        note(out, "no /sys/block: the disk layout is only read on Linux in this version");
+        /* Not Linux: ask the kernel the BSD way, where there is one to ask. */
+        if (!rs_bsd_describe(out))
+        {
+            note(out, "no /sys/block: the disk layout is read on Linux and the BSDs, and this "
+                      "is neither");
+            return;
+        }
+        describe_table(root, "/etc/fstab", "fstab", fstab_names, 6, out);
         return;
     }
     describe_firmware(sysroot, root, out);

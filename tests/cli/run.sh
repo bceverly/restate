@@ -225,6 +225,54 @@ fi
 expect 2 "installer --mirror must be https or file" -- \
   "$BIN" installer fetch ubuntu.json --mirror=http://mirror.example.invalid/
 
+# ---------------------------------------------------------------------------
+# buildsheet and autoinstall
+# ---------------------------------------------------------------------------
+cat > layout.json <<'JSON'
+{"system": {"id": "ubuntu", "version_id": "26.04", "version": "26.04.1 LTS", "hostname": "db01",
+            "architecture": "x86_64", "type": "server", "locale": "en_US.UTF-8"},
+ "hardware": {"cpus": 2, "memory": 4294967296},
+ "firmware": {"mode": "uefi"},
+ "disks": [{"name": "sda", "size": 21474836480, "logical_block_size": 512,
+            "table": {"type": "gpt", "uuid": "t-uuid"},
+            "partitions": [
+              {"name": "sda1", "number": 1, "start": 1048576, "size": 536870912,
+               "type": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+               "content": {"type": "vfat", "usage": "filesystem", "uuid": "AAAA-BBBB"}},
+              {"name": "sda2", "number": 2, "start": 537919488, "size": 20000000000,
+               "type": "0fc63daf-8483-4772-8e79-3d69d8477de4",
+               "content": {"type": "ext4", "usage": "filesystem", "uuid": "root-uuid"}}]}],
+ "mounts": [{"mountpoint": "/", "source": "/dev/sda2", "size": 19000000000, "used": 3000000000}],
+ "fstab": [{"spec": "UUID=root-uuid", "file": "/", "type": "ext4", "options": "errors=remount-ro"},
+           {"spec": "UUID=AAAA-BBBB", "file": "/boot/efi", "type": "vfat", "options": "umask=0077"}]}
+JSON
+expect 0 "buildsheet for a described machine" -- "$BIN" buildsheet layout.json
+contains "$OUT" "restate build sheet: db01" "buildsheet names the machine"
+contains "$OUT" "sda2 : start=1050624, size=39062500" "buildsheet keeps the exact sectors"
+contains "$OUT" "mkfs.ext4 -F -U root-uuid" "buildsheet keeps the filesystem UUID"
+contains "$OUT" "Custom storage layout" "buildsheet says how to drive the installer"
+contains "$OUT" "tar -xpzf layout.json" "buildsheet says how to restore"
+expect 0 "buildsheet --target=vm" -- "$BIN" buildsheet --target=vm layout.json -o sheet.txt
+check "buildsheet -o writes the file" test -s sheet.txt
+contains "$(cat sheet.txt)" "virt-install --name db01" "a VM build sheet defines the VM"
+contains "$(cat sheet.txt)" "--disk size=7," "the VM disk is sized to what is used"
+expect 2 "--target must be vm or metal" -- "$BIN" buildsheet --target=cloud layout.json
+contains "$ERR" "--target: \"cloud\" is not vm or metal" "--target says what it takes"
+expect 2 "buildsheet without disks" -- "$BIN" buildsheet ubuntu.json
+contains "$ERR" "no disks to rebuild" "buildsheet says why it cannot"
+expect 2 "buildsheet of a missing description" -- "$BIN" buildsheet no-such.json
+expect 0 "autoinstall for a described machine" -- "$BIN" autoinstall layout.json
+contains "$OUT" "#cloud-config" "autoinstall is cloud-config"
+contains "$OUT" "        uuid: \"root-uuid\"" "autoinstall keeps the filesystem UUID"
+if command -v python3 > /dev/null 2>&1 && python3 -c 'import yaml' 2> /dev/null; then
+  check "the autoinstall file is valid YAML" \
+    python3 -c 'import sys, yaml; assert "autoinstall" in yaml.safe_load(sys.stdin)' < out.txt
+fi
+expect 0 "autoinstall --target=metal" -- "$BIN" autoinstall --target=metal layout.json
+contains "$OUT" "size: largest" "autoinstall on new hardware picks the largest disk"
+expect 2 "autoinstall for another system" -- "$BIN" autoinstall openbsd.json
+contains "$ERR" "autoinstall files are for Ubuntu" "autoinstall says what it is for"
+
 expect 0 "scan --all" -- "$BIN" scan -r tree --os=linux --all -q
 contains "$OUT" '"class": "expendable"' "--all records expendable paths"
 contains "$OUT" "/var/cache/apt/pkg.deb" "--all records the cache"

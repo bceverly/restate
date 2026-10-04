@@ -247,9 +247,9 @@ note "the digest identifies content; nothing here encrypts, signs or authenticat
 section "10. privilege escalation (CWE-271)"
 HITS="$(grep_source '\b(setuid|seteuid|setreuid|setresuid|setgid|setegid|setregid|setresgid)[[:space:]]*\(')"
 no_hits "restate never changes identity" "identity changes found" "$HITS"
-# Three programs are run -- gzip, curl and gpgv -- from one file, by absolute
-# path, with posix_spawn, no shell and a fixed environment. Anything more is a
-# finding.
+# Four programs are run -- gzip, curl, gpgv and gpg -- from one file, by
+# absolute path, only if root owns them and their directory, with posix_spawn,
+# no shell and a fixed environment. Anything more is a finding.
 HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(')"
 no_hits "no shell, no exec family, and no program found through PATH" \
   "a shell, an exec or a PATH lookup is used to run something" "$HITS"
@@ -258,10 +258,16 @@ no_hits "posix_spawn appears only in src/run.c" "posix_spawn is called outside s
 if grep -q '"/usr/bin/gzip", "/bin/gzip"' src/run.c \
    && grep -q '"/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"' src/run.c \
    && grep -q '"/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv"' src/run.c \
+   && grep -q '"/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg"' src/run.c \
    && grep -q 'PATH=/usr/bin:/bin' src/run.c; then
-  ok "gzip, curl and gpgv are run from fixed absolute paths, with a fixed environment"
+  ok "gzip, curl, gpgv and gpg are run from fixed absolute paths, with a fixed environment"
 else
   bad "a program is no longer run from a fixed path with a fixed environment"
+fi
+if grep -q 'st->st_uid == 0 && (st->st_mode & (S_IWGRP | S_IWOTH)) == 0' src/run.c; then
+  ok "a program is run only if root owns it and its directory, and nobody else can write them"
+else
+  bad "programs are no longer required to be root's"
 fi
 HITS="$(grep -n 'rs_gzip_set_paths\|rs_program_set_paths' src/*.c \
         | grep -v '^src/gzip.c:\|^src/run.c:' || true)"

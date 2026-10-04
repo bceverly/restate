@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "autoinstall.h"
+#include "buildsheet.h"
 #include "diff.h"
 #include "image.h"
 #include "index.h"
@@ -21,6 +23,7 @@
 #include "machine.h"
 #include "meta.h"
 #include "rules.h"
+#include "run.h"
 #include "scan.h"
 
 /* A machine description read on its own is refused beyond this size. */
@@ -354,6 +357,7 @@ int rs_cmd_capture(const struct rs_options *o)
     struct rs_scan_stats   st;
     struct rs_image_writer image;
     struct rs_buf          err;
+    size_t                 k;
     bool                   ok;
 
     if (!o->output || strcmp(o->output, "-") == 0)
@@ -368,12 +372,35 @@ int rs_cmd_capture(const struct rs_options *o)
         rs_warn("--no-hash is ignored by capture: kept files are always hashed");
     }
     rs_buf_init(&err);
+    /* Before the scan, which can take a long time to find out at the end. */
+    if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
+    {
+        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    for (k = 0; k < o->nrecipients; k++)
+    {
+        /* Opened, not access()ed: the question is whether this process can
+         * read it, which only opening it answers. gpg opens it again later. */
+        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
+            rs_buf_free(&err);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        (void)close(fd);
+    }
     if (!rs_image_begin(&image, o->output, &err))
     {
         rs_error("%s", err.data);
         rs_buf_free(&err);
         return RESTATE_EXIT_TROUBLE;
     }
+    image.recipients = o->recipients;
+    image.nrecipients = o->nrecipients;
     if (!run_scan(o, o->root ? o->root : "/", true, &image, &m, &st))
     {
         rs_image_abort(&image);
@@ -714,6 +741,112 @@ int rs_cmd_installer(const struct rs_options *o)
     return status;
 }
 
+/* The --target option as the layout spells it. */
+static enum rs_target target_of(const struct rs_options *o)
+{
+    if (o->target && strcmp(o->target, "vm") == 0)
+    {
+        return RS_TARGET_VM;
+    }
+    if (o->target && strcmp(o->target, "metal") == 0)
+    {
+        return RS_TARGET_METAL;
+    }
+    return RS_TARGET_SAME;
+}
+
+/* The machine to describe: the one in IMAGE, or this one. */
+static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine)
+{
+    memset(machine, 0, sizeof(*machine));
+    if (image)
+    {
+        return load_machine(image, machine);
+    }
+    rs_machine_describe("/", o->root ? o->root : "/", machine);
+    return true;
+}
+
+/* Writes `text` where --output says, and frees it. */
+static int emit(const struct rs_options *o, struct rs_buf *text)
+{
+    struct output out;
+    bool          ok;
+
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text->data, 1, text->len, out.fp) == text->len;
+    rs_buf_free(text);
+    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+}
+
+int rs_cmd_buildsheet(const struct rs_options *o)
+{
+    const char          *image = o->nargs > 0 ? o->args[0] : NULL;
+    struct rs_jval       machine;
+    struct rs_buf        text;
+    struct rs_buf        err;
+    struct rs_sheet_opts so;
+    bool                 ok;
+
+    if (!machine_for(o, image, &machine))
+    {
+        rs_jval_free(&machine);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    so.target = target_of(o);
+    so.image = image;
+    so.version = RESTATE_VERSION;
+    rs_buf_init(&text);
+    rs_buf_init(&err);
+    ok = rs_buildsheet(&machine, &so, &text, &err);
+    rs_jval_free(&machine);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    return emit(o, &text);
+}
+
+int rs_cmd_autoinstall(const struct rs_options *o)
+{
+    const char         *image = o->nargs > 0 ? o->args[0] : NULL;
+    struct rs_jval      machine;
+    struct rs_buf       text;
+    struct rs_buf       err;
+    struct rs_auto_opts ao;
+    bool                ok;
+
+    if (!machine_for(o, image, &machine))
+    {
+        rs_jval_free(&machine);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ao.target = target_of(o);
+    ao.image = image;
+    ao.version = RESTATE_VERSION;
+    rs_buf_init(&text);
+    rs_buf_init(&err);
+    ok = rs_autoinstall(&machine, &ao, &text, &err);
+    rs_jval_free(&machine);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    return emit(o, &text);
+}
+
 int rs_cmd_classify(const struct rs_options *o)
 {
     struct rs_rules rules;
@@ -808,6 +941,10 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_machine(o);
     case CMD_INSTALLER:
         return rs_cmd_installer(o);
+    case CMD_BUILDSHEET:
+        return rs_cmd_buildsheet(o);
+    case CMD_AUTOINSTALL:
+        return rs_cmd_autoinstall(o);
     case CMD_CLASSIFY:
         return rs_cmd_classify(o);
     case CMD_RULES:

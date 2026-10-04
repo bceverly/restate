@@ -31,6 +31,7 @@ void *rs_xreallocarray(void *p, size_t count, size_t size);
 char *rs_xstrdup(const char *s);
 char *rs_xstrndup(const char *s, size_t n);
 char *rs_xasprintf(const char *fmt, ...) RESTATE_PRINTF(1, 2);
+char *rs_xvasprintf(const char *fmt, va_list ap) RESTATE_PRINTF(1, 0);
 
 /* A growable, always NUL-terminated byte buffer. */
 struct rs_buf {

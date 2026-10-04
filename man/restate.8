@@ -66,6 +66,12 @@ describe this machine: hardware, firmware, disks, partitions, encryption, LVM, R
 \fBinstaller\fR \fI[fetch] [IMAGE]\fR
 show the installer that rebuilds this machine, or the one IMAGE was taken from; with fetch, download it and check its signature
 .TP
+\fBbuildsheet\fR \fI[IMAGE]\fR
+write a plain\-text runbook to rebuild this machine, or the one IMAGE was taken from: disks, encryption, LVM, filesystems, installer, restore
+.TP
+\fBautoinstall\fR \fI[IMAGE]\fR
+write an Ubuntu autoinstall file that rebuilds this machine, or the one IMAGE was taken from, unattended: storage, locale, network, identity
+.TP
 \fBclassify\fR \fIPATH...\fR
 show the class each path falls under, and the rule that decided it
 .TP
@@ -94,6 +100,9 @@ record expendable paths too: caches, logs, downloaded packages
 \fB\-B\fR, \-\-baseline\-content
 capture: keep the content of baseline files too, not only their digests
 .TP
+\-\-encrypt\-to=KEYFILE
+capture: encrypt the image to the OpenPGP public key in KEYFILE (gpg \-\-export); repeatable, for more than one recipient
+.TP
 \fB\-x\fR, \-\-one\-file\-system
 record mount points but do not descend into other filesystems
 .TP
@@ -105,6 +114,9 @@ installer fetch: keep installers in DIR rather than the system's cache
 .TP
 \fB\-\-mirror\fR=\fIURL\fR
 installer fetch: download from the directory at URL (https:// or file://) rather than the vendor's
+.TP
+\fB\-\-target\fR=\fIKIND\fR
+buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other hardware (metal) rather than the same machine
 .TP
 \fB\-q\fR, \-\-quiet
 no warnings and no summary; errors are still reported
@@ -241,9 +253,27 @@ and will not unlock that way on any other machine. No key, passphrase or key
 slot is ever recorded. Anything that could not be read is listed in the
 description's
 .B """notes"""
-rather than guessed. The disk layout is read on Linux in this version; on
-another system the description holds the system and hardware sections and a
-note saying so.
+rather than guessed.
+.PP
+On the BSDs the kernel is asked instead, each in its own terms: on FreeBSD,
+GEOM's configuration
+.RB ( "sysctl kern.geom.conftxt" :
+disks, GPT and MBR partitions, GELI providers) and the boot method; on
+OpenBSD, each disk's disklabel; on NetBSD, the wedges of a GPT disk or the
+disklabel of any other \- the last two need root, as reading a disklabel
+does. The hardware comes from
+.BR sysctl (3),
+the interfaces from
+.BR getifaddrs (3)
+and the mounts from
+.BR getmntinfo (3).
+On macOS, whose disks are described through Disk Arbitration rather than
+libc, the description holds the system, hardware, interfaces and mounts, and
+a note saying so.
+.B buildsheet
+and
+.B autoinstall
+are written for Linux in this version.
 .PP
 An index of any other tree \- a disk mounted from another machine, a
 directory \- has no machine description, because the disks it would describe
@@ -322,6 +352,68 @@ changes where images are kept, and
 .B \-\-mirror
 fetches from another https:// or file:// directory holding the same files \-
 which are checked against the same key.
+.SH REBUILDING
+.B restate buildsheet
+writes a plain-text runbook for rebuilding the machine onto a blank disk:
+the hardware and firmware it needs, the installer, the disk layout as it
+was, and the commands that recreate it \-
+.BR sfdisk (8)
+for the partition tables,
+.BR cryptsetup (8)
+for LUKS,
+.BR mdadm (8)
+for RAID,
+.BR pvcreate (8)
+and
+.BR vgcfgrestore (8)
+for LVM (the volume group's own metadata backup, so every volume comes back
+at its old extents), and
+.BR mkfs (8)
+and
+.BR mkswap (8)
+for the filesystems \- with the original UUIDs, so the restored
+.I /etc/fstab
+and
+.I /etc/crypttab
+still name the right volumes. Then how to point the installer at that
+layout, what to do after it, and how to put the files back. Nothing is run:
+every command is printed for a person to check against
+.BR lsblk (8)
+and run.
+.PP
+Partitions that belong to another operating system \- Windows, BitLocker,
+macOS, a VeraCrypt container \- are never formatted. Rebuilding the same
+machine, the sheet offers two paths: a blank disk, where they are recreated
+empty for that system's own restore, or the same disk, where the partition
+table and the EFI system partition they boot from are left alone.
+.PP
+.B restate autoinstall
+writes the same layout as an Ubuntu autoinstall file, for an install nobody
+has to attend: storage in curtin's terms, locale, keyboard, time zone, host
+name, network and the SSH server. A LUKS passphrase has to be in the file
+for the installer to format the volume, and is left as CHANGE-ME, as is the
+first account's password, which the restore replaces. The packages
+installed since the original install are not yet included.
+.PP
+With
+.BR "\-\-target vm" ,
+either one rebuilds the machine as a virtual machine: the Linux volumes only, each
+filesystem sized to what it uses plus room to grow, disks named
+.IR /dev/vda ,
+and a
+.BR virt-install (1)
+command sized from the original's CPUs and memory; the hardware-only
+packages (microcode, firmware and sensor tools, GPU drivers) are removed
+and
+.B qemu-guest-agent
+added.
+With
+.BR "\-\-target metal" ,
+it rebuilds on other hardware: the original sizes, the disk named by whoever
+runs it, and the guest-only packages removed. Either way the sheet covers
+what does not move: network interface names and MAC addresses, LUKS keys
+held by the old machine's TPM, Secure Boot keys and the hibernation
+resume device.
 .SH IMAGES AND INDEXES
 An image is an ordinary gzip'd POSIX tar archive:
 .PP
@@ -405,6 +497,34 @@ where
 is available to the file's owner and to root; reading a symbolic link's
 target does, and nothing can prevent that.
 .PP
+An image can hold keys \- a LUKS key file under
+.IR /etc ,
+SSH host keys, TLS private keys \- so
+.B \-\-encrypt\-to
+encrypts it to the OpenPGP public key in a file
+.RB ( "gpg \-\-export \-o key.gpg" ),
+once for each recipient. Only a public key is needed to capture, so a
+capture can run unattended with no passphrase anywhere, and only the holder
+of a matching secret key can read the image.
+.BR gpg (1)
+runs in the same pipe as gzip, in an empty GnuPG home of its own that is
+removed afterwards, and the result is an ordinary OpenPGP message that
+.B gpg \-d
+reads anywhere. One thing is not encrypted: while the tree is walked, the
+content being kept is staged in an unlinked temporary file in the image's
+directory, because the index has to come first in the archive and is not
+complete until the walk is. It is never visible by name and is gone when
+restate exits, but its blocks were written; where even that must not
+happen, write the image to encrypted storage or a tmpfs.
+.BR diff ,
+.BR verify ,
+.BR installer ,
+.B buildsheet
+and
+.B autoinstall
+read an encrypted image directly, decrypting with the invoking user's own
+GnuPG keyring.
+.PP
 gzip is run as a separate process, from
 .I /usr/bin/gzip
 or
@@ -437,8 +557,19 @@ And their upper-case forms: passed to
 .BR curl (1)
 by
 .BR "restate installer fetch" ,
-for a machine that reaches the Internet through a proxy. No other variable
-reaches a program
+for a machine that reaches the Internet through a proxy.
+.TP
+.BR HOME ", " GNUPGHOME ", " GPG_TTY ", " TERM ", " DISPLAY ", " WAYLAND_DISPLAY ", " XDG_RUNTIME_DIR ", " DBUS_SESSION_BUS_ADDRESS
+Passed to
+.BR gpg (1)
+when an encrypted image is read, so it finds the secret key in the invoking
+user's GnuPG home and can ask for its passphrase. Under
+.BR sudo (8)
+that is root's home, unless
+.B GNUPGHOME
+names another.
+.PP
+No other variable reaches a program
 .B restate
 runs.
 .SH USE CASES
@@ -473,14 +604,28 @@ with its owner, mode, times and SHA-256.
 Capture before a release upgrade, keep the image, and
 .B diff
 afterwards.
+.TP
+.B Rebuilding after a dead disk
+.B restate buildsheet
+and
+.B restate autoinstall
+turn an image's machine description into the steps that rebuild the disk
+layout and reinstall onto it, by hand or unattended; the image then puts
+the files back. Packages installed since the original install still have to
+be reinstalled by hand in this version.
+.TP
+.B Into a virtual machine, or back onto hardware
+The same, with
+.B \-\-target vm
+or
+.BR "\-\-target metal" :
+volumes resized to what they use, the VM itself defined, and the drivers,
+interface names, TPM-held keys and hardware-only packages accounted for.
 .PP
-Planned, and described in the project's ROADMAP: bare-metal recovery from a
-build sheet or an unattended install; moving a machine to new hardware;
-moving a machine from bare metal into a virtual machine and back, with its
-drivers, firmware mode, device and interface names, disk size and
-hardware-specific software adjusted for the new home; stamping out many
-copies of one machine, each with its own host name, address, machine-id and
-SSH host keys; and air-gapped rebuilds.
+Planned, and described in the project's ROADMAP: the package inventory that
+makes a rebuild complete; stamping out many copies of one machine, each
+with its own host name, address, machine-id and SSH host keys; and
+air-gapped rebuilds.
 .SH EXAMPLES
 .PP
 .RS
@@ -552,41 +697,49 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs three programs, each for something it should not do itself:
+runs four programs, each for something it should not do itself:
 .BR gzip (1),
-.BR curl (1)
+.BR curl (1),
+.BR gpgv (1)
 and
-.BR gpgv (1).
+.BR gpg (1).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then
 .I /usr/local/bin
-for curl and gpgv, then
+for the last three, then
 .I /bin
 \- never through
 .BR PATH ,
-because restate runs as root and a
-.B PATH
-reaching a user-writable directory would hand that user root. They are
-started with
+and only if root owns both the program and its directory and nobody else
+can write to them, because restate runs as root and a program another user
+could replace would run as root too. They are started with
 .BR posix_spawn (3),
 with no shell, and with an environment of
 .BR PATH ,
 .B LC_ALL
-and the proxy variables only. restate itself opens no network connection;
+and what that one program needs (see
+.BR ENVIRONMENT ).
+restate itself opens no network connection;
 curl is held to HTTPS, redirects included, and ignores
 .IR ~/.curlrc .
 Nothing downloaded is used until its checksum has been verified against a
 signature by the pinned vendor key.
 .SH SEE ALSO
 .BR find (1),
+.BR cryptsetup (8),
 .BR curl (1),
+.BR gpg (1),
 .BR gpgv (1),
 .BR gzip (1),
+.BR mdadm (8),
 .BR mtree (8),
 .BR tar (1),
 .BR rsync (1),
+.BR sfdisk (8),
 .BR sha256sum (1),
+.BR vgcfgrestore (8),
+.BR virt-install (1),
 .BR dpkg (1),
 .BR pkg (8),
 .BR pkg_info (1)

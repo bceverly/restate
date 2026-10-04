@@ -32,6 +32,9 @@ RS_OPT('a', "all",              no_argument,       NULL,
        "record expendable paths too: caches, logs, downloaded packages")
 RS_OPT('B', "baseline-content", no_argument,       NULL,
        "capture: keep the content of baseline files too, not only their digests")
+RS_OPT(OPT_ENCRYPT_TO, "encrypt-to", required_argument, "KEYFILE",
+       "capture: encrypt the image to the OpenPGP public key in KEYFILE "
+       "(gpg --export); repeatable, for more than one recipient")
 RS_OPT('x', "one-file-system",  no_argument,       NULL,
        "record mount points but do not descend into other filesystems")
 RS_OPT('n', "no-hash",          no_argument,       NULL,
@@ -41,6 +44,9 @@ RS_OPT(OPT_CACHE, "cache",      required_argument, "DIR",
 RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
        "installer fetch: download from the directory at URL (https:// or file://) "
        "rather than the vendor's")
+RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
+       "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
+       "hardware (metal) rather than the same machine")
 RS_OPT('q', "quiet",            no_argument,       NULL,
        "no warnings and no summary; errors are still reported")
 RS_OPT('v', "verbose",          no_argument,       NULL,

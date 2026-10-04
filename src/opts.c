@@ -148,6 +148,9 @@ void rs_options_free(struct rs_options *o)
     free(o->rules_files);
     o->rules_files = NULL;
     o->nrules_files = 0;
+    free(o->recipients);
+    o->recipients = NULL;
+    o->nrecipients = 0;
 }
 
 bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf *err)
@@ -202,6 +205,19 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
                 return false;
             }
             o->mirror = optarg;
+            break;
+        case OPT_ENCRYPT_TO:
+            o->recipients = rs_xreallocarray(o->recipients, o->nrecipients + 1,
+                                             sizeof(*o->recipients));
+            o->recipients[o->nrecipients++] = optarg;
+            break;
+        case OPT_TARGET:
+            if (strcmp(optarg, "vm") != 0 && strcmp(optarg, "metal") != 0)
+            {
+                rs_buf_addf(err, "--target: \"%s\" is not vm or metal", optarg);
+                return false;
+            }
+            o->target = optarg;
             break;
         case 'a':
             o->all = true;

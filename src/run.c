@@ -16,10 +16,27 @@
 #include <unistd.h>
 
 static const char *const gzip_paths[] = { "/usr/bin/gzip", "/bin/gzip" };
-/* /usr/local/bin too, for curl and gpgv: that is where the BSDs' packages put
- * them. Like /usr/bin it is writable only by root. */
+/* /usr/local/bin too, for curl and the GnuPG tools: that is where the BSDs'
+ * packages put them. A path is used only if it and its directory belong to
+ * root and nobody else can write them -- see usable() -- which is what rules
+ * out a Homebrew /usr/local/bin on macOS, owned by whoever installed it. */
 static const char *const curl_paths[] = { "/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl" };
 static const char *const gpgv_paths[] = { "/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv" };
+static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg" };
+
+/* The environment each program gets beyond PATH and LC_ALL: curl the proxy
+ * settings, gpg what it needs to find the key that decrypts an image and to
+ * ask for its passphrase. Nothing else is passed to anything. */
+static const char *const no_env[] = { NULL };
+static const char *const curl_env[] = {
+    "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY", NULL
+};
+static const char *const gpg_env[] = {
+    "HOME", "GNUPGHOME", "GPG_TTY", "TERM", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS", NULL
+};
+
+#define ENV_MAX 8
 
 struct program {
     const char        *name;
@@ -27,22 +44,20 @@ struct program {
     size_t             ndefaults;
     const char *const *paths;
     size_t             npaths;
+    const char *const *env;
 };
 
-#define PROGRAM(n, list) { n, list, sizeof(list) / sizeof((list)[0]), list, sizeof(list) / sizeof((list)[0]) }
+#define PROGRAM(n, list, env) \
+    { n, list, sizeof(list) / sizeof((list)[0]), list, sizeof(list) / sizeof((list)[0]), env }
 
 static struct program programs[RS_PROG_COUNT] = {
-    PROGRAM("gzip", gzip_paths),
-    PROGRAM("curl", curl_paths),
-    PROGRAM("gpgv", gpgv_paths),
+    PROGRAM("gzip", gzip_paths, no_env),
+    PROGRAM("curl", curl_paths, curl_env),
+    PROGRAM("gpgv", gpgv_paths, no_env),
+    PROGRAM("gpg", gpg_paths, gpg_env),
 };
 
 #undef PROGRAM
-
-/* The proxy settings curl reads, passed through; nothing else is. */
-static const char *const passthrough[] = {
-    "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"
-};
 
 const char *rs_program_name(enum rs_program p)
 {
@@ -62,12 +77,34 @@ void rs_program_set_paths(enum rs_program p, const char *const *list, size_t n)
     }
 }
 
-/* A regular file someone may execute. */
+/* Owned by root, and writable by nobody else. */
+static bool root_only(const struct stat *st)
+{
+    return st->st_uid == 0 && (st->st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+/*
+ * A regular file someone may execute, which only root could have put there:
+ * the file and its directory both root's and writable by no one else. restate
+ * runs as root, and a program anyone else could replace would run as root too.
+ */
 static bool usable(const char *path)
 {
     struct stat st;
+    struct stat dir;
+    const char *slash = strrchr(path, '/');
+    char       *parent;
+    bool        ok;
 
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & 0111);
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || !(st.st_mode & 0111) || !root_only(&st) ||
+        !slash)
+    {
+        return false;
+    }
+    parent = slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path));
+    ok = stat(parent, &dir) == 0 && root_only(&dir);
+    free(parent);
+    return ok;
 }
 
 const char *rs_program_path(enum rs_program p)
@@ -89,7 +126,8 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
 {
     /* posix_spawn takes char *const[] and string literals are const, so the
      * environment is built from writable copies and nothing is cast. */
-    char                      *envp[2 + sizeof(passthrough) / sizeof(passthrough[0]) + 1];
+    const struct program      *prog;
+    char                      *envp[2 + ENV_MAX + 1];
     size_t                     nenv = 0;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t          attr;
@@ -97,17 +135,25 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
     size_t                     i;
     int                        rc = ENOENT;
 
+    /* Every caller passes one of the enum's values; checked anyway, since
+     * it indexes the table. */
+    if ((size_t)p >= RS_PROG_COUNT)
+    {
+        rs_buf_addf(err, "no program numbered %d", (int)p);
+        return false;
+    }
+    prog = &programs[(size_t)p];
     envp[nenv++] = rs_xstrdup("PATH=/usr/bin:/bin:/usr/local/bin");
     envp[nenv++] = rs_xstrdup("LC_ALL=C");
-    for (i = 0; i < sizeof(passthrough) / sizeof(passthrough[0]); i++)
+    for (i = 0; i < ENV_MAX && prog->env[i]; i++)
     {
-        /* Untrusted, and not interpreted here: it goes to curl, which reads
-         * these very variables itself, as the caller could have set them. */
-        const char *v = getenv(passthrough[i]); /* Flawfinder: ignore */
+        /* Untrusted, and not interpreted here: it goes to the program, which
+         * reads these very variables itself, as the caller could have set them. */
+        const char *v = getenv(prog->env[i]); /* Flawfinder: ignore */
 
         if (v && *v)
         {
-            envp[nenv++] = rs_xasprintf("%s=%s", passthrough[i], v);
+            envp[nenv++] = rs_xasprintf("%s=%s", prog->env[i], v);
         }
     }
     envp[nenv] = NULL;
@@ -133,13 +179,13 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
     (void)posix_spawnattr_setsigdefault(&attr, &reset);
     (void)posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF);
 
-    for (i = 0; i < programs[p].npaths; i++)
+    for (i = 0; i < prog->npaths; i++)
     {
-        if (!usable(programs[p].paths[i]))
+        if (!usable(prog->paths[i]))
         {
             continue;
         }
-        rc = posix_spawn(pid, programs[p].paths[i], &actions, &attr, argv, envp);
+        rc = posix_spawn(pid, prog->paths[i], &actions, &attr, argv, envp);
         if (rc == 0)
         {
             break;
@@ -156,11 +202,11 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
         struct rs_buf where;
 
         rs_buf_init(&where);
-        for (i = 0; i < programs[p].npaths; i++)
+        for (i = 0; i < prog->npaths; i++)
         {
-            rs_buf_addf(&where, "%s%s", i ? ", " : "", programs[p].paths[i]);
+            rs_buf_addf(&where, "%s%s", i ? ", " : "", prog->paths[i]);
         }
-        rs_buf_addf(err, "could not run %s (looked for %s): %s", programs[p].name, where.data,
+        rs_buf_addf(err, "could not run %s (looked for %s): %s", prog->name, where.data,
                     strerror(rc));
         rs_buf_free(&where);
         return false;

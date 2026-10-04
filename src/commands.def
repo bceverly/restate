@@ -26,6 +26,12 @@ RS_CMD(CMD_MACHINE,  "machine",  "",           0,  0,
 RS_CMD(CMD_INSTALLER, "installer", "[fetch] [IMAGE]", 0, 2,
        "show the installer that rebuilds this machine, or the one IMAGE was taken "
        "from; with fetch, download it and check its signature")
+RS_CMD(CMD_BUILDSHEET, "buildsheet", "[IMAGE]", 0, 1,
+       "write a plain-text runbook to rebuild this machine, or the one IMAGE was "
+       "taken from: disks, encryption, LVM, filesystems, installer, restore")
+RS_CMD(CMD_AUTOINSTALL, "autoinstall", "[IMAGE]", 0, 1,
+       "write an Ubuntu autoinstall file that rebuilds this machine, or the one "
+       "IMAGE was taken from, unattended: storage, locale, network, identity")
 RS_CMD(CMD_CLASSIFY, "classify", "PATH...",    1, -1,
        "show the class each path falls under, and the rule that decided it")
 RS_CMD(CMD_RULES,    "rules",    "",           0,  0,

@@ -81,8 +81,12 @@ running 26.04 would differ from its installer in nearly every file. Instead:
       never keys), software RAID, filesystems with UUIDs and labels, mounts,
       `fstab`, `crypttab`, swap, UEFI or BIOS and the boot loaders, hardware
       and network interfaces — on Linux
-- [ ] The BSD storage equivalents (`gpart`, `disklabel`, NetBSD `gpt`); a
-      description only on macOS
+- [x] The BSD storage equivalents in the machine description: FreeBSD's GEOM
+      configuration (GPT, MBR, GELI), OpenBSD's disklabels, NetBSD's wedges
+      and disklabels; hardware, interfaces and mounts from sysctl,
+      getifaddrs and getmntinfo; a description without disks on macOS
+- [ ] Build sheets for the BSDs: `gpart`, `geli`, `newfs` and `zpool` on
+      FreeBSD; `disklabel` and `newfs` on OpenBSD; `gpt` and `newfs` on NetBSD
 - [x] **`restate installer`**: which installer matches the machine — release,
       architecture and type (server, desktop, …) — with its official download
       URL, its checksum and the vendor's signed checksum file. Ubuntu done;
@@ -97,14 +101,16 @@ running 26.04 would differ from its installer in nearly every file. Instead:
       gzip is — so that restate itself still links only libc and contains no
       TLS or OpenPGP code of its own. Vendors that sign some other way are
       handled in their own terms (OpenBSD signs with `signify`)
-- [ ] **`restate buildsheet`**: a plain-text runbook to rebuild the machine —
+- [x] **`restate buildsheet`**: a plain-text runbook to rebuild the machine —
       the hardware it came from and what a replacement needs; the commands to
       recreate partitions, LUKS, RAID, LVM, filesystems and swap with the same
       UUIDs; how to drive the installer onto that layout; then the restore
-- [ ] **Unattended rebuilds:** a generated Ubuntu autoinstall file (storage,
-      release, type, PPAs and keys, packages, `restate restore` at the end);
-      `bsdinstall` and OpenBSD `install.conf` equivalents
-- [ ] **Moving between bare metal and a virtual machine**: `buildsheet` and
+- [x] **Unattended rebuilds:** a generated Ubuntu autoinstall file — storage,
+      locale, keyboard, time zone, identity, network, SSH server
+- [ ] The autoinstall file's packages: PPAs and keys, the recorded packages,
+      `restate restore` at the end (with the package baseline, above)
+- [ ] `bsdinstall` and OpenBSD `install.conf` equivalents
+- [x] **Moving between bare metal and a virtual machine**: `buildsheet` and
       `autoinstall` take `--target vm` or `--target metal` and account for
       what changes — the storage and network drivers the initramfs needs
       (virtio, NVMe, RAID controllers); UEFI or BIOS, and the partitions each
@@ -120,8 +126,13 @@ running 26.04 would differ from its installer in nearly every file. Instead:
       the machine itself (`virt-install`), sized from the captured CPUs,
       memory and used space. The machine description already records whether
       it is virtual and on what, and the space used on each filesystem
-- [ ] **Image encryption at rest**: an image can hold key files (a LUKS key
-      under `/etc`), so it must be possible to encrypt one
+- [ ] Changing firmware mode on the way (BIOS to UEFI, or back), which needs an
+      EFI system partition or a BIOS boot partition added; both targets keep
+      the original's mode for now
+- [x] **Image encryption at rest**: an image can hold key files (a LUKS key
+      under `/etc`), so `capture --encrypt-to KEYFILE` encrypts it to OpenPGP
+      public keys, with gpg in the same pipe as gzip; every command reads an
+      encrypted image directly
 
 ## Then — putting it back
 

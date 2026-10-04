@@ -207,6 +207,9 @@ int main(void)
     test_image();
     test_machine();
     test_installer();
+    test_rebuild();
+    test_pgp();
+    test_bsd();
     test_scan();
     test_diff();
     test_opts();

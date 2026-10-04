@@ -201,6 +201,12 @@ Commands:
                           show the installer that rebuilds this machine, or the
                           one IMAGE was taken from; with fetch, download it and
                           check its signature
+  buildsheet [IMAGE]      write a plain-text runbook to rebuild this machine,
+                          or the one IMAGE was taken from: disks, encryption,
+                          LVM, filesystems, installer, restore
+  autoinstall [IMAGE]     write an Ubuntu autoinstall file that rebuilds this
+                          machine, or the one IMAGE was taken from, unattended:
+                          storage, locale, network, identity
   classify PATH...        show the class each path falls under, and the rule
                           that decided it
   rules                   print the rules in effect, in the format --rules
@@ -221,6 +227,10 @@ Options:
                           packages
   -B, --baseline-content  capture: keep the content of baseline files too, not
                           only their digests
+      --encrypt-to=KEYFILE
+                          capture: encrypt the image to the OpenPGP public key
+                          in KEYFILE (gpg --export); repeatable, for more than
+                          one recipient
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
@@ -229,6 +239,9 @@ Options:
                           the system's cache
       --mirror=URL        installer fetch: download from the directory at URL
                           (https:// or file://) rather than the vendor's
+      --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
+                          (vm) or on other hardware (metal) rather than the
+                          same machine
   -q, --quiet             no warnings and no summary; errors are still reported
   -v, --verbose           report every path the rules skip, and why
   -h, --help              print this help and exit
@@ -261,6 +274,41 @@ fetch it    restate installer fetch
 $ sudo restate installer fetch
 /var/cache/restate/installers/ubuntu/26.04/ubuntu-26.04.1-desktop-amd64.iso
 ```
+
+## Rebuilding
+
+`restate buildsheet` turns a machine description -- this machine's, or the one
+inside an image -- into a plain-text runbook for rebuilding it onto a blank
+disk: the hardware and installer it needs, then the `sfdisk`, `cryptsetup`,
+`mdadm`, LVM (`vgcfgrestore`, from the group's own metadata backup) and
+`mkfs` commands that recreate the layout **with the original UUIDs**, so the
+restored `/etc/fstab` and `/etc/crypttab` still match; then how to drive the
+installer, what to do after it, and how to put the files back. Nothing is run:
+every command is printed to be checked and run by a person.
+
+`restate autoinstall` writes the same layout as an Ubuntu autoinstall file for
+an unattended reinstall, with the locale, keyboard, time zone, host name,
+network and SSH server. LUKS passphrases and the first account's password are
+left as `CHANGE-ME`.
+
+Another operating system's partitions -- Windows, BitLocker, macOS, VeraCrypt
+-- are never formatted. For the same machine, both keep them, and the EFI
+partition they boot from, in place.
+
+`--target vm` rebuilds as a virtual machine instead: Linux volumes only, each
+sized to what it uses plus room to grow, a ready `virt-install` command, and
+the hardware-only packages swapped for `qemu-guest-agent`. `--target metal`
+goes the other way, onto other hardware. Both cover what cannot move:
+interface names and MACs, TPM-held LUKS keys, Secure Boot keys, the
+hibernation resume device.
+
+```console
+$ restate buildsheet web01.tgz -o web01-rebuild.txt
+$ restate autoinstall --target vm web01.tgz -o user-data
+```
+
+Packages installed after the original install are not part of either yet --
+that is the next stage on the [roadmap](ROADMAP.md).
 
 ## Images and indexes
 
@@ -321,6 +369,26 @@ exactly the bytes in the image.
 
 `scan` writes the index alone, without content, for when the question is "what
 changed" rather than "keep a copy".
+
+
+### Encrypted images
+
+An image holds whatever a reinstall would not put back, and that can include
+keys -- a LUKS key file, SSH host keys, TLS private keys. Encrypt it to one or
+more OpenPGP public keys:
+
+```console
+$ gpg --export -o backup-key.gpg backup@example.com
+$ sudo restate capture -o web01.tgz.gpg --encrypt-to=backup-key.gpg
+$ restate verify web01.tgz.gpg          # decrypts with your own keyring
+```
+
+Capturing needs only the public key, so it can run from cron with no
+passphrase anywhere. The result is an ordinary OpenPGP message (`gpg -d`
+reads it), and `diff`, `verify`, `installer`, `buildsheet` and `autoinstall`
+all read it directly. While the tree is walked, the content is staged
+unencrypted in an unlinked temporary file beside the image; where that
+matters, write the image to encrypted storage or a tmpfs.
 
 ## Classes and rules
 

@@ -5,19 +5,21 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs exactly three programs, each for something it should not do
- * itself: gzip (compression), curl (HTTPS) and gpgv (OpenPGP signature
- * checks). Writing a compressor, a TLS stack or an OpenPGP implementation
+ * restate runs four programs, each for something it should not do itself:
+ * gzip (compression), curl (HTTPS), gpgv (OpenPGP signature checks) and gpg
+ * (encrypting and decrypting images). Writing a compressor, a TLS stack or an OpenPGP implementation
  * here would be hundreds of lines of exactly the code that should not be
  * written twice; linking a library for them would end "links nothing but
  * libc". As separate processes their code stays out of this address space.
  *
  * Each is found at a fixed absolute path -- never through $PATH, because
  * restate runs as root and a PATH reaching a user-writable directory would
- * hand that user root -- and started with posix_spawn: no shell, nothing run
- * in the child before the exec, and an environment of PATH and LC_ALL plus
- * the standard proxy variables, which curl needs behind a proxy and nothing
- * else reads.
+ * hand that user root -- and used only if it and its directory belong to root
+ * and are writable by nobody else. It is started with posix_spawn: no shell,
+ * nothing run in the child before the exec, and an environment of PATH and
+ * LC_ALL plus what that one program needs: the proxy variables for curl, and
+ * for gpg the home, terminal and display it finds a key and asks for its
+ * passphrase with.
  */
 #ifndef RESTATE_RUN_H
 #define RESTATE_RUN_H
@@ -32,10 +34,11 @@ enum rs_program {
     RS_PROG_GZIP = 0,
     RS_PROG_CURL,
     RS_PROG_GPGV,
+    RS_PROG_GPG,
     RS_PROG_COUNT
 };
 
-/* "gzip", "curl", "gpgv". */
+/* "gzip", "curl", "gpgv", "gpg". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or

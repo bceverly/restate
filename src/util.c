@@ -86,9 +86,7 @@ char *rs_xstrndup(const char *s, size_t n)
     return p;
 }
 
-static char *xvasprintf(const char *fmt, va_list ap) RESTATE_PRINTF(1, 0);
-
-static char *xvasprintf(const char *fmt, va_list ap)
+char *rs_xvasprintf(const char *fmt, va_list ap)
 {
     va_list copy;
     int     need;
@@ -116,7 +114,7 @@ char *rs_xasprintf(const char *fmt, ...)
     char   *p;
 
     va_start(ap, fmt);
-    p = xvasprintf(fmt, ap);
+    p = rs_xvasprintf(fmt, ap);
     va_end(ap);
     return p;
 }
@@ -196,7 +194,7 @@ void rs_buf_addf(struct rs_buf *b, const char *fmt, ...)
     char   *s;
 
     va_start(ap, fmt);
-    s = xvasprintf(fmt, ap);
+    s = rs_xvasprintf(fmt, ap);
     va_end(ap);
     rs_buf_addstr(b, s);
     free(s);

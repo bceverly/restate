@@ -167,11 +167,12 @@ function check_includes(    k, g, kind, first_kind, prev, own, sys_seen, base) {
       } else if (inc[k] < inc[k - 1]) {
         report_at(incline[k], "includes out of order: " inc[k] " belongs before " inc[k - 1])
       }
-    } else if (k > 1 && kind == "sys" && prevgroupkind == "loc" && !(k == 2 && base ~ /\.c$/ && own_exists && inc[1] == "\"" own "\"")) {
+    } else if (k > 2 && kind == "sys" && prevkind == "loc") {
+      # A new group of system headers straight after project headers. The
+      # one header a file leads with -- its own, or the one it is about --
+      # comes before them; and a second group of system headers, under an
+      # #if, after the first is in order.
       report_at(incline[k], "system headers go before the project'\''s own")
-    }
-    if (k == 1 || incgroup[k] != incgroup[k - 1]) {
-      prevgroupkind = (k > 1) ? prevkind : ""
     }
     prevkind = kind
   }

@@ -334,13 +334,50 @@ static void run_cases(void)
     CHECK_INT(code, 128 + 9);
     CHECK_STR(out.data, "");
 
-    TEST_CASE("run: the proxy is passed through");
+    TEST_CASE("run: the proxy goes to curl, and to nothing else");
     argv[2] = proxy;
     (void)setenv("https_proxy", "http://proxy.example.invalid:3128", 1);
     rs_buf_reset(&out);
     CHECK(rs_run(RS_PROG_GZIP, argv, &out, NULL, &code, &err));
+    CHECK_STR(out.data, "");
+    rs_program_set_paths(RS_PROG_CURL, sh, 1);
+    rs_buf_reset(&out);
+    CHECK(rs_run(RS_PROG_CURL, argv, &out, NULL, &code, &err));
     CHECK_STR(out.data, "http://proxy.example.invalid:3128");
+    rs_program_set_paths(RS_PROG_CURL, NULL, 0);
     (void)unsetenv("https_proxy");
+
+    TEST_CASE("run: a program anyone but root could have replaced");
+    {
+        char                    *dir = rs_test_tmpdir();
+        char                    *prog = rs_xasprintf("%s/prog", dir);
+        const char *const        mine[] = { prog };
+
+        rs_test_write(dir, "prog", "#!/bin/sh\nexit 0\n", 0755);
+        (void)chmod(prog, 0777);   /* writable by anyone: refused even as root */
+        rs_program_set_paths(RS_PROG_GZIP, mine, 1);
+        CHECK(rs_program_path(RS_PROG_GZIP) == NULL);
+        rs_buf_reset(&err);
+        CHECK(!rs_run(RS_PROG_GZIP, argv, &out, NULL, &code, &err));
+        if (geteuid() != 0)
+        {
+            (void)chmod(prog, 0755);   /* safe permissions, but not root's */
+            CHECK(rs_program_path(RS_PROG_GZIP) == NULL);
+        }
+        rs_program_set_paths(RS_PROG_GZIP, sh, 1);
+        rs_test_rmtree(dir);
+        free(prog);
+        free(dir);
+    }
+
+    TEST_CASE("run: a program number outside the table");
+    {
+        pid_t pid;
+
+        rs_buf_reset(&err);
+        CHECK(!rs_spawn((enum rs_program)RS_PROG_COUNT, argv, -1, -1, -1, &pid, &err));
+        CHECK_CONTAINS(err.data, "no program numbered");
+    }
 
     TEST_CASE("run: a program that is not there");
     rs_program_set_paths(RS_PROG_GZIP, missing, 1);

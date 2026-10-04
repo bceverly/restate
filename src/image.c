@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "gzip.h"
+#include "pgp.h"
 #include "sha256.h"
 
 static bool write_all(int fd, const void *data, size_t n)
@@ -285,6 +286,8 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     struct rs_tar_member m;
     struct rs_tar_writer tw;
     struct rs_gzip       gz;
+    struct rs_pgp        pg;
+    bool                 sealed = false;
     struct sigaction     ignore;
     struct sigaction     saved;
     char                *tmp = NULL;
@@ -314,7 +317,23 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     ignore.sa_handler = SIG_IGN;
     (void)sigaction(SIGPIPE, &ignore, &saved);
 
-    ok = rs_gzip_compress(out, &gz, err);
+    /* Encrypted, gzip writes into gpg and gpg into the file; our copy of the
+     * pipe into gpg is closed once gzip has its own, so gpg sees the end of
+     * the data when gzip exits. */
+    ok = true;
+    memset(&pg, 0, sizeof(pg));
+    pg.fd = -1;
+    if (iw->nrecipients > 0)
+    {
+        ok = rs_pgp_encrypt(iw->recipients, iw->nrecipients, out, &pg, err);
+        sealed = ok;
+    }
+    ok = ok && rs_gzip_compress(sealed ? pg.fd : out, &gz, err);
+    if (sealed && pg.fd >= 0)
+    {
+        (void)close(pg.fd);
+        pg.fd = -1;
+    }
     if (ok)
     {
         memset(&m, 0, sizeof(m));
@@ -352,6 +371,10 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
         {
             ok = false;
         }
+    }
+    if (sealed && !rs_pgp_finish(&pg, false, err))
+    {
+        ok = false;
     }
     (void)sigaction(SIGPIPE, &saved, NULL);
 
@@ -420,16 +443,31 @@ static bool slurp(int fd, struct rs_buf *out, const char *name, struct rs_buf *e
     }
 }
 
-static bool index_from_image(int fd, const char *path, struct rs_buf *text,
+static bool index_from_image(int fd, const char *path, bool sealed, struct rs_buf *text,
                              struct rs_buf *err)
 {
     struct rs_gzip gz;
+    struct rs_pgp  pg;
     struct rs_buf  name;
     struct rs_buf  terr;
     bool           ok;
 
-    if (!rs_gzip_decompress(fd, &gz, err))
+    if (sealed && !rs_pgp_decrypt(fd, &pg, err))
     {
+        return false;
+    }
+    ok = rs_gzip_decompress(sealed ? pg.fd : fd, &gz, err);
+    if (sealed)
+    {
+        (void)close(pg.fd);
+        pg.fd = -1;
+    }
+    if (!ok)
+    {
+        if (sealed)
+        {
+            (void)rs_pgp_finish(&pg, true, err);
+        }
         return false;
     }
     rs_buf_init(&name);
@@ -446,6 +484,22 @@ static bool index_from_image(int fd, const char *path, struct rs_buf *text,
     }
     /* Everything after the index is of no interest here. */
     (void)rs_gzip_finish(&gz, true, err);
+    if (sealed)
+    {
+        struct rs_buf perr;
+
+        rs_buf_init(&perr);
+        /* Abandoned once the index is read. A gpg that could not decrypt (no
+         * secret key, a wrong passphrase) leaves gzip nothing to read, and
+         * gpg's failure is the message worth giving. */
+        if (!rs_pgp_finish(&pg, ok, &perr) && !ok)
+        {
+            rs_buf_reset(err);
+            rs_buf_addf(err, "%s: could not decrypt it (%s); is the secret key for it in "
+                        "this user's GnuPG keyring?", path, perr.data);
+        }
+        rs_buf_free(&perr);
+    }
     rs_buf_free(&name);
     rs_buf_free(&terr);
     return ok;
@@ -468,11 +522,13 @@ bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
     }
     if (!is_stdin)
     {
-        unsigned char magic[2] = { 0, 0 };
+        unsigned char magic[64];
+        ssize_t       got = pread(fd, magic, sizeof(magic), 0);
+        bool          sealed = got > 0 && rs_pgp_detect(magic, (size_t)got);
 
-        if (pread(fd, magic, 2, 0) == 2 && magic[0] == 0x1f && magic[1] == 0x8b)
+        if (sealed || (got >= 2 && magic[0] == 0x1f && magic[1] == 0x8b))
         {
-            ok = index_from_image(fd, path, &text, err);
+            ok = index_from_image(fd, path, sealed, &text, err);
             (void)close(fd);
             ok = ok && rs_index_parse(ix, text.data, text.len, name, err);
             rs_buf_free(&text);

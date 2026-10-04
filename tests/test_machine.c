@@ -250,7 +250,15 @@ static void build_fake(const char *sys, const char *root)
     put(root, "var/lib/dpkg/status",
         "Package: ubuntu-desktop\nStatus: deinstall ok config-files\nVersion: 1\n\n"
         "Package: ubuntu-server\nStatus: install ok installed\nVersion: 1\n\n"
-        "Package: ubuntu-server-minimal\nVersion: 1\nStatus: install ok installed\n");
+        "Package: ubuntu-server-minimal\nVersion: 1\nStatus: install ok installed\n\n"
+        "Package: openssh-server\nStatus: install ok installed\n\n"
+        "Package: nvidia-driver-550\nStatus: install ok installed\n\n"
+        "Package: intel-microcode\nStatus: deinstall ok config-files\n\n"
+        "Package: qemu-guest-agent\nStatus: install ok installed\n\n"
+        "Not-a-package: x\n");
+    put(root, "etc/default/locale", "# set by the installer\nLANG=\"en_GB.UTF-8\"\n  LANG=fr_FR.UTF-8 \n");
+    put(root, "etc/default/keyboard", "XKBLAYOUT='gb'\nXKBVARIANT=\nXKBMODEL\n");
+    put(root, "etc/timezone", "Europe/London\n");
 }
 
 static const struct rs_jval *at(const struct rs_jval *arr, size_t i)
@@ -312,6 +320,14 @@ void test_machine(void)
     CHECK(strstr(rs_jobject_str(v, "type_evidence"), "ubuntu-desktop ") == NULL);
     CHECK_STR(rs_jobject_str(v, "virtualization"), "none");
     CHECK(rs_jobject_get(v, "container") == NULL);
+    CHECK_STR(rs_jobject_str(v, "locale"), "fr_FR.UTF-8");
+    CHECK_STR(rs_jobject_str(v, "keyboard_layout"), "gb");
+    CHECK(rs_jobject_str(v, "keyboard_variant") == NULL);
+    CHECK_STR(rs_jobject_str(v, "timezone"), "Europe/London");
+    CHECK(rs_jobject_get(v, "ssh_server") && rs_jobject_get(v, "ssh_server")->b);
+    CHECK_INT(rs_jobject_get(v, "hardware_packages")->n, 1);
+    CHECK_STR(rs_jobject_get(v, "hardware_packages")->items[0].s, "nvidia-driver-550");
+    CHECK_INT(rs_jobject_get(v, "guest_packages")->n, 1);
 
     TEST_CASE("machine: hardware and firmware");
     v = rs_jobject_get(&m, "hardware");
@@ -464,7 +480,7 @@ void test_machine(void)
         (void)mkdir(empty, 0755);
         memset(&m, 0, sizeof(m));
         rs_machine_describe(empty, empty, &m);
-        CHECK(notes_contain(&m, "only read on Linux"));
+        CHECK(notes_contain(&m, "read on Linux and the BSDs, and this is neither"));
         CHECK(rs_jobject_get(&m, "disks") == NULL);
         rs_jval_free(&m);
         free(empty);
@@ -502,6 +518,22 @@ void test_machine(void)
                 put(one, "usr/share/xsessions/xfce.desktop", "[Desktop Entry]\n");
                 put(one, "run/.containerenv", "");
             }
+            if (k == 0)
+            {
+                char *lt = rs_xasprintf("%s/etc/localtime", one);
+
+                put(one, "etc/locale.conf", "LANG='de_DE.UTF-8'\n");
+                CHECK(symlink("../usr/share/zoneinfo/Europe/Berlin", lt) == 0);
+                free(lt);
+            }
+            if (k == 2)
+            {
+                char *lt = rs_xasprintf("%s/etc/localtime", one);
+
+                put(one, "etc/", "");
+                CHECK(symlink("/etc/somewhere-else", lt) == 0);
+                free(lt);
+            }
             memset(&m, 0, sizeof(m));
             rs_machine_describe(one, one, &m);
             v = rs_jobject_get(&m, "system");
@@ -510,6 +542,9 @@ void test_machine(void)
             CHECK_STR(rs_jobject_str(v, "type"), k < 2 ? "desktop" : "server");
             if (k == 0)
             {
+                CHECK_STR(rs_jobject_str(v, "locale"), "de_DE.UTF-8");
+                CHECK_STR(rs_jobject_str(v, "timezone"), "Europe/Berlin");
+                CHECK(rs_jobject_get(v, "ssh_server") == NULL);
                 CHECK_STR(rs_jobject_str(v, "container"), "docker");
                 CHECK_CONTAINS(rs_jobject_str(v, "type_evidence"), "gnome.desktop");
             }
@@ -519,6 +554,7 @@ void test_machine(void)
             }
             if (k == 2)
             {
+                CHECK(rs_jobject_str(v, "timezone") == NULL);
                 CHECK_STR(rs_jobject_str(v, "type_evidence"),
                           "no desktop package or graphical session is installed");
             }
