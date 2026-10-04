@@ -66,7 +66,7 @@ static const struct builtin linux_rules[] = {
     { E, "/var/lock",              "lock files from the running system" },
     { E, "/mnt",                   "mount points for other filesystems" },
     { E, "/media",                 "removable media" },
-    { E, "/swapfile",              "swap" },
+    { E, "/swapfile*",             "swap files: /swapfile, /swapfile2 ... (they can hold secrets)" },
     { E, "/swap.img",              "swap, as the Ubuntu installer names it" },
     { B, "/usr",                   "installed by the distribution and its packages" },
     { B, "/bin",                   "installed by the distribution (often a link into /usr)" },
@@ -88,9 +88,22 @@ static const struct builtin linux_rules[] = {
     { X, "/var/lib/snapd/snaps",   "snap images, refetched from the store" },
     { X, "/var/lib/snapd/cache",   "snapd's download cache" },
     { X, "/snap",                  "mounted snap images, recreated by snapd" },
-    { X, "/var/lib/flatpak/repo",  "flatpak's object store, refetched on install" },
+    { X, "/var/lib/flatpak",       "flatpak apps and runtimes, installed again" },
+    { S, "/var/lib/flatpak/repo/config", "flatpak's remotes" },
+    { S, "/var/lib/flatpak/overrides", "flatpak permission overrides" },
     { X, "/var/crash",             "crash dumps" },
     { E, "/var/lib/systemd/coredump", "core dumps" },
+    { E, "/var/snap/lxd/common/ns", "LXD's namespace handles, bind-mounted while it runs" },
+    /* Container images are pulled again; the volumes containers write to
+     * are data, and stay state. */
+    { X, "/var/lib/containerd",    "container images and snapshots, pulled again" },
+    { X, "/var/lib/docker",        "Docker's images and layers, pulled again" },
+    { S, "/var/lib/docker/volumes", "Docker volumes: the data containers keep" },
+    { X, "/var/lib/containers/storage", "Podman's images and layers, pulled again" },
+    { S, "/var/lib/containers/storage/volumes", "Podman volumes: the data containers keep" },
+    { X, "/var/lib/libvirt/boot",  "installer images libvirt boots from, downloaded again" },
+    { X, "/var/snap/lxd/common/lxd/images", "LXD's image cache; the containers themselves stay" },
+    { X, "/usr/share/ollama/.ollama/models", "Ollama's model weights, pulled again" },
 };
 
 static const struct builtin freebsd_rules[] = {
@@ -190,6 +203,31 @@ static const struct builtin darwin_rules[] = {
     { X, "/Library/Caches",        "regenerated on demand" },
     { X, "/private/var/log",       "useful, but not needed to rebuild the machine" },
     { X, "/opt/homebrew/Library/Homebrew", "Homebrew's own checkout, refetched on install" },
+    { X, "/Library/Logs",          "logs" },
+    { X, "/Library/Updates",       "downloaded system updates" },
+    { X, "/private/var/db/diagnostics", "the unified log's store" },
+};
+
+/*
+ * In every user's home, on every system: where homes live (/home on Linux
+ * and the BSDs, /usr/home on older FreeBSD installs, /Users on macOS) and
+ * root's own. What is here was fetched from somewhere and can be fetched
+ * again; a rules file line such as "state /home/alice/Downloads" keeps it.
+ */
+static const struct builtin home_rules[] = {
+    { X, "/home/*/Downloads",          "downloads: fetched once, and fetchable again" },
+    { X, "/usr/home/*/Downloads",      "downloads: fetched once, and fetchable again" },
+    { X, "/Users/*/Downloads",         "downloads: fetched once, and fetchable again" },
+    { X, "/root/Downloads",            "downloads: fetched once, and fetchable again" },
+    { X, "/private/var/root/Downloads", "downloads: fetched once, and fetchable again" },
+    { X, "/Users/*/.Trash",            "the Finder's trash: deleted already" },
+    { X, "/Users/*/Library/Caches",    "per-user caches, regenerated on demand" },
+    { X, "/Users/*/Library/Containers/*/Data/Library/Caches", "sandboxed apps' caches" },
+    { X, "/Users/*/Library/Developer/Xcode/DerivedData", "Xcode's build output and indexes" },
+    { X, "/Users/*/Library/Developer/Xcode/*DeviceSupport", "device symbols, copied again from a device" },
+    { X, "/Users/*/Library/Developer/CoreSimulator/Caches", "the simulator's caches" },
+    { X, "/Users/*/Library/Logs",      "per-user logs" },
+    { E, "/home/*/.xsession-errors",   "the last X session's errors" },
 };
 
 /* At any depth, and therefore last. */
@@ -198,6 +236,93 @@ static const struct builtin anywhere_rules[] = {
     { E, "*.sock",                 "a socket's name, recreated by its server" },
     { E, ".nfs*",                 "NFS silly-rename placeholders" },
     { X, ".cache",                 "per-user caches (XDG)" },
+    { X, "**/.local/share/Trash",  "the desktop's trash: deleted already" },
+    { X, "**/.thumbnails",         "thumbnails, made again when the files are shown" },
+    /* JavaScript: dependencies come back from the lock file. */
+    { X, "**/.npm",                "npm's cache, logs and npx packages, refetched" },
+    { X, "**/node_modules",        "JavaScript dependencies, reinstalled from the lock file" },
+    { X, "**/.yarn/cache",         "Yarn's package cache" },
+    { X, "**/.pnpm-store",         "pnpm's package store" },
+    { X, "**/.local/share/pnpm/store", "pnpm's package store" },
+    { X, "**/.bun/install/cache",  "Bun's package cache" },
+    { X, "**/.next",               "Next.js build output" },
+    { X, "**/.nuxt",               "Nuxt build output" },
+    { X, "**/.parcel-cache",       "Parcel's build cache" },
+    { X, "**/.turbo",              "Turborepo's build cache" },
+    /* Python: environments come back from their requirements. */
+    { X, "**/__pycache__",         "compiled Python, rebuilt on import" },
+    { X, "**/.venv",               "a Python virtual environment, rebuilt from its requirements" },
+    { X, "**/venv",                "a Python virtual environment, rebuilt from its requirements" },
+    { X, "**/.venvs",              "Python virtual environments, rebuilt from their requirements" },
+    { X, "**/.local/share/virtualenvs", "pipenv's environments" },
+    { X, "**/.tox",                "tox's environments, rebuilt on the next run" },
+    { X, "**/.nox",                "nox's environments, rebuilt on the next run" },
+    { X, "**/.pytest_cache",       "pytest's cache" },
+    { X, "**/.mypy_cache",         "mypy's cache" },
+    { X, "**/.ruff_cache",         "ruff's cache" },
+    { X, "**/.hypothesis",         "Hypothesis's example database" },
+    { X, "**/.conda/pkgs",         "conda's package cache" },
+    { X, "**/miniconda3/pkgs",     "conda's package cache" },
+    { X, "**/anaconda3/pkgs",      "conda's package cache" },
+    /* Other languages' downloaded dependencies and build caches. */
+    { X, "**/.gradle",             "Gradle's caches, daemons and wrapper downloads" },
+    { X, "**/.m2/repository",      "Maven's download cache" },
+    { X, "**/.ivy2/cache",         "Ivy's download cache" },
+    { X, "**/.cargo/registry",     "Cargo's download cache" },
+    { X, "**/.cargo/git",          "Cargo's git dependency checkouts" },
+    { X, "**/.rustup/toolchains",  "Rust toolchains, reinstalled by rustup" },
+    { X, "**/go/pkg/mod",          "Go's module cache" },
+    { X, "**/.nuget/packages",     "NuGet's package cache" },
+    { X, "**/.pub-cache",          "Dart and Flutter's package cache" },
+    { X, "**/.dart_tool",          "Dart's build output" },
+    { X, "**/.stack",              "Haskell Stack's snapshots and compilers" },
+    { X, "**/.cabal/packages",     "Cabal's package cache" },
+    { X, "**/.zig-cache",          "Zig's build cache" },
+    { X, "**/zig-cache",           "Zig's build cache" },
+    { X, "**/.ccache",             "ccache's compiler cache" },
+    { X, "**/.terraform",          "Terraform's providers and modules, fetched by init" },
+    { X, "**/.terraform.d/plugin-cache", "Terraform's provider cache" },
+    { X, "**/.vagrant.d/boxes",    "Vagrant's downloaded boxes" },
+    { X, "**/.minikube/cache",     "minikube's downloaded images" },
+    { X, "**/.direnv",             "direnv's per-project environments" },
+    { X, "**/.gem",                "installed Ruby gems, reinstalled from the Gemfile" },
+    { X, "**/vendor/bundle",       "Bundler's installed gems" },
+    { X, "**/CMakeFiles",          "CMake's build files" },
+    { X, "*.o",                    "an object file, rebuilt by the compiler" },
+    { X, "*.pyc",                  "compiled Python, rebuilt on import" },
+    /* Toolchains a version manager installs, and installs again. */
+    { X, "**/.nvm/versions",       "Node versions installed by nvm" },
+    { X, "**/.pyenv/versions",     "Python versions installed by pyenv" },
+    { X, "**/.rbenv/versions",     "Ruby versions installed by rbenv" },
+    { X, "**/.asdf/installs",      "tools installed by asdf" },
+    { X, "**/.local/share/mise/installs", "tools installed by mise" },
+    { X, "**/.volta/tools",        "tools installed by Volta" },
+    { X, "**/.sdkman/candidates",  "SDKs installed by SDKMAN!" },
+    { X, "**/.ghcup/ghc",          "GHC versions installed by ghcup" },
+    { X, "**/.elan/toolchains",    "Lean toolchains installed by elan" },
+    { X, "**/.julia/packages",     "Julia packages, reinstalled from the manifest" },
+    { X, "**/.julia/artifacts",    "Julia's downloaded artifacts" },
+    /* Editors, SDKs and apps that download what they need. */
+    { X, "**/.vscode/extensions",  "VS Code extensions, installed again" },
+    { X, "**/.vscode-server",      "VS Code's remote server and its extensions" },
+    { X, "**/.vscode-oss/extensions", "VSCodium extensions, installed again" },
+    { X, "**/.config/*/Cache",     "an Electron app's cache (Code, Slack, Discord ...)" },
+    { X, "**/.config/*/CachedData", "an Electron app's cached data" },
+    { X, "**/.config/*/GPUCache",  "an Electron app's shader cache" },
+    { X, "**/.config/*/DawnCache", "an Electron app's WebGPU cache" },
+    { X, "**/Android/Sdk",         "the Android SDK, downloaded again by its manager" },
+    { X, "**/.platformio/packages", "PlatformIO's toolchains and frameworks" },
+    { X, "**/.arduino15/packages", "Arduino cores and tools" },
+    { X, "**/.local/share/JetBrains/Toolbox/apps", "IDEs installed by JetBrains Toolbox" },
+    { X, "**/.ollama/models",      "Ollama's model weights, pulled again" },
+    { X, "**/.Trash-*",            "the trash on another drive" },
+    { E, "**/lost+found",          "fsck's salvage area, specific to one filesystem" },
+    { X, "**/.local/share/Steam/steamapps", "Steam's games, downloaded again" },
+    { X, "**/.local/share/flatpak", "per-user flatpak apps and runtimes, installed again" },
+    { S, "**/.local/share/flatpak/repo/config", "per-user flatpak remotes" },
+    { S, "**/.local/share/flatpak/overrides", "per-user flatpak permission overrides" },
+    { X, "**/.local/share/containers/storage", "rootless Podman's images, pulled again" },
+    { S, "**/.local/share/containers/storage/volumes", "rootless Podman's volumes: data" },
 };
 
 #undef E
@@ -363,6 +488,7 @@ bool rs_rules_add_builtin(struct rs_rules *rs, const char *os)
             add_table(rs, common_rules, sizeof(common_rules) / sizeof(common_rules[0]),
                       source);
             add_table(rs, os_tables[i].rules, os_tables[i].count, source);
+            add_table(rs, home_rules, sizeof(home_rules) / sizeof(home_rules[0]), source);
             add_table(rs, anywhere_rules,
                       sizeof(anywhere_rules) / sizeof(anywhere_rules[0]), source);
             free(source);

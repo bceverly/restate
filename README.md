@@ -419,6 +419,45 @@ restate -N -R site.rules capture -o web01.tgz   # use only yours
 restate -R site.rules capture -o web01.tgz      # or add yours after the built-ins
 ```
 
+### What is left out by default
+
+An image holds what cannot be had again any other way. Anything that can be
+downloaded again, or rebuilt from files the image does keep, is **expendable**
+and left out unless you ask for it:
+
+- **Downloads** -- `~/Downloads` in every home, on every system (`/home`,
+  FreeBSD's `/usr/home`, macOS's `/Users`, and root's).
+- **Caches and the trash** -- `~/.cache`, the desktop trash and other drives'
+  `.Trash-*`, thumbnails, Electron apps' caches, `/var/cache`, macOS's
+  `Library/Caches`.
+- **Dependencies** -- `node_modules`, the npm/Yarn/pnpm/Bun caches, Python
+  virtual environments (`.venv`, `venv`, `~/.venvs`, pipenv's), the Gradle,
+  Maven, Cargo, Go, NuGet, Dart, Haskell and conda caches, installed gems,
+  Terraform providers.
+- **Build output** -- `__pycache__`, `*.o`, CMake files, Next.js/Nuxt/Parcel/
+  Turborepo/Zig caches, ccache, Xcode's DerivedData.
+- **Installed toolchains and apps** -- nvm, pyenv, rbenv, asdf, mise, Volta,
+  SDKMAN!, ghcup, rustup; VS Code extensions; the Android SDK, PlatformIO,
+  Arduino, JetBrains Toolbox; Steam games; Flatpak apps (remotes and overrides
+  are kept); snaps; Ollama models.
+- **Images** -- container images and layers (containerd, Docker, Podman, but
+  not their volumes), LXD's image cache, libvirt's installer ISOs. VM disks
+  are data and are kept.
+- **Never at all** -- swap files, PID files, sockets, `lost+found`, `/proc`,
+  `/sys`, `/run`, `/tmp`, `/mnt`, `/media`.
+
+Nothing here is gone for good: `--all` keeps all of it, and a rule keeps one
+piece, since your rules come after the built-ins and the last match wins:
+
+```
+state  /home/alice/Downloads     # keep one user's downloads
+state  /srv/app/node_modules     # an app deployed with its dependencies
+state  **/.venv                  # every virtual environment
+```
+
+`restate classify PATH` says which rule decided a path; `restate rules` lists
+them all, each with its reason.
+
 ## Installing
 
 Distribution packages come later — a Launchpad PPA for Ubuntu first; see the

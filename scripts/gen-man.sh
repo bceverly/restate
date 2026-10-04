@@ -172,10 +172,13 @@ Runtime state with no meaning after a reboot:
 process ID files and sockets. Never recorded, and never descended into.
 .TP
 .B expendable
-Could be kept, but a rebuilt machine does not need it: caches, downloaded
-packages, snap images, logs. Not recorded unless
+Could be kept, but a rebuilt machine does not need it, because it can be
+fetched or rebuilt from something else: caches, downloads, dependencies,
+installed toolchains, logs; see
+.BR "WHAT IS LEFT OUT" .
+Not recorded unless
 .B \-\-all
-is given.
+is given, or a rule makes it state.
 .TP
 .B baseline
 Supplied by the operating system or its packages:
@@ -238,6 +241,83 @@ netbsd and darwin.
 prints them in this format, with the reason for each, so that a site that
 disagrees can save them, edit them, and run with
 .BR "\-N \-R" " file" .
+.SH WHAT IS LEFT OUT
+By default an image holds what cannot be had again any other way. Anything
+that can be downloaded again, or rebuilt from files the image does keep, is
+expendable, so it costs neither time nor space in a capture:
+.TP
+.B Downloads
+.I ~/Downloads
+in every user's home, wherever homes are kept
+.RI ( /home ,
+.I /usr/home
+on FreeBSD,
+.I /Users
+on macOS, and root's).
+.TP
+.B Caches and the trash
+.IR ~/.cache ,
+the desktop's trash and the trash on other drives, thumbnails, Electron
+apps' caches under
+.IR ~/.config ,
+.IR /var/cache ,
+and on macOS the per-user and sandboxed apps' caches.
+.TP
+.B Dependencies
+Anything a lock file or a manifest installs again:
+.IR node_modules ,
+npm, Yarn, pnpm and Bun caches, Python virtual environments
+.RI ( .venv ,
+.IR venv ,
+.IR ~/.venvs ,
+pipenv's), Gradle, Maven, Ivy, Cargo, Go, NuGet, Dart, Haskell and conda
+caches, installed Ruby gems, Terraform providers.
+.TP
+.B Build output
+Compiled Python, object files, CMake's build files, Next.js, Nuxt, Parcel,
+Turborepo and Zig caches, ccache, and Xcode's DerivedData.
+.TP
+.B Installed toolchains and apps
+What a version manager or store installs again: nvm, pyenv, rbenv, asdf,
+mise, Volta, SDKMAN!, ghcup, elan and rustup toolchains; Julia packages; VS
+Code extensions and its remote server; the Android SDK, PlatformIO, Arduino
+and JetBrains Toolbox installs; Steam games; Flatpak apps and runtimes
+(their remotes and overrides are kept); snaps; Ollama models.
+.TP
+.B Images
+Container images and layers (containerd, Docker, Podman \- not their
+volumes, which are data), LXD's image cache, installer images libvirt boots
+from. Virtual machines' own disks are data, and are kept.
+.TP
+.B Never at all
+Swap files, process IDs and sockets, per-filesystem
+.IR lost+found ,
+the last X session's error log; and
+.IR /proc ,
+.IR /sys ,
+.IR /run ,
+.IR /tmp ,
+.IR /mnt ,
+.I /media
+and the like.
+.PP
+None of it is lost for good by being left out: it is kept with
+.BR \-\-all ,
+or one piece at a time with a rule in a rules file, since a site's rules
+come after the built-in ones and the last match wins:
+.PP
+.RS
+.nf
+state  /home/alice/Downloads        # keep one user's downloads
+state  /srv/app/node_modules        # an app deployed with its dependencies
+state  **/.venv                     # every virtual environment
+.fi
+.RE
+.PP
+.B restate classify
+says which rule decided a path, and
+.B restate rules
+lists every rule with its reason.
 .SH MACHINE
 An index of the running system's own root \- a
 .B capture
