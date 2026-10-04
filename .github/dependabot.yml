@@ -17,12 +17,27 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
+    groups:
+      # init, analyze and upload-sarif are one action published together, and
+      # must stay on the same commit; separate PRs would split them.
+      codeql:
+        patterns:
+          - "github/codeql-action*"
 
+  # semgrep only. The lock pins every package semgrep pulls in, but those
+  # versions are semgrep's to choose: bumped one at a time, Dependabot moved
+  # protobuf, opentelemetry and pydantic-core past semgrep's limits, and pip
+  # would have "resolved" that by installing a semgrep a hundred releases
+  # older. A semgrep bump is the signal to regenerate the whole lock with
+  # scripts/lock-semgrep.sh; security advisories against any locked package
+  # still arrive as Dependabot alerts.
   - package-ecosystem: pip
     directory: "/.github/requirements"
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    allow:
+      - dependency-name: "semgrep"
     commit-message:
       prefix: "ci"
