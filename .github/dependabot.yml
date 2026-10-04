@@ -1,14 +1,25 @@
 # Copyright (c) 2026 Bryan C. Everly
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Keep the GitHub Actions this project uses current.
+# Keep the GitHub Actions this project uses current, and the hash-locked
+# semgrep the Security workflow installs.
 #
-# Only the actions: restate is C linked against nothing but libc, so there is
-# no application ecosystem to update -- the absence is deliberate.
+# Nothing for the program itself: restate is C linked against nothing but
+# libc, so there is no application ecosystem to update -- the absence is
+# deliberate. Both entries here are CI tooling.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: pip
+    directory: "/.github/requirements"
     schedule:
       interval: weekly
       day: monday

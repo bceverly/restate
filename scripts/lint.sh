@@ -398,7 +398,8 @@ done < <(
     # And the code outside them: the build, the CI and the repository's own
     # configuration. Prose (the Markdown) and data (VERSION, the generated
     # badge) are not code and carry no header.
-    find .github -type f \( -name '*.yml' -o -name '*.yaml' -o -name CODEOWNERS \)
+    find .github -type f \( -name '*.yml' -o -name '*.yaml' -o -name CODEOWNERS \
+                       -o -path '.github/requirements/*' \)
     printf '%s\n' Makefile .editorconfig .gitignore
   } | sort
 )

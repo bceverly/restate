@@ -44,7 +44,7 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # gitleaks scans history, which a single-commit checkout lacks.
           fetch-depth: 0
@@ -63,7 +63,9 @@ jobs:
             -o /tmp/gitleaks.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
-          python3 -m pip install --quiet --break-system-packages semgrep \
+          # Every package pinned by hash: see the file for how it is made.
+          python3 -m pip install --quiet --break-system-packages --require-hashes \
+            -r .github/requirements/semgrep.txt \
             || echo "::warning::semgrep install failed; that scan will skip"
 
       # The hardening check reads the built binary, so it has to exist.
@@ -77,7 +79,7 @@ jobs:
 
       - name: Upload the scanner reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-reports
           path: |
@@ -97,7 +99,7 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install clang and the symbolizer
         run: |
@@ -111,7 +113,7 @@ jobs:
 
       - name: Upload the findings
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-findings
           path: |

@@ -9,6 +9,7 @@ system — so after a reinstall, the difference can be put back.**
 [![Security](https://github.com/bceverly/restate/actions/workflows/security.yml/badge.svg)](https://github.com/bceverly/restate/actions/workflows/security.yml)
 [![CodeQL](https://github.com/bceverly/restate/actions/workflows/codeql.yml/badge.svg)](https://github.com/bceverly/restate/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/bceverly/restate/badge)](https://scorecard.dev/viewer/?uri=github.com/bceverly/restate)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15216/badge)](https://www.bestpractices.dev/projects/15216)
 [![Coverage](docs/badges/coverage.svg)](#testing)
 
 [![License: BSD 2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-1B4B8F.svg)](LICENSE)
