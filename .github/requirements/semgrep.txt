@@ -520,9 +520,9 @@ opentelemetry-semantic-conventions==0.58b0 \
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-requests
     #   opentelemetry-sdk
-opentelemetry-util-http==0.58b0 \
-    --hash=sha256:6c6b86762ed43025fbd593dc5f700ba0aa3e09711aedc36fd48a13b23d8cb1e7 \
-    --hash=sha256:de0154896c3472c6599311c83e0ecee856c4da1b17808d39fdc5cce5312e4d89
+opentelemetry-util-http==0.66b0 \
+    --hash=sha256:7f5e581e94f023b30995f700e41ce319cec82bd542ff1c1c7c9b56d6b10bb687 \
+    --hash=sha256:a2d53859630abe8e5abcc4f867c5a809bb95873033573b1a67f6ef43b57a8627
     # via opentelemetry-instrumentation-requests
 packaging==26.3 \
     --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
