@@ -428,8 +428,9 @@ and left out unless you ask for it:
 - **Downloads** -- `~/Downloads` in every home, on every system (`/home`,
   FreeBSD's `/usr/home`, macOS's `/Users`, and root's).
 - **Caches and the trash** -- `~/.cache`, the desktop trash and other drives'
-  `.Trash-*`, thumbnails, Electron apps' caches, `/var/cache`, macOS's
-  `Library/Caches`.
+  `.Trash-*`, thumbnails, the caches Chrome, Brave, Edge and Electron apps
+  keep in their profiles (not bookmarks, logins or site data), `/var/cache`,
+  SonarScanner's cache, macOS's `Library/Caches`.
 - **Dependencies** -- `node_modules`, the npm/Yarn/pnpm/Bun caches, Python
   virtual environments (`.venv`, `venv`, `~/.venvs`, pipenv's), the Gradle,
   Maven, Cargo, Go, NuGet, Dart, Haskell and conda caches, installed gems,
@@ -441,8 +442,9 @@ and left out unless you ask for it:
   Arduino, JetBrains Toolbox; Steam games; Flatpak apps (remotes and overrides
   are kept); snaps; Ollama models.
 - **Images** -- container images and layers (containerd, Docker, Podman, but
-  not their volumes), LXD's image cache, libvirt's installer ISOs. VM disks
-  are data and are kept.
+  not their volumes), LXD's image cache, libvirt's installer ISOs, snapd's
+  seed. VM disks and definitions are data and are kept; a suspended VM's
+  saved memory is not (the VM boots afresh).
 - **Never at all** -- swap files, PID files, sockets, `lost+found`, `/proc`,
   `/sys`, `/run`, `/tmp`, `/mnt`, `/media`.
 

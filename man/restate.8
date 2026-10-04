@@ -224,11 +224,12 @@ on macOS, and root's).
 .TP
 .B Caches and the trash
 .IR ~/.cache ,
-the desktop's trash and the trash on other drives, thumbnails, Electron
-apps' caches under
-.IR ~/.config ,
+the desktop's trash and the trash on other drives, thumbnails, the caches
+Chrome, Chromium, Brave, Edge and Electron apps keep inside their profiles
+(service-worker, compiled-code and GPU shader caches \- not bookmarks,
+logins or site data),
 .IR /var/cache ,
-and on macOS the per-user and sandboxed apps' caches.
+SonarScanner's cache, and on macOS the per-user and sandboxed apps' caches.
 .TP
 .B Dependencies
 Anything a lock file or a manifest installs again:
@@ -254,7 +255,9 @@ and JetBrains Toolbox installs; Steam games; Flatpak apps and runtimes
 .B Images
 Container images and layers (containerd, Docker, Podman \- not their
 volumes, which are data), LXD's image cache, installer images libvirt boots
-from. Virtual machines' own disks are data, and are kept.
+from, the snaps the installer seeded. Virtual machines' own disks and
+definitions are data, and are kept; a suspended VM's saved memory is not,
+and without it the VM boots afresh.
 .TP
 .B Never at all
 Swap files, process IDs and sockets, per-filesystem
