@@ -19,7 +19,9 @@
 
 /* Long-only options, numbered above any character. */
 enum {
-    OPT_OS = 256
+    OPT_OS = 256,
+    OPT_CACHE,
+    OPT_MIRROR
 };
 
 enum rs_command {
@@ -40,6 +42,8 @@ struct rs_options {
     size_t          nrules_files;
     bool            no_default_rules;
     const char     *os;
+    const char     *cache;
+    const char     *mirror;
     bool            all;
     bool            baseline_content;
     bool            one_fs;

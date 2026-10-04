@@ -11,8 +11,8 @@
 #   FUZZ_ENGINE=builtin make fuzz     skip libFuzzer even where clang is present
 #
 # The target is tests/fuzz/fuzz_restate.c: indexes, tar streams, rules files,
-# patterns, timestamps and base64, chosen by the first byte of each input. Two
-# engines:
+# patterns, timestamps, base64, LVM and LUKS metadata and checksum files,
+# chosen by the first byte of each input. Two engines:
 #
 #   libFuzzer                   coverage-guided, and far better at reaching
 #                               deep paths; used when clang can build it
@@ -44,7 +44,8 @@ mkdir -p "$WORK/corpus"
 # ---------------------------------------------------------------------------
 # The seed corpus: a valid example of each kind of input. A fuzzer with a poor
 # corpus spends its whole run rediscovering what JSON is. The selector byte
-# comes first: 0 index, 1 rules, 2 pattern+path, 3 tar, 4 time, 5 base64.
+# comes first: 0 index, 1 rules, 2 pattern+path, 3 tar, 4 time, 5 base64,
+# 6 LVM metadata, 7 LUKS header.
 # ---------------------------------------------------------------------------
 # seed NAME SELECTOR BODY -- BODY may use \t, \n, \0 and \\ escapes.
 seed() {
@@ -70,6 +71,16 @@ if [ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ]; then
   seed time-iso 4 '2026-10-03T14:05:09.123456789Z'
   seed time-epoch 4 '@-62167219201.000000000'
   seed base64 5 'L2V0Yy9h/w=='
+  seed lvm 6 'contents = "Text Format Volume Group"\nversion = 1\nvg0 {\n\tid = "x"\n\textent_size = 8192\n\tstatus = ["READ", "WRITE"]\n\tlogical_volumes {\n\t\troot {\n\t\t\tstripes = [\n\t\t\t\t"pv0", 0\n\t\t\t]\n\t\t}\n\t}\n}\n'
+  seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
+  # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
+  # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.
+  {
+    printf '\007LUKS\272\276\000\002\000\000\000\000\000\000\040\000'
+    head -c 4080 /dev/zero
+    printf '{"keyslots": {"0": {"area": {"key_size": 64}, "kdf": {"type": "argon2id"}}}, "segments": {"0": {"encryption": "aes-xts-plain64", "sector_size": 4096}}}'
+    head -c 3900 /dev/zero
+  } > "$WORK/corpus/luks2"
   # A real tar with the index as its first member, as an image holds it.
   SEED_TREE="$(mktemp -d)"
   mkdir -p "$SEED_TREE/restate"

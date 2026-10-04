@@ -56,6 +56,7 @@ restate: 1 added, 0 deleted, 1 modified
 ## Contents
 
 - [What it does](#what-it-does)
+- [Use cases](#use-cases)
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Images and indexes](#images-and-indexes)
@@ -90,6 +91,65 @@ restate: 1 added, 0 deleted, 1 modified
   opened by a path longer than one component, no symlink is followed, and
   every file is checked against what was stat'ed a moment earlier.
 
+## Use cases
+
+**What changed on this server?** Capture on a schedule, and see exactly what
+has been added, deleted or modified since — content, mode, owner or link
+target — without the noise of timestamps:
+
+```bash
+restate capture -o /var/backups/web01-$(date +%F).tgz
+restate verify /var/backups/web01-2026-09-28.tgz          # against the server as it is now
+restate diff web01-2026-09-28.tgz web01-2026-10-05.tgz    # between two captures
+```
+
+**Why does this one behave differently?** Diff two servers that are supposed
+to be identical:
+
+```bash
+restate scan -o app1.json      # on app1
+restate scan -o app2.json      # on app2
+restate diff app1.json app2.json
+```
+
+**What did that installer actually do?** Capture before and after installing
+a vendor's package, running a configuration-management job or applying an
+update, and diff the two.
+
+**What is actually on this box?** Before decommissioning, handing over or
+auditing a machine, `restate machine` documents the hardware, firmware, disk
+layout, encryption, LVM, RAID and mounts, and an index lists every file with
+its owner, mode, times and SHA-256.
+
+**A safety net before an upgrade.** Capture before a release upgrade, keep the
+image, and diff afterwards to see what the upgrade changed.
+
+### Coming
+
+These need the pieces on the [roadmap](ROADMAP.md) — package-aware capture,
+the build sheet and autoinstall file, and `restore`:
+
+- **Bare-metal disaster recovery.** The disk dies: rebuild the machine from
+  its build sheet or an unattended autoinstall file, and restore the image.
+- **A hardware refresh.** Move a machine onto new hardware, disks of a
+  different size included.
+- **Bare metal to a virtual machine, and back.** Move a physical server into
+  a VM — or a VM onto hardware — with what changes accounted for: the storage
+  and network drivers in the initramfs, UEFI or BIOS, device and interface
+  names, a disk sized to the data rather than the old drive, hardware tools
+  swapped for guest agents (or the reverse), and an encrypted volume that
+  was unlocked by the old machine's TPM. For a VM, a ready-to-run definition
+  of the virtual machine itself.
+- **Stamping out copies.** Build one machine that does the thing — a load
+  generator, a lab workstation — and rebuild it as many machines, each with
+  its own host name, address, machine-id and SSH host keys, so no two come up
+  as the same machine on the network.
+- **Turning a hand-built server into code.** The package inventory and the
+  autoinstall file are a starting point for automating a machine that was
+  only ever configured by hand.
+- **Air-gapped rebuilds**, from a downloaded installer and kept packages.
+- **A new laptop, set up like the old one**, in one unattended install.
+
 ## Quick start
 
 ```bash
@@ -100,8 +160,10 @@ sudo ./bin/restate capture -o /tmp/me.tgz     # an image of this machine
 sudo ./bin/restate verify /tmp/me.tgz         # what has changed since
 ```
 
-Building needs a C11 compiler and GNU make, and nothing else. For the test
-suite, the analyzers and the git hooks:
+Building needs a C11 compiler and GNU make, and nothing else. Running it needs
+gzip, and `restate installer fetch` also needs curl and gpgv — all three are
+in a standard Ubuntu install. For the test suite, the analyzers and the git
+hooks:
 
 ```bash
 make install-dev    # prompts for sudo; installs valgrind, cppcheck, clang-tidy,
@@ -132,6 +194,12 @@ Commands:
                           modified, and how
   verify IMAGE            compare an image or index against the tree as it is
                           now
+  machine                 describe this machine: hardware, firmware, disks,
+                          partitions, encryption, LVM, RAID, mounts
+  installer [fetch] [IMAGE]
+                          show the installer that rebuilds this machine, or the
+                          one IMAGE was taken from; with fetch, download it and
+                          check its signature
   classify PATH...        show the class each path falls under, and the rule
                           that decided it
   rules                   print the rules in effect, in the format --rules
@@ -156,10 +224,41 @@ Options:
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
                           then judged by size and mtime
+      --cache=DIR         installer fetch: keep installers in DIR rather than
+                          the system's cache
+      --mirror=URL        installer fetch: download from the directory at URL
+                          (https:// or file://) rather than the vendor's
   -q, --quiet             no warnings and no summary; errors are still reported
   -v, --verbose           report every path the rules skip, and why
   -h, --help              print this help and exit
   -V, --version           print the version and exit
+```
+
+## Installers
+
+`restate installer` names the installation image a machine is rebuilt from:
+the distribution, release and point release, the architecture, and whether
+it is a desktop or a server, with the evidence. Given an image or index it
+names the installer for the machine that was captured. `restate installer
+fetch` downloads it into `/var/cache/restate/installers/<vendor>/<release>/`
+(`--cache` to change that) and checks it: the vendor's `SHA256SUMS` must be
+signed by the vendor key built into restate, pinned by fingerprint, and the
+image must match it. Ubuntu is supported now; the others are on the
+[roadmap](ROADMAP.md).
+
+```console
+$ restate installer
+installer   Ubuntu 26.04 Desktop for amd64
+for         web01 (Ubuntu 26.04.1 LTS)
+because     this is a desktop: the ubuntu-desktop package is installed
+from        https://releases.ubuntu.com/26.04/
+            or, after end of life, https://old-releases.ubuntu.com/releases/26.04/
+file        ubuntu-26.04[.N]-desktop-amd64.iso -- 26.04.1, or the newest listed
+checked by  SHA256SUMS, signed by Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>
+            8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092
+fetch it    restate installer fetch
+$ sudo restate installer fetch
+/var/cache/restate/installers/ubuntu/26.04/ubuntu-26.04.1-desktop-amd64.iso
 ```
 
 ## Images and indexes
@@ -388,6 +487,7 @@ Run `make` with no arguments for the full list.
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
 | `make install-dev` | the development tools and the git hooks |
 | `make man` | regenerate the manpage and the README's Usage block |
+| `make show-man` | read the manpage from the tree, without installing anything |
 | `make clean` | remove everything a build or test produced |
 
 ## Releasing
@@ -437,6 +537,10 @@ src/            the program: one module per concern
   image.c       images: assembling and reading back
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
+  run.c         running gzip, curl and gpgv: fixed paths, posix_spawn
+  machine.c     the machine description: hardware, disks, encryption
+  installer.c   which installer rebuilds a machine, and fetching it
+  keys.c        the vendors' signing keys, pinned by fingerprint
   json.c        a strict JSON parser and writer
   meta.c        timestamps, birth times, user and group names
   diff.c        comparing two indexes

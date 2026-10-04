@@ -176,6 +176,55 @@ if command -v python3 > /dev/null 2>&1; then
     < out.txt
 fi
 
+lacks "$OUT" '"machine"' "a tree that is not the live root gets no machine description"
+
+# ---------------------------------------------------------------------------
+# machine
+# ---------------------------------------------------------------------------
+expect 0 "machine" -- "$BIN" machine
+contains "$OUT" '"system": {' "machine describes the system"
+contains "$OUT" '"hardware": {' "machine describes the hardware"
+contains "$OUT" '"kernel_name": "' "machine names the kernel"
+if command -v python3 > /dev/null 2>&1; then
+  check "the machine description is valid JSON" \
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert "system" in d' < out.txt
+fi
+expect 0 "machine -o" -- "$BIN" machine -o machine.json
+check "machine -o writes the file" test -s machine.json
+check "and it is private" test "$(file_mode machine.json)" = "600"
+
+# ---------------------------------------------------------------------------
+# installer
+# ---------------------------------------------------------------------------
+cat > ubuntu.json <<'JSON'
+{"system": {"id": "ubuntu", "version_id": "26.04", "version": "26.04.1 LTS (Resolute Raccoon)",
+            "pretty_name": "Ubuntu 26.04.1 LTS", "hostname": "builder",
+            "architecture": "aarch64", "type": "server", "type_evidence": "no desktop is installed"}}
+JSON
+expect 0 "installer for a described machine" -- "$BIN" installer ubuntu.json
+contains "$OUT" "installer   Ubuntu 26.04 Server for arm64" "installer names the image"
+contains "$OUT" "for         builder (Ubuntu 26.04.1 LTS)" "installer names the machine"
+contains "$OUT" "because     this is a server: no desktop is installed" "installer says why"
+contains "$OUT" "https://cdimage.ubuntu.com/releases/26.04/release/" "arm64 comes from cdimage"
+contains "$OUT" "ubuntu-26.04[.N]-live-server-arm64.iso -- 26.04.1" "installer names the file"
+contains "$OUT" "8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092" "installer shows the pinned key"
+contains "$OUT" "restate installer fetch ubuntu.json" "installer says how to fetch it"
+printf '{"system": {"id": "openbsd", "version_id": "7.8"}}\n' > openbsd.json
+expect 2 "installer for an unsupported system" -- "$BIN" installer openbsd.json
+contains "$ERR" "installers for openbsd are not supported yet" "installer says what is unsupported"
+expect 2 "installer for a missing description" -- "$BIN" installer no-such.json
+expect 2 "installer with two descriptions" -- "$BIN" installer ubuntu.json ubuntu.json
+# A fetch needs curl and gpgv; without them it fails differently.
+have() { [ -x "/usr/bin/$1" ] || [ -x "/usr/local/bin/$1" ] || [ -x "/bin/$1" ]; }
+if have curl && have gpgv; then
+  expect 2 "installer fetch from a mirror that is not there" -- \
+    "$BIN" installer fetch ubuntu.json --mirror=file:///nonexistent/mirror --cache=cache -q
+  contains "$ERR" "could not download" "a failed fetch says why"
+  refute "a failed fetch leaves no image" ls cache/ubuntu/26.04/*.iso > /dev/null 2>&1
+fi
+expect 2 "installer --mirror must be https or file" -- \
+  "$BIN" installer fetch ubuntu.json --mirror=http://mirror.example.invalid/
+
 expect 0 "scan --all" -- "$BIN" scan -r tree --os=linux --all -q
 contains "$OUT" '"class": "expendable"' "--all records expendable paths"
 contains "$OUT" "/var/cache/apt/pkg.deb" "--all records the cache"

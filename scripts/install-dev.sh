@@ -92,6 +92,12 @@ PACKAGES=(
   valgrind                 # the uninitialized-read pass in make test-memory
   # --- coverage ------------------------------------------------------------
   gcovr                    # the XML and HTML reports CI keeps
+  # --- the installer fetch tests -------------------------------------------
+  # They sign a local mirror with a key of their own and fetch from it; without
+  # these they are skipped, which is the right thing on a machine without them
+  # and the wrong thing on a developer's.
+  gnupg                    # gpg, to make the test key and sign the mirror
+  gpgv
   # --- lint ----------------------------------------------------------------
   cppcheck
   clang-tidy

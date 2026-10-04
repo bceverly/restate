@@ -737,3 +737,211 @@ bool rs_jval_i64(const struct rs_jval *v, int64_t *out)
     *out = (int64_t)v->u;
     return true;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Building and writing                                                      */
+/* ------------------------------------------------------------------------- */
+
+void rs_jval_set_object(struct rs_jval *v)
+{
+    rs_jval_free(v);
+    v->type = RS_JOBJECT;
+}
+
+void rs_jval_set_array(struct rs_jval *v)
+{
+    rs_jval_free(v);
+    v->type = RS_JARRAY;
+}
+
+void rs_jval_set_string(struct rs_jval *v, const char *s)
+{
+    size_t len = strlen(s);
+
+    rs_jval_free(v);
+    v->type = RS_JSTRING;
+    /* JSON strings are UTF-8, and a disk's model or a partition's name read
+     * off the hardware need not be. */
+    v->s = rs_utf8_valid(s, len) ? rs_xstrdup(s) : rs_utf8_lossy(s, len);
+    v->slen = strlen(v->s);
+}
+
+void rs_jval_set_u64(struct rs_jval *v, uint64_t u)
+{
+    rs_jval_free(v);
+    v->type = RS_JINT;
+    v->u = u;
+}
+
+void rs_jval_set_i64(struct rs_jval *v, int64_t i)
+{
+    rs_jval_free(v);
+    v->type = RS_JINT;
+    if (i < 0)
+    {
+        v->neg = true;
+        v->u = i == INT64_MIN ? (uint64_t)INT64_MAX + 1u : (uint64_t)-i;
+    } else
+    {
+        v->u = (uint64_t)i;
+    }
+}
+
+void rs_jval_set_bool(struct rs_jval *v, bool b)
+{
+    rs_jval_free(v);
+    v->type = RS_JBOOL;
+    v->b = b;
+}
+
+/* Room for one more member; a capacity is not stored, so grow on powers of
+ * two -- n is always the count, and n == 0 or a power of two means full. */
+static void grow(struct rs_jval *c)
+{
+    if (c->n == 0 || (c->n & (c->n - 1)) == 0)
+    {
+        size_t cap = c->n ? c->n * 2 : 4;
+
+        c->items = rs_xreallocarray(c->items, cap, sizeof(*c->items));
+        if (c->type == RS_JOBJECT)
+        {
+            c->keys = rs_xreallocarray(c->keys, cap, sizeof(*c->keys));
+        }
+    }
+}
+
+struct rs_jval *rs_jobj_add(struct rs_jval *obj, const char *key)
+{
+    struct rs_jval *v;
+
+    grow(obj);
+    obj->keys[obj->n] = rs_xstrdup(key);
+    v = &obj->items[obj->n++];
+    memset(v, 0, sizeof(*v));
+    return v;
+}
+
+struct rs_jval *rs_jarr_add(struct rs_jval *arr)
+{
+    struct rs_jval *v;
+
+    grow(arr);
+    v = &arr->items[arr->n++];
+    memset(v, 0, sizeof(*v));
+    return v;
+}
+
+void rs_jobj_str(struct rs_jval *obj, const char *key, const char *s)
+{
+    if (s)
+    {
+        rs_jval_set_string(rs_jobj_add(obj, key), s);
+    }
+}
+
+void rs_jobj_u64(struct rs_jval *obj, const char *key, uint64_t u)
+{
+    rs_jval_set_u64(rs_jobj_add(obj, key), u);
+}
+
+void rs_jobj_bool(struct rs_jval *obj, const char *key, bool b)
+{
+    rs_jval_set_bool(rs_jobj_add(obj, key), b);
+}
+
+const char *rs_jobject_str(const struct rs_jval *obj, const char *key)
+{
+    const struct rs_jval *v = rs_jobject_get(obj, key);
+
+    return (v && v->type == RS_JSTRING) ? v->s : NULL;
+}
+
+void rs_jval_copy(struct rs_jval *dst, const struct rs_jval *src) /* NOLINT(misc-no-recursion) */
+{
+    size_t i;
+
+    memset(dst, 0, sizeof(*dst));
+    dst->type = src->type;
+    dst->b = src->b;
+    dst->neg = src->neg;
+    dst->u = src->u;
+    if (src->s)
+    {
+        dst->s = rs_xstrndup(src->s, src->slen);
+        dst->slen = src->slen;
+    }
+    for (i = 0; i < src->n; i++)
+    {
+        struct rs_jval *v = src->type == RS_JOBJECT ? rs_jobj_add(dst, src->keys[i])
+                                                    : rs_jarr_add(dst);
+
+        rs_jval_copy(v, &src->items[i]);
+    }
+}
+
+static bool scalars_only(const struct rs_jval *v)
+{
+    size_t i;
+
+    for (i = 0; i < v->n; i++)
+    {
+        if (v->items[i].type == RS_JOBJECT || v->items[i].type == RS_JARRAY)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void rs_json_write(struct rs_buf *out, const struct rs_jval *v, int indent, int level) /* NOLINT(misc-no-recursion) */
+{
+    size_t i;
+    bool   spread;
+
+    switch (v->type)
+    {
+    case RS_JNULL:
+        rs_buf_addstr(out, "null");
+        return;
+    case RS_JBOOL:
+        rs_buf_addstr(out, v->b ? "true" : "false");
+        return;
+    case RS_JINT:
+        rs_buf_addf(out, "%s%llu", v->neg ? "-" : "", (unsigned long long)v->u);
+        return;
+    case RS_JSTRING:
+        rs_json_put_string(out, v->s, v->slen);
+        return;
+    case RS_JOBJECT:
+    case RS_JARRAY:
+    default:
+        break;
+    }
+    rs_buf_addc(out, v->type == RS_JOBJECT ? '{' : '[');
+    spread = indent > 0 && v->n > 0 && !scalars_only(v);
+    for (i = 0; i < v->n; i++)
+    {
+        if (i > 0)
+        {
+            rs_buf_addc(out, ',');
+        }
+        if (spread)
+        {
+            rs_buf_addf(out, "\n%*s", indent * (level + 1), "");
+        } else if (i > 0)
+        {
+            rs_buf_addc(out, ' ');
+        }
+        if (v->type == RS_JOBJECT)
+        {
+            rs_json_put_string(out, v->keys[i], strlen(v->keys[i]));
+            rs_buf_addstr(out, ": ");
+        }
+        rs_json_write(out, &v->items[i], indent, level + 1);
+    }
+    if (spread)
+    {
+        rs_buf_addf(out, "\n%*s", indent * level, "");
+    }
+    rs_buf_addc(out, v->type == RS_JOBJECT ? '}' : ']');
+}

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # Publish a release when a version tag is pushed.
 #
 # `make release` writes the version into VERSION, commits, tags and pushes --

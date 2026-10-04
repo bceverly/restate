@@ -23,6 +23,11 @@
  *   3  a tar stream: its first member read, and fed to the index parser
  *   4  a timestamp: parsed, and if it parses, formatted back identically
  *   5  base64: decoded, re-encoded, and compared
+ *   6  LVM metadata, as /etc/lvm/backup holds it: parsed, and if it parses,
+ *      written out as JSON and parsed again
+ *   7  a LUKS1 or LUKS2 header, as the start of a block device holds it
+ *   8  a SHA256SUMS file, as a vendor's mirror serves it: an image is picked
+ *      from it, and what is picked must be a plain file name with a digest
  *
  * It is reached two ways:
  *
@@ -43,7 +48,9 @@
 #include "diff.h"
 #include "glob.h"
 #include "index.h"
+#include "installer.h"
 #include "json.h"
+#include "machine.h"
 #include "meta.h"
 #include "rules.h"
 #include "tar.h"
@@ -241,6 +248,78 @@ static void fuzz_base64(const char *text, size_t len)
     rs_buf_free(&enc);
 }
 
+static void fuzz_lvm(const char *text, size_t len)
+{
+    struct rs_jval tree;
+    struct rs_buf  err;
+
+    memset(&tree, 0, sizeof(tree));
+    rs_buf_init(&err);
+    if (rs_lvm_parse(text, len, &tree, &err))
+    {
+        /* Whatever parses must be expressible as JSON that parses back. */
+        struct rs_buf         json;
+        struct rs_json_parser jp;
+        struct rs_jval        back;
+        struct rs_buf         jerr;
+
+        rs_buf_init(&json);
+        rs_buf_init(&jerr);
+        rs_json_write(&json, &tree, 2, 0);
+        rs_json_init(&jp, json.data, json.len, &jerr);
+        memset(&back, 0, sizeof(back));
+        if (!rs_json_value(&jp, &back) || back.type != RS_JOBJECT)
+        {
+            /* Deeper than JSON allows is the one legitimate refusal. */
+            if (!strstr(jerr.data ? jerr.data : "", "nested too deeply"))
+            {
+                abort();
+            }
+        }
+        rs_jval_free(&back);
+        rs_buf_free(&json);
+        rs_buf_free(&jerr);
+    }
+    rs_jval_free(&tree);
+    rs_buf_free(&err);
+}
+
+static void fuzz_luks(const char *data, size_t len)
+{
+    struct rs_jval out;
+
+    memset(&out, 0, sizeof(out));
+    (void)rs_luks_parse((const unsigned char *)data, len, &out);
+    rs_jval_free(&out);
+}
+
+/* Downloaded before its signature is checked, so it is read as hostile. */
+static void fuzz_sums(const char *data, size_t len)
+{
+    static char         release[] = "26.04";
+    static char         point[] = "26.04.1";
+    static char         flavor[] = "live-server";
+    static char         arch[] = "amd64";
+    struct rs_installer in;
+    char               *name = NULL;
+    char                hash[RS_SHA256_HEX_SIZE];
+
+    memset(&in, 0, sizeof(in));
+    in.release = release;
+    in.point = (len % 2) ? point : NULL;
+    in.flavor = flavor;
+    in.arch = arch;
+    if (rs_installer_pick(&in, data, len, &name, hash))
+    {
+        if (strchr(name, '/') || strstr(name, "..") || strncmp(name, "ubuntu-26.04", 12) != 0 ||
+            !rs_sha256_valid_hex(hash))
+        {
+            abort();
+        }
+    }
+    free(name);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     const char *text;
@@ -250,7 +329,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 6)
+    switch (data[0] % 9)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -267,8 +346,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 4:
         fuzz_time(text, size - 1);
         break;
-    default:
+    case 5:
         fuzz_base64(text, size - 1);
+        break;
+    case 6:
+        fuzz_lvm(text, size - 1);
+        break;
+    case 7:
+        fuzz_luks(text, size - 1);
+        break;
+    default:
+        fuzz_sums(text, size - 1);
         break;
     }
     return 0;
@@ -403,7 +491,7 @@ static void mutate(struct rs_buf *b, const unsigned char *other, size_t other_le
         default:  /* change which parser it goes to */
             if (b->len > 0)
             {
-                b->data[0] = (char)rnd(6);
+                b->data[0] = (char)rnd(8);
             }
             break;
         }
@@ -500,7 +588,7 @@ int main(int argc, char **argv)
             rs_buf_add(&b, corpus[pick], lens[pick]);
             if (b.len == 0)
             {
-                rs_buf_addc(&b, (char)rnd(6));
+                rs_buf_addc(&b, (char)rnd(8));
             }
             mutate(&b, corpus[other], lens[other]);
             /* Written before it runs: if this one kills the process, the file

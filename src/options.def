@@ -36,6 +36,11 @@ RS_OPT('x', "one-file-system",  no_argument,       NULL,
        "record mount points but do not descend into other filesystems")
 RS_OPT('n', "no-hash",          no_argument,       NULL,
        "record metadata only; much faster, but content is then judged by size and mtime")
+RS_OPT(OPT_CACHE, "cache",      required_argument, "DIR",
+       "installer fetch: keep installers in DIR rather than the system's cache")
+RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
+       "installer fetch: download from the directory at URL (https:// or file://) "
+       "rather than the vendor's")
 RS_OPT('q', "quiet",            no_argument,       NULL,
        "no warnings and no summary; errors are still reported")
 RS_OPT('v', "verbose",          no_argument,       NULL,

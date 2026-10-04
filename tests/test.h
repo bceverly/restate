@@ -84,6 +84,8 @@ void test_json(void);
 void test_meta(void);
 void test_index(void);
 void test_image(void);
+void test_machine(void);
+void test_installer(void);
 void test_scan(void);
 void test_diff(void);
 void test_opts(void);

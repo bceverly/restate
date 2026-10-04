@@ -77,5 +77,12 @@ The C is written in the style of [tmd](https://github.com/bceverly/tmd), and
    */
   ```
 
+  and every script, Makefile, workflow and configuration file with the same
+  two lines as `#` comments, in its first 12 lines. `make lint` checks every
+  file under `src/`, `include/`, `tests/`, `scripts/` and `.githooks/`,
+  whatever its extension, plus the Makefile, the `.github` YAML, `CODEOWNERS`,
+  `.editorconfig` and `.gitignore`. Prose (the Markdown) and data (`VERSION`,
+  the generated badge) carry no header.
+
 By contributing you agree your contribution is licensed under the
 [BSD 2-Clause License](LICENSE).

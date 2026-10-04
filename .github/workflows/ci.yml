@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # Build, lint and test on every push and pull request.
 #
 # Each concern is its own job so a failure names itself in the checks list, and

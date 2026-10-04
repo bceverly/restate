@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # The house style, for editors that read this file.
 root = true
 

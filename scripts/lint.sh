@@ -16,7 +16,8 @@
 #   4. clang-tidy, a third
 #   5. the house style: tmd's formatting (scripts/style.sh), braces on their
 #      own line, American spelling
-#   6. the copyright audit -- every source file carries the same notice
+#   6. the copyright audit -- every source file, the Makefile, the workflows
+#      and the repository configuration carry the same notice
 #   7. shellcheck on every script and actionlint on every workflow
 #   8. the generated files (manpage, README usage) match the binary
 #
@@ -389,11 +390,16 @@ while IFS= read -r file; do
   fi
 done < <(
   {
-    find src include tests scripts -type f \
-         \( -name '*.c' -o -name '*.h' -o -name '*.def' -o -name '*.sh' \)
-    # The git hooks carry no extension, so the pattern above misses them --
-    # and they are shipped source like everything else.
-    find .githooks -type f 2>/dev/null
+    # Every file in the source directories, whatever its extension: a new
+    # kind of file (a suppressions list, an awk program, a hook with no
+    # extension at all) is source the moment it is added, and an extension
+    # list would let it in without a header.
+    find src include tests scripts .githooks -type f 2>/dev/null
+    # And the code outside them: the build, the CI and the repository's own
+    # configuration. Prose (the Markdown) and data (VERSION, the generated
+    # badge) are not code and carry no header.
+    find .github -type f \( -name '*.yml' -o -name '*.yaml' -o -name CODEOWNERS \)
+    printf '%s\n' Makefile .editorconfig .gitignore
   } | sort
 )
 

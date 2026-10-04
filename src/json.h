@@ -79,6 +79,37 @@ bool rs_json_at_end(struct rs_json_parser *jp);
 /* Appends `s` (`len` bytes of valid UTF-8) as a quoted JSON string. */
 void rs_json_put_string(struct rs_buf *out, const char *s, size_t len);
 
+/*
+ * Building a tree. rs_jobj_add and rs_jarr_add append a new member, of type
+ * null, and return it to be filled in with one of the setters -- or made an
+ * object or array itself. The returned pointer is only good until the next
+ * member is added to the same container, so fill each one before adding the
+ * next.
+ */
+void            rs_jval_set_object(struct rs_jval *v);
+void            rs_jval_set_array(struct rs_jval *v);
+void            rs_jval_set_string(struct rs_jval *v, const char *s);
+void            rs_jval_set_u64(struct rs_jval *v, uint64_t u);
+void            rs_jval_set_i64(struct rs_jval *v, int64_t i);
+void            rs_jval_set_bool(struct rs_jval *v, bool b);
+struct rs_jval *rs_jobj_add(struct rs_jval *obj, const char *key);
+struct rs_jval *rs_jarr_add(struct rs_jval *arr);
+/* Shorthands that add and set in one call. A NULL string adds nothing. */
+void            rs_jobj_str(struct rs_jval *obj, const char *key, const char *s);
+void            rs_jobj_u64(struct rs_jval *obj, const char *key, uint64_t u);
+void            rs_jobj_bool(struct rs_jval *obj, const char *key, bool b);
+/* The string member `key`, or NULL. */
+const char     *rs_jobject_str(const struct rs_jval *obj, const char *key);
+/* A deep copy of `src` into `dst`. */
+void            rs_jval_copy(struct rs_jval *dst, const struct rs_jval *src);
+
+/*
+ * Writes `v` as JSON. With `indent` > 0, objects and arrays are spread over
+ * lines and indented that many spaces a level, starting at `level`; an object
+ * or array holding only scalars is kept on one line. With 0, one line.
+ */
+void rs_json_write(struct rs_buf *out, const struct rs_jval *v, int indent, int level);
+
 bool  rs_utf8_valid(const char *s, size_t len);
 /* `s` with every invalid UTF-8 sequence replaced by U+FFFD. */
 char *rs_utf8_lossy(const char *s, size_t len);

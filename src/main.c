@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 /*
- * restate -- record what makes a machine different from its baseline.
+ * restate -- back up what a fresh OS install would not put back, to rebuild the machine.
  *
  * Everything of substance is in the other files; this one parses the command
  * line and hands over, so that the unit tests, which link everything except

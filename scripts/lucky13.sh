@@ -161,10 +161,26 @@ fi
 
 # ---------------------------------------------------------------------------
 section "4. remote file inclusion (CWE-98)"
-na "not applicable: restate opens no network connection and loads no code"
+# restate loads no code and opens no connection itself. The one download --
+# `restate installer fetch` -- is curl's, HTTPS only, and nothing it fetches
+# is used until its signature has been checked against a pinned key.
 HITS="$(grep_source '\b(dlopen|dlsym|socket|connect|getaddrinfo|curl_)[[:space:]]*\(')"
 no_hits "no dynamic loading and no networking in the source" \
   "dynamic loading or networking found" "$HITS"
+if grep -q '"=https"' src/installer.c && grep -q '"--proto-redir"' src/installer.c \
+   && grep -q '"-q"' src/installer.c; then
+  ok "curl is held to HTTPS, redirects included, and ignores ~/.curlrc"
+else
+  bad "curl is no longer held to HTTPS with ~/.curlrc ignored"
+fi
+if grep -q 'VALIDSIG' src/installer.c && grep -q 'key->fingerprint' src/installer.c; then
+  ok "a download counts only when gpgv names the pinned key's fingerprint"
+else
+  bad "the signature check no longer requires the pinned fingerprint"
+fi
+HITS="$(grep -n 'rs_installer_set_key' src/*.c | grep -v '^src/installer.c:' || true)"
+no_hits "nothing in the program can change which key is trusted" \
+  "the signing key is changed outside the tests" "$HITS"
 
 # ---------------------------------------------------------------------------
 section "5. SQL injection (CWE-89)"
@@ -231,22 +247,26 @@ note "the digest identifies content; nothing here encrypts, signs or authenticat
 section "10. privilege escalation (CWE-271)"
 HITS="$(grep_source '\b(setuid|seteuid|setreuid|setresuid|setgid|setegid|setregid|setresgid)[[:space:]]*\(')"
 no_hits "restate never changes identity" "identity changes found" "$HITS"
-# One program is run -- gzip, as tar runs it -- from one file, by absolute path,
-# with posix_spawn, no shell and a fixed environment. Anything more is a finding.
+# Three programs are run -- gzip, curl and gpgv -- from one file, by absolute
+# path, with posix_spawn, no shell and a fixed environment. Anything more is a
+# finding.
 HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(')"
 no_hits "no shell, no exec family, and no program found through PATH" \
   "a shell, an exec or a PATH lookup is used to run something" "$HITS"
-HITS="$(grep_source '\bposix_spawn[[:space:]]*\(' | grep -v '^[0-9]*:src/gzip.c: ')"
-no_hits "posix_spawn appears only in src/gzip.c" "posix_spawn is called outside src/gzip.c" "$HITS"
-if grep -q '"/usr/bin/gzip", "/bin/gzip"' src/gzip.c \
-   && grep -q 'PATH=/usr/bin:/bin' src/gzip.c; then
-  ok "gzip is run from a fixed absolute path, with a fixed environment"
+HITS="$(grep_source '\bposix_spawn[[:space:]]*\(' | grep -v '^[0-9]*:src/run.c: ')"
+no_hits "posix_spawn appears only in src/run.c" "posix_spawn is called outside src/run.c" "$HITS"
+if grep -q '"/usr/bin/gzip", "/bin/gzip"' src/run.c \
+   && grep -q '"/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"' src/run.c \
+   && grep -q '"/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv"' src/run.c \
+   && grep -q 'PATH=/usr/bin:/bin' src/run.c; then
+  ok "gzip, curl and gpgv are run from fixed absolute paths, with a fixed environment"
 else
-  bad "gzip is no longer run from a fixed path with a fixed environment"
+  bad "a program is no longer run from a fixed path with a fixed environment"
 fi
-HITS="$(grep -n 'rs_gzip_set_paths' src/*.c | grep -v '^src/gzip.c:' || true)"
-no_hits "nothing in the program can change which gzip is run" \
-  "the gzip paths are changed outside the tests" "$HITS"
+HITS="$(grep -n 'rs_gzip_set_paths\|rs_program_set_paths' src/*.c \
+        | grep -v '^src/gzip.c:\|^src/run.c:' || true)"
+no_hits "nothing in the program can change which programs are run" \
+  "program paths are changed outside the tests" "$HITS"
 
 # ---------------------------------------------------------------------------
 section "11. symlink following (CWE-61)"

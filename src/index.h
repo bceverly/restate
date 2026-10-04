@@ -17,6 +17,7 @@
  *     "hashed": true,
  *     "content": "state",
  *     "count": 2,
+ *     "machine": { ...disks, partitions, firmware; see machine.h... },
  *     "entries": [
  *       {"path": "/etc", "name": "etc", "type": "directory", ...},
  *       {"path": "/etc/hosts", "name": "hosts", "type": "file", ...}
@@ -57,6 +58,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "json.h"
 #include "meta.h"
 #include "rules.h"
 #include "sha256.h"
@@ -106,6 +108,7 @@ struct rs_index {
     char            *version;   /* the restate that wrote it */
     char            *content;   /* "none", "state" or "state+baseline" */
     bool             hashed;
+    struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
 };
 
 void rs_index_init(struct rs_index *ix);

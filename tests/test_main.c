@@ -205,6 +205,8 @@ int main(void)
     test_meta();
     test_index();
     test_image();
+    test_machine();
+    test_installer();
     test_scan();
     test_diff();
     test_opts();

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # Security scanning.
 #
 # The `security` job runs exactly what `make security` runs locally -- same

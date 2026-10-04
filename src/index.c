@@ -39,6 +39,7 @@ void rs_index_free(struct rs_index *ix)
     free(ix->created);
     free(ix->version);
     free(ix->content);
+    rs_jval_free(&ix->machine);
     rs_index_init(ix);
 }
 
@@ -382,6 +383,11 @@ bool rs_index_write(const struct rs_index *ix, FILE *out)
     first = true;
     rs_buf_addstr(&b, ",\n  ");
     put_u64(&b, "count", ix->count, &first);
+    if (ix->machine.type == RS_JOBJECT)
+    {
+        rs_buf_addstr(&b, ",\n  \"machine\": ");
+        rs_json_write(&b, &ix->machine, 2, 1);
+    }
     rs_buf_addstr(&b, ",\n  \"entries\": [");
     (void)fwrite(b.data, 1, b.len, out);
 
@@ -695,6 +701,20 @@ bool rs_index_parse(struct rs_index *ix, const char *text, size_t len,
                 saw_entries = true;
                 if (!parse_entries(ix, &jp, name, err))
                 {
+                    ok = false;
+                    break;
+                }
+            } else if (strcmp(key.data, "machine") == 0)
+            {
+                rs_jval_free(&ix->machine);
+                if (!rs_json_value(&jp, &ix->machine))
+                {
+                    ok = false;
+                    break;
+                }
+                if (ix->machine.type != RS_JOBJECT)
+                {
+                    rs_buf_addf(err, "%s: \"machine\" is not an object", name);
                     ok = false;
                     break;
                 }

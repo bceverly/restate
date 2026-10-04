@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # OpenSSF Scorecard: an outside opinion of this repository's security
 # practices -- branch protection, pinned dependencies, token permissions,
 # signed releases, fuzzing, SAST and the rest -- published so the README badge

@@ -1,5 +1,8 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # =============================================================================
-# restate — record what makes a machine different from its baseline
+# restate — back up what a fresh OS install would not put back, to rebuild the machine
 #
 # Run `make` with no arguments for the list of targets.
 #
@@ -135,7 +138,7 @@ export prefix exec_prefix sbindir mandir DESTDIR PROG MAN_PAGE
 # -----------------------------------------------------------------------------
 .PHONY: help
 help:
-	@printf '\n  \033[1;97mrestate\033[0m \033[2m%s\033[0m — record what makes a machine different from its baseline\n' '$(VERSION)'
+	@printf '\n  \033[1;97mrestate\033[0m \033[2m%s\033[0m — back up what a fresh OS install would not put back, to rebuild the machine\n' '$(VERSION)'
 	@printf '  \033[2mUsage: make <target>\033[0m\n'
 	@awk 'BEGIN {FS = ":.*##"} \
 		/^##@/ { printf "\n  \033[1;94m%s\033[0m\n", substr($$0, 5); next } \
@@ -242,6 +245,18 @@ docs: $(BIN_DIR)/$(PROG) ## Regenerate the manpage and the README's Usage block
 	@scripts/gen-man.sh ./$(BIN_DIR)/$(PROG) $(MAN_PAGE)
 	@scripts/gen-readme-usage.sh ./$(BIN_DIR)/$(PROG) README.md
 	@printf '  \033[92m✓\033[0m %s and the README Usage block are current\n' "$(MAN_PAGE)"
+
+# Shows the page from the tree -- regenerated first if the program changed --
+# without installing anything. mandoc where there is one (the BSDs, macOS);
+# otherwise man(1), which every system here reads a page from when it is given
+# a path with a slash in it rather than a name.
+.PHONY: show-man
+show-man: $(MAN_PAGE) ## Display the manpage from the tree, without installing it
+	@if command -v mandoc > /dev/null 2>&1; then \
+	    mandoc -a $(MAN_PAGE); \
+	else \
+	    man ./$(MAN_PAGE); \
+	fi
 
 .PHONY: man-check
 man-check: build ## Fail if the committed manpage or README Usage block is out of date

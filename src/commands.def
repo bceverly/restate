@@ -20,6 +20,12 @@ RS_CMD(CMD_DIFF,     "diff",     "OLD NEW",    2,  2,
        "compare two images or indexes: A added, D deleted, M modified, and how")
 RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
        "compare an image or index against the tree as it is now")
+RS_CMD(CMD_MACHINE,  "machine",  "",           0,  0,
+       "describe this machine: hardware, firmware, disks, partitions, encryption, "
+       "LVM, RAID, mounts")
+RS_CMD(CMD_INSTALLER, "installer", "[fetch] [IMAGE]", 0, 2,
+       "show the installer that rebuilds this machine, or the one IMAGE was taken "
+       "from; with fetch, download it and check its signature")
 RS_CMD(CMD_CLASSIFY, "classify", "PATH...",    1, -1,
        "show the class each path falls under, and the rule that decided it")
 RS_CMD(CMD_RULES,    "rules",    "",           0,  0,

@@ -192,6 +192,17 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             }
             o->os = optarg;
             break;
+        case OPT_CACHE:
+            o->cache = optarg;
+            break;
+        case OPT_MIRROR:
+            if (!rs_starts_with(optarg, "https://") && !rs_starts_with(optarg, "file://"))
+            {
+                rs_buf_addf(err, "--mirror: \"%s\" is not an https:// or file:// URL", optarg);
+                return false;
+            }
+            o->mirror = optarg;
+            break;
         case 'a':
             o->all = true;
             break;

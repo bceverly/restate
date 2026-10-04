@@ -66,7 +66,9 @@ section() {
     on {
       if ($0 ~ /^                    /) {     # a continuation line
         sub(/^ +/, "")
-        entry = entry " " $0
+        # A term too long for its column has its description start on the
+        # next line; keep the two-space gap that separates the two.
+        entry = entry (entry ~ /[^ ]  +[^ ]/ ? " " : "  ") $0
         next
       }
       if (entry != "") print entry
@@ -111,7 +113,7 @@ trap 'rm -f "$TMP" "$TMP.a" "$TMP.b"' EXIT
 .TH RESTATE 8 "${KEEP_DATE:-$DATE}" "restate $VERSION" "System Manager's Manual"
 .nh
 .SH NAME
-restate \- record what makes a machine different from its baseline
+restate \- back up what a fresh OS install would not put back, to rebuild the machine
 .SH SYNOPSIS
 .B restate
 .RI [ option ...]
@@ -236,6 +238,135 @@ netbsd and darwin.
 prints them in this format, with the reason for each, so that a site that
 disagrees can save them, edit them, and run with
 .BR "\-N \-R" " file" .
+.SH MACHINE
+An index of the running system's own root \- a
+.B capture
+or
+.B scan
+of
+.I /
+\- also describes the machine underneath the files, in a
+.B """machine"""
+object, so that it can be rebuilt before the files are put back.
+.B restate machine
+prints the same description on its own.
+.PP
+It records the operating system (from
+.IR os\-release ),
+the kernel, the architecture, the host name and the media the machine was
+first installed from; whether it is a desktop or a server, with the evidence
+for that \- desktop metapackages, graphical sessions installed \- since the
+installer chosen for a rebuild depends on it; whether it is bare metal or a
+virtual machine, and on what, and whether it is a container; the hardware (from DMI: vendor, product, firmware
+version), the processor, the memory and the physical network interfaces with
+their addresses; UEFI or BIOS, the Secure Boot state, and the boot loaders
+installed; every disk, with its size, sector sizes, model and serial number;
+its partition table (GPT or MBR) and, for each partition, its offset, size,
+type, UUID, name and flags, and what is on it \- a filesystem with its type,
+UUID and label, LUKS, an LVM physical volume, a RAID member; the
+device-mapper devices built on them; each LVM volume group's own metadata, as
+.I /etc/lvm/backup
+holds it; software RAID arrays; the persistent filesystems mounted, with their size and the space used on
+each \- what a replacement disk, or a virtual one, actually has to hold \- and
+.IR /etc/fstab ,
+.I /etc/crypttab
+and the swap in use.
+.PP
+All of it is read from files \- sysfs, the udev database,
+.IR /proc ,
+.I /etc
+\- except a LUKS volume's cipher, key size and key-derivation function, which
+are in the volume's header and need root to read, as are its LUKS2 tokens:
+a
+.B systemd\-tpm2
+or
+.B clevis
+token means the volume unlocks with this machine's TPM or a network server,
+and will not unlock that way on any other machine. No key, passphrase or key
+slot is ever recorded. Anything that could not be read is listed in the
+description's
+.B """notes"""
+rather than guessed. The disk layout is read on Linux in this version; on
+another system the description holds the system and hardware sections and a
+note saying so.
+.PP
+An index of any other tree \- a disk mounted from another machine, a
+directory \- has no machine description, because the disks it would describe
+are this machine's, not that tree's.
+.SH BASELINE
+.I Baseline
+means
+.I supplied by the operating system or its packages
+\- the files a reinstall puts back on its own. In this version that is
+decided by the rules alone, from where a file lives:
+.IR /usr ,
+.IR /bin ,
+.IR /sbin ,
+.IR /lib ,
+.IR /boot ,
+the package database, and the equivalents on each system, as
+.B restate rules
+lists them.
+.PP
+The baseline is not read from an installation image, and does not depend on
+whether a machine was installed as a desktop or a server, or for which
+processor: it is decided on the machine in front of it, so whatever was
+installed there is what it sees. (The installer still matters for putting a
+machine back, and
+.B restate installer
+names and fetches it; see
+.BR INSTALLERS .)
+A baseline file is recorded in the index with
+its owner, mode, times and SHA-256, and its content is left out of an image
+unless
+.B \-\-baseline\-content
+is given.
+.PP
+What this version does not yet do is check those digests against what the
+vendor shipped, so a baseline file changed by hand \- an edited file under
+.IR /usr/share ,
+a replaced binary \- is recorded but not kept. Every system restate supports
+already holds the vendor's digests for every installed file in its own package
+database, and a later version reads them; see
+.BR BUGS .
+Until then, keep anything changed under a baseline path with
+.BR \-\-baseline\-content ,
+or classify it as state in a rules file.
+.SH INSTALLERS
+.B restate installer
+names the installation image a machine is rebuilt from, worked out from its
+machine description: the distribution and release, the point release, the
+architecture, and whether it is a desktop or a server, with the evidence for
+that. Given an image, index or saved description, it names the installer for
+the machine that was captured rather than this one. Ubuntu is supported in
+this version: the desktop image for a desktop on amd64 or arm64, and the
+server image otherwise, from
+.I releases.ubuntu.com
+(and
+.I old\-releases.ubuntu.com
+once a release reaches end of life) for amd64, and
+.I cdimage.ubuntu.com
+for other architectures.
+.PP
+.B restate installer fetch
+downloads it. The vendor's
+.I SHA256SUMS
+and its signature are fetched first and checked with
+.BR gpgv (1)
+against the vendor's signing key, which is built into
+.B restate
+and pinned by fingerprint: a signature counts only when gpgv names that
+fingerprint, not merely when it succeeds. The image listed for the machine's
+own point release is chosen, or else the newest listed. It is downloaded with
+.BR curl (1)
+over HTTPS only, resuming an interrupted download, and checked against the
+signed checksum; only then is it moved into place, and its path printed. An
+image already in the cache that matches is not downloaded again.
+.B \-\-cache
+changes where images are kept, and
+.B \-\-mirror
+fetches from another https:// or file:// directory holding the same files \-
+which are checked against the same key.
 .SH IMAGES AND INDEXES
 An image is an ordinary gzip'd POSIX tar archive:
 .PP
@@ -324,7 +455,9 @@ gzip is run as a separate process, from
 or
 .IR /bin/gzip ,
 never through
-.BR PATH .
+.BR PATH ;
+see
+.BR "SECURITY CONSIDERATIONS" .
 CLASSES
 
   printf '.SH EXIT STATUS\n'
@@ -340,7 +473,60 @@ CLASSES
 .B SOURCE_DATE_EPOCH
 When set to a number of seconds since the epoch, used as the creation time
 written into an index instead of the clock.
+.TP
+.BR https_proxy ", " all_proxy ", " no_proxy
+And their upper-case forms: passed to
+.BR curl (1)
+by
+.BR "restate installer fetch" ,
+for a machine that reaches the Internet through a proxy. No other variable
+reaches a program
+.B restate
+runs.
 ENVIRONMENT
+
+  cat <<'USECASES'
+.SH USE CASES
+.TP
+.B What changed on this server?
+Capture on a schedule, then
+.B verify
+an image against the machine as it is now, or
+.B diff
+two images, to see what was added, deleted or modified \- content, mode,
+owner or link target \- without the noise of timestamps.
+.TP
+.B Why does this one behave differently?
+.B scan
+two machines that are meant to be identical and
+.B diff
+the indexes.
+.TP
+.B What did that installer do?
+Capture before and after installing software or running a
+configuration-management job, and
+.B diff
+the two.
+.TP
+.B What is on this machine?
+.B restate machine
+and an index document a machine before it is decommissioned, handed over or
+audited: hardware, firmware, disk layout, encryption, mounts, and every file
+with its owner, mode, times and SHA-256.
+.TP
+.B A safety net before an upgrade
+Capture before a release upgrade, keep the image, and
+.B diff
+afterwards.
+.PP
+Planned, and described in the project's ROADMAP: bare-metal recovery from a
+build sheet or an unattended install; moving a machine to new hardware;
+moving a machine from bare metal into a virtual machine and back, with its
+drivers, firmware mode, device and interface names, disk size and
+hardware-specific software adjusted for the new home; stamping out many
+copies of one machine, each with its own host name, address, machine-id and
+SSH host keys; and air-gapped rebuilds.
+USECASES
 
   printf '.SH EXAMPLES\n'
   section "Examples" | while IFS= read -r line; do
@@ -348,6 +534,26 @@ ENVIRONMENT
   done
 
   cat <<'TRAILER'
+.SH FILES
+.TP
+.I /var/cache/restate/installers/VENDOR/RELEASE/
+Where
+.B restate installer fetch
+keeps installation images, with the
+.I SHA256SUMS
+and signature they were checked against
+.RI ( /Library/Caches/restate/installers
+on macOS). Anything here can be deleted; it is fetched again when needed.
+.PP
+Otherwise
+.B restate
+keeps no files of its own: no configuration, no database, no directory of
+images. It writes only what
+.B \-\-output
+names, and reads only the tree it is given and the files named on its
+command line. A site's rules live wherever the administrator keeps them and
+are passed with
+.BR \-\-rules .
 .SH SECURITY CONSIDERATIONS
 A complete scan reads every file on the machine and so runs as root. It opens
 everything with
@@ -360,8 +566,38 @@ An image or index is input when it is read back. The JSON and tar parsers
 are strict, bounded and fuzzed, and they reject any path that is not clean
 and absolute, so that an index cannot name a location outside the tree it
 describes.
+.PP
+.B restate
+runs three programs, each for something it should not do itself:
+.BR gzip (1),
+.BR curl (1)
+and
+.BR gpgv (1).
+Each is run from a fixed absolute path \-
+.IR /usr/bin ,
+then
+.I /usr/local/bin
+for curl and gpgv, then
+.I /bin
+\- never through
+.BR PATH ,
+because restate runs as root and a
+.B PATH
+reaching a user-writable directory would hand that user root. They are
+started with
+.BR posix_spawn (3),
+with no shell, and with an environment of
+.BR PATH ,
+.B LC_ALL
+and the proxy variables only. restate itself opens no network connection;
+curl is held to HTTPS, redirects included, and ignores
+.IR ~/.curlrc .
+Nothing downloaded is used until its checksum has been verified against a
+signature by the pinned vendor key.
 .SH SEE ALSO
 .BR find (1),
+.BR curl (1),
+.BR gpgv (1),
 .BR gzip (1),
 .BR mtree (8),
 .BR tar (1),
@@ -374,10 +610,12 @@ describes.
 Bryan C. Everly.
 .SH BUGS
 This is the first stage of a larger tool. It captures and compares state; it
-does not yet compare baseline files against the package manager's own digests,
-record extended attributes, ACLs or file capabilities, keep hard links as
-links, or restore an image itself. The project's ROADMAP lists what comes
-next.
+does not yet compare baseline files against the digests the package manager
+already holds \- dpkg on Debian and Ubuntu, rpm on Red Hat and its relatives,
+pkg on FreeBSD, the package databases of OpenBSD and NetBSD, and the sealed
+system volume and installer receipts on macOS \- record extended attributes,
+ACLs or file capabilities, keep hard links as links, or restore an image
+itself. The project's ROADMAP lists what comes next.
 .PP
 Report bugs at
 .UR https://github.com/bceverly/restate/issues

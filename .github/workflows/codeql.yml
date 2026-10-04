@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # CodeQL, GitHub's semantic code analysis, with the security-extended queries.
 #
 # Its own workflow, rather than a job in security.yml, so the README badge

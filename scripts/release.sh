@@ -14,16 +14,18 @@
 # already says (0.1.0.0 to begin with) rather than a bump of nothing.
 #
 # What it does, in order, after a single confirmation:
-#   1. Works out the next version, refuses an existing tag, a version older
-#      than the newest release, or uncommitted changes, and asks you to
-#      confirm it.
+#   1. Brings VERSION up to the newest release tag if it has fallen behind,
+#      works out the next version, refuses an existing tag, a version older
+#      than the newest release, or uncommitted changes (other than VERSION),
+#      and asks you to confirm it.
 #   2. Writes it into VERSION, rebuilds, regenerates the manpage and the
 #      README's Usage block, and checks the manpage names the new version.
 #   3. Commits and pushes that change.
 #   4. Creates an annotated tag and pushes the tag.
 #
 # Pushing the tag is what triggers the release build, so the confirmation in
-# step 1 is the point of no return — answer "n" and nothing at all happens.
+# step 1 is the point of no return — answer "n" and nothing is released (VERSION
+# keeps its catch-up, if it needed one).
 #
 # Commit and tag signing follow your git config (commit.gpgsign / tag.gpgsign);
 # this script does not override them.
@@ -62,6 +64,20 @@ LATEST="$(git tag -l 'v*' 2>/dev/null \
           | sed 's/^v//' \
           | sort -V \
           | tail -1)"
+
+# VERSION catches up with the newest release before anything else. It can fall
+# behind -- a release cut from another clone, or a release commit that never
+# reached this branch -- and then everything built here calls itself an older
+# version than one already published. The newest tag is the authority on what
+# has been released, so VERSION is brought up to it here, where git is already
+# being run, rather than by hand. This stays done even if the release is
+# declined below, and the release commit carries it either way.
+CURRENT="$(cat VERSION 2>/dev/null || echo)"
+if [ -n "$LATEST" ] && { [ -z "$CURRENT" ] || \
+   [ "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)" != "$CURRENT" ]; }; then
+  echo "$LATEST" > VERSION || die "Could not write VERSION."
+  warn "VERSION said ${CURRENT:-nothing}, but v$LATEST is released: VERSION -> $LATEST"
+fi
 
 # `make release VERSION=1.2.3.4` hands this script the number two ways at once:
 # as an environment variable — which is how it is read, just below — and as a
@@ -133,8 +149,10 @@ fi
 # A release built from a dirty tree is a release nobody can reproduce -- and it
 # is not even the tree that is being looked at: uncommitted changes would be
 # left out of it. Commit them, or stash them, first.
-if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-  git status --short --untracked-files=no | sed 's/^/      /'
+# VERSION is left out: the catch-up above may just have changed it, and the
+# release writes and commits it regardless.
+if [ -n "$(git status --porcelain --untracked-files=no -- . ':!VERSION' 2>/dev/null)" ]; then
+  git status --short --untracked-files=no -- . ':!VERSION' | sed 's/^/      /'
   die "The working tree has uncommitted changes (above). Commit them first:
        a release has to be exactly what is committed."
 fi
@@ -149,7 +167,11 @@ case "$REPLY" in
   y | Y | yes | YES | Yes) ;;
   *)
     printf '\n'
-    info "Stopped. Nothing was changed."
+    if [ "$(cat VERSION)" != "$CURRENT" ]; then
+      info "Stopped. Only VERSION changed, to match v$LATEST; nothing was released."
+    else
+      info "Stopped. Nothing was changed."
+    fi
     exit 0
     ;;
 esac

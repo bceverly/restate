@@ -5,6 +5,7 @@
 #include "cmd.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,9 +17,14 @@
 #include "diff.h"
 #include "image.h"
 #include "index.h"
+#include "installer.h"
+#include "machine.h"
 #include "meta.h"
 #include "rules.h"
 #include "scan.h"
+
+/* A machine description read on its own is refused beyond this size. */
+#define MACHINE_MAX ((size_t)16 * 1024 * 1024)
 
 /* ------------------------------------------------------------------------- */
 /* Rules                                                                     */
@@ -231,6 +237,21 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
     }
 }
 
+/*
+ * Whether `root` is the running system's own root. The machine description --
+ * disks, firmware, mounts -- is of the running machine, so it belongs only in
+ * an index of that machine's root, not in one of a tree mounted from some
+ * other disk.
+ */
+static bool is_live_root(const char *root)
+{
+    struct stat a;
+    struct stat b;
+
+    return stat(root, &a) == 0 && stat("/", &b) == 0 && a.st_dev == b.st_dev &&
+           a.st_ino == b.st_ino;
+}
+
 static bool run_scan(const struct rs_options *o, const char *root, bool hash,
                      struct rs_image_writer *image, struct rs_index *m,
                      struct rs_scan_stats *st)
@@ -278,6 +299,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     m->created = created_now();
     m->hashed = hash || image != NULL;
     m->version = rs_xstrdup(RESTATE_VERSION);
+    if (is_live_root(root))
+    {
+        rs_machine_describe("/", root, &m->machine);
+    }
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
 
     rs_buf_init(&err);
@@ -484,6 +509,211 @@ int rs_cmd_verify(const struct rs_options *o)
 /* Explaining                                                                */
 /* ------------------------------------------------------------------------- */
 
+int rs_cmd_machine(const struct rs_options *o)
+{
+    struct rs_jval machine;
+    struct rs_buf  text;
+    struct output  out;
+    bool           ok;
+
+    memset(&machine, 0, sizeof(machine));
+    rs_machine_describe("/", o->root ? o->root : "/", &machine);
+    rs_buf_init(&text);
+    rs_json_write(&text, &machine, 2, 0);
+    rs_buf_addc(&text, '\n');
+    rs_jval_free(&machine);
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text.data, 1, text.len, out.fp) == text.len;
+    rs_buf_free(&text);
+    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+}
+
+/*
+ * The machine description in `path`: an image or index with a "machine"
+ * section, or what `restate machine -o` writes.
+ */
+static bool load_machine(const char *path, struct rs_jval *machine)
+{
+    struct rs_index ix;
+    struct rs_buf   err;
+    bool            ok = false;
+
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    if (rs_index_load(&ix, path, &err))
+    {
+        if (ix.machine.type == RS_JOBJECT)
+        {
+            rs_jval_copy(machine, &ix.machine);
+            ok = true;
+        } else
+        {
+            rs_error("%s has no machine description: only a capture or scan of a machine's "
+                     "own root has one", path);
+        }
+    } else
+    {
+        /* Not an index: perhaps a description on its own. */
+        int           fd = open(path, O_RDONLY | O_CLOEXEC);
+        struct rs_buf text;
+        char          chunk[8192];
+        ssize_t       n = 0;
+
+        rs_buf_init(&text);
+        rs_buf_add(&text, "", 0);
+        /* A description is a few kilobytes; a file far bigger is not one. */
+        while (fd >= 0 && text.len < MACHINE_MAX && (n = read(fd, chunk, sizeof(chunk))) > 0)
+        {
+            rs_buf_add(&text, chunk, (size_t)n);
+        }
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        if (fd >= 0 && n >= 0 && text.len < MACHINE_MAX)
+        {
+            struct rs_json_parser jp;
+            struct rs_buf         jerr;
+
+            rs_buf_init(&jerr);
+            rs_json_init(&jp, text.data, text.len, &jerr);
+            ok = rs_json_value(&jp, machine) && rs_json_at_end(&jp) &&
+                 machine->type == RS_JOBJECT && rs_jobject_get(machine, "system");
+            rs_buf_free(&jerr);
+        }
+        if (!ok)
+        {
+            rs_error("%s", err.data);
+        }
+        rs_buf_free(&text);
+    }
+    rs_buf_free(&err);
+    rs_index_free(&ix);
+    return ok;
+}
+
+/* "843938DF228D..." as "8439 38DF 228D ..." -- the way fingerprints are read. */
+static void print_fingerprint(FILE *fp, const char *fpr)
+{
+    size_t i;
+
+    for (i = 0; fpr[i] != '\0'; i++)
+    {
+        if (i > 0 && i % 4 == 0)
+        {
+            (void)fputc(' ', fp);
+        }
+        if (i == 20)
+        {
+            (void)fputc(' ', fp);
+        }
+        (void)fputc(fpr[i], fp);
+    }
+}
+
+int rs_cmd_installer(const struct rs_options *o)
+{
+    bool                fetch = o->nargs > 0 && strcmp(o->args[0], "fetch") == 0;
+    const char         *image = o->nargs > (fetch ? 1u : 0u) ? o->args[fetch ? 1 : 0] : NULL;
+    struct rs_jval      machine;
+    struct rs_installer in;
+    struct rs_buf       err;
+    const char         *host;
+    int                 status = RESTATE_EXIT_OK;
+
+    if (o->nargs == 2 && !fetch)
+    {
+        rs_error("usage: restate installer [fetch] [IMAGE]");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    memset(&machine, 0, sizeof(machine));
+    if (image)
+    {
+        if (!load_machine(image, &machine))
+        {
+            rs_jval_free(&machine);
+            return RESTATE_EXIT_TROUBLE;
+        }
+    } else
+    {
+        rs_machine_describe("/", o->root ? o->root : "/", &machine);
+    }
+    rs_buf_init(&err);
+    if (!rs_installer_resolve(&machine, &in, &err))
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_jval_free(&machine);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    host = rs_jobject_str(rs_jobject_get(&machine, "system"), "hostname");
+    if (!fetch)
+    {
+        (void)printf("installer   %s\n", in.description);
+        (void)printf("for         %s (%s)\n", host ? host : "this machine",
+                     rs_jobject_str(rs_jobject_get(&machine, "system"), "pretty_name")
+                         ? rs_jobject_str(rs_jobject_get(&machine, "system"), "pretty_name")
+                         : in.release);
+        (void)printf("because     %s\n", in.reason);
+        (void)printf("from        %s\n", in.url);
+        if (in.fallback_url)
+        {
+            (void)printf("            or, after end of life, %s\n", in.fallback_url);
+        }
+        (void)printf("file        %s -- %s, or the newest listed\n", in.pattern,
+                     in.point ? in.point : "the release");
+        (void)printf("checked by  SHA256SUMS, signed by %s\n", in.key ? in.key->name : "(no key)");
+        if (in.key)
+        {
+            (void)printf("            ");
+            print_fingerprint(stdout, in.key->fingerprint);
+            (void)printf("\n");
+        }
+        (void)printf("fetch it    restate installer fetch%s%s\n", image ? " " : "",
+                     image ? image : "");
+    } else
+    {
+        struct rs_fetch_opts fo;
+        char                *path = NULL;
+
+        fo.cache = o->cache;
+        fo.mirror = o->mirror;
+        fo.quiet = o->quiet;
+        if (rs_installer_fetch(&in, &fo, &path, &err))
+        {
+            (void)printf("%s\n", path);
+            if (!o->quiet)
+            {
+                (void)fflush(stdout);
+                (void)fprintf(stderr, "restate: %s is verified. To write it to a USB stick -- "
+                                      "which erases the stick --\n", in.description);
+#if defined(__APPLE__)
+                (void)fprintf(stderr, "restate: find the stick with `diskutil list`, then\n"
+                                      "restate:   diskutil unmountDisk /dev/diskN\n"
+                                      "restate:   sudo dd if=%s of=/dev/rdiskN bs=4m\n", path);
+#else
+                (void)fprintf(stderr, "restate: find the stick with `lsblk`, then\n"
+                                      "restate:   sudo dd if=%s of=/dev/sdX bs=4M "
+                                      "status=progress conv=fsync\n", path);
+#endif
+            }
+            free(path);
+        } else
+        {
+            rs_error("%s", err.data);
+            status = RESTATE_EXIT_TROUBLE;
+        }
+    }
+    rs_installer_free(&in);
+    rs_buf_free(&err);
+    rs_jval_free(&machine);
+    return status;
+}
+
 int rs_cmd_classify(const struct rs_options *o)
 {
     struct rs_rules rules;
@@ -574,6 +804,10 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_diff(o);
     case CMD_VERIFY:
         return rs_cmd_verify(o);
+    case CMD_MACHINE:
+        return rs_cmd_machine(o);
+    case CMD_INSTALLER:
+        return rs_cmd_installer(o);
     case CMD_CLASSIFY:
         return rs_cmd_classify(o);
     case CMD_RULES:

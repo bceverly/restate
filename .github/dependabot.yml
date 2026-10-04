@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
 # Keep the GitHub Actions this project uses current.
 #
 # Only the actions: restate is C linked against nothing but libc, so there is
