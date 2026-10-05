@@ -288,7 +288,11 @@ and JetBrains Toolbox installs; Steam games; Flatpak apps and runtimes
 .B Images
 Container images and layers (containerd, Docker, Podman \- not their
 volumes, which are data), LXD's image cache, installer images libvirt boots
-from, the snaps the installer seeded. Virtual machines' own disks and
+from, the snaps the installer seeded, and installer and disc images
+.RI ( *.iso ),
+cloud images and downloads that never finished
+.RI ( *.part ,
+.IR *.crdownload ). Virtual machines' own disks and
 definitions are data, and are kept; a suspended VM's saved memory is not,
 and without it the VM boots afresh.
 .TP
@@ -472,33 +476,37 @@ which are checked against the same key.
 A capture of a whole machine can read hundreds of gigabytes and take an
 hour, and by default says nothing until it is done.
 .B \-\-progress
-reports as it goes, on standard error, the way
-.B dd status=progress
-does:
+shows how far it has got:
 .PP
 .RS
 .nf
-restate: walking  812345 paths  143 GiB  209 MiB/s  0:11:40  .../src/main.c
-restate: writing   62%  89 GiB of 143 GiB  305 MiB/s  0:03:01 left
+restate: counting  812345 paths  184 GiB to read  0:00:41
+restate: walking [#######.............]  35%  64 GiB of 184 GiB  91 MiB/s  0:22:30 left
+  .../home/alice/dev/project/src/main.c
+restate: writing [##############......]  70%  129 GiB of 184 GiB  305 MiB/s  0:03:01 left
 .fi
 .RE
 .PP
-Walking the tree
+A walk that reads files
 .RB ( scan ,
 .BR capture ,
 .BR verify )
-has no total to measure against \- how much is left is not known until it
-has been walked \- so it shows the paths and bytes so far, the rate, the time
-taken and the path being read. Writing an image, the last step of a
-capture, knows its total, so it shows a percentage and the time left at the
-current rate. Downloading an installer shows curl's own progress bar, which
-appears on a terminal anyway and
-.B \-\-progress
-shows everywhere else too.
+first counts them \- metadata only, no file is read, so this is quick \- to
+know how many bytes the walk will read. The walk then shows a bar, a
+percentage, how much has been read of how much, the throughput, the time
+left at that rate, and under the bar the path being read. Writing an image,
+the last step of a capture, shows the same against the content to be
+written. Downloading an installer shows curl's own progress bar.
 .PP
-On a terminal the line is rewritten in place a few times a second. Written
-to a file or a pipe, a whole line is written every ten seconds instead, so a
-log of a scheduled capture stays readable. It is off unless asked for, and
+On a terminal the two lines are redrawn in place a few times a second, the
+bar as wide as the terminal allows. They are drawn on the terminal even
+when standard error is redirected \- to a log, through
+.BR tee (1)
+\- and each phase's final line is also written to standard error, so the
+log records how each went. With no terminal at all, as under
+.BR cron (8),
+a line is written to standard error every ten seconds instead. It is off
+unless asked for, and
 .B \-\-quiet
 does not turn it off: one option asks for silence about everything else,
 the other for this.
@@ -552,7 +560,9 @@ filesystem sized to what it uses plus room to grow, disks named
 .IR /dev/vda ,
 and a
 .BR virt-install (1)
-command sized from the original's CPUs and memory; the hardware-only
+command that gives the VM a modest share of a host \- at most 8 GiB of
+memory and 4 CPUs, and never more than the original had, since a test
+rebuild often runs on the very machine it came from; the hardware-only
 packages (microcode, firmware and sensor tools, GPU drivers) are removed
 and
 .B qemu-guest-agent
@@ -675,11 +685,11 @@ and
 read an encrypted image directly, decrypting with the invoking user's own
 GnuPG keyring.
 .PP
-gzip is run as a separate process, from
-.I /usr/bin/gzip
-or
-.IR /bin/gzip ,
-never through
+An image is compressed by
+.BR pigz (1)
+where it is installed \- the same gzip format, on every core, several times
+faster on a large image \- and by gzip, with a warning saying so, where it
+is not. Each is run as a separate process from a fixed path, never through
 .BR PATH ;
 see
 .BR "SECURITY CONSIDERATIONS" .
@@ -818,8 +828,11 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs four programs, each for something it should not do itself:
+runs five programs, each for something it should not do itself:
 .BR gzip (1),
+.BR pigz (1)
+(the same compression on every core, used in place of gzip to write an
+image where it is installed),
 .BR curl (1),
 .BR gpgv (1)
 and
@@ -828,7 +841,7 @@ Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then
 .I /usr/local/bin
-for the last three, then
+for all but gzip, then
 .I /bin
 \- never through
 .BR PATH ,

@@ -247,7 +247,7 @@ note "the digest identifies content; nothing here encrypts, signs or authenticat
 section "10. privilege escalation (CWE-271)"
 HITS="$(grep_source '\b(setuid|seteuid|setreuid|setresuid|setgid|setegid|setregid|setresgid)[[:space:]]*\(')"
 no_hits "restate never changes identity" "identity changes found" "$HITS"
-# Four programs are run -- gzip, curl, gpgv and gpg -- from one file, by
+# Five programs are run -- gzip, pigz, curl, gpgv and gpg -- from one file, by
 # absolute path, only if root owns them and their directory, with posix_spawn,
 # no shell and a fixed environment. Anything more is a finding.
 HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(')"
@@ -259,8 +259,9 @@ if grep -q '"/usr/bin/gzip", "/bin/gzip"' src/run.c \
    && grep -q '"/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"' src/run.c \
    && grep -q '"/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv"' src/run.c \
    && grep -q '"/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg"' src/run.c \
+   && grep -q '"/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz"' src/run.c \
    && grep -q 'PATH=/usr/bin:/bin' src/run.c; then
-  ok "gzip, curl, gpgv and gpg are run from fixed absolute paths, with a fixed environment"
+  ok "gzip, pigz, curl, gpgv and gpg are run from fixed absolute paths, with a fixed environment"
 else
   bad "a program is no longer run from a fixed path with a fixed environment"
 fi

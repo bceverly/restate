@@ -5,8 +5,9 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs four programs, each for something it should not do itself:
- * gzip (compression), curl (HTTPS), gpgv (OpenPGP signature checks) and gpg
+ * restate runs five programs, each for something it should not do itself:
+ * gzip (compression), pigz (the same compression on every core, where it is
+ * installed), curl (HTTPS), gpgv (OpenPGP signature checks) and gpg
  * (encrypting and decrypting images). Writing a compressor, a TLS stack or an OpenPGP implementation
  * here would be hundreds of lines of exactly the code that should not be
  * written twice; linking a library for them would end "links nothing but
@@ -35,10 +36,11 @@ enum rs_program {
     RS_PROG_CURL,
     RS_PROG_GPGV,
     RS_PROG_GPG,
+    RS_PROG_PIGZ,
     RS_PROG_COUNT
 };
 
-/* "gzip", "curl", "gpgv", "gpg". */
+/* "gzip", "curl", "gpgv", "gpg", "pigz". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or

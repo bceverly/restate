@@ -331,6 +331,11 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
         ok = rs_pgp_encrypt(iw->recipients, iw->nrecipients, out, &pg, err);
         sealed = ok;
     }
+    if (ok && !rs_gzip_parallel())
+    {
+        rs_warn("pigz is not installed, so the image is compressed on one core with gzip; "
+                "installing pigz makes this several times faster");
+    }
     ok = ok && rs_gzip_compress(sealed ? pg.fd : out, &gz, err);
     if (sealed && pg.fd >= 0)
     {

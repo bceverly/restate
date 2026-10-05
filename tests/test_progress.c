@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 #include <stdlib.h>
+#include <sys/stat.h>
 
+#include "cmd.h"
 #include "progress.h"
 #include "test.h"
 #include "util.h"
@@ -11,6 +13,11 @@
 #define SEC ((uint64_t)1000000000)
 
 static uint64_t fake_now;
+
+static int run(const void *arg)
+{
+    return rs_cmd_run(arg);
+}
 
 static uint64_t fake_clock(void)
 {
@@ -42,26 +49,19 @@ void test_progress(void)
     FILE                    *fp;
     char                    *text;
 
-    TEST_CASE("progress: a walk, with no total");
+    TEST_CASE("progress: a walk, with no total, and counting");
     memset(&s, 0, sizeof(s));
     s.phase = "walking";
     s.paths = 812345;
     s.bytes = (uint64_t)143 * 1024 * 1024 * 1024;
     s.start_ns = 0;
-    s.current = "/home/alice/dev/project/src/main.c";
     rs_progress_format(&s, 700 * SEC, 79, line, sizeof(line));
-    CHECK_CONTAINS(line, "walking  812345 paths  143 GiB  209 MiB/s  0:11:40  ...e/dev/project/src/main.c");
-    s.current = "/etc/hosts";
-    rs_progress_format(&s, 700 * SEC, 79, line, sizeof(line));
-    CHECK_CONTAINS(line, "0:11:40  /etc/hosts");
-    s.current = "/home/alice/a/very/long/path/that/will/not/fit/in/what/is/left/of/the/line.txt";
-    rs_progress_format(&s, 700 * SEC, 79, line, sizeof(line));
-    CHECK_CONTAINS(line, "  ...");
-    CHECK_CONTAINS(line, "line.txt");
-    CHECK(strlen(line) <= 79);
-    s.current = NULL;
+    CHECK_STR(line, "walking  812345 paths  143 GiB  209 MiB/s  0:11:40");
     rs_progress_format(&s, 0, 79, line, sizeof(line));
     CHECK_CONTAINS(line, "0 bytes/s  0:00:00");
+    s.phase = "counting";
+    rs_progress_format(&s, 41 * SEC, 79, line, sizeof(line));
+    CHECK_STR(line, "counting  812345 paths  143 GiB to read  0:00:41");
 
     TEST_CASE("progress: writing, with a total");
     memset(&s, 0, sizeof(s));
@@ -69,7 +69,12 @@ void test_progress(void)
     s.total = 1000 * 1024 * 1024;
     s.bytes = 250 * 1024 * 1024;
     rs_progress_format(&s, 10 * SEC, 79, line, sizeof(line));
-    CHECK_CONTAINS(line, " 25%  250 MiB of 1000 MiB  25 MiB/s  0:00:30 left");
+    CHECK_CONTAINS(line, "writing [");
+    CHECK_CONTAINS(line, "]  25%  250 MiB of 1000 MiB  25 MiB/s  0:00:30 left");
+    CHECK(strlen(line) <= 79);
+    CHECK(strstr(line, "[####....") != NULL);
+    rs_progress_format(&s, 10 * SEC, 160, line, sizeof(line));
+    CHECK(strstr(line, "##########..............................]") != NULL);
     rs_progress_format(&s, 0, 79, line, sizeof(line));
     CHECK_CONTAINS(line, "-:--:-- left");
     s.bytes = s.total + 5;
@@ -113,13 +118,19 @@ void test_progress(void)
     CHECK_CONTAINS(text, "restate: walking  2 paths  1 KiB");
     CHECK_CONTAINS(text, "  /b\n");
     free(text);
+    fake_now = 22 * SEC;
+    rs_progress_path("/a/path/long/enough/that/it/has/to/be/cut/down/to/fit/beside/the/counts/on/one/line");
+    text = contents(fp);
+    CHECK_CONTAINS(text, "...");
+    free(text);
     /* A new phase finishes the one before it. */
     rs_progress_phase("writing", 2048);
     rs_progress_bytes(2048);
     rs_progress_done();
     rs_progress_done();
     text = contents(fp);
-    CHECK_CONTAINS(text, "restate: writing  100%");
+    CHECK_CONTAINS(text, "restate: writing [");
+    CHECK_CONTAINS(text, "] 100%  2 KiB of 2 KiB");
     free(text);
     (void)fclose(fp);
 
@@ -139,11 +150,55 @@ void test_progress(void)
     rs_progress_path("/b");
     rs_progress_done();
     text = contents(fp);
-    CHECK(text[0] == '\r');
-    CHECK_CONTAINS(text, "\rrestate: walking  2 paths");
+    CHECK_CONTAINS(text, "restate: walking  1 paths");
+    CHECK_CONTAINS(text, "\n  /a/rather/long/path/name");
+    CHECK_CONTAINS(text, "\033[2K\033[1A");
+    CHECK_CONTAINS(text, "restate: walking  2 paths");
     CHECK(text[strlen(text) - 1] == '\n');
     free(text);
     (void)fclose(fp);
+
+    TEST_CASE("progress: a capture counts first, then walks against the total");
+    {
+        char             *dir = rs_test_tmpdir();
+        char             *img = rs_xasprintf("%s/p.tgz", dir);
+        char             *tree = rs_xasprintf("%s/tree", dir);
+        struct rs_options o;
+        char             *o_out = NULL;
+        char             *o_err = NULL;
+
+        fp = tmpfile();
+        CHECK(fp != NULL);
+        if (!fp)
+        {
+            return;
+        }
+        (void)mkdir(tree, 0755);
+        rs_test_write(tree, "a", "some content\n", 0644);
+        rs_test_write(tree, "b", "more content\n", 0644);
+        rs_progress_set_output(fp, false, fake_clock);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CAPTURE;
+        o.root = tree;
+        o.output = img;
+        o.no_default_rules = true;
+        o.quiet = true;
+        o.progress = true;
+        CHECK_INT(rs_test_capture(run, &o, &o_out, &o_err), RESTATE_EXIT_OK);
+        text = contents(fp);
+        CHECK_CONTAINS(text, "restate: counting  2 paths  26 bytes to read");
+        CHECK_CONTAINS(text, "restate: walking [");
+        CHECK_CONTAINS(text, "100%  26 bytes of 26 bytes");
+        CHECK_CONTAINS(text, "restate: writing [");
+        free(text);
+        free(o_out);
+        free(o_err);
+        (void)fclose(fp);
+        rs_test_rmtree(dir);
+        free(img);
+        free(tree);
+        free(dir);
+    }
 
     rs_progress_enable(false);
     rs_progress_set_output(NULL, false, NULL);

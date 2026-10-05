@@ -331,6 +331,12 @@ static const struct builtin anywhere_rules[] = {
     { X, "**/.local/share/libvirt/boot", "installer images libvirt boots from, downloaded again" },
     { X, "**/.config/libvirt/qemu/save", "suspended VMs' memory; without it a VM boots afresh" },
     { X, "**/.Trash-*",            "the trash on another drive" },
+    /* Installer media and downloads that never finished: fetched again. */
+    { X, "*.iso",                  "an installer or disc image, downloaded again" },
+    { X, "*-cloudimg-*.img",       "a cloud image, downloaded again" },
+    { X, "*.part",                 "a download that never finished" },
+    { X, "*.crdownload",           "a Chrome download that never finished" },
+    { X, "*.partial",              "a download that never finished" },
     { E, "**/lost+found",          "fsck's salvage area, specific to one filesystem" },
     { X, "**/.local/share/Steam/steamapps", "Steam's games, downloaded again" },
     { X, "**/.local/share/flatpak", "per-user flatpak apps and runtimes, installed again" },

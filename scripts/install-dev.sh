@@ -96,6 +96,7 @@ PACKAGES=(
   # They sign a local mirror with a key of their own and fetch from it; without
   # these they are skipped, which is the right thing on a machine without them
   # and the wrong thing on a developer's.
+  pigz                     # parallel gzip: restate compresses images with it
   gnupg                    # gpg, to make the test key and sign the mirror
   gpgv
   # --- lint ----------------------------------------------------------------

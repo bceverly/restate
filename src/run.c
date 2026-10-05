@@ -23,6 +23,7 @@ static const char *const gzip_paths[] = { "/usr/bin/gzip", "/bin/gzip" };
 static const char *const curl_paths[] = { "/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl" };
 static const char *const gpgv_paths[] = { "/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv" };
 static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg" };
+static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -55,6 +56,7 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("curl", curl_paths, curl_env),
     PROGRAM("gpgv", gpgv_paths, no_env),
     PROGRAM("gpg", gpg_paths, gpg_env),
+    PROGRAM("pigz", pigz_paths, no_env),
 };
 
 #undef PROGRAM

@@ -1175,13 +1175,21 @@ static void vm(struct sheet *s)
     bool                  uefi = s->l.firmware && strcmp(s->l.firmware, "uefi") == 0;
     size_t                d;
 
+    uint64_t              orig_mib = mem ? mem->u / MIB : 0;
+    uint64_t              orig_cpus = cpus ? cpus->u : 0;
+    /* A VM is a guest on someone's host, often the very machine it was taken
+     * from: a modest share of it, never more than the original had. */
+    uint64_t              vm_mib = orig_mib == 0 ? 4096 : (orig_mib < 8192 ? orig_mib : 8192);
+    uint64_t              vm_cpus = orig_cpus == 0 ? 2 : (orig_cpus < 4 ? orig_cpus : 4);
+    char                  buf[32];
+
     heading(s, "Create the virtual machine");
-    say(s, "%s", "With libvirt, on the host -- sized from the original's CPUs and memory, and");
-    say(s, "%s", "its disks from what the Linux volumes will hold:");
+    say(s, "%s", "With libvirt, on the host. Its disks are sized from what the Linux volumes");
+    say(s, "%s", "will hold, and it gets a modest share of a host -- at most 8 GiB and 4 CPUs:");
     say(s, "%s", "");
     say(s, "    virt-install --name %s \\", host ? host : "restored");
-    say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 " --cpu host-passthrough \\",
-        mem ? mem->u / MIB : 4096, cpus && cpus->u ? cpus->u : 2);
+    say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 " --cpu host-passthrough \\", vm_mib,
+        vm_cpus);
     for (d = 0; d < s->l.ndisks; d++)
     {
         uint64_t need = 0;
@@ -1229,6 +1237,12 @@ static void vm(struct sheet *s)
         say(s, "%s", "        --cdrom INSTALLER.iso");
     }
     say(s, "%s", "");
+    if (vm_mib < orig_mib || vm_cpus < orig_cpus)
+    {
+        say(s, "The original had %s of memory and %" PRIu64 " CPUs; raise --memory and --vcpus",
+            size_text(orig_mib * MIB, buf, sizeof(buf)), orig_cpus);
+        say(s, "%s", "if the VM is to do the original's work, and the host can spare them.");
+    }
     say(s, "%s", "The VM's disks appear as /dev/vda, /dev/vdb...; Ubuntu's generic kernel has");
     say(s, "%s", "the virtio drivers, so the initramfs needs nothing added.");
     if (s->l.secure_boot)

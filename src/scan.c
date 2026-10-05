@@ -176,6 +176,11 @@ static void unreadable(struct walk *w, const char *path, int err)
 {
     struct rs_buf shown;
 
+    /* A counting pass says nothing: the walk after it will, once. */
+    if (w->opts->count_only)
+    {
+        return;
+    }
     w->stats->unreadable++;
     rs_buf_init(&shown);
     rs_escape(&shown, path);
@@ -414,38 +419,54 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         verbose_skip(w, tree_path, "a socket");
         return;
     }
-    fill_entry(&e, dirfd, name, &st, type, cls);
-    e.path = rs_xstrdup(tree_path);
+    if (w->opts->count_only)
+    {
+        /* What the real walk will read: every regular file it hashes, or,
+         * without hashing, every one it keeps. */
+        bool kept = w->opts->store && (cls != RS_CLASS_BASELINE || w->opts->store_baseline);
 
-    if (type == 'l')
-    {
-        e.target = read_link_at(dirfd, name);
-        if (!e.target)
+        if (type == 'f' && (w->opts->hash || kept))
         {
-            unreadable(w, tree_path, errno);
-            rs_entry_free(&e);
-            return;
+            w->stats->bytes_hashed += (uint64_t)st.st_size;
+            rs_progress_found((uint64_t)st.st_size);
         }
+        w->stats->recorded++;
+        rs_progress_path(tree_path);
+    } else
+    {
+        fill_entry(&e, dirfd, name, &st, type, cls);
+        e.path = rs_xstrdup(tree_path);
+
+        if (type == 'l')
+        {
+            e.target = read_link_at(dirfd, name);
+            if (!e.target)
+            {
+                unreadable(w, tree_path, errno);
+                rs_entry_free(&e);
+                return;
+            }
+        }
+        if (type == 'f')
+        {
+            if (!file_content(w, dirfd, name, &st, &e))
+            {
+                w->failed = true;
+                rs_entry_free(&e);
+                return;
+            }
+        } else if (storing(w, &e))
+        {
+            if (!w->opts->store(w->opts->store_ctx, &e, -1, &st, w->err))
+            {
+                w->failed = true;
+                rs_entry_free(&e);
+                return;
+            }
+            w->stats->stored++;
+        }
+        record(w, &e);
     }
-    if (type == 'f')
-    {
-        if (!file_content(w, dirfd, name, &st, &e))
-        {
-            w->failed = true;
-            rs_entry_free(&e);
-            return;
-        }
-    } else if (storing(w, &e))
-    {
-        if (!w->opts->store(w->opts->store_ctx, &e, -1, &st, w->err))
-        {
-            w->failed = true;
-            rs_entry_free(&e);
-            return;
-        }
-        w->stats->stored++;
-    }
-    record(w, &e);
 
     if (type != 'd')
     {
@@ -548,6 +569,13 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     w.root_dev = st.st_dev;
     w.max_depth = opts->max_depth ? opts->max_depth : RS_SCAN_MAX_DEPTH;
 
+    if (opts->count_only)
+    {
+        stats->recorded = 1;
+        walk_dir(&w, fd, "/", 0);
+        (void)close(fd);
+        return true;
+    }
     fill_entry(&e, fd, ".", &st, 'd', rs_rules_classify(opts->rules, "/", NULL));
     e.path = rs_xstrdup("/");
     if (storing(&w, &e))

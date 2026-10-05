@@ -162,7 +162,8 @@ sudo ./bin/restate verify /tmp/me.tgz         # what has changed since
 ```
 
 Building needs a C11 compiler and GNU make, and nothing else. Running it needs
-gzip, and `restate installer fetch` also needs curl and gpgv — all three are
+gzip (and uses pigz, if it is installed, to compress on every core), and
+`restate installer fetch` also needs curl and gpgv — all three are
 in a standard Ubuntu install. For the test suite, the analyzers and the git
 hooks:
 
@@ -254,19 +255,22 @@ Options:
 ## Progress
 
 A whole-machine capture can read hundreds of gigabytes. `--progress` (`-P`)
-reports as it goes, on standard error, like `dd status=progress`:
+shows how far it has got, redrawn in place on the terminal:
 
 ```console
 $ sudo restate capture --progress -o /backup/web01.tgz
-restate: walking  812345 paths  143 GiB  209 MiB/s  0:11:40  .../src/main.c
-restate: writing   62%  89 GiB of 143 GiB  305 MiB/s  0:03:01 left
+restate: counting  812345 paths  184 GiB to read  0:00:41
+restate: walking [#######.............]  35%  64 GiB of 184 GiB  91 MiB/s  0:22:30 left
+  .../home/alice/dev/project/src/main.c
 ```
 
-The walk has no total until it is done, so it shows paths and bytes so far,
-the rate and the elapsed time; writing the image shows a percentage and the
-time left; `installer fetch` shows curl's progress bar. On a terminal the line
-updates in place; into a log it writes a line every ten seconds. It is off
-unless asked for, and works alongside `--quiet`.
+A quick metadata-only count comes first, so the walk has a real 0-100% with
+throughput and time left, and the path being read underneath; writing the
+image shows the same; `installer fetch` shows curl's bar. The bar fills the
+terminal's width, and is drawn on the terminal even when output is going to
+a log through `tee` -- each phase's final line goes to the log as well. With no
+terminal (cron), it writes a plain line every ten seconds instead. Off unless
+asked for; works alongside `--quiet`.
 
 ## Installers
 
@@ -316,7 +320,9 @@ Another operating system's partitions -- Windows, BitLocker, macOS, VeraCrypt
 partition they boot from, in place.
 
 `--target vm` rebuilds as a virtual machine instead: Linux volumes only, each
-sized to what it uses plus room to grow, a ready `virt-install` command, and
+sized to what the image holds plus room to grow, a ready `virt-install`
+command with a modest share of a host (at most 8 GiB and 4 CPUs, never more
+than the original), and
 the hardware-only packages swapped for `qemu-guest-agent`. `--target metal`
 goes the other way, onto other hardware. Both cover what cannot move:
 interface names and MACs, TPM-held LUKS keys, Secure Boot keys, the
@@ -462,8 +468,9 @@ and left out unless you ask for it:
   Arduino, JetBrains Toolbox; Steam games; Flatpak apps (remotes and overrides
   are kept); snaps; Ollama models.
 - **Images** -- container images and layers (containerd, Docker, Podman, but
-  not their volumes), LXD's image cache, libvirt's installer ISOs, snapd's
-  seed. VM disks and definitions are data and are kept; a suspended VM's
+  not their volumes), LXD's image cache, snapd's seed, installer and disc
+  images (`*.iso`) wherever they are, cloud images, and downloads that never
+  finished (`*.part`, `*.crdownload`). VM disks and definitions are data and are kept; a suspended VM's
   saved memory is not (the VM boots afresh).
 - **Never at all** -- swap files, PID files, sockets, `lost+found`, `/proc`,
   `/sys`, `/run`, `/tmp`, `/mnt`, `/media`.

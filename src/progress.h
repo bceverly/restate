@@ -9,17 +9,21 @@
  * hour, and without this it says nothing until the end. With it, a line on
  * standard error says what it is doing -- like `dd status=progress`:
  *
- *   walking  812345 paths  143 GiB  209 MiB/s  0:11:40  .../src/main.c
- *   writing   62%  89 GiB of 143 GiB  305 MiB/s  0:03:01 left
+ *   counting  812345 paths  184 GiB to read  0:00:41
+ *   walking [########............]  45%  83 GiB of 184 GiB  91 MiB/s  0:21:13 left
+ *     .../src/main.c
+ *   writing [##############......]  70%  129 GiB of 184 GiB  305 MiB/s  0:03:01 left
  *
- * Walking has no total to measure against -- nothing says how much of the
- * tree is left until it has been walked -- so it shows how much so far and
- * how fast. Writing the image does know its total, so it shows a percentage
- * and the time left at the current rate.
+ * A walk that will read files first counts them -- metadata only, no file
+ * read -- so that the walk itself has a total, and a percentage and a time
+ * left like the writing of the image does.
  *
- * On a terminal the line is rewritten in place a few times a second; anywhere
- * else (a log file, a pipe) a whole line is written every ten seconds, so the
- * log stays readable. Off, every call here does nothing.
+ * On a terminal the bar and the path under it are redrawn in place a few
+ * times a second, the bar as wide as the terminal allows. Progress is drawn
+ * on the terminal even when standard error goes to a log, and each phase's
+ * last line is written to standard error too, so the log has a record of it.
+ * With no terminal at all (cron) a whole line goes to standard error every
+ * ten seconds. Off, every call here does nothing.
  */
 #ifndef RESTATE_PROGRESS_H
 #define RESTATE_PROGRESS_H
@@ -49,6 +53,8 @@ void rs_progress_phase(const char *phase, uint64_t total);
 void rs_progress_bytes(uint64_t n);
 /* Counts a path, and names it as the one being read. */
 void rs_progress_path(const char *path);
+/* Counts bytes found to read, while counting rather than reading. */
+void rs_progress_found(uint64_t n);
 /* Ends the phase with a last, final line. */
 void rs_progress_done(void);
 

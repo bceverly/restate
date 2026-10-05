@@ -12,6 +12,7 @@
 
 #include "gzip.h"
 #include "image.h"
+#include "run.h"
 #include "scan.h"
 #include "tar.h"
 #include "test.h"
@@ -98,6 +99,23 @@ static void gzip_file(const char *in, const char *out)
     (void)close(ifd);
     (void)close(ofd);
     rs_buf_free(&err);
+}
+
+/* Writes an empty image to `arg`, for a test that wants what it prints. */
+static int finish_one(const void *arg)
+{
+    struct rs_image_writer iw;
+    struct rs_index        ix;
+    struct rs_buf          err;
+    bool                   ok;
+
+    rs_index_init(&ix);
+    ix.root = rs_xstrdup("/");
+    rs_buf_init(&err);
+    ok = rs_image_begin(&iw, arg, &err) && rs_image_finish(&iw, &ix, &err);
+    rs_index_free(&ix);
+    rs_buf_free(&err);
+    return ok ? 1 : 0;
 }
 
 void test_image(void)
@@ -284,6 +302,39 @@ void test_image(void)
             (void)close(dfd);
         }
         rs_index_free(&back);
+
+        TEST_CASE("image: compressed with pigz where it is installed, gzip where not");
+        {
+            /* gzip stands in for pigz: it takes the same options, and the
+             * test must not depend on pigz being installed. */
+            static const char *const as_pigz[] = { "/usr/bin/gzip", "/bin/gzip" };
+            static const char *const no_pigz[] = { "/nonexistent/pigz" };
+            struct rs_image_writer   pw;
+            struct rs_index          empty;
+            struct rs_index          again;
+            char                    *pimg = rs_xasprintf("%s/pigz.tgz", dir);
+            char                    *out = NULL;
+            char                    *errs = NULL;
+
+            rs_index_init(&empty);
+            empty.root = rs_xstrdup("/");
+            rs_program_set_paths(RS_PROG_PIGZ, as_pigz, 2);
+            CHECK(rs_gzip_parallel());
+            CHECK(rs_image_begin(&pw, pimg, &err));
+            CHECK(rs_image_finish(&pw, &empty, &err));
+            rs_index_init(&again);
+            CHECK(rs_index_load(&again, pimg, &err));
+            rs_index_free(&again);
+            rs_program_set_paths(RS_PROG_PIGZ, no_pigz, 1);
+            CHECK(!rs_gzip_parallel());
+            CHECK_INT(rs_test_capture(finish_one, pimg, &out, &errs), 1);
+            CHECK_CONTAINS(errs, "pigz is not installed");
+            free(out);
+            free(errs);
+            rs_program_set_paths(RS_PROG_PIGZ, NULL, 0);
+            rs_index_free(&empty);
+            free(pimg);
+        }
 
         TEST_CASE("image: system tar can unpack it");
         {

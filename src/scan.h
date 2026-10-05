@@ -57,6 +57,10 @@ struct rs_scan_opts {
     rs_store_fn            store;     /* NULL: an index only, no content */
     void                  *store_ctx;
     bool                   store_baseline; /* keep baseline content too */
+    /* Walk and classify only, recording nothing and reading no file: the
+     * bytes the same walk would read are added up in stats->bytes_hashed,
+     * which is what lets a progress bar show a percentage. */
+    bool                   count_only;
 };
 
 struct rs_scan_stats {

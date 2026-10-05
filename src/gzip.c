@@ -20,7 +20,9 @@ const char *rs_gzip_path(void)
 
 void rs_gzip_set_paths(const char *const *list, size_t n)
 {
+    /* Both: whichever compresses, it is the one the tests mean. */
     rs_program_set_paths(RS_PROG_GZIP, list, n);
+    rs_program_set_paths(RS_PROG_PIGZ, list, n);
 }
 
 static void cloexec(int fd)
@@ -46,21 +48,29 @@ static bool make_pipe(int p[2], struct rs_buf *err)
     return true;
 }
 
+bool rs_gzip_parallel(void)
+{
+    return rs_program_path(RS_PROG_PIGZ) != NULL;
+}
+
 bool rs_gzip_compress(int out_fd, struct rs_gzip *gz, struct rs_buf *err)
 {
-    /* -n leaves out the name and timestamp gzip would otherwise record. */
-    static char a0[] = "gzip";
-    static char a1[] = "-c";
-    static char a2[] = "-n";
-    static char a3[] = "-6";
-    char       *argv[] = { a0, a1, a2, a3, NULL };
-    int         p[2];
+    /* -n leaves out the name and timestamp gzip would otherwise record; pigz
+     * takes the same options and writes the same format. */
+    static char     gzip_name[] = "gzip";
+    static char     pigz_name[] = "pigz";
+    static char     a1[] = "-c";
+    static char     a2[] = "-n";
+    static char     a3[] = "-6";
+    bool            parallel = rs_gzip_parallel();
+    char           *argv[] = { parallel ? pigz_name : gzip_name, a1, a2, a3, NULL };
+    int             p[2];
 
     if (!make_pipe(p, err))
     {
         return false;
     }
-    if (!rs_spawn(RS_PROG_GZIP, argv, p[0], out_fd, -1, &gz->pid, err))
+    if (!rs_spawn(parallel ? RS_PROG_PIGZ : RS_PROG_GZIP, argv, p[0], out_fd, -1, &gz->pid, err))
     {
         (void)close(p[0]);
         (void)close(p[1]);

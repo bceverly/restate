@@ -28,7 +28,7 @@ static const char *const server_json[] = {
     "   \"timezone\": \"Europe/London\", \"ssh_server\": true,"
     "   \"hardware_packages\": [\"mdadm\", \"intel-microcode\"], \"guest_packages\": []},"
     " \"hardware\": {\"sys_vendor\": \"Example\", \"product_name\": \"Box 1\", \"cpu\": \"Fast CPU\","
-    "   \"cpus\": 4, \"memory\": 8589934592,"
+    "   \"cpus\": 16, \"memory\": 34359738368,"
     "   \"network\": [{\"name\": \"eno1\", \"mac\": \"52:54:00:00:00:01\"},"
     "                {\"name\": \"wlp2s0\", \"mac\": \"52:54:00:00:00:02\"},"
     "                {\"name\": \"eno2\"}]},"
@@ -428,6 +428,7 @@ static void sheet_cases(void)
     s = sheet(&m, RS_TARGET_VM, NULL);
     CHECK_CONTAINS(s, "virt-install --name web01");
     CHECK_CONTAINS(s, "--memory 8192 --vcpus 4");
+    CHECK_CONTAINS(s, "The original had 32 GiB of memory and 16 CPUs");
     CHECK_CONTAINS(s, "--boot uefi");
     CHECK_CONTAINS(s, "--graphics none");
     CHECK_CONTAINS(s, "firmware.feature0.name=secure-boot");
@@ -481,6 +482,8 @@ static void sheet_cases(void)
     free(s);
     s = sheet(&m, RS_TARGET_VM, NULL);
     CHECK(strstr(s, "B. The same disk") == NULL);
+    CHECK_CONTAINS(s, "--memory 4096 --vcpus 2");
+    CHECK(strstr(s, "The original had") == NULL);
     CHECK(strstr(s, "Windows") == NULL || strstr(s, "not rebuilt"));
     free(s);
     rs_jval_free(&m);

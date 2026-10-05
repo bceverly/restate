@@ -34,14 +34,21 @@ struct rs_gzip {
 const char *rs_gzip_path(void);
 
 /*
- * Replaces the fixed list of paths tried, for the unit tests' benefit -- they
- * need a gzip that is missing and one that fails. NULL restores the default.
+ * Replaces the fixed list of paths tried -- for gzip and pigz both -- for the
+ * unit tests' benefit: they need a gzip that is missing and one that fails.
+ * NULL restores the default.
  * Nothing in restate itself calls it, and no option or variable reaches it.
  */
 void rs_gzip_set_paths(const char *const *list, size_t n);
 
-/* Starts `gzip -c -n` writing compressed output to `out_fd`. */
+/*
+ * Starts compressing to `out_fd`: with pigz where it is installed -- the same
+ * gzip format, on every core, several times faster on a large image -- and
+ * with `gzip -c -n` where it is not.
+ */
 bool rs_gzip_compress(int out_fd, struct rs_gzip *gz, struct rs_buf *err);
+/* Whether compressing will use pigz. */
+bool rs_gzip_parallel(void);
 /* Starts `gzip -d -c` reading compressed input from `in_fd`. */
 bool rs_gzip_decompress(int in_fd, struct rs_gzip *gz, struct rs_buf *err);
 

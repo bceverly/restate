@@ -310,7 +310,31 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
 
     rs_buf_init(&err);
-    rs_progress_phase("walking", 0);
+    {
+        uint64_t total = 0;
+
+        /* A walk that reads files is counted first -- metadata only -- so its
+         * progress has a total to show a percentage against. */
+        if (rs_progress_enabled() && (so.hash || so.store))
+        {
+            struct rs_scan_opts  count = so;
+            struct rs_scan_stats cst;
+            struct rs_index      none;
+
+            count.count_only = true;
+            count.verbose = false;
+            rs_index_init(&none);
+            rs_progress_phase("counting", 0);
+            if (rs_scan(&count, &none, &cst, &err))
+            {
+                total = cst.bytes_hashed;
+            }
+            rs_progress_done();
+            rs_index_free(&none);
+            rs_buf_reset(&err);
+        }
+        rs_progress_phase("walking", total);
+    }
     ok = rs_scan(&so, m, st, &err);
     rs_progress_done();
     if (!ok)
