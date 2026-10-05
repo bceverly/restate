@@ -58,13 +58,15 @@ void rs_progress_set_output(FILE *fp, bool tty, uint64_t (*now_fn)(void))
 }
 
 /*
- * The terminal, if there is one, whatever standard error is: a capture whose
- * output is going to a log can still draw its progress for the person
- * watching. Without one -- cron, a service -- lines go to standard error.
+ * The terminal, whatever standard error is, when someone is at it: a capture
+ * whose output is going to a log can still draw its progress for the person
+ * watching. "Someone is at it" means standard input is a terminal -- true of
+ * a run piped through tee, false of cron, a service, or a test suite feeding
+ * it /dev/null -- and otherwise lines go to standard error.
  */
 static void choose_output(void)
 {
-    int fd = open("/dev/tty", O_WRONLY | O_CLOEXEC | O_NOCTTY);
+    int fd = isatty(STDIN_FILENO) == 1 ? open("/dev/tty", O_WRONLY | O_CLOEXEC | O_NOCTTY) : -1;
 
     if (fd >= 0 && isatty(fd) == 1)
     {
@@ -91,6 +93,16 @@ void rs_progress_enable(bool enable)
     if (on && !out)
     {
         choose_output();
+    }
+    /* Off again: the terminal opened for it is closed, not left behind. */
+    if (!on && out && !out_set && out != stderr)
+    {
+        (void)fclose(out);
+        out = NULL;
+        own_tty = false;
+    } else if (!on && !out_set)
+    {
+        out = NULL;
     }
 }
 

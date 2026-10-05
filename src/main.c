@@ -15,6 +15,7 @@
 #include "cmd.h"
 #include "meta.h"
 #include "opts.h"
+#include "progress.h"
 #include "util.h"
 
 int main(int argc, char **argv)
@@ -58,5 +59,6 @@ int main(int argc, char **argv)
     /* Freed rather than left to exit, so valgrind's leak check -- which this
      * project runs with every kind of leak counted -- reads as clean. */
     rs_name_cache_free();
+    rs_progress_enable(false);   /* closes the terminal it may have opened */
     return status;
 }
