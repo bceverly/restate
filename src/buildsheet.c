@@ -1177,7 +1177,7 @@ static void vm(struct sheet *s)
 
     heading(s, "Create the virtual machine");
     say(s, "%s", "With libvirt, on the host -- sized from the original's CPUs and memory, and");
-    say(s, "%s", "its disks from the space the Linux volumes use:");
+    say(s, "%s", "its disks from what the Linux volumes will hold:");
     say(s, "%s", "");
     say(s, "    virt-install --name %s \\", host ? host : "restored");
     say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 " --cpu host-passthrough \\",

@@ -333,6 +333,23 @@ static void layout_cases(void)
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sdb6"), RS_TARGET_VM) == 1073741824);
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "nvme9n1"), RS_TARGET_VM) == 12 * 1024 * 1024);
 
+    TEST_CASE("layout: what an index records beats what the disk used");
+    {
+        struct rs_jval   c;
+        struct rs_layout cl;
+
+        parse("{\"disks\": [{\"name\": \"sda\", \"size\": 107374182400, \"table\": {\"type\": \"gpt\"},"
+              " \"partitions\": [{\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 100000000000,"
+              " \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"u\"}}]}],"
+              " \"mounts\": [{\"mountpoint\": \"/\", \"source\": \"/dev/sda1\", \"size\": 99000000000,"
+              " \"used\": 90000000000, \"captured\": 0}]}", &c);
+        CHECK(rs_layout_build(&c, &cl));
+        CHECK(cl.vols[0].captured_known);
+        CHECK(rs_layout_fit(&cl, 0, RS_TARGET_VM) == (uint64_t)2 * 1024 * 1024 * 1024);
+        rs_layout_free(&cl);
+        rs_jval_free(&c);
+    }
+
     TEST_CASE("layout: names and sizes for people");
     CHECK_STR(rs_ptype_name("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"), "EFI system");
     CHECK_STR(rs_ptype_name("0x83"), "Linux");

@@ -47,6 +47,9 @@ RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
 RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
        "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
        "hardware (metal) rather than the same machine")
+RS_OPT('P', "progress",         no_argument,       NULL,
+       "show progress on standard error: paths and bytes so far while walking, "
+       "a percentage and time left while writing an image or downloading")
 RS_OPT('q', "quiet",            no_argument,       NULL,
        "no warnings and no summary; errors are still reported")
 RS_OPT('v', "verbose",          no_argument,       NULL,

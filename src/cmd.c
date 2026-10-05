@@ -22,6 +22,7 @@
 #include "installer.h"
 #include "machine.h"
 #include "meta.h"
+#include "progress.h"
 #include "rules.h"
 #include "run.h"
 #include "scan.h"
@@ -309,7 +310,9 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
 
     rs_buf_init(&err);
+    rs_progress_phase("walking", 0);
     ok = rs_scan(&so, m, st, &err);
+    rs_progress_done();
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -560,6 +563,75 @@ int rs_cmd_machine(const struct rs_options *o)
 }
 
 /*
+ * What the index records on each mounted filesystem: the bytes of every file
+ * under its mount point (and under no deeper one), as "captured" on the
+ * description's mounts. A rebuilt machine holds that much -- the files the
+ * image keeps and the system files a reinstall puts back -- not the old
+ * disk's whole use, which counted downloads and caches the image left out.
+ */
+static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
+{
+    struct rs_jval *mounts = NULL;
+    uint64_t       *sums;
+    size_t          i;
+    size_t          k;
+
+    for (i = 0; machine->type == RS_JOBJECT && i < machine->n; i++)
+    {
+        if (strcmp(machine->keys[i], "mounts") == 0 && machine->items[i].type == RS_JARRAY)
+        {
+            mounts = &machine->items[i];
+        }
+    }
+    if (!mounts || mounts->n == 0)
+    {
+        return;
+    }
+    sums = rs_xcalloc(mounts->n, sizeof(*sums));
+    for (i = 0; i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+        size_t                 best = SIZE_MAX;
+        size_t                 best_len = 0;
+
+        if (e->type != 'f' || !e->path)
+        {
+            continue;
+        }
+        for (k = 0; k < mounts->n; k++)
+        {
+            const char *mp = rs_jobject_str(&mounts->items[k], "mountpoint");
+            size_t      len = mp ? strlen(mp) : 0;
+            bool        under;
+
+            if (!mp)
+            {
+                continue;
+            }
+            under = strcmp(mp, "/") == 0 ||
+                    (strncmp(e->path, mp, len) == 0 && (e->path[len] == '/' || e->path[len] == '\0'));
+            if (under && (best == SIZE_MAX || len > best_len))
+            {
+                best = k;
+                best_len = len;
+            }
+        }
+        if (best != SIZE_MAX)
+        {
+            sums[best] += e->size;
+        }
+    }
+    for (k = 0; k < mounts->n; k++)
+    {
+        if (mounts->items[k].type == RS_JOBJECT && !rs_jobject_get(&mounts->items[k], "captured"))
+        {
+            rs_jobj_u64(&mounts->items[k], "captured", sums[k]);
+        }
+    }
+    free(sums);
+}
+
+/*
  * The machine description in `path`: an image or index with a "machine"
  * section, or what `restate machine -o` writes.
  */
@@ -576,6 +648,7 @@ static bool load_machine(const char *path, struct rs_jval *machine)
         if (ix.machine.type == RS_JOBJECT)
         {
             rs_jval_copy(machine, &ix.machine);
+            note_captured(&ix, machine);
             ok = true;
         } else
         {
@@ -707,9 +780,11 @@ int rs_cmd_installer(const struct rs_options *o)
         struct rs_fetch_opts fo;
         char                *path = NULL;
 
+        memset(&fo, 0, sizeof(fo));
         fo.cache = o->cache;
         fo.mirror = o->mirror;
         fo.quiet = o->quiet;
+        fo.progress = o->progress;
         if (rs_installer_fetch(&in, &fo, &path, &err))
         {
             (void)printf("%s\n", path);
@@ -927,6 +1002,7 @@ int rs_cmd_rules(const struct rs_options *o)
 
 int rs_cmd_run(const struct rs_options *o)
 {
+    rs_progress_enable(o->progress);
     switch (o->command)
     {
     case CMD_CAPTURE:

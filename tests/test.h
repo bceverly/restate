@@ -89,6 +89,7 @@ void test_installer(void);
 void test_rebuild(void);
 void test_pgp(void);
 void test_bsd(void);
+void test_progress(void);
 void test_scan(void);
 void test_diff(void);
 void test_opts(void);

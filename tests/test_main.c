@@ -210,6 +210,7 @@ int main(void)
     test_rebuild();
     test_pgp();
     test_bsd();
+    test_progress();
     test_scan();
     test_diff();
     test_opts();

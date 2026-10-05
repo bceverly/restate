@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "meta.h"
+#include "progress.h"
 
 /* O_DIRECTORY and O_NOFOLLOW are POSIX.1-2008, but be tolerant of a libc that
  * only exposes them under a feature macro this build did not ask for. */
@@ -133,6 +134,7 @@ bool rs_hash_fd(int fd, char hex[RS_SHA256_HEX_SIZE], uint64_t *bytes)
             break;
         }
         rs_sha256_update(&ctx, chunk, (size_t)n);
+        rs_progress_bytes((uint64_t)n);
         if (bytes)
         {
             *bytes += (uint64_t)n;
@@ -259,6 +261,7 @@ static void fill_entry(struct rs_entry *e, int dirfd, const char *name,
 static void record(struct walk *w, const struct rs_entry *e)
 {
     rs_index_add(w->out, e);
+    rs_progress_path(e->path);
     w->stats->recorded++;
     w->stats->by_class[e->cls]++;
 }

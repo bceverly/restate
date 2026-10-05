@@ -54,6 +54,7 @@ struct rs_options {
     bool            one_fs;
     bool            no_hash;
     bool            quiet;
+    bool            progress;
     bool            verbose;
     bool            help;
     bool            version;

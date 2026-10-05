@@ -59,7 +59,8 @@ const char *rs_installer_default_cache(void);
 struct rs_fetch_opts {
     const char *cache;    /* NULL: rs_installer_default_cache() */
     const char *mirror;   /* a directory URL to fetch from instead, or NULL */
-    bool        quiet;    /* no progress */
+    bool        quiet;    /* no messages, and no progress bar unless asked for */
+    bool        progress; /* curl's progress bar, even when not on a terminal */
 };
 
 /* Downloads and verifies the image. *path is where it now is (caller frees). */

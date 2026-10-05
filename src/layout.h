@@ -94,6 +94,8 @@ struct rs_vol {
     const char      *options;     /* the fstab options */
     uint64_t         fs_size;     /* bytes, from statvfs; 0 if not mounted */
     uint64_t         fs_used;
+    uint64_t         fs_captured; /* bytes an index records on it, if known */
+    bool             captured_known;
 
     /* Another operating system's: Windows, BitLocker, macOS, a VeraCrypt
      * volume. Never formatted; not carried into a VM or onto new hardware. */

@@ -256,6 +256,31 @@ expect 0 "buildsheet --target=vm" -- "$BIN" buildsheet --target=vm layout.json -
 check "buildsheet -o writes the file" test -s sheet.txt
 contains "$(cat sheet.txt)" "virt-install --name db01" "a VM build sheet defines the VM"
 contains "$(cat sheet.txt)" "--disk size=7," "the VM disk is sized to what is used"
+# Sized from what an index records, not from how full the old disk was: 4 GiB
+# of files on / (the /srv one belongs to its own mount) makes a 7 GiB volume,
+# where the old disk's 90 GB of use would have made a 115 GiB one.
+cat > captured.json <<'JSON'
+{"format": "restate-index", "version": 1, "root": "/", "hashed": false, "content": "none",
+ "machine": {"system": {"id": "ubuntu", "version_id": "26.04", "kernel_name": "Linux"},
+   "firmware": {"mode": "uefi"},
+   "disks": [{"name": "sda", "size": 107374182400, "table": {"type": "gpt"},
+     "partitions": [{"name": "sda1", "number": 1, "start": 1048576, "size": 100000000000,
+       "type": "0fc63daf-8483-4772-8e79-3d69d8477de4",
+       "content": {"type": "ext4", "usage": "filesystem", "uuid": "r"}}]}],
+   "mounts": [{"mountpoint": "/", "source": "/dev/sda1", "size": 99000000000, "used": 90000000000},
+              {"mountpoint": "/srv", "source": "/dev/sdz9", "size": 1, "used": 1}]},
+ "entries": [
+{"path": "/", "name": "/", "type": "directory", "class": "state", "mode": "0755", "uid": 0, "gid": 0, "size": 0, "mtime": "2026-10-05T00:00:00.000000000Z"},
+{"path": "/etc", "name": "etc", "type": "directory", "class": "state", "mode": "0755", "uid": 0, "gid": 0, "size": 0, "mtime": "2026-10-05T00:00:00.000000000Z"},
+{"path": "/etc/big", "name": "big", "type": "file", "class": "state", "mode": "0644", "uid": 0, "gid": 0, "size": 4294967296, "mtime": "2026-10-05T00:00:00.000000000Z"},
+{"path": "/srv", "name": "srv", "type": "directory", "class": "state", "mode": "0755", "uid": 0, "gid": 0, "size": 0, "mtime": "2026-10-05T00:00:00.000000000Z"},
+{"path": "/srv/x", "name": "x", "type": "file", "class": "state", "mode": "0644", "uid": 0, "gid": 0, "size": 1073741824, "mtime": "2026-10-05T00:00:00.000000000Z"}
+]}
+JSON
+expect 0 "buildsheet --target=vm from an index" -- "$BIN" buildsheet --target=vm captured.json
+contains "$OUT" "vda1 : size=7168MiB" "a VM volume is sized from what the index records"
+contains "$OUT" "--disk size=8," "and so is the VM's disk"
+
 expect 2 "--target must be vm or metal" -- "$BIN" buildsheet --target=cloud layout.json
 contains "$ERR" "--target: \"cloud\" is not vm or metal" "--target says what it takes"
 expect 2 "buildsheet without disks" -- "$BIN" buildsheet ubuntu.json
@@ -277,6 +302,12 @@ expect 0 "scan --all" -- "$BIN" scan -r tree --os=linux --all -q
 contains "$OUT" '"class": "expendable"' "--all records expendable paths"
 contains "$OUT" "/var/cache/apt/pkg.deb" "--all records the cache"
 check "--quiet writes nothing to stderr" test -z "$ERR"
+
+expect 0 "scan --progress" -- "$BIN" scan -r tree --os=linux -P -q -o progress.json
+contains "$ERR" "restate: walking" "--progress reports the walk"
+lacks "$ERR" "recorded" "--progress does not undo --quiet's silence"
+expect 0 "scan without --progress" -- "$BIN" scan -r tree --os=linux -q -o progress.json
+lacks "$ERR" "walking" "progress is off unless asked for"
 
 expect 0 "scan --no-hash" -- "$BIN" scan -r tree --os=linux -n -q
 contains "$OUT" '"hashed": false' "--no-hash says so"

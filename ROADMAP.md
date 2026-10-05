@@ -148,6 +148,51 @@ running 26.04 would differ from its installer in nearly every file. Instead:
       links; users and groups the image's owners depend on
 - [ ] `status`: what has changed since the last capture, quickly
 
+## Then — captures on a schedule
+
+So that a capture can run from cron, unattended, and keep running every
+night without the disk filling up.
+
+- [ ] **Detecting what is live** (libc only, from `/proc`): database
+      servers (Postgres, MySQL/MariaDB, MongoDB, Redis, ...), QEMU VMs and
+      the disk images they hold open, running LXD and Docker containers, and
+      services known to write to them. `capture` warns by default, naming the
+      command that would pause each one
+- [ ] **Quiescing, through hook scripts.** restate itself still runs no
+      administration tools: it runs root-owned hooks from
+      `/etc/restate/hooks.d` (directory and scripts owned by root and
+      writable by no one else, as with the programs it runs now), and ships
+      ready-made ones for Postgres, MySQL/MariaDB, libvirt, LXD, Docker and
+      systemd services, which a site can add to or replace
+- [ ] **Just in time**: the walk leaves each live service's files to the
+      end, then for each in turn pauses it, copies its files and resumes it,
+      so a service is down for the time its own files take to copy, not for
+      the whole capture. Per kind: a database is dumped into the image
+      (`pg_dumpall`, `mysqldump --single-transaction`) and stopped, copied
+      and started; a VM is suspended (or its filesystems frozen through the
+      guest agent), copied and resumed; a container paused and unpaused; a
+      service that writes to a database stopped before it and started after
+- [ ] **Always put back**: every paused or stopped thing is resumed or
+      started again whether the capture succeeds, fails or is interrupted,
+      with each step reported (`pausing win-msi-lab ... resumed`) and logged
+      to syslog for a cron job's benefit
+- [ ] **A repository** instead of a growing pile of `.tgz` files: a
+      directory where file content is stored once, by SHA-256, in compressed
+      packs, and each capture adds a snapshot -- an index pointing into it
+- [ ] **Incremental runs**: a file whose size, mtime, ctime and inode match
+      the last snapshot is not read again, its recorded digest is trusted (as
+      `git status` and rsync do), so the first capture takes as long as today
+      and later ones only as long as what changed
+- [ ] `restate snapshots`; `restate prune --keep-daily N --keep-weekly N
+      --keep-monthly N`, which drops old snapshots and the content no
+      remaining one refers to; `restate export SNAPSHOT -o FILE.tgz` for the
+      portable single file; `diff`, `verify`, `buildsheet`, `autoinstall` and
+      restore reading a snapshot as they read an image today
+- [ ] Encryption per pack with the same `--encrypt-to` keys, so a
+      repository can sit on untrusted storage
+- [ ] A lock, so two scheduled runs never overlap, and exit statuses and
+      log lines a monitoring system can act on
+
 ## Then — stamping out copies
 
 A capture of one machine that does "the thing", rebuilt as N machines — for

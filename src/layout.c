@@ -738,6 +738,8 @@ static void read_mounts(const struct rs_jval *machine, struct rs_layout *l)
             {
                 l->vols[j].fs_size = num(e, "size");
                 l->vols[j].fs_used = num(e, "used");
+                l->vols[j].fs_captured = num(e, "captured");
+                l->vols[j].captured_known = rs_jobject_get(e, "captured") != NULL;
                 if (!l->vols[j].mountpoint)
                 {
                     l->vols[j].mountpoint = rs_jobject_str(e, "mountpoint");
@@ -987,19 +989,23 @@ static uint64_t round_up(uint64_t v, uint64_t unit)
 }
 
 /*
- * A filesystem in a virtual machine: what it uses, a quarter again, and 2 GiB
- * for the system to grow into, never less than 1 GiB and never more than it
- * had. One that was not mounted -- so its use is unknown -- keeps its size.
+ * A filesystem in a virtual machine: what it will hold, a quarter again, and
+ * 2 GiB for the system to grow into, never less than 1 GiB and never more
+ * than it had. What it will hold is what an image records on it, where the
+ * description came with one; otherwise what the filesystem used, which also
+ * counts what the image leaves out. One that was not mounted -- so neither is
+ * known -- keeps its size.
  */
 static uint64_t fit_fs(const struct rs_vol *v)
 {
     uint64_t want;
+    uint64_t holds = v->captured_known ? v->fs_captured : v->fs_used;
 
-    if (v->fs_size == 0)
+    if (v->fs_size == 0 && !v->captured_known)
     {
         return v->size;
     }
-    want = round_up(v->fs_used + v->fs_used / 4 + 2 * GIB, GIB);
+    want = round_up(holds + holds / 4 + 2 * GIB, GIB);
     if (v->size > 0 && want > v->size)
     {
         want = v->size;

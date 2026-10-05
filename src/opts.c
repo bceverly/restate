@@ -231,6 +231,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case 'n':
             o->no_hash = true;
             break;
+        case 'P':
+            o->progress = true;
+            break;
         case 'q':
             o->quiet = true;
             break;
@@ -390,6 +393,7 @@ void rs_print_help(FILE *out)
                        "\n"
                        "Examples:\n"
                        "  restate capture -o /var/backups/web01.tgz\n"
+                       "  restate capture --progress -o /var/backups/web01.tgz\n"
                        "  restate scan -o web01.json\n"
                        "  restate diff monday.tgz tuesday.tgz\n"
                        "  restate verify /var/backups/web01.tgz\n"

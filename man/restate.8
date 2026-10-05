@@ -118,6 +118,9 @@ installer fetch: download from the directory at URL (https:// or file://) rather
 \fB\-\-target\fR=\fIKIND\fR
 buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other hardware (metal) rather than the same machine
 .TP
+\fB\-P\fR, \-\-progress
+show progress on standard error: paths and bytes so far while walking, a percentage and time left while writing an image or downloading
+.TP
 \fB\-q\fR, \-\-quiet
 no warnings and no summary; errors are still reported
 .TP
@@ -435,6 +438,40 @@ changes where images are kept, and
 .B \-\-mirror
 fetches from another https:// or file:// directory holding the same files \-
 which are checked against the same key.
+.SH PROGRESS
+A capture of a whole machine can read hundreds of gigabytes and take an
+hour, and by default says nothing until it is done.
+.B \-\-progress
+reports as it goes, on standard error, the way
+.B dd status=progress
+does:
+.PP
+.RS
+.nf
+restate: walking  812345 paths  143 GiB  209 MiB/s  0:11:40  .../src/main.c
+restate: writing   62%  89 GiB of 143 GiB  305 MiB/s  0:03:01 left
+.fi
+.RE
+.PP
+Walking the tree
+.RB ( scan ,
+.BR capture ,
+.BR verify )
+has no total to measure against \- how much is left is not known until it
+has been walked \- so it shows the paths and bytes so far, the rate, the time
+taken and the path being read. Writing an image, the last step of a
+capture, knows its total, so it shows a percentage and the time left at the
+current rate. Downloading an installer shows curl's own progress bar, which
+appears on a terminal anyway and
+.B \-\-progress
+shows everywhere else too.
+.PP
+On a terminal the line is rewritten in place a few times a second. Written
+to a file or a pipe, a whole line is written every ten seconds instead, so a
+log of a scheduled capture stays readable. It is off unless asked for, and
+.B \-\-quiet
+does not turn it off: one option asks for silence about everything else,
+the other for this.
 .SH REBUILDING
 .B restate buildsheet
 writes a plain-text runbook for rebuilding the machine onto a blank disk:
@@ -714,6 +751,12 @@ air-gapped rebuilds.
 .RS
 .nf
 restate capture \-o /var/backups/web01.tgz
+.fi
+.RE
+.PP
+.RS
+.nf
+restate capture \-\-progress \-o /var/backups/web01.tgz
 .fi
 .RE
 .PP

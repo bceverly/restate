@@ -498,7 +498,7 @@ void test_image(void)
             struct rs_gzip           gz;
             struct rs_image_writer   gw;
             struct rs_index          empty;
-            int                      devnull = open("/dev/null", O_RDWR);
+            int                      devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
 
             rs_index_init(&empty);
             rs_gzip_set_paths(missing, 2);

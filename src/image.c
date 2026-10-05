@@ -15,6 +15,7 @@
 
 #include "gzip.h"
 #include "pgp.h"
+#include "progress.h"
 #include "sha256.h"
 
 static bool write_all(int fd, const void *data, size_t n)
@@ -134,6 +135,7 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
             break;
         }
         rs_sha256_update(&ctx, chunk, (size_t)n);
+        rs_progress_bytes((uint64_t)n);
         if (copied < size)
         {
             size_t take = (uint64_t)n < size - copied ? (size_t)n : (size_t)(size - copied);
@@ -277,6 +279,7 @@ static bool copy_content(int from, int to, struct rs_buf *err)
             rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
             return false;
         }
+        rs_progress_bytes((uint64_t)n);
     }
 }
 
@@ -356,7 +359,21 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
         {
             rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
         }
-        ok = ok && copy_content(iw->content_fd, gz.fd, err);
+        if (ok)
+        {
+            struct stat staged;
+            uint64_t    total = 0;
+
+            /* The one step whose total is known: the content staged during
+             * the walk, through gzip (and gpg) into the image. */
+            if (fstat(iw->content_fd, &staged) == 0)
+            {
+                total = (uint64_t)staged.st_size;
+            }
+            rs_progress_phase("writing", total);
+            ok = copy_content(iw->content_fd, gz.fd, err);
+            rs_progress_done();
+        }
         if (ok)
         {
             /* Every member in the content ends on a block boundary, so the

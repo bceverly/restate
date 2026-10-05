@@ -652,7 +652,8 @@ bool rs_installer_fetch(const struct rs_installer *in, const struct rs_fetch_opt
         for (;;)
         {
             rs_buf_reset(&why);
-            if (!curl(url, part, !fresh, !o->quiet && isatty(STDERR_FILENO), &code, &why, err))
+            if (!curl(url, part, !fresh, o->progress || (!o->quiet && isatty(STDERR_FILENO)),
+                      &code, &why, err))
             {
                 break;
             }

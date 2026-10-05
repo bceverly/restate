@@ -510,6 +510,7 @@ void test_installer(void)
     rs_buf_init(&err);
     machine(&m, "ubuntu", "26.04", "26.04.1 LTS", "x86_64", "server");
     CHECK(rs_installer_resolve(&m, &in, &err));
+    memset(&fo, 0, sizeof(fo));
     fo.cache = cache;
     fo.mirror = url;
     fo.quiet = true;

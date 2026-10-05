@@ -242,11 +242,31 @@ Options:
       --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
                           (vm) or on other hardware (metal) rather than the
                           same machine
+  -P, --progress          show progress on standard error: paths and bytes so
+                          far while walking, a percentage and time left while
+                          writing an image or downloading
   -q, --quiet             no warnings and no summary; errors are still reported
   -v, --verbose           report every path the rules skip, and why
   -h, --help              print this help and exit
   -V, --version           print the version and exit
 ```
+
+## Progress
+
+A whole-machine capture can read hundreds of gigabytes. `--progress` (`-P`)
+reports as it goes, on standard error, like `dd status=progress`:
+
+```console
+$ sudo restate capture --progress -o /backup/web01.tgz
+restate: walking  812345 paths  143 GiB  209 MiB/s  0:11:40  .../src/main.c
+restate: writing   62%  89 GiB of 143 GiB  305 MiB/s  0:03:01 left
+```
+
+The walk has no total until it is done, so it shows paths and bytes so far,
+the rate and the elapsed time; writing the image shows a percentage and the
+time left; `installer fetch` shows curl's progress bar. On a terminal the line
+updates in place; into a log it writes a line every ten seconds. It is off
+unless asked for, and works alongside `--quiet`.
 
 ## Installers
 
