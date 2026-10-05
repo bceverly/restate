@@ -524,7 +524,7 @@ static void network(struct rs_jval *machine)
     freeifaddrs(ifs);
 }
 
-static void mounts(struct rs_jval *machine)
+static void mount_table(struct rs_jval *machine)
 {
 #if defined(__NetBSD__)
     struct statvfs *mnt = NULL;
@@ -762,7 +762,7 @@ bool rs_bsd_describe(struct rs_jval *machine)
     note(machine, "on macOS the disks are described through Disk Arbitration, not libc, so "
                   "only the hardware, interfaces and mounts are recorded in this version");
 #endif
-    mounts(machine);
+    mount_table(machine);
     return true;
 }
 

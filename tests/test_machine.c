@@ -480,8 +480,14 @@ void test_machine(void)
         (void)mkdir(empty, 0755);
         memset(&m, 0, sizeof(m));
         rs_machine_describe(empty, empty, &m);
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__APPLE__)
+        /* No Linux files, so the kernel is asked the BSD way. */
+        CHECK(rs_jobject_get(&m, "mounts") != NULL);
+        CHECK(!notes_contain(&m, "and this is neither"));
+#else
         CHECK(notes_contain(&m, "read on Linux and the BSDs, and this is neither"));
         CHECK(rs_jobject_get(&m, "disks") == NULL);
+#endif
         rs_jval_free(&m);
         free(empty);
     }

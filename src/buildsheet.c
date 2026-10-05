@@ -938,28 +938,33 @@ static void volumes(struct sheet *s)
     free(handled);
 }
 
+/* A mounted volume, for sorting by where it is mounted. */
+struct mounted {
+    const struct rs_vol *vol;
+};
+
 static int by_mountpoint(const void *a, const void *b)
 {
-    const struct rs_vol *x = *(const struct rs_vol *const *)a;
-    const struct rs_vol *y = *(const struct rs_vol *const *)b;
+    const struct mounted *x = a;
+    const struct mounted *y = b;
 
-    return strcmp(x->mountpoint, y->mountpoint);
+    return strcmp(x->vol->mountpoint, y->vol->mountpoint);
 }
 
 static void install(struct sheet *s)
 {
-    const struct rs_vol **list = rs_xcalloc(s->l.nvols + 1, sizeof(*list));
-    size_t                n = 0;
-    size_t                i;
-    bool                  desktop = s->have_installer && eq(s->in.flavor, "desktop");
-    bool                  any_luks = false;
+    struct mounted *list = rs_xcalloc(s->l.nvols + 1, sizeof(*list));
+    size_t          n = 0;
+    size_t          i;
+    bool            desktop = s->have_installer && eq(s->in.flavor, "desktop");
+    bool            any_luks = false;
 
     heading(s, "Install onto that layout");
     for (i = 0; i < s->l.nvols; i++)
     {
         if (kept(s, i) && s->l.vols[i].mountpoint)
         {
-            list[n++] = &s->l.vols[i];
+            list[n++].vol = &s->l.vols[i];
         }
         any_luks = any_luks || (kept(s, i) && s->l.vols[i].kind == RS_VOL_LUKS);
     }
@@ -980,7 +985,7 @@ static void install(struct sheet *s)
     say(s, "%s", "");
     for (i = 0; i < n; i++)
     {
-        const struct rs_vol *v = list[i];
+        const struct rs_vol *v = list[i].vol;
         bool                 swap = strcmp(v->mountpoint, "[swap]") == 0;
 
         say(s, "    %-22s %-32s %s", swap ? "swap" : v->mountpoint, v->path,
