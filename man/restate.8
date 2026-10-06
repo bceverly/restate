@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "October 5, 2026" "restate 0.9.3.1" "System Manager's Manual"
+.TH RESTATE 8 "October 6, 2026" "restate 0.9.3.1" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -626,6 +626,11 @@ where
 .B O_NOATIME
 is available to the file's owner and to root; reading a symbolic link's
 target does, and nothing can prevent that.
+.PP
+A file written to while it is copied \- a log, usually \- is kept as it
+was when its copy began, with a digest of what was kept, and a warning says
+so; it is not counted as unreadable. One that is cut short while copied, or
+whose reading fails, is recorded as unreadable, and the exit status is 3.
 .PP
 An image can hold keys \- a LUKS key file under
 .IR /etc ,

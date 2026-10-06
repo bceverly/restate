@@ -1188,6 +1188,10 @@ static void vm(struct sheet *s)
     say(s, "%s", "will hold, and it gets a modest share of a host -- at most 8 GiB and 4 CPUs:");
     say(s, "%s", "");
     say(s, "    virt-install --name %s \\", host ? host : "restored");
+    /* q35: its CD drives are SATA. On the older "pc" machine they are IDE,
+     * which current installers' initrds cannot see, and the live system
+     * then cannot find itself. */
+    say(s, "%s", "        --machine q35 \\");
     say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 " --cpu host-passthrough \\", vm_mib,
         vm_cpus);
     for (d = 0; d < s->l.ndisks; d++)

@@ -73,6 +73,14 @@ enum rs_hash_state {
     RS_HASH_UNREADABLE    /* a regular file that could not be read */
 };
 
+/* How copying a file's content into an image went; not written to the index. */
+enum rs_copy {
+    RS_COPY_OK = 0,
+    RS_COPY_GREW,         /* written to while read: kept as it was at the start */
+    RS_COPY_SHRANK,       /* cut short while read: what is stored is not the file */
+    RS_COPY_READ_ERROR    /* a read failed: copy_errno says how */
+};
+
 struct rs_entry {
     char              *path;     /* absolute in the scanned tree */
     char              *target;   /* a symlink's target, else NULL */
@@ -95,6 +103,8 @@ struct rs_entry {
     enum rs_class      cls;
     enum rs_hash_state hash_state;
     char               hash[RS_SHA256_HEX_SIZE];
+    enum rs_copy       copy;       /* see rs_copy; transient */
+    int                copy_errno;
 };
 
 struct rs_index {

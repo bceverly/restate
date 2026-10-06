@@ -234,6 +234,12 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
     {
         (void)fprintf(stderr, "restate: hashed %" PRIu64 " bytes\n", st->bytes_hashed);
     }
+    if (st->grew > 0)
+    {
+        (void)fprintf(stderr, "restate: %" PRIu64 " files were written to while they were "
+                      "copied (logs, usually), and are kept as they were when the copy "
+                      "began\n", st->grew);
+    }
     if (st->unreadable > 0)
     {
         (void)fprintf(stderr, "restate: %" PRIu64 " paths could not be read; "

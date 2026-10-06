@@ -273,7 +273,28 @@ const char *rs_installer_default_cache(void)
 #endif
 }
 
-/* mkdir -p, each new directory mode 0755 (0700 if `private`). */
+/*
+ * Sets the mode of what is at `path` -- through a descriptor, opened without
+ * following a symbolic link, so nothing put in its place between its making
+ * and this can take the change somewhere else.
+ */
+static void set_mode(const char *path, mode_t mode)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+
+    if (fd >= 0)
+    {
+        (void)fchmod(fd, mode);
+        (void)close(fd);
+    }
+}
+
+/*
+ * mkdir -p, each new directory mode 0755 (0700 if `private`) -- set with
+ * chmod, since restate's umask of 077 would otherwise make every one private,
+ * and an installer image is public data a hypervisor running as someone else
+ * has to read.
+ */
 static bool make_dirs(const char *path, bool private_dir, struct rs_buf *err)
 {
     char  *p = rs_xstrdup(path);
@@ -284,7 +305,10 @@ static bool make_dirs(const char *path, bool private_dir, struct rs_buf *err)
         if (p[i] == '/')
         {
             p[i] = '\0';
-            if (mkdir(p, 0755) != 0 && errno != EEXIST)
+            if (mkdir(p, 0755) == 0)
+            {
+                set_mode(p, 0755);
+            } else if (errno != EEXIST)
             {
                 rs_buf_addf(err, "%s: %s", p, strerror(errno));
                 free(p);
@@ -293,7 +317,10 @@ static bool make_dirs(const char *path, bool private_dir, struct rs_buf *err)
             p[i] = '/';
         }
     }
-    if (mkdir(p, private_dir ? 0700 : 0755) != 0 && errno != EEXIST)
+    if (mkdir(p, private_dir ? 0700 : 0755) == 0)
+    {
+        set_mode(p, private_dir ? 0700 : 0755);
+    } else if (errno != EEXIST)
     {
         rs_buf_addf(err, "%s: %s", p, strerror(errno));
         free(p);
@@ -301,6 +328,32 @@ static bool make_dirs(const char *path, bool private_dir, struct rs_buf *err)
     }
     free(p);
     return true;
+}
+
+/*
+ * Opens up the default cache, which a version of restate before this one
+ * created readable by root alone: its directories 0755. Only the default's,
+ * which restate owns; a --cache directory is left as its owner made it.
+ */
+static void open_default_cache(const struct rs_installer *in)
+{
+    const char *root = rs_installer_default_cache();
+    char       *parent = rs_xstrdup(root);
+    char       *slash = strrchr(parent, '/');
+    char       *vendor = rs_xasprintf("%s/%s", root, in->vendor);
+    char       *release = rs_xasprintf("%s/%s/%s", root, in->vendor, in->release);
+
+    if (slash && slash != parent)
+    {
+        *slash = '\0';
+        set_mode(parent, 0755);   /* /var/cache/restate */
+    }
+    set_mode(root, 0755);
+    set_mode(vendor, 0755);
+    set_mode(release, 0755);
+    free(parent);
+    free(vendor);
+    free(release);
 }
 
 /*
@@ -606,6 +659,10 @@ bool rs_installer_fetch(const struct rs_installer *in, const struct rs_fetch_opt
     {
         goto done;
     }
+    if (!o->cache)
+    {
+        open_default_cache(in);
+    }
 
     msg = rs_xasprintf("fetching the checksums from %s", base);
     progress(o, msg);
@@ -616,6 +673,8 @@ bool rs_installer_fetch(const struct rs_installer *in, const struct rs_fetch_opt
     {
         goto done;
     }
+    set_mode(sums, 0644);
+    set_mode(sig, 0644);
     msg = rs_xasprintf("SHA256SUMS is signed by %s", in->key->name);
     progress(o, msg);
     free(msg);
@@ -631,6 +690,7 @@ bool rs_installer_fetch(const struct rs_installer *in, const struct rs_fetch_opt
 
     if (hash_file(final, got) && strcmp(got, want) == 0)
     {
+        set_mode(final, 0644);
         msg = rs_xasprintf("%s is already downloaded and matches the signed checksum", name);
         progress(o, msg);
         free(msg);
@@ -673,6 +733,10 @@ bool rs_installer_fetch(const struct rs_installer *in, const struct rs_fetch_opt
         }
         rs_buf_free(&why);
         free(url);
+    }
+    if (ok)
+    {
+        set_mode(part, 0644);   /* public data: a hypervisor reads it */
     }
     if (ok && rename(part, final) != 0)
     {

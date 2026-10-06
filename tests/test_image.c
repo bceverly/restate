@@ -440,15 +440,24 @@ void test_image(void)
             CHECK(rs_image_store(&cw, &ce, fd, &fake, &err));
             (void)close(fd);
             CHECK_INT(ce.hash_state, RS_HASH_UNREADABLE);
+            CHECK_INT(ce.copy, RS_COPY_SHRANK);
             free(ce.stored);
             ce.stored = NULL;
 
-            /* It grew: there was more than the header promised. */
+            /* It grew: there was more than the header promised. Kept as it
+             * was when the copy began, with the digest of what is stored. */
             fake.st_size = 3;
             fd = open(f, O_RDONLY);
             CHECK(rs_image_store(&cw, &ce, fd, &fake, &err));
             (void)close(fd);
-            CHECK_INT(ce.hash_state, RS_HASH_UNREADABLE);
+            CHECK_INT(ce.hash_state, RS_HASH_PRESENT);
+            CHECK_INT(ce.copy, RS_COPY_GREW);
+            {
+                char want[RS_SHA256_HEX_SIZE];
+
+                rs_sha256_hex("set", 3, want);
+                CHECK_STR(ce.hash, want);
+            }
             CHECK_INT(cw.tar.offset % RS_TAR_BLOCK, 0);
             free(ce.stored);
             ce.stored = NULL;
@@ -459,6 +468,8 @@ void test_image(void)
             CHECK(rs_image_store(&cw, &ce, fd, &fake, &err));
             (void)close(fd);
             CHECK_INT(ce.hash_state, RS_HASH_UNREADABLE);
+            CHECK_INT(ce.copy, RS_COPY_READ_ERROR);
+            CHECK(ce.copy_errno != 0);
             free(ce.stored);
             ce.stored = NULL;
 

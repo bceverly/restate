@@ -80,6 +80,55 @@ static int quiet_scan(const void *arg)
     return unreadable;
 }
 
+/* A store that pretends each file's copy went one of the ways it can go,
+ * chosen by name, so the walk's reporting of each can be checked. */
+static bool pretend_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
+                          struct rs_buf *err)
+{
+    (void)ctx;
+    (void)fd;
+    (void)st;
+    (void)err;
+    if (e->type != 'f')
+    {
+        return true;
+    }
+    e->hash_state = RS_HASH_PRESENT;
+    e->copy = RS_COPY_OK;
+    if (strstr(e->path, "hosts"))
+    {
+        e->copy = RS_COPY_GREW;
+    } else if (strstr(e->path, "empty"))
+    {
+        e->hash_state = RS_HASH_UNREADABLE;
+        e->copy = RS_COPY_SHRANK;
+    } else if (strstr(e->path, "tool"))
+    {
+        e->hash_state = RS_HASH_UNREADABLE;
+        e->copy = RS_COPY_READ_ERROR;
+        e->copy_errno = EIO;
+    }
+    return true;
+}
+
+static int scan_pretending(const void *arg)
+{
+    struct rs_scan_opts  o = *(const struct rs_scan_opts *)arg;
+    struct rs_scan_stats st;
+    struct rs_index      m;
+    struct rs_buf        err;
+    bool                 ok;
+
+    o.store = pretend_store;
+    o.store_baseline = true;
+    rs_index_init(&m);
+    rs_buf_init(&err);
+    ok = rs_scan(&o, &m, &st, &err);
+    rs_index_free(&m);
+    rs_buf_free(&err);
+    return ok && st.grew == 1 && st.unreadable == 2 ? 1 : 0;
+}
+
 void test_scan(void)
 {
     char                  *root = rs_test_tmpdir();
@@ -130,6 +179,19 @@ void test_scan(void)
     CHECK_INT(st.by_class[RS_CLASS_BASELINE], 2);
     CHECK(st.bytes_hashed > 0);
     rs_index_free(&m);
+
+    TEST_CASE("scan: a file written to while copied is kept; one cut short is not");
+    {
+        char *out = NULL;
+        char *errs = NULL;
+
+        CHECK_INT(rs_test_capture(scan_pretending, &o, &out, &errs), 1);
+        CHECK_CONTAINS(errs, "/etc/hosts: written to while it was being copied; kept as it was");
+        CHECK_CONTAINS(errs, "/etc/empty: cut short while it was being copied");
+        CHECK_CONTAINS(errs, "/usr/tool: Input/output error");
+        free(out);
+        free(errs);
+    }
 
     TEST_CASE("scan: --all keeps expendable paths, --no-hash keeps no digests");
     o.all = true;

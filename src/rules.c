@@ -66,6 +66,7 @@ static const struct builtin linux_rules[] = {
     { E, "/var/lock",              "lock files from the running system" },
     { E, "/mnt",                   "mount points for other filesystems" },
     { E, "/media",                 "removable media" },
+    { E, "/cdrom",                 "where the installer mounted its own media" },
     { E, "/swapfile*",             "swap files: /swapfile, /swapfile2 ... (they can hold secrets)" },
     { E, "/swap.img",              "swap, as the Ubuntu installer names it" },
     { B, "/usr",                   "installed by the distribution and its packages" },
@@ -85,9 +86,18 @@ static const struct builtin linux_rules[] = {
     { B, "/var/lib/rpm",           "the package database, rebuilt by reinstalling packages" },
     { B, "/var/lib/pacman",        "the package database, rebuilt by reinstalling packages" },
     { X, "/var/lib/apt/lists",     "package indexes, refetched by apt update" },
-    { X, "/var/lib/snapd/snaps",   "snap images, refetched from the store" },
-    { X, "/var/lib/snapd/cache",   "snapd's download cache" },
+    /* snapd all or nothing: its database without the snaps it describes
+     * restores a system that believes they are installed and fails to mount
+     * every one. The snaps' own data -- /var/snap, ~/snap -- is kept. */
+    { X, "/var/lib/snapd",         "snapd's database and snap images, rebuilt as snaps are installed" },
     { X, "/snap",                  "mounted snap images, recreated by snapd" },
+    { X, "/etc/systemd/system/snap-*", "mount units snapd generates for installed snaps" },
+    { X, "/etc/systemd/system/snap.*", "services snapd generates for installed snaps" },
+    { X, "/etc/systemd/system/*.wants/snap-*", "snapd's own enablement links" },
+    { X, "/etc/systemd/system/*.wants/snap.*", "snapd's own enablement links" },
+    /* dpkg's, through update-alternatives, and pointing into packages:
+     * restored onto a system without them, every link dangles. */
+    { B, "/etc/alternatives",      "symlinks dpkg keeps, rebuilt as packages are installed" },
     { X, "/var/lib/flatpak",       "flatpak apps and runtimes, installed again" },
     { S, "/var/lib/flatpak/repo/config", "flatpak's remotes" },
     { S, "/var/lib/flatpak/overrides", "flatpak permission overrides" },
@@ -103,7 +113,6 @@ static const struct builtin linux_rules[] = {
     { S, "/var/lib/containers/storage/volumes", "Podman volumes: the data containers keep" },
     { X, "/var/lib/libvirt/boot",  "installer images libvirt boots from, downloaded again" },
     { X, "/var/lib/libvirt/qemu/save", "suspended VMs' memory; without it a VM boots afresh" },
-    { X, "/var/lib/snapd/seed",    "the snaps the installer seeded, downloaded again" },
     { X, "/var/snap/lxd/common/lxd/images", "LXD's image cache; the containers themselves stay" },
     { X, "/usr/share/ollama/.ollama/models", "Ollama's model weights, pulled again" },
 };

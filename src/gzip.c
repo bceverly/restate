@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -57,20 +58,27 @@ bool rs_gzip_compress(int out_fd, struct rs_gzip *gz, struct rs_buf *err)
 {
     /* -n leaves out the name and timestamp gzip would otherwise record; pigz
      * takes the same options and writes the same format. */
-    static char     gzip_name[] = "gzip";
-    static char     pigz_name[] = "pigz";
     static char     a1[] = "-c";
     static char     a2[] = "-n";
     static char     a3[] = "-6";
-    bool            parallel = rs_gzip_parallel();
-    char           *argv[] = { parallel ? pigz_name : gzip_name, a1, a2, a3, NULL };
+    enum rs_program prog = rs_gzip_parallel() ? RS_PROG_PIGZ : RS_PROG_GZIP;
+    const char     *path = rs_program_path(prog);
+    const char     *base = path ? strrchr(path, '/') : NULL;
+    /* Started as the file it is: some gzips (OpenBSD's) are several programs
+     * in one and choose by name. */
+    char           *name = rs_xstrdup(base ? base + 1 : rs_program_name(prog));
+    char           *argv[] = { name, a1, a2, a3, NULL };
     int             p[2];
+    bool            ok;
 
     if (!make_pipe(p, err))
     {
+        free(name);
         return false;
     }
-    if (!rs_spawn(parallel ? RS_PROG_PIGZ : RS_PROG_GZIP, argv, p[0], out_fd, -1, &gz->pid, err))
+    ok = rs_spawn(prog, argv, p[0], out_fd, -1, &gz->pid, err);
+    free(name);
+    if (!ok)
     {
         (void)close(p[0]);
         (void)close(p[1]);

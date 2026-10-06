@@ -172,6 +172,21 @@ static char *child_path(const char *parent, const char *name)
     return rs_xasprintf("%s/%s", parent, name);
 }
 
+static void unreadable_because(struct walk *w, const char *path, const char *why)
+{
+    struct rs_buf shown;
+
+    if (w->opts->count_only)
+    {
+        return;
+    }
+    w->stats->unreadable++;
+    rs_buf_init(&shown);
+    rs_escape(&shown, path);
+    rs_warn("%s: %s", shown.data, why);
+    rs_buf_free(&shown);
+}
+
 static void unreadable(struct walk *w, const char *path, int err)
 {
     struct rs_buf shown;
@@ -185,6 +200,20 @@ static void unreadable(struct walk *w, const char *path, int err)
     rs_buf_init(&shown);
     rs_escape(&shown, path);
     rs_warn("%s: %s", shown.data, strerror(err));
+    rs_buf_free(&shown);
+}
+
+/* A file written to while it was copied: kept as it was when the copy began,
+ * which for a log -- the usual case -- is all of it but the last few lines. */
+static void grew(struct walk *w, const char *path)
+{
+    struct rs_buf shown;
+
+    w->stats->grew++;
+    rs_buf_init(&shown);
+    rs_escape(&shown, path);
+    rs_warn("%s: written to while it was being copied; kept as it was when the copy began",
+            shown.data);
     rs_buf_free(&shown);
 }
 
@@ -358,9 +387,18 @@ static bool file_content(struct walk *w, int dirfd, const char *name,
         if (e->hash_state == RS_HASH_PRESENT)
         {
             w->stats->bytes_hashed += e->size;
+            if (e->copy == RS_COPY_GREW)
+            {
+                grew(w, e->path);
+            }
+        } else if (e->copy == RS_COPY_SHRANK)
+        {
+            /* Truncated while read: ESTALE's "stale file" is the nearest
+             * the system's own messages come, so say it plainly instead. */
+            unreadable_because(w, e->path, "cut short while it was being copied");
         } else
         {
-            unreadable(w, e->path, EIO);
+            unreadable(w, e->path, e->copy_errno ? e->copy_errno : EIO);
         }
         return true;
     }

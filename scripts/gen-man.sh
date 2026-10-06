@@ -657,6 +657,11 @@ where
 is available to the file's owner and to root; reading a symbolic link's
 target does, and nothing can prevent that.
 .PP
+A file written to while it is copied \- a log, usually \- is kept as it
+was when its copy began, with a digest of what was kept, and a warning says
+so; it is not counted as unreadable. One that is cut short while copied, or
+whose reading fails, is recorded as unreadable, and the exit status is 3.
+.PP
 An image can hold keys \- a LUKS key file under
 .IR /etc ,
 SSH host keys, TLS private keys \- so

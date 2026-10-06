@@ -103,10 +103,16 @@ static char *member_name(const char *path)
 }
 
 /*
- * Copies exactly `size` bytes of `fd` into the archive, hashing everything
- * read. A file that shrinks is padded with zeros and one that grows is cut
- * off -- the tar header has already promised `size` -- and either way the
- * digest is marked unreadable, because the stored bytes are not the file.
+ * Copies exactly `size` bytes of `fd` into the archive -- the tar header has
+ * already promised that many -- hashing exactly what is stored.
+ *
+ * A file that grows while it is read (a log being written to) is kept as it
+ * was when the copy began: its first `size` bytes, a consistent prefix, with
+ * a digest of those bytes; e->copy says it grew, so it can be reported, and
+ * the rest is left for the next capture rather than chased to an end that
+ * keeps moving. A file that shrinks, or whose read fails, is padded with
+ * zeros to the promised size and its digest marked unreadable, because what
+ * is stored then is not the file.
  */
 static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, uint64_t size)
 {
@@ -114,12 +120,15 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
     unsigned char              chunk[65536];
     struct rs_sha256           ctx;
     uint64_t                   copied = 0;
-    bool                       intact = true;
 
+    e->copy = RS_COPY_OK;
+    e->copy_errno = 0;
     rs_sha256_init(&ctx);
     for (;;)
     {
-        ssize_t n = read(fd, chunk, sizeof(chunk));
+        size_t  want = copied < size && size - copied < sizeof(chunk) ? (size_t)(size - copied)
+                                                                      : sizeof(chunk);
+        ssize_t n = read(fd, chunk, want);
 
         if (n < 0)
         {
@@ -127,36 +136,31 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
             {
                 continue;
             }
-            intact = false;
+            e->copy = RS_COPY_READ_ERROR;
+            e->copy_errno = errno;
             break;
         }
         if (n == 0)
         {
             break;
         }
-        rs_sha256_update(&ctx, chunk, (size_t)n);
         rs_progress_bytes((uint64_t)n);
-        if (copied < size)
+        if (copied >= size)
         {
-            size_t take = (uint64_t)n < size - copied ? (size_t)n : (size_t)(size - copied);
-
-            if (!rs_tar_data(&iw->tar, chunk, take))
-            {
-                return false;
-            }
-            copied += take;
-            if (take < (size_t)n)
-            {
-                intact = false;   /* it grew */
-            }
-        } else
-        {
-            intact = false;
+            /* Read past what the header promised: it grew. */
+            e->copy = RS_COPY_GREW;
+            break;
         }
+        rs_sha256_update(&ctx, chunk, (size_t)n);
+        if (!rs_tar_data(&iw->tar, chunk, (size_t)n))
+        {
+            return false;
+        }
+        copied += (uint64_t)n;
     }
-    if (copied < size)
+    if (copied < size && e->copy == RS_COPY_OK)
     {
-        intact = false;   /* it shrank, or a read failed */
+        e->copy = RS_COPY_SHRANK;
     }
     while (copied < size)
     {
@@ -169,7 +173,8 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
         copied += take;
     }
     rs_sha256_final(&ctx, e->hash);
-    e->hash_state = intact ? RS_HASH_PRESENT : RS_HASH_UNREADABLE;
+    e->hash_state = (e->copy == RS_COPY_OK || e->copy == RS_COPY_GREW) ? RS_HASH_PRESENT
+                                                                       : RS_HASH_UNREADABLE;
     return rs_tar_pad(&iw->tar);
 }
 

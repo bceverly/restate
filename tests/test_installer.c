@@ -515,7 +515,24 @@ void test_installer(void)
     fo.mirror = url;
     fo.quiet = true;
 
-    TEST_CASE("installer: fetch, verify, and keep");
+    TEST_CASE("installer: fetch, verify, and keep, readable by a hypervisor");
+    {
+        /* restate runs with umask 077; the cache must come out readable. */
+        mode_t      old = umask(077);
+        struct stat sb;
+        char       *rel = rs_xasprintf("%s/ubuntu/26.04", cache);
+        char       *sums = rs_xasprintf("%s/SHA256SUMS", rel);
+
+        CHECK(rs_installer_fetch(&in, &fo, &path, &err));
+        (void)umask(old);
+        CHECK(path && stat(path, &sb) == 0 && (sb.st_mode & 0777) == 0644);
+        CHECK(stat(rel, &sb) == 0 && (sb.st_mode & 0777) == 0755);
+        CHECK(stat(sums, &sb) == 0 && (sb.st_mode & 0777) == 0644);
+        free(rel);
+        free(sums);
+        free(path);
+        path = NULL;
+    }
     CHECK(rs_installer_fetch(&in, &fo, &path, &err));
     CHECK_STR(err.data ? err.data : "", "");
     CHECK(path && strstr(path, "/ubuntu/26.04/ubuntu-26.04.1-live-server-amd64.iso"));

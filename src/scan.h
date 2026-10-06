@@ -71,6 +71,7 @@ struct rs_scan_stats {
     uint64_t skipped_sockets;
     uint64_t skipped_mounts;
     uint64_t unreadable;
+    uint64_t grew;            /* kept as they were when their copy began */
     uint64_t bytes_hashed;
     uint64_t stored;
 };

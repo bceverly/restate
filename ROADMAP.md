@@ -53,6 +53,38 @@ running 26.04 would differ from its installer in nearly every file. Instead:
 
 ## Next — the package baseline (Ubuntu first)
 
+What the first full restore -- this laptop, rebuilt into a VM from its image,
+2026-10-06 -- showed this stage has to do. Of 234 packages installed by hand,
+156 were missing afterwards (Postgres, Docker, VS Code, Chrome, libvirt and
+QEMU, OpenJDK, Node.js, compilers, nordlayer ...), with 1,622 dependencies
+under them; the third-party APT sources (Chrome, VS Code, HashiCorp,
+NodeSource, Tailscale, a PPA ...) came back with /etc, so the names alone
+would bring most of it back. Units enabled for programs no longer installed
+fail at boot until their packages return. And two things restored on their
+own did harm, and are now left out until this stage puts them back properly:
+/etc/alternatives (392 links into missing packages, `awk` among them) and
+snapd's database without its snaps (32 snaps listed, 48 mount units failing).
+
+Then the 156 were installed by name, in that VM, from the restored sources:
+144 came back. What did not, and what went wrong, is this stage's to-do list:
+
+- Repository keys: five sources (NodeSource, HashiCorp, nordlayer, Tailscale,
+  VS Code) name keys under /usr/share/keyrings -- baseline, so not kept --
+  and were refused as unsigned. Every source's key has to be recorded, from
+  wherever its signed-by points.
+- Origins: with NodeSource refused, nodejs quietly came from the Ubuntu
+  archive instead, another version. Each package's origin (and version) has
+  to be recorded and insisted on.
+- Packages from no repository at all -- chef, osquery, otelcol-contrib,
+  veracrypt, zoom, installed from downloaded .debs -- cannot be found by
+  name: keep the .deb, or where it came from.
+- Order: packages first, then the kept files. Laying the files down first
+  made three packages fail to configure: a conffile dpkg stopped to ask
+  about (fwupd), and a file already where libvirt places a diversion. When a
+  package's own conffile and the kept one differ, the kept one wins.
+- /etc/alternatives: the manual choices among them have to be put back after
+  the packages providing them are installed.
+
 - [ ] **System identity:** distribution, release, architecture, the original
       install media, and the type — desktop, server, minimal, cloud — from
       the installed metapackages

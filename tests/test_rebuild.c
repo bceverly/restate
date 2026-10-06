@@ -427,6 +427,7 @@ static void sheet_cases(void)
     TEST_CASE("buildsheet: as a virtual machine");
     s = sheet(&m, RS_TARGET_VM, NULL);
     CHECK_CONTAINS(s, "virt-install --name web01");
+    CHECK_CONTAINS(s, "--machine q35");
     CHECK_CONTAINS(s, "--memory 8192 --vcpus 4");
     CHECK_CONTAINS(s, "The original had 32 GiB of memory and 16 CPUs");
     CHECK_CONTAINS(s, "--boot uefi");
