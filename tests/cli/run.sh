@@ -194,6 +194,45 @@ check "machine -o writes the file" test -s machine.json
 check "and it is private" test "$(file_mode machine.json)" = "600"
 
 # ---------------------------------------------------------------------------
+# packages
+# ---------------------------------------------------------------------------
+mkdir -p pkgtree/var/lib/dpkg pkgtree/etc/apt pkgtree/var/lib/apt/lists
+cat > pkgtree/var/lib/dpkg/status <<'DPKG'
+Package: hello
+Status: install ok installed
+Architecture: amd64
+Version: 2.10-3
+
+Package: by-hand
+Status: install ok installed
+Architecture: amd64
+Version: 1.0
+DPKG
+echo 'deb [signed-by=/etc/apt/k.gpg] http://deb.example.com/debian stable main' \
+  > pkgtree/etc/apt/sources.list
+printf 'key' > pkgtree/etc/apt/k.gpg
+printf 'Package: hello\nArchitecture: amd64\nVersion: 2.10-3\n' \
+  > pkgtree/var/lib/apt/lists/deb.example.com_debian_dists_stable_main_binary-amd64_Packages
+expect 0 "packages" -- "$BIN" packages --root pkgtree
+contains "$OUT" '"name": "hello"' "packages lists what dpkg installed"
+contains "$OUT" '"http://deb.example.com/debian stable/main"' "and where it came from"
+contains "$OUT" '"unavailable": "local"' "and what no repository has"
+contains "$OUT" '"path": "/etc/apt/k.gpg"' "and the key the repository is signed with"
+if command -v python3 > /dev/null 2>&1; then
+  check "the inventory is valid JSON" \
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["apt"]["count"] == 2' < out.txt
+fi
+expect 0 "packages -o" -- "$BIN" packages --root pkgtree -o packages.json
+check "packages -o writes the file" test -s packages.json
+expect 0 "scan records the inventory" -- "$BIN" scan --root pkgtree -o pkgindex.json
+expect 0 "packages IMAGE" -- "$BIN" packages pkgindex.json
+contains "$OUT" '"name": "by-hand"' "packages reads the inventory back from an index"
+printf '{"format": "restate-index", "version": 1, "entries": []}' > old-index.json
+expect 2 "packages of an old index" -- "$BIN" packages old-index.json
+contains "$ERR" "has no package inventory" "an index from before the inventory says so"
+expect 2 "packages of a missing file" -- "$BIN" packages no-such-index.json
+
+# ---------------------------------------------------------------------------
 # installer
 # ---------------------------------------------------------------------------
 cat > ubuntu.json <<'JSON'

@@ -18,6 +18,7 @@
  *     "content": "state",
  *     "count": 2,
  *     "machine": { ...disks, partitions, firmware; see machine.h... },
+ *     "packages": { ...apt, snap, flatpak, pip...; see packages.h... },
  *     "entries": [
  *       {"path": "/etc", "name": "etc", "type": "directory", ...},
  *       {"path": "/etc/hosts", "name": "hosts", "type": "file", ...}
@@ -119,6 +120,7 @@ struct rs_index {
     char            *content;   /* "none", "state" or "state+baseline" */
     bool             hashed;
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
+    struct rs_jval   packages;  /* what is installed, or null; see packages.h */
 };
 
 void rs_index_init(struct rs_index *ix);

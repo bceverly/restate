@@ -23,6 +23,9 @@ RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
 RS_CMD(CMD_MACHINE,  "machine",  "",           0,  0,
        "describe this machine: hardware, firmware, disks, partitions, encryption, "
        "LVM, RAID, mounts")
+RS_CMD(CMD_PACKAGES, "packages", "[IMAGE]",    0,  1,
+       "list what is installed, and where each package came from -- apt, snap, "
+       "flatpak, pip, npm, cargo -- here, or on the machine IMAGE was taken from")
 RS_CMD(CMD_INSTALLER, "installer", "[fetch] [IMAGE]", 0, 2,
        "show the installer that rebuilds this machine, or the one IMAGE was taken "
        "from; with fetch, download it and check its signature")

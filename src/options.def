@@ -18,7 +18,8 @@
  */
 
 RS_OPT('r', "root",             required_argument, "DIR",
-       "treat DIR as the root of the tree to scan or verify (default /)")
+       "treat DIR as the root of the tree to scan, verify, or list the packages of "
+       "(default /)")
 RS_OPT('o', "output",           required_argument, "FILE",
        "write to FILE instead of standard output; created mode 0600, replaced atomically")
 RS_OPT('R', "rules",            required_argument, "FILE",

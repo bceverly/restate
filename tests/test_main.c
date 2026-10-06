@@ -206,6 +206,7 @@ int main(void)
     test_index();
     test_image();
     test_machine();
+    test_packages();
     test_installer();
     test_rebuild();
     test_pgp();

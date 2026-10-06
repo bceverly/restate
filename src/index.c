@@ -40,6 +40,7 @@ void rs_index_free(struct rs_index *ix)
     free(ix->version);
     free(ix->content);
     rs_jval_free(&ix->machine);
+    rs_jval_free(&ix->packages);
     rs_index_init(ix);
 }
 
@@ -388,6 +389,11 @@ bool rs_index_write(const struct rs_index *ix, FILE *out)
         rs_buf_addstr(&b, ",\n  \"machine\": ");
         rs_json_write(&b, &ix->machine, 2, 1);
     }
+    if (ix->packages.type == RS_JOBJECT)
+    {
+        rs_buf_addstr(&b, ",\n  \"packages\": ");
+        rs_json_write(&b, &ix->packages, 2, 1);
+    }
     rs_buf_addstr(&b, ",\n  \"entries\": [");
     (void)fwrite(b.data, 1, b.len, out);
 
@@ -715,6 +721,20 @@ bool rs_index_parse(struct rs_index *ix, const char *text, size_t len,
                 if (ix->machine.type != RS_JOBJECT)
                 {
                     rs_buf_addf(err, "%s: \"machine\" is not an object", name);
+                    ok = false;
+                    break;
+                }
+            } else if (strcmp(key.data, "packages") == 0)
+            {
+                rs_jval_free(&ix->packages);
+                if (!rs_json_value(&jp, &ix->packages))
+                {
+                    ok = false;
+                    break;
+                }
+                if (ix->packages.type != RS_JOBJECT)
+                {
+                    rs_buf_addf(err, "%s: \"packages\" is not an object", name);
                     ok = false;
                     break;
                 }

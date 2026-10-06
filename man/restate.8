@@ -63,6 +63,9 @@ compare an image or index against the tree as it is now
 \fBmachine\fR
 describe this machine: hardware, firmware, disks, partitions, encryption, LVM, RAID, mounts
 .TP
+\fBpackages\fR \fI[IMAGE]\fR
+list what is installed, and where each package came from \-\- apt, snap, flatpak, pip, npm, cargo \-\- here, or on the machine IMAGE was taken from
+.TP
 \fBinstaller\fR \fI[fetch] [IMAGE]\fR
 show the installer that rebuilds this machine, or the one IMAGE was taken from; with fetch, download it and check its signature
 .TP
@@ -80,7 +83,7 @@ print the rules in effect, in the format \-\-rules reads
 .SH OPTIONS
 .TP
 \fB\-r\fR, \fB\-\-root\fR=\fIDIR\fR
-treat DIR as the root of the tree to scan or verify (default /)
+treat DIR as the root of the tree to scan, verify, or list the packages of (default /)
 .TP
 \fB\-o\fR, \fB\-\-output\fR=\fIFILE\fR
 write to FILE instead of standard output; created mode 0600, replaced atomically
@@ -368,6 +371,62 @@ are written for Linux in this version.
 An index of any other tree \- a disk mounted from another machine, a
 directory \- has no machine description, because the disks it would describe
 are this machine's, not that tree's.
+.SH PACKAGES
+A reinstall puts back the distribution's own packages; everything installed
+since \- by apt from the archive, a PPA or a vendor's repository, by snap or
+flatpak, by pip, npm or cargo \- has to be installed again, and the rules
+leave it out of an image, because a package manager puts it back. So every
+.B capture
+and
+.B scan
+records what is installed, and where it came from, in a
+.B """packages"""
+object.
+.B restate packages
+prints the same inventory on its own, of this tree or of the one an image
+was taken from. All of it is read from the package managers' own files,
+never by running them, so the inventory of a tree mounted from another disk
+is that tree's.
+.PP
+For apt it records every package dpkg has unpacked, with its version and
+architecture; whether it was installed by hand or as a dependency (from
+.IR /var/lib/apt/extended_states );
+whether it is held; and how far dpkg got with one it did not finish. It
+records every repository in
+.I /etc/apt/sources.list
+and
+.IR /etc/apt/sources.list.d ,
+in either format, with the key each is signed with, and every key file apt
+trusts \- whole, wherever it is, because a key under
+.I /usr/share/keyrings
+is not kept in an image, and apt refuses a repository whose key is missing.
+Only public keys are there to record. From apt's package lists it records
+which repositories each installed version can be had from again, and, for
+the ones none can, why:
+.B """superseded"""
+where a repository has another version of the package now, and
+.B """local"""
+where none has it at all \- it was installed from a
+.I .deb
+file, and only that file puts it back. The lists are as fresh as the last
+.BR "apt update" .
+.PP
+For snap it records each snap's revision, channel and confinement, from
+snapd's state, which only root can read; otherwise the revisions alone, from
+.IR /snap ,
+and a note. A snap installed from a file rather than the store is marked
+.BR """local""" .
+For flatpak it records the remotes and the apps of each installation, the
+system's and each user's. For pip, npm, cargo, pipx and Ruby gems it records
+what was installed outside any project: system-wide, and in the home
+directory of root and of each user who logs in. On OpenBSD and NetBSD it
+records the installed packages. Other package managers \- rpm, pacman, apk,
+Nix, Guix, Homebrew, conda, FreeBSD's
+.BR pkg ,
+macOS receipts \- are listed in
+.B """managers"""
+as present, with no inventory in this version, so that an image says what it
+is missing rather than leaving it out silently.
 .SH BASELINE
 .I Baseline
 means

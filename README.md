@@ -127,8 +127,8 @@ image, and diff afterwards to see what the upgrade changed.
 
 ### Coming
 
-These need the pieces on the [roadmap](ROADMAP.md) — package-aware capture,
-the build sheet and autoinstall file, and `restore`:
+These need the pieces still on the [roadmap](ROADMAP.md) — reinstalling the
+package inventory, package-aware capture, and `restore`:
 
 - **Bare-metal disaster recovery.** The disk dies: rebuild the machine from
   its build sheet or an unattended autoinstall file, and restore the image.
@@ -198,6 +198,9 @@ Commands:
                           now
   machine                 describe this machine: hardware, firmware, disks,
                           partitions, encryption, LVM, RAID, mounts
+  packages [IMAGE]        list what is installed, and where each package came
+                          from -- apt, snap, flatpak, pip, npm, cargo -- here,
+                          or on the machine IMAGE was taken from
   installer [fetch] [IMAGE]
                           show the installer that rebuilds this machine, or the
                           one IMAGE was taken from; with fetch, download it and
@@ -214,8 +217,8 @@ Commands:
                           reads
 
 Options:
-  -r, --root=DIR          treat DIR as the root of the tree to scan or verify
-                          (default /)
+  -r, --root=DIR          treat DIR as the root of the tree to scan, verify, or
+                          list the packages of (default /)
   -o, --output=FILE       write to FILE instead of standard output; created
                           mode 0600, replaced atomically
   -R, --rules=FILE        read more rules from FILE, applied after the built-in
@@ -271,6 +274,40 @@ terminal's width, and is drawn on the terminal even when output is going to
 a log through `tee` -- each phase's final line goes to the log as well. With no
 terminal (cron), it writes a plain line every ten seconds instead. Off unless
 asked for; works alongside `--quiet`.
+
+## Packages
+
+A reinstall puts back the distribution's own packages, and the image leaves
+out what a package manager puts back — so every capture and scan records what
+was installed since, and from where, and `restate packages` prints it:
+
+- **apt:** every package, version and architecture; installed by hand or as a
+  dependency; held, or left half-configured. Every repository, in either
+  sources format, and every key apt trusts — whole, wherever it is, because a
+  key in `/usr/share/keyrings` is not in the image and apt refuses a
+  repository without it. And which repository each installed version can be
+  had from again; for the ones none can, `"unavailable": "superseded"` (a
+  newer version replaced it) or `"local"` (installed from a `.deb`, and only
+  that file puts it back).
+- **snap:** revision, channel and confinement (channels need root); snaps
+  installed from a file are marked `"local"`.
+- **flatpak:** remotes and apps, system-wide and per user.
+- **pip, npm, cargo, pipx, gems:** what was installed outside any project,
+  system-wide and in each home.
+- **OpenBSD and NetBSD packages.** rpm, pacman, apk, Nix, Guix, Homebrew,
+  conda, FreeBSD's pkg and macOS receipts are noted as present, without an
+  inventory yet.
+
+```console
+$ restate packages | jq -c '.apt | {count, manual, superseded, local}'
+{"count":3184,"manual":234,"superseded":2,"local":5}
+$ restate packages laptop.tgz | jq -r '.apt.packages[] | select(.unavailable == "local") | .name'
+chef
+osquery
+otelcol-contrib
+veracrypt
+zoom
+```
 
 ## Installers
 
@@ -676,6 +713,7 @@ src/            the program: one module per concern
   gzip.c        gzip as a separate process
   run.c         running gzip, curl and gpgv: fixed paths, posix_spawn
   machine.c     the machine description: hardware, disks, encryption
+  packages.c    the package inventory: apt, snap, flatpak, pip, npm, cargo
   installer.c   which installer rebuilds a machine, and fetching it
   keys.c        the vendors' signing keys, pinned by fingerprint
   json.c        a strict JSON parser and writer

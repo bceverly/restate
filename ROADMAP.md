@@ -85,26 +85,37 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 - /etc/alternatives: the manual choices among them have to be put back after
   the packages providing them are installed.
 
-- [ ] **System identity:** distribution, release, architecture, the original
+- [x] **System identity:** distribution, release, architecture, the original
       install media, and the type — desktop, server, minimal, cloud — from
-      the installed metapackages
-- [ ] **Every package manager detected:** apt/dpkg, snap, flatpak, rpm,
+      the installed metapackages (the machine description's "system")
+- [x] **Every package manager detected:** apt/dpkg, snap, flatpak, rpm,
       pacman, apk, nix, guix, Homebrew, pip, npm, cargo, gem, conda, FreeBSD
-      pkg, OpenBSD and NetBSD packages, macOS receipts — which are present,
-      and an inventory of each
-- [ ] **The apt inventory:** every package, version and architecture; manual
-      or automatic; the source each version came from — the archive, a PPA, a
-      third-party repository, or nowhere (installed by hand); every source
-      definition and the key it is signed with. A PPA package is not backed
-      up: the image records "add `ppa:owner/name` with this key, install
-      these versions"
+      pkg, OpenBSD and NetBSD packages, macOS receipts — which are present
+      ("managers" in the inventory, `restate packages`)
+- [x] Inventories of apt, snap, flatpak, pip, npm, cargo, pipx, gems, and
+      OpenBSD and NetBSD packages
+- [ ] Inventories of the rest: rpm, pacman, apk, Nix, Guix, Homebrew, conda,
+      FreeBSD pkg (SQLite), macOS receipts
+- [x] **The apt inventory:** every package, version and architecture; manual
+      or automatic; held or half-configured; the repositories each installed
+      version can be had from, or that none can — superseded, or installed
+      from a `.deb`; every source definition, in either format, and every key
+      apt trusts, whole, from wherever signed-by points
+- [ ] **The apt inventory in the build sheet:** the repositories and keys to
+      add, then the packages to install, by name and version, with the ones
+      that cannot be had listed first
 - [ ] **Package-aware capture:** unmodified package files listed, not
       stored; modified ones (including edited conffiles) and files no
       package owns stored
 - [ ] **Package-aware diff:** upgrades and removals reported per package
-- [ ] **Fetchability:** which installed versions a restore could not get
-      back, and an option to keep their `.deb` files
-- [ ] snap revisions and channels; flatpak apps, branches and remotes
+- [ ] **Fetchability:** an option to keep the `.deb` files of the installed
+      versions no repository has (from /var/cache/apt/archives, or
+      snapshot.ubuntu.com for superseded ones); likewise snaps installed from
+      a file
+- [x] snap revisions, channels and confinement; flatpak apps, branches and
+      remotes
+- [ ] /etc/alternatives: the manual choices, put back once the packages
+      providing them are installed
 
 ## Then — the machine underneath
 

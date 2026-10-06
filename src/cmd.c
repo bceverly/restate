@@ -22,6 +22,7 @@
 #include "installer.h"
 #include "machine.h"
 #include "meta.h"
+#include "packages.h"
 #include "progress.h"
 #include "rules.h"
 #include "run.h"
@@ -313,6 +314,8 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     {
         rs_machine_describe("/", root, &m->machine);
     }
+    /* What is installed is in the tree's own files, wherever it is mounted. */
+    rs_packages_describe(root, &m->packages);
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
 
     rs_buf_init(&err);
@@ -888,6 +891,51 @@ static int emit(const struct rs_options *o, struct rs_buf *text)
     return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
+/*
+ * What is installed: in this tree, or in the one IMAGE was taken from. An
+ * image made before the inventory has none, and says so.
+ */
+int rs_cmd_packages(const struct rs_options *o)
+{
+    struct rs_jval packages;
+    struct rs_buf  text;
+
+    memset(&packages, 0, sizeof(packages));
+    if (o->nargs > 0)
+    {
+        struct rs_index ix;
+        struct rs_buf   err;
+
+        rs_index_init(&ix);
+        rs_buf_init(&err);
+        if (!rs_index_load(&ix, o->args[0], &err))
+        {
+            rs_error("%s", err.data);
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        rs_buf_free(&err);
+        if (ix.packages.type != RS_JOBJECT)
+        {
+            rs_error("%s has no package inventory: it was made by a restate older than 1.1",
+                     o->args[0]);
+            rs_index_free(&ix);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        rs_jval_copy(&packages, &ix.packages);
+        rs_index_free(&ix);
+    } else
+    {
+        rs_packages_describe(o->root ? o->root : "/", &packages);
+    }
+    rs_buf_init(&text);
+    rs_json_write(&text, &packages, 2, 0);
+    rs_buf_addc(&text, '\n');
+    rs_jval_free(&packages);
+    return emit(o, &text);
+}
+
 int rs_cmd_buildsheet(const struct rs_options *o)
 {
     const char          *image = o->nargs > 0 ? o->args[0] : NULL;
@@ -1045,6 +1093,8 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_verify(o);
     case CMD_MACHINE:
         return rs_cmd_machine(o);
+    case CMD_PACKAGES:
+        return rs_cmd_packages(o);
     case CMD_INSTALLER:
         return rs_cmd_installer(o);
     case CMD_BUILDSHEET:
