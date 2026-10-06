@@ -12,7 +12,9 @@
 #            runner, its SHA-256 checksums, and a signed build-provenance
 #            attestation (SLSA) that says which workflow made it from which
 #            commit
-#   publish  a GitHub release with the tarball, the checksums and the notes
+#   publish  a GitHub release with the tarball, the checksums and the notes:
+#            what changed -- the subject of every commit since the previous
+#            release tag -- then how to build, install and verify it
 #
 # Distribution packages come later: a Launchpad PPA for Ubuntu first, then the
 # BSDs and macOS. See ROADMAP.md. Until then the release is the source, which
@@ -178,6 +180,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The whole history and its tags: the notes list the commits since the
+      # previous release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
@@ -191,8 +201,26 @@ jobs:
           V: ${{ needs.build.outputs.version }}
         run: |
           set -eu
-          cat > notes.md <<NOTES
-          restate $V
+          # The release before this one: the newest version tag older than
+          # this tag, in version order.
+          PREV=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' |
+                 sort -V | awk -v t="$TAG" '$0 == t { print last; exit } { last = $0 }')
+          {
+            echo "restate $V"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "What changed since $PREV:"
+              echo
+              git log --no-merges --reverse --format='- %s' "$PREV..$TAG" -- \
+                | grep -v '^- Release v' || echo "- (no changes besides the version)"
+            else
+              echo "The first release."
+            fi
+            echo
+            echo "No publicly known vulnerability was fixed in this release unless a"
+            echo "line above says so; see SECURITY.md for how they are reported."
+          } > notes.md
+          cat >> notes.md <<NOTES
 
           Build and install from source (Ubuntu 26.04 and any Linux, the BSDs
           with gmake, macOS):

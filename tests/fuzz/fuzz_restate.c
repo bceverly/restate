@@ -44,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "diff.h"
 #include "glob.h"
@@ -52,6 +53,7 @@
 #include "json.h"
 #include "machine.h"
 #include "meta.h"
+#include "packages.h"
 #include "rules.h"
 #include "tar.h"
 #include "util.h"
@@ -320,6 +322,137 @@ static void fuzz_sums(const char *data, size_t len)
     free(name);
 }
 
+/*
+ * The package inventory reads files from the tree it describes, and a tree
+ * mounted from another machine says whatever it likes. So the input is laid
+ * out as such a tree -- its parts, between NULs, become dpkg's status, apt's
+ * extended states, a sources.list, a deb822 .sources file, a package list,
+ * snapd's state, /etc/passwd, an alternatives entry and a cargo record -- and
+ * the whole inventory is taken of it. The tree is made once and rewritten for
+ * each input.
+ */
+static const char *const pkg_files[] = {
+    "var/lib/dpkg/status",
+    "var/lib/apt/extended_states",
+    "etc/apt/sources.list",
+    "etc/apt/sources.list.d/fuzz.sources",
+    "var/lib/apt/lists/deb.example.com_dists_s_main_binary-amd64_Packages",
+    "var/lib/snapd/state.json",
+    "etc/passwd",
+    "var/lib/dpkg/alternatives/editor",
+    "home/u/.cargo/.crates2.json",
+};
+static const char *const pkg_dirs[] = {
+    "var", "var/lib", "var/lib/dpkg", "var/lib/dpkg/alternatives", "var/lib/apt",
+    "var/lib/apt/lists", "var/lib/snapd", "etc", "etc/apt", "etc/apt/sources.list.d",
+    "home", "home/u", "home/u/.cargo",
+};
+static char *pkg_root;
+
+static void pkg_cleanup(void)
+{
+    size_t i;
+
+    for (i = 0; pkg_root && i < sizeof(pkg_files) / sizeof(pkg_files[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/%s", pkg_root, pkg_files[i]);
+
+        (void)remove(path);
+        free(path);
+    }
+    for (i = sizeof(pkg_dirs) / sizeof(pkg_dirs[0]); pkg_root && i > 0; i--)
+    {
+        char *path = rs_xasprintf("%s/%s", pkg_root, pkg_dirs[i - 1]);
+
+        (void)remove(path);
+        free(path);
+    }
+    if (pkg_root)
+    {
+        (void)remove(pkg_root);
+    }
+    free(pkg_root);
+    pkg_root = NULL;
+}
+
+static bool pkg_tree(void)
+{
+    const char *tmp = getenv("TMPDIR"); /* Flawfinder: ignore */
+    size_t      i;
+
+    if (pkg_root)
+    {
+        return true;
+    }
+    pkg_root = rs_xasprintf("%s/restate-fuzz.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    if (!mkdtemp(pkg_root))
+    {
+        free(pkg_root);
+        pkg_root = NULL;
+        return false;
+    }
+    for (i = 0; i < sizeof(pkg_dirs) / sizeof(pkg_dirs[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/%s", pkg_root, pkg_dirs[i]);
+
+        (void)mkdir(path, 0700);
+        free(path);
+    }
+    (void)atexit(pkg_cleanup);
+    return true;
+}
+
+static void fuzz_packages(const char *text, size_t len)
+{
+    struct rs_jval inv;
+    struct rs_buf  missing;
+    const char    *p = text;
+    const char    *end = text + len;
+    size_t         i;
+    size_t         n;
+    char         **kept;
+
+    if (!pkg_tree())
+    {
+        return;
+    }
+    for (i = 0; i < sizeof(pkg_files) / sizeof(pkg_files[0]); i++)
+    {
+        const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
+        size_t      part = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
+        char       *path = rs_xasprintf("%s/%s", pkg_root, pkg_files[i]);
+        FILE       *fp = fopen(path, "w");
+
+        if (fp)
+        {
+            if (part > 0)
+            {
+                (void)fwrite(p, 1, part, fp);
+            }
+            (void)fclose(fp);
+        }
+        free(path);
+        p += part + (nul ? 1 : 0);
+    }
+    memset(&inv, 0, sizeof(inv));
+    rs_packages_describe(pkg_root, &inv);
+    rs_buf_init(&missing);
+    kept = rs_packages_keep(pkg_root, &inv, &n, &missing);
+    for (i = 0; i < n; i++)
+    {
+        free(kept[i]);
+    }
+    free(kept);
+    kept = rs_packages_apt_words(&inv, NULL, true, &n);
+    for (i = 0; i < n; i++)
+    {
+        free(kept[i]);
+    }
+    free(kept);
+    rs_buf_free(&missing);
+    rs_jval_free(&inv);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     const char *text;
@@ -329,7 +462,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 9)
+    switch (data[0] % 10)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -355,8 +488,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 7:
         fuzz_luks(text, size - 1);
         break;
-    default:
+    case 8:
         fuzz_sums(text, size - 1);
+        break;
+    default:
+        fuzz_packages(text, size - 1);
         break;
     }
     return 0;

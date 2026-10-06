@@ -26,6 +26,10 @@ bypasses either, for the rare honest reason.
 - `make test` passes: unit tests, end-to-end tests, the sanitizers, valgrind,
   and **at least 80% line coverage — overall and in every source file**. The
   gates can be raised, never lowered.
+- New behavior comes with tests that exercise it, and a fixed bug with a test
+  that fails without the fix: unit tests in `tests/test_*.c`, end-to-end
+  checks of the command line in `tests/cli/run.sh`. Coverage that only rises
+  because other code was deleted does not count.
 - `make security` is clean.
 - A new command or option is added to `src/commands.def` or `src/options.def`,
   and `make man` regenerates the manpage and the README's Usage block from it.
