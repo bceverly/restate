@@ -101,9 +101,11 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       version can be had from, or that none can — superseded, or installed
       from a `.deb`; every source definition, in either format, and every key
       apt trusts, whole, from wherever signed-by points
-- [ ] **The apt inventory in the build sheet:** the repositories and keys to
-      add, then the packages to install, by name and version, with the ones
-      that cannot be had listed first
+- [x] **The inventory in the build sheet:** /etc/apt and the keys outside
+      it, then the packages installed by hand pinned to their versions, holds,
+      the ones no repository has; snaps, flatpaks, pip, npm, pipx, cargo, gem
+- [ ] **The inventory in the autoinstall file:** the same, as late-commands,
+      so an unattended rebuild comes up with its packages
 - [ ] **Package-aware capture:** unmodified package files listed, not
       stored; modified ones (including edited conffiles) and files no
       package owns stored

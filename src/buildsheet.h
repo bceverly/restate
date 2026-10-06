@@ -10,7 +10,9 @@
  * RAID, LVM, filesystems and swap -- with the same UUIDs, so the /etc/fstab
  * and /etc/crypttab that come back with the files still name the right
  * volumes -- then how to point the installer at that layout, what to do after
- * it, and how to put the files back.
+ * it, how to install the packages again -- repositories and keys first,
+ * then each package at the version that was installed -- and how to put the
+ * files back.
  *
  * Nothing is run. Every command is printed for the person to read, check
  * against `lsblk`, and run, because every one of them destroys data.
@@ -25,9 +27,10 @@
 #include "util.h"
 
 struct rs_sheet_opts {
-    enum rs_target target;
-    const char    *image;    /* the image the sheet was made from, or NULL */
-    const char    *version;  /* restate's, for the heading */
+    enum rs_target        target;
+    const char           *image;      /* the image the sheet was made from, or NULL */
+    const char           *version;    /* restate's, for the heading */
+    const struct rs_jval *packages;   /* the package inventory (packages.h), or NULL */
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

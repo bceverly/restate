@@ -1142,6 +1142,605 @@ static void after(struct sheet *s)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* The packages                                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * `word` as one shell word. The inventory is read from the captured tree, and
+ * a version or a path in it is whatever that tree said: anything outside the
+ * characters package names, versions and paths are made of is quoted, so a
+ * line copied from the sheet runs only the command it shows.
+ */
+static void shell_word(struct rs_buf *b, const char *word)
+{
+    static const char safe[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                               "._+:=@/,-";
+    const char       *p;
+
+    if (word[0] != '\0' && word[0] != '-' && strspn(word, safe) == strlen(word))
+    {
+        rs_buf_addstr(b, word);
+        return;
+    }
+    rs_buf_addc(b, '\'');
+    for (p = word; *p; p++)
+    {
+        if (*p == '\'')
+        {
+            rs_buf_addstr(b, "'\\''");
+        } else
+        {
+            rs_buf_addc(b, *p);
+        }
+    }
+    rs_buf_addc(b, '\'');
+}
+
+/* A command whose arguments are wrapped to the page, a backslash ending each
+ * line but the last. */
+struct wrap {
+    struct sheet *s;
+    struct rs_buf line;
+    size_t        words;
+};
+
+static void wrap_start(struct wrap *w, struct sheet *s, const char *command)
+{
+    w->s = s;
+    w->words = 0;
+    rs_buf_init(&w->line);
+    rs_buf_addf(&w->line, "    %s", command);
+}
+
+static void wrap_word(struct wrap *w, const char *word)
+{
+    struct rs_buf q;
+
+    rs_buf_init(&q);
+    shell_word(&q, word);
+    if (w->words > 0 && w->line.len + 1 + q.len > 76)
+    {
+        say(w->s, "%s \\", w->line.data);
+        rs_buf_reset(&w->line);
+        rs_buf_addstr(&w->line, "        ");
+        rs_buf_addstr(&w->line, q.data);
+    } else
+    {
+        rs_buf_addc(&w->line, ' ');
+        rs_buf_addstr(&w->line, q.data);
+    }
+    w->words++;
+    rs_buf_free(&q);
+}
+
+/* Prints the command, if it got any arguments. */
+static void wrap_end(struct wrap *w)
+{
+    if (w->words > 0)
+    {
+        say(w->s, "%s", w->line.data);
+    }
+    rs_buf_free(&w->line);
+}
+
+static bool in_list(const struct rs_jval *arr, const char *name)
+{
+    size_t i;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        if (arr->items[i].type == RS_JSTRING && eq(arr->items[i].s, name))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool flag_set(const struct rs_jval *obj, const char *key)
+{
+    const struct rs_jval *v = rs_jobject_get(obj, key);
+
+    return v && v->type == RS_JBOOL && v->b;
+}
+
+/* The home directory a per-user installation is in: what comes before its
+ * "/.local/" or "/.cargo", or `where` itself. */
+static char *home_of(const char *where)
+{
+    const char *p = strstr(where, "/.local/");
+
+    p = p ? p : strstr(where, "/.cargo");
+    return p ? rs_xstrndup(where, (size_t)(p - where)) : rs_xstrdup(where);
+}
+
+/* Keys a fresh install puts back itself: the distribution's own. */
+static bool distro_key(const char *path)
+{
+    const char *base = strrchr(path, '/');
+
+    base = base ? base + 1 : path;
+    return rs_starts_with(base, "ubuntu-") || rs_starts_with(base, "debian-");
+}
+
+/* A key file, written back from the inventory with base64(1). */
+static void key_file(struct sheet *s, const struct rs_jval *k)
+{
+    const char   *path = rs_jobject_str(k, "path");
+    const char   *data = rs_jobject_str(k, "data");
+    struct rs_buf q;
+    size_t        len;
+    size_t        i;
+
+    if (!path || !data || strspn(data, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                       "0123456789+/=") != strlen(data))
+    {
+        return;
+    }
+    rs_buf_init(&q);
+    shell_word(&q, path);
+    say(s, "    base64 -d > %s <<'KEY'", q.data);
+    len = strlen(data);
+    for (i = 0; i < len; i += 64)
+    {
+        /* At the margin: base64 -d takes no indentation. */
+        say(s, "%.*s", (int)(len - i < 64 ? len - i : 64), data + i);
+    }
+    say(s, "%s", "KEY");
+    rs_buf_free(&q);
+}
+
+/* apt: its sources and keys, then the packages asked for, at their versions. */
+static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
+{
+    const struct rs_jval *keys = rs_jobject_get(apt, "keys");
+    const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
+    const struct rs_jval *archs = rs_jobject_get(apt, "architectures");
+    const struct rs_jval *skip = NULL;
+    const char           *native = archs && archs->n > 0 ? archs->items[0].s : NULL;
+    const char           *img = s->o->image ? s->o->image : "IMAGE.tgz";
+    struct wrap           w;
+    size_t                i;
+    size_t                nlocal = 0;
+    size_t                nsuperseded = 0;
+    size_t                nwritten = 0;
+    uint64_t              deps = 0;
+
+    if (s->o->target == RS_TARGET_VM)
+    {
+        skip = rs_jobject_get(s->sys, "hardware_packages");
+    } else if (s->o->target == RS_TARGET_METAL)
+    {
+        skip = rs_jobject_get(s->sys, "guest_packages");
+    }
+    say(s, "%s", "The repositories and the keys they are signed with first. /etc/apt comes");
+    say(s, "%s", "back from the image:");
+    say(s, "%s", "");
+    say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files/etc/apt", img);
+    for (i = 0; keys && keys->type == RS_JARRAY && i < keys->n; i++)
+    {
+        const struct rs_jval *k = &keys->items[i];
+        const char           *path = rs_jobject_str(k, "path");
+
+        if (!path)
+        {
+            continue;
+        }
+        if (flag_set(k, "missing"))
+        {
+            note(s, "The key %s was missing on the old machine: the repositories signed with it "
+                 "are refused until it is found.", path);
+        } else if (!rs_starts_with(path, "/etc/") && !distro_key(path))
+        {
+            if (nwritten++ == 0)
+            {
+                say(s, "%s", "");
+                say(s, "%s", "and the keys kept outside it, which the image does not hold:");
+                say(s, "%s", "");
+                say(s, "%s", "    mkdir -p /usr/share/keyrings");
+            }
+            key_file(s, k);
+        }
+    }
+    say(s, "%s", "");
+    say(s, "%s", "    apt-get update");
+
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+        const char           *why = rs_jobject_str(p, "unavailable");
+
+        if (flag_set(p, "manual") && eq(why, "local"))
+        {
+            nlocal++;
+        } else if (flag_set(p, "manual") && eq(why, "superseded"))
+        {
+            nsuperseded++;
+        }
+        deps += flag_set(p, "manual") ? 0 : 1;
+    }
+
+    say(s, "%s", "");
+    say(s, "%s", "Then the packages installed by hand, at the versions that were installed --");
+    say(s, "%s", "pinned, so each comes from the repository it came from before and not from");
+    say(s, "%s", "another that happens to have the name. Their dependencies come with them");
+    say(s, "(%" PRIu64 " were installed that way):", deps);
+    say(s, "%s", "");
+    wrap_start(&w, s, "apt-get install -y");
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+        const char           *name = rs_jobject_str(p, "name");
+        const char           *arch = rs_jobject_str(p, "architecture");
+        const char           *version = rs_jobject_str(p, "version");
+        const char           *why = rs_jobject_str(p, "unavailable");
+        char                 *word;
+        bool                  foreign = arch && !eq(arch, "all") && native && !eq(arch, native);
+
+        if (!name || !flag_set(p, "manual") || eq(why, "local") || in_list(skip, name))
+        {
+            continue;
+        }
+        if (why || !version)
+        {
+            word = rs_xasprintf("%s%s%s", name, foreign ? ":" : "", foreign ? arch : "");
+        } else
+        {
+            word = rs_xasprintf("%s%s%s=%s", name, foreign ? ":" : "", foreign ? arch : "",
+                                version);
+        }
+        wrap_word(&w, word);
+        free(word);
+    }
+    wrap_end(&w);
+
+    wrap_start(&w, s, "apt-mark hold");
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        if (flag_set(&pkgs->items[i], "hold") && rs_jobject_str(&pkgs->items[i], "name"))
+        {
+            wrap_word(&w, rs_jobject_str(&pkgs->items[i], "name"));
+        }
+    }
+    wrap_end(&w);
+
+    if (nsuperseded > 0)
+    {
+        say(s, "%s", "");
+        say(s, "%s", "No repository has these versions any more, so the current one is installed");
+        say(s, "%s", "instead (snapshot.ubuntu.com has old Ubuntu versions, if one matters):");
+        say(s, "%s", "");
+        for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+        {
+            const struct rs_jval *p = &pkgs->items[i];
+
+            if (flag_set(p, "manual") && eq(rs_jobject_str(p, "unavailable"), "superseded"))
+            {
+                say(s, "      %-32s was %s", rs_jobject_str(p, "name"),
+                    rs_jobject_str(p, "version") ? rs_jobject_str(p, "version") : "?");
+            }
+        }
+    }
+    if (nlocal > 0)
+    {
+        say(s, "%s", "");
+        say(s, "%s", "No repository has these at all: they were installed from .deb files. Get");
+        say(s, "%s", "each from its vendor (or from /var/cache/apt/archives on the old machine)");
+        say(s, "%s", "and install it with `apt-get install -y ./FILE.deb`:");
+        say(s, "%s", "");
+        for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+        {
+            const struct rs_jval *p = &pkgs->items[i];
+
+            if (flag_set(p, "manual") && eq(rs_jobject_str(p, "unavailable"), "local"))
+            {
+                say(s, "      %-32s %s", rs_jobject_str(p, "name"),
+                    rs_jobject_str(p, "version") ? rs_jobject_str(p, "version") : "");
+            }
+        }
+    }
+}
+
+/* Snaps the store has, by channel; the ones installed from a file, listed. */
+static void reinstall_snaps(struct sheet *s, const struct rs_jval *snaps)
+{
+    static const char *const implied[] = { "base", "core", "os", "snapd", "gadget", "kernel" };
+    size_t                   i;
+    size_t                   j;
+    bool                     any = false;
+    struct rs_buf            local;
+
+    rs_buf_init(&local);
+    for (i = 0; i < snaps->n; i++)
+    {
+        const struct rs_jval *sn = &snaps->items[i];
+        const char           *name = rs_jobject_str(sn, "name");
+        const char           *type = rs_jobject_str(sn, "type");
+        const char           *channel = rs_jobject_str(sn, "channel");
+        bool                  skip = !name;
+        struct rs_buf         line;
+
+        /* Bases and snapd come with the snaps that need them -- known by type,
+         * or, where snapd's state was not readable, by name. */
+        for (j = 0; type && j < sizeof(implied) / sizeof(implied[0]); j++)
+        {
+            skip = skip || eq(type, implied[j]);
+        }
+        if (!type && name)
+        {
+            skip = skip || eq(name, "snapd") || eq(name, "bare") ||
+                   (rs_starts_with(name, "core") &&
+                    strspn(name + 4, "0123456789") == strlen(name + 4));
+        }
+        if (skip)
+        {
+            continue;
+        }
+        if (flag_set(sn, "local"))
+        {
+            rs_buf_addf(&local, "      %s (revision %s)\n", name,
+                        rs_jobject_str(sn, "revision") ? rs_jobject_str(sn, "revision") : "?");
+            continue;
+        }
+        if (!any)
+        {
+            say(s, "%s", "");
+            say(s, "%s", "The snaps:");
+            say(s, "%s", "");
+            any = true;
+        }
+        rs_buf_init(&line);
+        rs_buf_addstr(&line, "    snap install ");
+        shell_word(&line, name);
+        if (channel)
+        {
+            rs_buf_addstr(&line, " --channel=");
+            shell_word(&line, channel);
+        }
+        if (flag_set(sn, "classic"))
+        {
+            rs_buf_addstr(&line, " --classic");
+        }
+        if (flag_set(sn, "devmode"))
+        {
+            rs_buf_addstr(&line, " --devmode");
+        }
+        if (flag_set(sn, "disabled"))
+        {
+            rs_buf_addstr(&line, " && snap disable ");
+            shell_word(&line, name);
+        }
+        say(s, "%s", line.data);
+        rs_buf_free(&line);
+    }
+    if (local.len)
+    {
+        say(s, "%s", "");
+        say(s, "%s", "These snaps were installed from files, not the store; install each from its");
+        say(s, "%s", "file with `snap install --dangerous FILE.snap`:");
+        say(s, "%s", "");
+        rs_buf_addstr(s->out, local.data);
+    }
+    rs_buf_free(&local);
+}
+
+/* "flatpak --user" where the installation is someone's own. */
+static void flatpak_cmd(struct rs_buf *line, const char *scope)
+{
+    rs_buf_addstr(line, "    flatpak");
+    if (scope && rs_starts_with(scope, "user "))
+    {
+        rs_buf_addstr(line, " --user");
+    }
+}
+
+static void reinstall_flatpak(struct sheet *s, const struct rs_jval *fp)
+{
+    const struct rs_jval *remotes = rs_jobject_get(fp, "remotes");
+    const struct rs_jval *apps = rs_jobject_get(fp, "apps");
+    size_t                i;
+
+    if (!apps || apps->type != RS_JARRAY || apps->n == 0)
+    {
+        return;
+    }
+    say(s, "%s", "");
+    say(s, "%s", "The flatpak apps; a --user line is run as the user whose home it was in:");
+    say(s, "%s", "");
+    for (i = 0; remotes && remotes->type == RS_JARRAY && i < remotes->n; i++)
+    {
+        const struct rs_jval *r = &remotes->items[i];
+        const char           *name = rs_jobject_str(r, "name");
+        const char           *url = rs_jobject_str(r, "url");
+        struct rs_buf         line;
+
+        if (!name || !url)
+        {
+            continue;
+        }
+        rs_buf_init(&line);
+        flatpak_cmd(&line, rs_jobject_str(r, "scope"));
+        rs_buf_addstr(&line, " remote-add --if-not-exists ");
+        shell_word(&line, name);
+        rs_buf_addc(&line, ' ');
+        shell_word(&line, url);
+        say(s, "%s    # %s", line.data, rs_jobject_str(r, "scope") ? rs_jobject_str(r, "scope") : "");
+        rs_buf_free(&line);
+    }
+    for (i = 0; i < apps->n; i++)
+    {
+        const struct rs_jval *a = &apps->items[i];
+        const char           *id = rs_jobject_str(a, "id");
+        const char           *branch = rs_jobject_str(a, "branch");
+        const char           *remote = rs_jobject_str(a, "remote");
+        struct rs_buf         line;
+        char                 *ref;
+
+        if (!id || !branch)
+        {
+            continue;
+        }
+        if (!remote)
+        {
+            note(s, "The flatpak app %s came from a remote that was not recorded: install it by "
+                 "hand.", id);
+            continue;
+        }
+        rs_buf_init(&line);
+        flatpak_cmd(&line, rs_jobject_str(a, "scope"));
+        rs_buf_addstr(&line, " install -y ");
+        shell_word(&line, remote);
+        rs_buf_addc(&line, ' ');
+        ref = rs_xasprintf("%s//%s", id, branch);
+        shell_word(&line, ref);
+        free(ref);
+        say(s, "%s    # %s", line.data, rs_jobject_str(a, "scope") ? rs_jobject_str(a, "scope") : "");
+        rs_buf_free(&line);
+    }
+}
+
+/*
+ * One language package manager's inventory, a command per place it was
+ * installed: `command` takes each package as its name, `sep`, and its version,
+ * and the ones in a home are installed by its owner with `user`.
+ */
+static void reinstall_lang(struct sheet *s, const struct rs_jval *arr, const char *what,
+                           const char *command, const char *user, const char *sep,
+                           const char *system_where)
+{
+    char  **wheres = NULL;
+    size_t  nwheres = 0;
+    size_t  i;
+    size_t  j;
+
+    if (!arr || arr->type != RS_JARRAY || arr->n == 0)
+    {
+        return;
+    }
+    for (i = 0; i < arr->n; i++)
+    {
+        const char *where = rs_jobject_str(&arr->items[i], "where");
+        bool        seen = false;
+
+        /* The distribution's own global packages come with its package. */
+        if (!where || (system_where && eq(where, system_where)))
+        {
+            continue;
+        }
+        for (j = 0; j < nwheres; j++)
+        {
+            seen = seen || eq(wheres[j], where);
+        }
+        if (!seen)
+        {
+            wheres = rs_xreallocarray(wheres, nwheres + 1, sizeof(*wheres));
+            wheres[nwheres++] = rs_xstrdup(where);
+        }
+    }
+    for (j = 0; j < nwheres; j++)
+    {
+        bool        home = rs_starts_with(wheres[j], "/home/") || rs_starts_with(wheres[j], "/root");
+        char       *owner = home ? home_of(wheres[j]) : NULL;
+        struct wrap w;
+
+        say(s, "%s", "");
+        if (owner)
+        {
+            say(s, "%s in %s, as the owner of %s:", what, wheres[j], owner);
+        } else
+        {
+            say(s, "%s in %s:", what, wheres[j]);
+        }
+        say(s, "%s", "");
+        wrap_start(&w, s, owner ? user : command);
+        for (i = 0; i < arr->n; i++)
+        {
+            const struct rs_jval *e = &arr->items[i];
+            const char           *name = rs_jobject_str(e, "name");
+            const char           *version = rs_jobject_str(e, "version");
+            char                 *word;
+
+            if (!name || !eq(rs_jobject_str(e, "where"), wheres[j]))
+            {
+                continue;
+            }
+            word = version && sep ? rs_xasprintf("%s%s%s", name, sep, version) : rs_xstrdup(name);
+            wrap_word(&w, word);
+            free(word);
+        }
+        wrap_end(&w);
+        free(owner);
+        free(wheres[j]);
+    }
+    free(wheres);
+}
+
+static void reinstall(struct sheet *s)
+{
+    const struct rs_jval *pk = s->o->packages;
+    const struct rs_jval *apt = rs_jobject_get(pk, "apt");
+    const struct rs_jval *snaps = rs_jobject_get(pk, "snap");
+    const struct rs_jval *flatpak = rs_jobject_get(pk, "flatpak");
+    const struct rs_jval *managers = rs_jobject_get(pk, "managers");
+    const struct rs_jval *cargo = rs_jobject_get(pk, "cargo");
+    const struct rs_jval *gems = rs_jobject_get(pk, "gem");
+    size_t                i;
+
+    if (!pk || pk->type != RS_JOBJECT)
+    {
+        return;
+    }
+    heading(s, "Install the packages again");
+    say(s, "%s", "Before the files, not after: a restored configuration file where a package");
+    say(s, "%s", "puts its own, or one that names a program not yet installed, makes packages");
+    say(s, "%s", "fail to install. The restore that follows puts the old configuration back");
+    say(s, "%s", "over the packages' own. As root on the new system:");
+    say(s, "%s", "");
+    if (apt && apt->type == RS_JOBJECT)
+    {
+        reinstall_apt(s, apt);
+    }
+    if (snaps && snaps->type == RS_JARRAY)
+    {
+        reinstall_snaps(s, snaps);
+    }
+    if (flatpak && flatpak->type == RS_JOBJECT)
+    {
+        reinstall_flatpak(s, flatpak);
+    }
+    reinstall_lang(s, rs_jobject_get(pk, "pip"), "Python packages",
+                   "pip install --break-system-packages",
+                   "pip install --user --break-system-packages", "==", NULL);
+    reinstall_lang(s, rs_jobject_get(pk, "npm"), "npm's global packages", "npm install -g",
+                   "npm install -g", "@", "/usr/lib/node_modules");
+    reinstall_lang(s, rs_jobject_get(pk, "pipx"), "pipx applications", "pipx install",
+                   "pipx install", NULL, NULL);
+    for (i = 0; cargo && cargo->type == RS_JARRAY && i < cargo->n; i++)
+    {
+        const char *src = rs_jobject_str(&cargo->items[i], "source");
+
+        if (src && !rs_starts_with(src, "registry+"))
+        {
+            note(s, "%s was built with cargo from %s, not crates.io: build it again from there.",
+                 rs_jobject_str(&cargo->items[i], "name"), src);
+        }
+    }
+    reinstall_lang(s, cargo, "Rust programs", "cargo install", "cargo install", "@", NULL);
+    reinstall_lang(s, gems, "Ruby gems", "gem install", "gem install", ":", NULL);
+    for (i = 0; managers && managers->type == RS_JARRAY && i < managers->n; i++)
+    {
+        const struct rs_jval *m = &managers->items[i];
+        const struct rs_jval *inv = rs_jobject_get(m, "inventory");
+
+        if (inv && inv->type == RS_JBOOL && !inv->b)
+        {
+            note(s, "%s is installed here, and this version takes no inventory of it: what it "
+                 "installed has to be installed again by hand.", rs_jobject_str(m, "name"));
+        }
+    }
+}
+
 static void restore(struct sheet *s)
 {
     const char *img = s->o->image ? s->o->image : "IMAGE.tgz";
@@ -1159,9 +1758,15 @@ static void restore(struct sheet *s)
     say(s, "%s", "        --exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab \\");
     say(s, "%s", "        restate/files");
     say(s, "%s", "");
-    say(s, "%s", "Packages installed after the original install are not reinstalled by this");
-    say(s, "%s", "version: install them first, or the restored configuration may refer to");
-    say(s, "%s", "programs that are not there yet. Then rebuild the boot files and reboot:");
+    if (!s->o->packages)
+    {
+        say(s, "%s", "This image has no package inventory (it is older than restate 1.1), so the");
+        say(s, "%s", "packages installed after the original install are not listed here: install");
+        say(s, "%s", "them first, or the restored configuration may refer to programs that are");
+        say(s, "%s", "not there yet.");
+        say(s, "%s", "");
+    }
+    say(s, "%s", "Then rebuild the boot files and reboot:");
     say(s, "%s", "");
     say(s, "%s", "    update-initramfs -u -k all && update-grub && reboot");
 }
@@ -1353,6 +1958,7 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
     volumes(&s);
     install(&s);
     after(&s);
+    reinstall(&s);
     restore(&s);
     notes(&s);
 

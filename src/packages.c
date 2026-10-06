@@ -770,10 +770,13 @@ static void read_list(const char *root, const char *rel, struct repos *rs, struc
     {
         struct rs_jval *src;
         struct rs_jval  words;
-        char           *p = line + strspn(line, " \t");
-        char           *hash = strchr(p, '#');
+        size_t          start = strspn(line, " \t");
+        char           *hash = strchr(line + start, '#');
+        const char     *p = line + start;
         char           *opts = NULL;
 
+        /* The line is edited in place -- the comment cut off, the [options]
+         * taken out -- through pointers into `line`; `p` only reads it. */
         if (hash)
         {
             *hash = '\0';
@@ -786,7 +789,7 @@ static void read_list(const char *root, const char *rel, struct repos *rs, struc
         memset(&words, 0, sizeof(words));
         rs_jval_set_array(&words);
         {
-            char *open_b = strchr(p, '[');
+            char *open_b = strchr(line + start, '[');
             char *close_b = open_b ? strchr(open_b, ']') : NULL;
 
             if (open_b && close_b)

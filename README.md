@@ -344,8 +344,16 @@ disk: the hardware and installer it needs, then the `sfdisk`, `cryptsetup`,
 `mdadm`, LVM (`vgcfgrestore`, from the group's own metadata backup) and
 `mkfs` commands that recreate the layout **with the original UUIDs**, so the
 restored `/etc/fstab` and `/etc/crypttab` still match; then how to drive the
-installer, what to do after it, and how to put the files back. Nothing is run:
-every command is printed to be checked and run by a person.
+installer, what to do after it, how to install the packages again, and how to
+put the files back. Nothing is run: every command is printed to be checked and
+run by a person.
+
+The packages go back before the files, from the image's
+[inventory](#packages): `/etc/apt` and the repository keys kept outside it,
+then every package installed by hand pinned to its old version (so it comes
+from the repository it came from), the snaps by channel, the flatpak apps,
+and what pip, npm, pipx, cargo and gem installed. The packages no repository
+has are listed with what to do about them.
 
 `restate autoinstall` writes the same layout as an Ubuntu autoinstall file for
 an unattended reinstall, with the locale, keyboard, time zone, host name,
@@ -370,8 +378,8 @@ $ restate buildsheet web01.tgz -o web01-rebuild.txt
 $ restate autoinstall --target vm web01.tgz -o user-data
 ```
 
-Packages installed after the original install are not part of either yet --
-that is the next stage on the [roadmap](ROADMAP.md).
+The autoinstall file does not install the packages yet; that is next on the
+[roadmap](ROADMAP.md).
 
 ## Images and indexes
 

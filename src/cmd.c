@@ -668,7 +668,7 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
  * The machine description in `path`: an image or index with a "machine"
  * section, or what `restate machine -o` writes.
  */
-static bool load_machine(const char *path, struct rs_jval *machine)
+static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages)
 {
     struct rs_index ix;
     struct rs_buf   err;
@@ -682,6 +682,10 @@ static bool load_machine(const char *path, struct rs_jval *machine)
         {
             rs_jval_copy(machine, &ix.machine);
             note_captured(&ix, machine);
+            if (packages && ix.packages.type == RS_JOBJECT)
+            {
+                rs_jval_copy(packages, &ix.packages);
+            }
             ok = true;
         } else
         {
@@ -766,7 +770,7 @@ int rs_cmd_installer(const struct rs_options *o)
     memset(&machine, 0, sizeof(machine));
     if (image)
     {
-        if (!load_machine(image, &machine))
+        if (!load_machine(image, &machine, NULL))
         {
             rs_jval_free(&machine);
             return RESTATE_EXIT_TROUBLE;
@@ -863,15 +867,25 @@ static enum rs_target target_of(const struct rs_options *o)
     return RS_TARGET_SAME;
 }
 
-/* The machine to describe: the one in IMAGE, or this one. */
-static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine)
+/* The machine to describe: the one in IMAGE, or this one -- and, with
+ * `packages`, what is installed on it, which an image may not record. */
+static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine,
+                        struct rs_jval *packages)
 {
     memset(machine, 0, sizeof(*machine));
+    if (packages)
+    {
+        memset(packages, 0, sizeof(*packages));
+    }
     if (image)
     {
-        return load_machine(image, machine);
+        return load_machine(image, machine, packages);
     }
     rs_machine_describe("/", o->root ? o->root : "/", machine);
+    if (packages)
+    {
+        rs_packages_describe(o->root ? o->root : "/", packages);
+    }
     return true;
 }
 
@@ -943,20 +957,25 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     struct rs_buf        text;
     struct rs_buf        err;
     struct rs_sheet_opts so;
+    struct rs_jval       packages;
     bool                 ok;
 
-    if (!machine_for(o, image, &machine))
+    if (!machine_for(o, image, &machine, &packages))
     {
         rs_jval_free(&machine);
+        rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
+    memset(&so, 0, sizeof(so));
     so.target = target_of(o);
     so.image = image;
     so.version = RESTATE_VERSION;
+    so.packages = packages.type == RS_JOBJECT ? &packages : NULL;
     rs_buf_init(&text);
     rs_buf_init(&err);
     ok = rs_buildsheet(&machine, &so, &text, &err);
     rs_jval_free(&machine);
+    rs_jval_free(&packages);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -977,7 +996,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     struct rs_auto_opts ao;
     bool                ok;
 
-    if (!machine_for(o, image, &machine))
+    if (!machine_for(o, image, &machine, NULL))
     {
         rs_jval_free(&machine);
         return RESTATE_EXIT_TROUBLE;

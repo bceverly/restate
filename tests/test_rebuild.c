@@ -191,6 +191,66 @@ static const char dual_json[] =
     "            {\"spec\": \"UUID=AAAA-BBBB\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
     "}";
 
+/* A package inventory with one of everything the build sheet handles. */
+static const char *const packages_json[] = {
+    "{\"managers\": [{\"name\": \"apt\", \"inventory\": true},"
+    "  {\"name\": \"nix\", \"inventory\": false, \"where\": [\"/nix/store\"]}],"
+    " \"apt\": {\"architectures\": [\"amd64\", \"i386\"],"
+    "  \"keys\": [{\"path\": \"/etc/apt/keyrings/local.gpg\", \"data\": \"AAAA\"},"
+    "   {\"path\": \"/usr/share/keyrings/vendor.gpg\", \"data\": \"dmVuZG9yIGtleQ==\"},"
+    "   {\"path\": \"/usr/share/keyrings/ubuntu-archive-keyring.gpg\", \"data\": \"AAAA\"},"
+    "   {\"path\": \"/usr/share/keyrings/odd.gpg\", \"data\": \"not base64!\"},"
+    "   {\"path\": \"/usr/share/keyrings/gone.gpg\", \"missing\": true},"
+    "   {\"data\": \"AAAA\"}],",
+    "  \"packages\": ["
+    "   {\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1-1\", \"manual\": true,"
+    "    \"origins\": [\"http://archive stable/main\"]},"
+    "   {\"name\": \"libfoo\", \"architecture\": \"i386\", \"version\": \"1.0~rc1\", \"manual\": true,"
+    "    \"origins\": [\"x\"], \"hold\": true},"
+    "   {\"name\": \"tzdata\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": true,"
+    "    \"origins\": [\"x\"]},"
+    "   {\"name\": \"evil\", \"architecture\": \"amd64\", \"version\": \"1$(reboot)'\", \"manual\": true,"
+    "    \"origins\": [\"x\"]},"
+    "   {\"name\": \"dep\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": false,"
+    "    \"origins\": [\"x\"]},"
+    "   {\"name\": \"intel-microcode\", \"architecture\": \"amd64\", \"version\": \"3\","
+    "    \"manual\": true, \"origins\": [\"x\"]},"
+    "   {\"name\": \"zoom\", \"architecture\": \"amd64\", \"version\": \"6.7\", \"manual\": true,"
+    "    \"origins\": [], \"unavailable\": \"local\"},"
+    "   {\"name\": \"oldie\", \"architecture\": \"amd64\", \"version\": \"1.0\", \"manual\": true,"
+    "    \"origins\": [], \"unavailable\": \"superseded\"},"
+    "   {\"name\": \"noversion\", \"architecture\": \"amd64\", \"manual\": true},"
+    "   {\"architecture\": \"amd64\", \"manual\": true}]},",
+    " \"snap\": [{\"name\": \"firefox\", \"revision\": \"1\", \"channel\": \"latest/stable\","
+    "   \"type\": \"app\"},"
+    "  {\"name\": \"code\", \"type\": \"app\", \"classic\": true, \"devmode\": true,"
+    "   \"disabled\": true, \"channel\": \"latest/edge\"},"
+    "  {\"name\": \"core22\", \"type\": \"base\"}, {\"name\": \"core24\"}, {\"name\": \"bare\"},"
+    "  {\"name\": \"lxd\"}, {\"name\": \"mine\", \"revision\": \"x1\", \"local\": true},"
+    "  {\"name\": \"what\", \"local\": true}, {\"type\": \"app\"}],",
+    " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": \"https://dl.flathub.org/repo/\","
+    "   \"scope\": \"system\"}, {\"name\": \"mine\", \"url\": \"https://x/repo\","
+    "   \"scope\": \"user /home/pat\"}, {\"name\": \"nourl\"}],"
+    "  \"apps\": [{\"id\": \"org.example.App\", \"branch\": \"stable\", \"remote\": \"flathub\","
+    "   \"scope\": \"system\"}, {\"id\": \"com.example.Mine\", \"branch\": \"master\","
+    "   \"remote\": \"mine\", \"scope\": \"user /home/pat\"},"
+    "   {\"id\": \"org.example.Lone\", \"branch\": \"stable\"}, {\"id\": \"no.branch\"}]},",
+    " \"pip\": [{\"name\": \"requests\", \"version\": \"2.31.0\","
+    "   \"where\": \"/usr/local/lib/python3.12/dist-packages\"},"
+    "  {\"name\": \"httpie\", \"version\": \"3.2\","
+    "   \"where\": \"/home/pat/.local/lib/python3.13/site-packages\"}, {\"name\": \"nowhere\"}],"
+    " \"npm\": [{\"name\": \"npm\", \"version\": \"10\", \"where\": \"/usr/lib/node_modules\"},"
+    "  {\"name\": \"left-pad\", \"version\": \"1.3.0\", \"where\": \"/usr/local/lib/node_modules\"}],"
+    " \"pipx\": [{\"name\": \"black\", \"where\": \"/home/pat/.local/share/pipx/venvs\"}],"
+    " \"cargo\": [{\"name\": \"ripgrep\", \"version\": \"14.1.0\", \"where\": \"/root\","
+    "   \"source\": \"registry+https://github.com/rust-lang/crates.io-index\"},"
+    "  {\"name\": \"mytool\", \"version\": \"0.1.0\", \"where\": \"/root\","
+    "   \"source\": \"git+https://example.com/mytool\"}],"
+    " \"gem\": [{\"name\": \"rake\", \"version\": \"13.0.6\","
+    "   \"where\": \"/var/lib/gems/3.2.0/specifications\"}], \"notes\": []}",
+    NULL
+};
+
 static void parse(const char *text, struct rs_jval *out)
 {
     struct rs_json_parser jp;
@@ -247,20 +307,28 @@ static void server(struct rs_jval *m)
     rs_jobj_str(vg, "name", "nometa");
 }
 
-static char *sheet(const struct rs_jval *m, enum rs_target t, const char *image)
+static char *sheet_with(const struct rs_jval *m, enum rs_target t, const char *image,
+                        const struct rs_jval *packages)
 {
     struct rs_sheet_opts o;
     struct rs_buf        out;
     struct rs_buf        err;
 
+    memset(&o, 0, sizeof(o));
     o.target = t;
     o.image = image;
     o.version = "9.9";
+    o.packages = packages;
     rs_buf_init(&out);
     rs_buf_init(&err);
     CHECK(rs_buildsheet(m, &o, &out, &err));
     rs_buf_free(&err);
     return rs_buf_detach(&out);
+}
+
+static char *sheet(const struct rs_jval *m, enum rs_target t, const char *image)
+{
+    return sheet_with(m, t, image, NULL);
 }
 
 static char *autoinst(const struct rs_jval *m, enum rs_target t)
@@ -491,7 +559,7 @@ static void sheet_cases(void)
 
     TEST_CASE("buildsheet: what it cannot do");
     {
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL };
         struct rs_buf        out;
         struct rs_buf        err;
 
@@ -511,6 +579,112 @@ static void sheet_cases(void)
         free(s);
         rs_jval_free(&m);
     }
+}
+
+static void package_cases(void)
+{
+    struct rs_jval m;
+    struct rs_jval pk;
+    struct rs_buf  text;
+    char          *s;
+    size_t         i;
+
+    TEST_CASE("buildsheet: installing the packages again");
+    server(&m);
+    rs_buf_init(&text);
+    for (i = 0; packages_json[i]; i++)
+    {
+        rs_buf_addstr(&text, packages_json[i]);
+    }
+    parse(text.data, &pk);
+    rs_buf_free(&text);
+    s = sheet_with(&m, RS_TARGET_VM, "web01.tgz", &pk);
+    CHECK_CONTAINS(s, "Install the packages again");
+    /* Before the files. */
+    CHECK(strstr(s, "Install the packages again") < strstr(s, "Restore the files"));
+    CHECK(strstr(s, "no package inventory") == NULL);
+    CHECK_CONTAINS(s, "tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 "
+                      "restate/files/etc/apt");
+    CHECK_CONTAINS(s, "base64 -d > /usr/share/keyrings/vendor.gpg <<'KEY'\ndmVuZG9yIGtleQ==\nKEY");
+    CHECK(strstr(s, "/etc/apt/keyrings/local.gpg <<") == NULL);
+    CHECK(strstr(s, "ubuntu-archive-keyring.gpg <<") == NULL);
+    CHECK(strstr(s, "odd.gpg") == NULL);
+    CHECK_CONTAINS(s, "The key /usr/share/keyrings/gone.gpg was missing");
+    CHECK_CONTAINS(s, "apt-get update");
+    CHECK_CONTAINS(s, "apt-get install -y vim=2:9.1-1 'libfoo:i386=1.0~rc1' tzdata=2026a");
+    /* Whatever the tree said, a copied line runs only the command shown. */
+    CHECK_CONTAINS(s, "'evil=1$(reboot)'\\'''");
+    CHECK(strstr(s, " dep=") == NULL);
+    CHECK(strstr(s, "intel-microcode=") == NULL);
+    CHECK(strstr(s, "zoom=") == NULL);
+    CHECK_CONTAINS(s, " oldie");
+    CHECK_CONTAINS(s, " noversion");
+    CHECK_CONTAINS(s, "(1 were installed that way)");
+    CHECK_CONTAINS(s, "apt-mark hold libfoo");
+    CHECK_CONTAINS(s, "oldie                            was 1.0");
+    CHECK_CONTAINS(s, "zoom                             6.7");
+    CHECK_CONTAINS(s, "snap install firefox --channel=latest/stable\n");
+    CHECK_CONTAINS(s, "snap install code --channel=latest/edge --classic --devmode && "
+                      "snap disable code");
+    CHECK_CONTAINS(s, "snap install lxd\n");
+    CHECK(strstr(s, "snap install core") == NULL);
+    CHECK(strstr(s, "snap install bare") == NULL);
+    CHECK_CONTAINS(s, "mine (revision x1)");
+    CHECK_CONTAINS(s, "what (revision ?)");
+    CHECK_CONTAINS(s, "flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/");
+    CHECK_CONTAINS(s, "flatpak --user remote-add --if-not-exists mine https://x/repo");
+    CHECK_CONTAINS(s, "flatpak install -y flathub org.example.App//stable");
+    CHECK_CONTAINS(s, "flatpak --user install -y mine com.example.Mine//master");
+    CHECK_CONTAINS(s, "org.example.Lone came from a remote that was not recorded");
+    CHECK_CONTAINS(s, "Python packages in /usr/local/lib/python3.12/dist-packages:\n\n"
+                      "    pip install --break-system-packages requests==2.31.0");
+    CHECK_CONTAINS(s, "as the owner of /home/pat:\n\n"
+                      "    pip install --user --break-system-packages httpie==3.2");
+    CHECK_CONTAINS(s, "npm install -g left-pad@1.3.0");
+    CHECK(strstr(s, "npm@10") == NULL);
+    CHECK_CONTAINS(s, "pipx install black");
+    CHECK_CONTAINS(s, "cargo install ripgrep@14.1.0 mytool@0.1.0");
+    CHECK_CONTAINS(s, "mytool was built with cargo from git+https://example.com/mytool");
+    CHECK_CONTAINS(s, "gem install rake:13.0.6");
+    CHECK_CONTAINS(s, "nix is installed here, and this version takes no inventory of it");
+    free(s);
+
+    /* Onto hardware, the guest's packages are left out instead. */
+    s = sheet_with(&m, RS_TARGET_METAL, NULL, &pk);
+    CHECK_CONTAINS(s, "intel-microcode=3");
+    CHECK_CONTAINS(s, "tar -xpzf IMAGE.tgz");
+    free(s);
+    rs_jval_free(&pk);
+
+    TEST_CASE("buildsheet: a long install wraps, and an empty inventory says little");
+    rs_buf_init(&text);
+    rs_buf_addstr(&text, "{\"apt\": {\"packages\": [");
+    for (i = 0; i < 30; i++)
+    {
+        rs_buf_addf(&text, "%s{\"name\": \"package-number-%zu\", \"version\": \"1.0\","
+                    " \"manual\": true, \"origins\": [\"x\"]}", i ? ", " : "", i);
+    }
+    rs_buf_addstr(&text, "]}, \"snap\": [], \"flatpak\": {\"apps\": []}, \"pip\": []}");
+    parse(text.data, &pk);
+    rs_buf_free(&text);
+    s = sheet_with(&m, RS_TARGET_SAME, NULL, &pk);
+    CHECK_CONTAINS(s, "apt-get install -y package-number-0=1.0 package-number-1=1.0 \\\n"
+                      "        package-number-2=1.0");
+    CHECK(strstr(s, "apt-mark hold") == NULL);
+    CHECK(strstr(s, "The snaps") == NULL);
+    CHECK(strstr(s, "flatpak") == NULL);
+    CHECK(strstr(s, "Python") == NULL);
+    free(s);
+    rs_jval_free(&pk);
+    rs_jval_free(&m);
+
+    TEST_CASE("buildsheet: an image without an inventory");
+    server(&m);
+    s = sheet(&m, RS_TARGET_SAME, NULL);
+    CHECK(strstr(s, "Install the packages again") == NULL);
+    CHECK_CONTAINS(s, "has no package inventory");
+    free(s);
+    rs_jval_free(&m);
 }
 
 static void autoinstall_cases(void)
@@ -613,6 +787,7 @@ static void autoinstall_cases(void)
 
 void test_rebuild(void)
 {
+    package_cases();
     layout_cases();
     sheet_cases();
     autoinstall_cases();

@@ -101,7 +101,7 @@ void test_bsd(void)
     TEST_CASE("bsd: a BSD layout is a layout, and a build sheet says what it is for");
     {
         struct rs_layout     l;
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL };
         struct rs_buf        out;
         struct rs_buf        err;
         struct rs_jval      *sys = rs_jobj_add(&m, "system");

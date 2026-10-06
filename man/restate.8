@@ -563,10 +563,30 @@ for the filesystems \- with the original UUIDs, so the restored
 and
 .I /etc/crypttab
 still name the right volumes. Then how to point the installer at that
-layout, what to do after it, and how to put the files back. Nothing is run:
+layout, what to do after it, how to install the packages again, and how to
+put the files back. Nothing is run:
 every command is printed for a person to check against
 .BR lsblk (8)
 and run.
+.PP
+The packages come from the image's inventory (see
+.BR PACKAGES ),
+and go back before the files, because a restored configuration file where a
+package puts its own, or one naming a program not yet installed, makes
+packages fail to install: first
+.I /etc/apt
+from the image and the repository keys kept outside it, written back from
+the inventory with
+.BR base64 (1);
+then every package installed by hand, pinned to the version that was
+installed, so it comes from the repository it came from and not another
+that has the same name; the held ones held again; the ones no repository has
+any more, or ever had, listed with what to do about them; then the snaps by
+channel, the flatpak apps by remote, and what pip, npm, pipx, cargo and gem
+installed, each by its owner. Every name and version in those commands is
+quoted where it needs to be, because the inventory says whatever the
+captured tree said. The restore that follows puts the old configuration
+back over the packages' own.
 .PP
 Partitions that belong to another operating system \- Windows, BitLocker,
 macOS, a VeraCrypt container \- are never formatted. Rebuilding the same
@@ -580,7 +600,8 @@ has to attend: storage in curtin's terms, locale, keyboard, time zone, host
 name, network and the SSH server. A LUKS passphrase has to be in the file
 for the installer to format the volume, and is left as CHANGE-ME, as is the
 first account's password, which the restore replaces. The packages
-installed since the original install are not yet included.
+installed since the original install are in the build sheet, and not yet in
+the autoinstall file.
 .PP
 With
 .BR "\-\-target vm" ,
