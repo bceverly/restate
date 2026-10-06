@@ -227,6 +227,27 @@ check "packages -o writes the file" test -s packages.json
 expect 0 "scan records the inventory" -- "$BIN" scan --root pkgtree -o pkgindex.json
 expect 0 "packages IMAGE" -- "$BIN" packages pkgindex.json
 contains "$OUT" '"name": "by-hand"' "packages reads the inventory back from an index"
+mkdir -p pkgtree/var/cache/apt/archives
+printf 'deb' > pkgtree/var/cache/apt/archives/by-hand_1.0_amd64.deb
+cat >> pkgtree/var/lib/dpkg/status <<'DPKG'
+
+Package: vanished
+Status: install ok installed
+Architecture: amd64
+Version: 2.0
+DPKG
+expect 0 "capture --keep-local-packages" -- \
+  "$BIN" capture --root pkgtree --keep-local-packages -o kept.tgz
+contains "$ERR" "vanished 2.0 is not in /var/cache/apt/archives" "a package not in apt's cache is warned of"
+contains "$ERR" "dpkg-repack vanished" "with how to rebuild it"
+check "the kept .deb is in the image, though /var/cache is left out" \
+  sh -c 'tar -tzf kept.tgz | grep -qx "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
+check "and nothing else of /var/cache" \
+  sh -c '! tar -tzf kept.tgz | grep -v by-hand_1.0_amd64.deb | grep -q "var/cache/apt/archives/"'
+expect 0 "packages of the image" -- "$BIN" packages kept.tgz
+contains "$OUT" '"kept": "/var/cache/apt/archives/by-hand_1.0_amd64.deb"' "the inventory says what it kept"
+expect 2 "autoinstall --image-at a relative path" -- "$BIN" autoinstall --image-at x.tgz
+contains "$ERR" "not an absolute path" "--image-at has to be absolute"
 printf '{"format": "restate-index", "version": 1, "entries": []}' > old-index.json
 expect 2 "packages of an old index" -- "$BIN" packages old-index.json
 contains "$ERR" "has no package inventory" "an index from before the inventory says so"

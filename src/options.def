@@ -36,6 +36,9 @@ RS_OPT('B', "baseline-content", no_argument,       NULL,
 RS_OPT(OPT_ENCRYPT_TO, "encrypt-to", required_argument, "KEYFILE",
        "capture: encrypt the image to the OpenPGP public key in KEYFILE "
        "(gpg --export); repeatable, for more than one recipient")
+RS_OPT(OPT_KEEP_LOCAL, "keep-local-packages", no_argument, NULL,
+       "capture: keep the .deb and .snap files of installed packages no repository "
+       "or store has, from apt's and snapd's caches, so a rebuild can install them")
 RS_OPT('x', "one-file-system",  no_argument,       NULL,
        "record mount points but do not descend into other filesystems")
 RS_OPT('n', "no-hash",          no_argument,       NULL,
@@ -48,6 +51,9 @@ RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
 RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
        "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
        "hardware (metal) rather than the same machine")
+RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
+       "autoinstall: where the installer will find the image (a mounted disk or "
+       "share); the file then installs the packages and restores the files from it")
 RS_OPT('P', "progress",         no_argument,       NULL,
        "show progress on standard error: paths and bytes so far while walking, "
        "a percentage and time left while writing an image or downloading")

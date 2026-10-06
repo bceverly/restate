@@ -104,20 +104,23 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 - [x] **The inventory in the build sheet:** /etc/apt and the keys outside
       it, then the packages installed by hand pinned to their versions, holds,
       the ones no repository has; snaps, flatpaks, pip, npm, pipx, cargo, gem
-- [ ] **The inventory in the autoinstall file:** the same, as late-commands,
-      so an unattended rebuild comes up with its packages
+- [x] **The inventory in the autoinstall file:** snaps in its snaps
+      section; with `--image-at`, the rest as late-commands, then the files
+      and the boot files, so an unattended rebuild comes up as it was
 - [ ] **Package-aware capture:** unmodified package files listed, not
       stored; modified ones (including edited conffiles) and files no
       package owns stored
 - [ ] **Package-aware diff:** upgrades and removals reported per package
-- [ ] **Fetchability:** an option to keep the `.deb` files of the installed
-      versions no repository has (from /var/cache/apt/archives, or
-      snapshot.ubuntu.com for superseded ones); likewise snaps installed from
-      a file
+- [x] **Fetchability:** `capture --keep-local-packages` keeps the `.deb` of
+      each installed version no repository has, from apt's cache (warning,
+      with the `dpkg-repack` that puts one there, of each it cannot), and the
+      `.snap` of each snap installed from a file
+- [ ] Superseded versions from snapshot.ubuntu.com, where a pinned version
+      has left the archive
 - [x] snap revisions, channels and confinement; flatpak apps, branches and
       remotes
-- [ ] /etc/alternatives: the manual choices, put back once the packages
-      providing them are installed
+- [x] /etc/alternatives: the manual choices recorded, and set again once the
+      packages providing them are installed
 
 ## Then — the machine underneath
 
@@ -189,6 +192,30 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       snapshot archive, or kept `.deb` files), remove what the vendor ships
       and the machine did not have, lay down the kept content, and restore
       owners — mapped by name — modes, times and attributes
+- [ ] **Signed images, and a restore that refuses a tampered one.**
+      Encryption is not authentication: `--encrypt-to` needs only a public
+      key, so anyone holding it can make an image that decrypts cleanly. So:
+  - `capture --sign-with KEYFILE` signs the index with an OpenPGP secret key
+    (gpg, in its own throwaway home, as encryption does now), and the
+    detached signature goes into the image beside `index.json`. The index
+    holds every kept file's SHA-256, so signing it covers every file's
+    content as well as its owner, mode and path. `restate sign IMAGE` signs
+    an existing image later, so a capture run unattended from cron needs no
+    secret key on the machine.
+  - `restore`, `verify` and `diff` check the signature with `gpgv` against
+    keys named by `--trusted-key KEYFILE`, and check each file against its
+    digest in the index as it is read. They say who signed the image, and
+    when and on which host it was captured, so a validly signed but older
+    image substituted for the newest one is visible to the person
+    restoring.
+  - `restore` refuses, before writing anything, an image that is unsigned,
+    carries a bad signature, was signed by a key not trusted, or has a file
+    that does not match its digest or is not in the index. It exits with a
+    status of its own, naming each failure.
+  - `--allow-unverified` overrides the refusal for that one run, and only on
+    the command line (no environment variable or rules file can set it). It
+    still checks everything, and prints every failure as a warning before
+    restoring anything.
 - [ ] Extended attributes, POSIX ACLs and file capabilities; hard links as
       links; users and groups the image's owners depend on
 - [ ] `status`: what has changed since the last capture, quickly

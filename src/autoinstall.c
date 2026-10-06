@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "packages.h"
+
 #define MIB ((uint64_t)1024 * 1024)
 
 struct gen {
@@ -20,6 +22,7 @@ struct gen {
     bool                       keep_table;  /* another system shares the disk */
     bool                      *made;        /* per volume: in the config already */
     bool                      *vg_made;
+    struct rs_buf              late;        /* the late-commands, as YAML lines */
 };
 
 static bool eq(const char *a, const char *b)
@@ -159,9 +162,26 @@ static void header(struct gen *g)
                   "# \"autoinstall\" added to the kernel command line. It ERASES the disks it\n"
                   "# names: try it in a VM first (restate autoinstall --target vm).\n"
                   "#\n"
-                  "# After the first boot, put the files back as the build sheet describes\n"
-                  "# (restate buildsheet). The installer formats the volumes itself, so keep its\n"
-                  "# /etc/fstab and /etc/crypttab rather than the restored ones.\n");
+                  "# The installer formats the volumes itself, so the restore keeps its\n"
+                  "# /etc/fstab and /etc/crypttab rather than the old ones.\n");
+    if (g->o->packages && g->o->image_at)
+    {
+        rs_buf_addf(g->out,
+                    "#\n"
+                    "# The late-commands install the packages and restore the files from the\n"
+                    "# image at %s, so it has to be there when the installer gets to them:\n"
+                    "# a disk or share mounted there by an early-command, or by the installer's\n"
+                    "# environment. Without it, the install stops with that said in its log.\n",
+                    g->o->image_at);
+    } else
+    {
+        rs_buf_addstr(g->out,
+                      "#\n"
+                      "# After the first boot, install the packages and put the files back as the\n"
+                      "# build sheet describes (restate buildsheet) -- or make this file with\n"
+                      "# --image-at PATH, where the installer will find the image, and it does\n"
+                      "# both itself.\n");
+    }
     if (g->keep_table)
     {
         rs_buf_addstr(g->out,
@@ -632,6 +652,454 @@ static void storage(struct gen *g)
     rs_buf_addstr(g->out, "    swap:\n      size: 0\n");
 }
 
+/* ------------------------------------------------------------------------- */
+/* After the install: the packages, then the files                           */
+/* ------------------------------------------------------------------------- */
+
+/* A late-command: run by the installer with sh -c, on the installer's side,
+ * the new system mounted at /target. */
+static void late(struct gen *g, const char *cmd)
+{
+    rs_buf_addstr(&g->late, "    - ");
+    q(&g->late, cmd);
+    rs_buf_addc(&g->late, '\n');
+}
+
+static void late_comment(struct gen *g, const char *text)
+{
+    rs_buf_addf(&g->late, "    # %s\n", text);
+}
+
+/* "curtin in-target -- " COMMAND WORDS..., then "|| echo ... >&2" with
+ * `failed`: a package that will not install is said in the installer's log,
+ * and the restore goes on, because the files are worth more than any one
+ * package. */
+static void late_in_target(struct gen *g, const char *command, char *const *words, size_t n,
+                           const char *failed)
+{
+    struct rs_buf b;
+    size_t        i;
+
+    if (n == 0)
+    {
+        return;
+    }
+    rs_buf_init(&b);
+    rs_buf_addf(&b, "curtin in-target -- %s", command);
+    for (i = 0; i < n; i++)
+    {
+        rs_buf_addc(&b, ' ');
+        rs_shell_word(&b, words[i]);
+    }
+    rs_buf_addf(&b, " || echo 'restate: %s' >&2", failed);
+    late(g, b.data);
+    rs_buf_free(&b);
+}
+
+static bool flag_set(const struct rs_jval *obj, const char *key)
+{
+    const struct rs_jval *v = rs_jobject_get(obj, key);
+
+    return v && v->type == RS_JBOOL && v->b;
+}
+
+/* The words of one language package manager's system-wide inventory. */
+static char **system_words(const struct rs_jval *arr, const char *sep, const char *not_where,
+                           size_t *n)
+{
+    char **words = NULL;
+    size_t i;
+
+    *n = 0;
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        const char *name = rs_jobject_str(&arr->items[i], "name");
+        const char *version = rs_jobject_str(&arr->items[i], "version");
+        const char *where = rs_jobject_str(&arr->items[i], "where");
+
+        if (!name || !where || rs_starts_with(where, "/home/") || rs_starts_with(where, "/root") ||
+            (not_where && eq(where, not_where)))
+        {
+            continue;
+        }
+        words = rs_xreallocarray(words, *n + 1, sizeof(*words));
+        words[(*n)++] = version ? rs_xasprintf("%s%s%s", name, sep, version) : rs_xstrdup(name);
+    }
+    return words;
+}
+
+static void free_words(char **words, size_t n)
+{
+    size_t i;
+
+    for (i = 0; words && i < n; i++)
+    {
+        free(words[i]);
+    }
+    free(words);
+}
+
+/* The snaps the store has, in the installer's own snaps section. */
+static void snaps(struct gen *g)
+{
+    static const char *const implied[] = { "base", "core", "os", "snapd", "gadget", "kernel" };
+    const struct rs_jval    *arr = rs_jobject_get(g->o->packages, "snap");
+    size_t                   i;
+    size_t                   j;
+    bool                     any = false;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        const struct rs_jval *sn = &arr->items[i];
+        const char           *name = rs_jobject_str(sn, "name");
+        const char           *type = rs_jobject_str(sn, "type");
+        const char           *channel = rs_jobject_str(sn, "channel");
+        bool                  skip = !name || flag_set(sn, "local");
+
+        for (j = 0; type && j < sizeof(implied) / sizeof(implied[0]); j++)
+        {
+            skip = skip || eq(type, implied[j]);
+        }
+        if (!type && name)
+        {
+            skip = skip || eq(name, "snapd") || eq(name, "bare") ||
+                   (rs_starts_with(name, "core") &&
+                    strspn(name + 4, "0123456789") == strlen(name + 4));
+        }
+        if (skip)
+        {
+            continue;
+        }
+        if (!any)
+        {
+            rs_buf_addstr(g->out, "  snaps:\n");
+            any = true;
+        }
+        rs_buf_addstr(g->out, "    - name: ");
+        q(g->out, name);
+        rs_buf_addc(g->out, '\n');
+        if (channel)
+        {
+            kv(g, 6, "channel", channel);
+        }
+        rs_buf_addf(g->out, "      classic: %s\n", flag_set(sn, "classic") ? "true" : "false");
+    }
+}
+
+/* The keys kept outside /etc, written into the new system from the inventory. */
+static void late_keys(struct gen *g, const struct rs_jval *keys)
+{
+    size_t i;
+
+    for (i = 0; keys && keys->type == RS_JARRAY && i < keys->n; i++)
+    {
+        const struct rs_jval *k = &keys->items[i];
+        const char           *path = rs_jobject_str(k, "path");
+        const char           *data = rs_jobject_str(k, "data");
+        const char           *base;
+        struct rs_buf         b;
+        char                 *dir;
+        char                 *target;
+
+        if (!path || !data || rs_starts_with(path, "/etc/") ||
+            strspn(data, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") !=
+                strlen(data))
+        {
+            continue;
+        }
+        base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (rs_starts_with(base, "ubuntu-") || rs_starts_with(base, "debian-"))
+        {
+            continue;
+        }
+        dir = rs_xasprintf("/target%.*s", (int)(base - path), path);
+        target = rs_xasprintf("/target%s", path);
+        rs_buf_init(&b);
+        rs_buf_addstr(&b, "mkdir -p ");
+        rs_shell_word(&b, dir);
+        rs_buf_addf(&b, " && echo %s | base64 -d > ", data);
+        rs_shell_word(&b, target);
+        late(g, b.data);
+        rs_buf_free(&b);
+        free(dir);
+        free(target);
+    }
+}
+
+/* The .deb files the image keeps, extracted into the new system's apt cache
+ * and installed from there. */
+static void late_kept_debs(struct gen *g, const char *img, const struct rs_jval *pkgs)
+{
+    struct rs_buf tar;
+    char        **files = NULL;
+    size_t        n = 0;
+    size_t        i;
+
+    rs_buf_init(&tar);
+    rs_buf_addstr(&tar, "tar -xpzf ");
+    rs_shell_word(&tar, img);
+    rs_buf_addstr(&tar, " --numeric-owner -C /target --strip-components=2");
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const char *kept = rs_jobject_str(&pkgs->items[i], "kept");
+        char       *member;
+
+        if (!kept || !rs_starts_with(kept, "/var/cache/apt/archives/"))
+        {
+            continue;
+        }
+        member = rs_xasprintf("restate/files%s", kept);
+        rs_buf_addc(&tar, ' ');
+        rs_shell_word(&tar, member);
+        free(member);
+        files = rs_xreallocarray(files, n + 1, sizeof(*files));
+        files[n++] = rs_xstrdup(kept);
+    }
+    if (n > 0)
+    {
+        late_comment(g, "the packages no repository has, kept in the image");
+        late(g, tar.data);
+        late_in_target(g, "env DEBIAN_FRONTEND=noninteractive apt-get install -y", files, n,
+                       "the kept packages did not all install");
+    }
+    free_words(files, n);
+    rs_buf_free(&tar);
+}
+
+/* What a person has to do after the first boot: per-user installations, and
+ * what neither a repository nor the image has. */
+static void first_boot(struct gen *g)
+{
+    const struct rs_jval *pk = g->o->packages;
+    const struct rs_jval *pkgs = rs_jobject_get(rs_jobject_get(pk, "apt"), "packages");
+    const struct rs_jval *arr = rs_jobject_get(pk, "snap");
+    size_t                i;
+    bool                  listed = false;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        const char *name = rs_jobject_str(&arr->items[i], "name");
+        const char *kept = rs_jobject_str(&arr->items[i], "kept");
+
+        if (!name || !flag_set(&arr->items[i], "local"))
+        {
+            continue;
+        }
+        if (!listed)
+        {
+            late_comment(g, "Left for after the first boot (the build sheet has the commands):");
+            listed = true;
+        }
+        if (kept)
+        {
+            rs_buf_addf(&g->late, "    #   snap install --dangerous %s\n", kept);
+        } else
+        {
+            rs_buf_addf(&g->late, "    #   the snap %s, from the file it was installed from\n",
+                        name);
+        }
+    }
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+
+        if (flag_set(p, "manual") && eq(rs_jobject_str(p, "unavailable"), "local") &&
+            !rs_jobject_str(p, "kept") && rs_jobject_str(p, "name"))
+        {
+            if (!listed)
+            {
+                late_comment(g, "Left for after the first boot (the build sheet has the commands):");
+                listed = true;
+            }
+            rs_buf_addf(&g->late, "    #   %s, from its .deb (no repository has it)\n",
+                        rs_jobject_str(p, "name"));
+        }
+    }
+    {
+        static const char *const per_user[] = { "pip", "pipx", "cargo" };
+        size_t                   k;
+
+        for (k = 0; k < sizeof(per_user) / sizeof(per_user[0]); k++)
+        {
+            arr = rs_jobject_get(pk, per_user[k]);
+            for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+            {
+                const char *where = rs_jobject_str(&arr->items[i], "where");
+
+                if (where && (rs_starts_with(where, "/home/") || rs_starts_with(where, "/root")))
+                {
+                    if (!listed)
+                    {
+                        late_comment(g, "Left for after the first boot (the build sheet has the "
+                                        "commands):");
+                        listed = true;
+                    }
+                    rs_buf_addf(&g->late, "    #   %s's packages in the home directories, each "
+                                "by its owner\n", per_user[k]);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static void late_packages(struct gen *g)
+{
+    const struct rs_jval *pk = g->o->packages;
+    const struct rs_jval *apt = rs_jobject_get(pk, "apt");
+    const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
+    const struct rs_jval *fp = rs_jobject_get(pk, "flatpak");
+    const struct rs_jval *alts = rs_jobject_get(pk, "alternatives");
+    const struct rs_jval *skip = NULL;
+    const char           *img = g->o->image_at;
+    struct rs_buf         b;
+    char                **words;
+    size_t                n;
+    size_t                i;
+
+    if (g->o->target == RS_TARGET_VM)
+    {
+        skip = rs_jobject_get(g->sys, "hardware_packages");
+    } else if (g->o->target == RS_TARGET_METAL)
+    {
+        skip = rs_jobject_get(g->sys, "guest_packages");
+    }
+    late_comment(g, "The packages, then the files, from the image -- as the build sheet does it.");
+    rs_buf_init(&b);
+    rs_buf_addstr(&b, "test -f ");
+    rs_shell_word(&b, img);
+    rs_buf_addstr(&b, " || { echo 'restate: the image is not at ");
+    rs_buf_addstr(&b, img);
+    rs_buf_addstr(&b, "' >&2; exit 1; }");
+    late(g, b.data);
+    rs_buf_reset(&b);
+    if (apt)
+    {
+        rs_buf_addstr(&b, "tar -xpzf ");
+        rs_shell_word(&b, img);
+        rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 restate/files/etc/apt");
+        late(g, b.data);
+        late_keys(g, rs_jobject_get(apt, "keys"));
+        late(g, "curtin in-target -- apt-get update || true");
+        /* Pinned, so each comes from where it came from; if a pinned version
+         * has gone since, the current ones rather than none. */
+        words = rs_packages_apt_words(pk, skip, true, &n);
+        if (n > 0)
+        {
+            char **names;
+            size_t nn;
+
+            rs_buf_reset(&b);
+            rs_buf_addstr(&b, "curtin in-target -- env DEBIAN_FRONTEND=noninteractive "
+                              "apt-get install -y");
+            for (i = 0; i < n; i++)
+            {
+                rs_buf_addc(&b, ' ');
+                rs_shell_word(&b, words[i]);
+            }
+            names = rs_packages_apt_words(pk, skip, false, &nn);
+            rs_buf_addstr(&b, " || curtin in-target -- env DEBIAN_FRONTEND=noninteractive "
+                              "apt-get install -y");
+            for (i = 0; i < nn; i++)
+            {
+                rs_buf_addc(&b, ' ');
+                rs_shell_word(&b, names[i]);
+            }
+            rs_buf_addstr(&b, " || echo 'restate: the packages did not all install' >&2");
+            late(g, b.data);
+            free_words(names, nn);
+        }
+        free_words(words, n);
+        late_kept_debs(g, img, pkgs);
+        words = NULL;
+        n = 0;
+        for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+        {
+            if (flag_set(&pkgs->items[i], "hold") && rs_jobject_str(&pkgs->items[i], "name"))
+            {
+                words = rs_xreallocarray(words, n + 1, sizeof(*words));
+                words[n++] = rs_xstrdup(rs_jobject_str(&pkgs->items[i], "name"));
+            }
+        }
+        late_in_target(g, "apt-mark hold", words, n, "the holds were not all set");
+        free_words(words, n);
+    }
+    {
+        const struct rs_jval *remotes = rs_jobject_get(fp, "remotes");
+        const struct rs_jval *apps = rs_jobject_get(fp, "apps");
+
+        for (i = 0; remotes && remotes->type == RS_JARRAY && i < remotes->n; i++)
+        {
+            const struct rs_jval *r = &remotes->items[i];
+            char                 *w[2];
+
+            if (!eq(rs_jobject_str(r, "scope"), "system") || !rs_jobject_str(r, "name") ||
+                !rs_jobject_str(r, "url"))
+            {
+                continue;
+            }
+            w[0] = rs_xstrdup(rs_jobject_str(r, "name"));
+            w[1] = rs_xstrdup(rs_jobject_str(r, "url"));
+            late_in_target(g, "flatpak remote-add --if-not-exists", w, 2, "a flatpak remote was not added");
+            free(w[0]);
+            free(w[1]);
+        }
+        for (i = 0; apps && apps->type == RS_JARRAY && i < apps->n; i++)
+        {
+            const struct rs_jval *a = &apps->items[i];
+            char                 *w[2];
+
+            if (!eq(rs_jobject_str(a, "scope"), "system") || !rs_jobject_str(a, "remote") ||
+                !rs_jobject_str(a, "id") || !rs_jobject_str(a, "branch"))
+            {
+                continue;
+            }
+            w[0] = rs_xstrdup(rs_jobject_str(a, "remote"));
+            w[1] = rs_xasprintf("%s//%s", rs_jobject_str(a, "id"), rs_jobject_str(a, "branch"));
+            late_in_target(g, "flatpak install -y --noninteractive", w, 2, "a flatpak app did not install");
+            free(w[0]);
+            free(w[1]);
+        }
+    }
+    words = system_words(rs_jobject_get(pk, "pip"), "==", NULL, &n);
+    late_in_target(g, "pip install --break-system-packages", words, n, "the Python packages did not all install");
+    free_words(words, n);
+    words = system_words(rs_jobject_get(pk, "npm"), "@", "/usr/lib/node_modules", &n);
+    late_in_target(g, "npm install -g", words, n, "the npm packages did not all install");
+    free_words(words, n);
+    words = system_words(rs_jobject_get(pk, "gem"), ":", NULL, &n);
+    late_in_target(g, "gem install", words, n, "the gems did not all install");
+    free_words(words, n);
+    for (i = 0; alts && alts->type == RS_JARRAY && i < alts->n; i++)
+    {
+        char *w[2];
+
+        if (!rs_jobject_str(&alts->items[i], "name") || !rs_jobject_str(&alts->items[i], "path"))
+        {
+            continue;
+        }
+        w[0] = rs_xstrdup(rs_jobject_str(&alts->items[i], "name"));
+        w[1] = rs_xstrdup(rs_jobject_str(&alts->items[i], "path"));
+        late_in_target(g, "update-alternatives --set", w, 2, "an alternative was not set");
+        free(w[0]);
+        free(w[1]);
+    }
+
+    late_comment(g, "The files, over the packages' own; the installer's fstab and crypttab stay.");
+    rs_buf_reset(&b);
+    rs_buf_addstr(&b, "tar -xpzf ");
+    rs_shell_word(&b, img);
+    rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 "
+                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
+                      "restate/files");
+    late(g, b.data);
+    late(g, "curtin in-target -- update-initramfs -u -k all");
+    late(g, "curtin in-target -- update-grub");
+    rs_buf_free(&b);
+    first_boot(g);
+}
+
 static void extras(struct gen *g)
 {
     const struct rs_jval *hwp = rs_jobject_get(g->sys, "hardware_packages");
@@ -661,20 +1129,34 @@ static void extras(struct gen *g)
             }
             if (!any)
             {
-                rs_buf_addstr(g->out, "  late-commands:\n");
-                rs_buf_addstr(g->out, "    # real hardware's packages, of no use in a VM\n");
+                late_comment(g, "real hardware's packages, of no use in a VM");
                 any = true;
             }
-            rs_buf_addstr(g->out, "    - ");
             {
-                char *cmd = rs_xasprintf("curtin in-target -- apt-get purge -y %s || true",
-                                         hwp->items[i].s);
+                struct rs_buf cmd;
 
-                q(g->out, cmd);
-                free(cmd);
+                rs_buf_init(&cmd);
+                rs_buf_addstr(&cmd, "curtin in-target -- apt-get purge -y ");
+                rs_shell_word(&cmd, hwp->items[i].s);
+                rs_buf_addstr(&cmd, " || true");
+                late(g, cmd.data);
+                rs_buf_free(&cmd);
             }
-            rs_buf_addc(g->out, '\n');
         }
+    }
+}
+
+/* Every late-command, under one key. */
+static void late_commands(struct gen *g)
+{
+    if (g->o->packages && g->o->image_at)
+    {
+        late_packages(g);
+    }
+    if (g->late.len)
+    {
+        rs_buf_addstr(g->out, "  late-commands:\n");
+        rs_buf_addstr(g->out, g->late.data);
     }
 }
 
@@ -716,7 +1198,11 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     identity(&g);
     network(&g);
     storage(&g);
+    rs_buf_init(&g.late);
+    snaps(&g);
     extras(&g);
+    late_commands(&g);
+    rs_buf_free(&g.late);
     free(g.made);
     free(g.vg_made);
     rs_layout_free(&g.l);

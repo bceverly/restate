@@ -271,6 +271,9 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     struct rs_scan_opts so;
     struct rs_buf       err;
     const char         *os_used = NULL;
+    char              **keep = NULL;
+    size_t              nkeep = 0;
+    size_t              i;
     bool                ok;
 
     /* Initialized before anything can fail, because every caller frees the
@@ -316,6 +319,24 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     /* What is installed is in the tree's own files, wherever it is mounted. */
     rs_packages_describe(root, &m->packages);
+    if (o->keep_local)
+    {
+        struct rs_buf missing;
+        const char   *p;
+
+        rs_buf_init(&missing);
+        keep = rs_packages_keep(root, &m->packages, &nkeep, &missing);
+        so.keep = (const char *const *)keep;
+        so.nkeep = nkeep;
+        for (p = missing.data; p && *p; )
+        {
+            size_t len = strcspn(p, "\n");
+
+            rs_warn("%.*s", (int)len, p);
+            p += len + (p[len] == '\n' ? 1 : 0);
+        }
+        rs_buf_free(&missing);
+    }
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
 
     rs_buf_init(&err);
@@ -352,6 +373,11 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     rs_buf_free(&err);
     rs_rules_free(&rules);
+    for (i = 0; i < nkeep; i++)
+    {
+        free(keep[i]);
+    }
+    free(keep);
     return ok;
 }
 
@@ -994,20 +1020,26 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     struct rs_buf       text;
     struct rs_buf       err;
     struct rs_auto_opts ao;
+    struct rs_jval      packages;
     bool                ok;
 
-    if (!machine_for(o, image, &machine, NULL))
+    if (!machine_for(o, image, &machine, &packages))
     {
         rs_jval_free(&machine);
+        rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
+    memset(&ao, 0, sizeof(ao));
     ao.target = target_of(o);
     ao.image = image;
     ao.version = RESTATE_VERSION;
+    ao.packages = packages.type == RS_JOBJECT ? &packages : NULL;
+    ao.image_at = o->image_at;
     rs_buf_init(&text);
     rs_buf_init(&err);
     ok = rs_autoinstall(&machine, &ao, &text, &err);
     rs_jval_free(&machine);
+    rs_jval_free(&packages);
     if (!ok)
     {
         rs_error("%s", err.data);

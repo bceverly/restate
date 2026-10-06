@@ -253,3 +253,34 @@ bool rs_starts_with(const char *s, const char *prefix)
 {
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
+
+/*
+ * `word` as one shell word. The inventory is read from the captured tree, and
+ * a version or a path in it is whatever that tree said: anything outside the
+ * characters package names, versions and paths are made of is quoted, so a
+ * line copied from the sheet runs only the command it shows.
+ */
+void rs_shell_word(struct rs_buf *b, const char *word)
+{
+    static const char safe[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                               "._+:=@/,-";
+    const char       *p;
+
+    if (word[0] != '\0' && word[0] != '-' && strspn(word, safe) == strlen(word))
+    {
+        rs_buf_addstr(b, word);
+        return;
+    }
+    rs_buf_addc(b, '\'');
+    for (p = word; *p; p++)
+    {
+        if (*p == '\'')
+        {
+            rs_buf_addstr(b, "'\\''");
+        } else
+        {
+            rs_buf_addc(b, *p);
+        }
+    }
+    rs_buf_addc(b, '\'');
+}

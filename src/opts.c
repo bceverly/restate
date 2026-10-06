@@ -219,6 +219,17 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             }
             o->target = optarg;
             break;
+        case OPT_KEEP_LOCAL:
+            o->keep_local = true;
+            break;
+        case OPT_IMAGE_AT:
+            if (optarg[0] != '/')
+            {
+                rs_buf_addf(err, "--image-at: \"%s\" is not an absolute path", optarg);
+                return false;
+            }
+            o->image_at = optarg;
+            break;
         case 'a':
             o->all = true;
             break;

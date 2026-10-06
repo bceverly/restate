@@ -216,10 +216,13 @@ static void make_apt(const char *t)
         "Types: deb\n"
         "Components: main\n");
     put(t, "etc/apt/sources.list.d/old.list.bak", "deb http://bak.example.com stable main\n");
-    put(t, "usr/share/keyrings/archive.gpg", "archive key");
-    put(t, "usr/share/keyrings/vendor.gpg", "vendor key");
-    put(t, "etc/apt/trusted.gpg", "legacy keyring");
-    put(t, "etc/apt/trusted.gpg.d/extra.asc", "extra key");
+    /* Keys in the shapes apt reads: binary, with an old-format or a
+     * new-format public-key packet first, and armored. */
+    put(t, "usr/share/keyrings/archive.gpg", "\x99\x01\x0dkey");
+    put(t, "usr/share/keyrings/vendor.gpg", "\xc6\x05key");
+    put(t, "etc/apt/trusted.gpg", "\x98\x33key");
+    put(t, "etc/apt/trusted.gpg.d/extra.asc",
+        "\n-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQINBGT\n-----END PGP PUBLIC KEY BLOCK-----\n");
     put(t, "etc/apt/keyrings/", "");
     put(t, "var/lib/apt/lists/archive.example.com_ubuntu_dists_stable_main_binary-amd64_Packages",
         "Package: vim\n"
@@ -328,8 +331,10 @@ static void test_apt(void)
     keys = rs_jobject_get(apt, "keys");
     CHECK_INT(keys ? keys->n : 0, 5);
     k = find(keys, "path", "/usr/share/keyrings/archive.gpg");
-    CHECK_STR(rs_jobject_str(k, "data"), "YXJjaGl2ZSBrZXk=");
-    CHECK_INT(count_of(k, "size"), 11);
+    CHECK_STR(rs_jobject_str(k, "data"), "mQENa2V5");
+    CHECK_INT(count_of(k, "size"), 6);
+    CHECK(rs_jobject_str(find(keys, "path", "/usr/share/keyrings/vendor.gpg"), "data") != NULL);
+    CHECK(rs_jobject_str(find(keys, "path", "/etc/apt/trusted.gpg.d/extra.asc"), "data") != NULL);
     CHECK(rs_jobject_str(k, "sha256") != NULL);
     CHECK(find(keys, "path", "/etc/apt/trusted.gpg") != NULL);
     CHECK(find(keys, "path", "/etc/apt/trusted.gpg.d/extra.asc") != NULL);
@@ -342,6 +347,66 @@ static void test_apt(void)
     rs_jval_free(&out);
     rs_test_rmtree(t);
     free(t);
+}
+
+/*
+ * A tree from somewhere else, made to lead the inventory astray: a
+ * repository whose signed-by names a file that is not a key, one whose key
+ * is reached through a symlink out of the tree, and a home directory that is
+ * a symlink.
+ */
+static void test_hostile(void)
+{
+    char                 *t = rs_test_tmpdir();
+    char                 *outside = rs_test_tmpdir();
+    struct rs_jval        out;
+    const struct rs_jval *keys;
+    const struct rs_jval *k;
+    char                 *link;
+    char                 *target;
+
+    TEST_CASE("the inventory stays inside the tree");
+    put(outside, "keys/stolen.gpg", "\x99\x01\x0dsecret");
+    put(outside, "home/.cargo/.crates2.json", "{\"installs\": {\"x 1.0\": {}}}");
+    put(t, "var/lib/dpkg/status",
+        "Package: a\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n");
+    put(t, "etc/shadow", "root:$6$hash:19000:0:99999:7:::\n");
+    put(t, "etc/apt/sources.list",
+        "deb [signed-by=/etc/shadow] http://a.example.com stable main\n"
+        "deb [signed-by=/usr/share/keyrings/stolen.gpg] http://b.example.com stable main\n"
+        "deb [signed-by=/usr/share/keyrings/../../../etc/shadow] http://c.example.com s main\n");
+    put(t, "usr/share/", "");
+    put(t, "etc/passwd", "eve:x:1000:1000::/home/eve:/bin/sh\n");
+    put(t, "home/", "");
+    link = rs_xasprintf("%s/usr/share/keyrings", t);
+    target = rs_xasprintf("%s/keys", outside);
+    CHECK(symlink(target, link) == 0);
+    free(link);
+    free(target);
+    link = rs_xasprintf("%s/home/eve", t);
+    target = rs_xasprintf("%s/home", outside);
+    CHECK(symlink(target, link) == 0);
+    free(link);
+    free(target);
+
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+    keys = rs_jobject_get(rs_jobject_get(&out, "apt"), "keys");
+    k = find(keys, "path", "/etc/shadow");
+    CHECK(is_true(k, "not_a_key"));
+    CHECK(rs_jobject_get(k, "data") == NULL);
+    CHECK(any_contains(rs_jobject_get(&out, "notes"), "/etc/shadow is named as a repository key "
+                                                      "and is not one"));
+    k = find(keys, "path", "/usr/share/keyrings/stolen.gpg");
+    CHECK(is_true(k, "missing"));
+    CHECK(rs_jobject_get(k, "data") == NULL);
+    CHECK(find(keys, "path", "/usr/share/keyrings/../../../etc/shadow") == NULL);
+    CHECK(rs_jobject_get(&out, "cargo") == NULL);
+    rs_jval_free(&out);
+    rs_test_rmtree(t);
+    rs_test_rmtree(outside);
+    free(t);
+    free(outside);
 }
 
 static void test_snap(void)
@@ -560,6 +625,185 @@ static void test_languages(void)
     free(t);
 }
 
+static void test_alternatives(void)
+{
+    char                 *t = rs_test_tmpdir();
+    struct rs_jval        out;
+    const struct rs_jval *alts;
+    char                 *ln;
+
+    TEST_CASE("the alternatives chosen by hand");
+    put(t, "var/lib/dpkg/alternatives/editor", "manual\n/usr/bin/editor\n\n/usr/bin/vim.basic\n30\n");
+    put(t, "var/lib/dpkg/alternatives/pager", "auto\n/usr/bin/pager\n\n/bin/less\n77\n");
+    put(t, "var/lib/dpkg/alternatives/nolink", "manual\n/usr/bin/x\n");
+    put(t, "var/lib/alternatives/java", "manual\n/usr/bin/java\n");
+    put(t, "etc/alternatives/", "");
+    ln = rs_xasprintf("%s/etc/alternatives/editor", t);
+    CHECK(symlink("/usr/bin/vim.basic", ln) == 0);
+    free(ln);
+    ln = rs_xasprintf("%s/etc/alternatives/pager", t);
+    CHECK(symlink("/bin/less", ln) == 0);
+    free(ln);
+    ln = rs_xasprintf("%s/etc/alternatives/java", t);
+    CHECK(symlink("/usr/lib/jvm/jre-21/bin/java", ln) == 0);
+    free(ln);
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+    alts = rs_jobject_get(&out, "alternatives");
+    CHECK_INT(alts ? alts->n : 0, 2);
+    CHECK_STR(rs_jobject_str(find(alts, "name", "editor"), "path"), "/usr/bin/vim.basic");
+    CHECK_STR(rs_jobject_str(find(alts, "name", "java"), "path"), "/usr/lib/jvm/jre-21/bin/java");
+    CHECK(find(alts, "name", "pager") == NULL);
+    CHECK(find(alts, "name", "nolink") == NULL);
+    rs_jval_free(&out);
+    rs_test_rmtree(t);
+    free(t);
+}
+
+static void test_keep(void)
+{
+    char                 *t = rs_test_tmpdir();
+    struct rs_jval        out;
+    struct rs_buf         missing;
+    const struct rs_jval *pkgs;
+    const struct rs_jval *snaps;
+    char                **paths;
+    size_t                n;
+    size_t                i;
+    char                 *ln;
+
+    TEST_CASE("keeping the packages no repository has");
+    put(t, "var/lib/dpkg/status",
+        "Package: zoom\nStatus: install ok installed\nArchitecture: amd64\nVersion: 6.7\n\n"
+        "Package: epoch\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1:2.0\n\n"
+        "Package: repacked\nStatus: install ok installed\nArchitecture: amd64\nVersion: 3:1.5\n\n"
+        "Package: gone\nStatus: install ok installed\nArchitecture: amd64\nVersion: 9\n\n"
+        "Package: odd\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1/2\n\n"
+        "Package: fine\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n");
+    put(t, "var/lib/apt/lists/x.example.com_dists_s_main_binary-amd64_Packages",
+        "Package: fine\nArchitecture: amd64\nVersion: 1\n");
+    put(t, "var/cache/apt/archives/zoom_6.7_amd64.deb", "deb");
+    put(t, "var/cache/apt/archives/epoch_1%3a2.0_amd64.deb", "deb");
+    put(t, "var/cache/apt/archives/repacked_1.5_amd64.deb", "deb");
+    put(t, "var/lib/snapd/state.json",
+        "{\"data\": {\"snaps\": {"
+        "\"mine\": {\"type\": \"app\", \"current\": \"x1\", \"sequence\": [{\"revision\": \"x1\"}]},"
+        "\"lost\": {\"type\": \"app\", \"current\": \"x2\", \"sequence\": [{\"revision\": \"x2\"}]},"
+        "\"store\": {\"type\": \"app\", \"current\": \"5\", \"sequence\": [{\"revision\": \"5\","
+        " \"snap-id\": \"abc\"}]}}}}");
+    put(t, "var/lib/snapd/snaps/mine_x1.snap", "snap");
+    /* One that is a symlink is not kept: it could point anywhere. */
+    put(t, "var/lib/snapd/snaps/", "");
+    ln = rs_xasprintf("%s/var/lib/snapd/snaps/lost_x2.snap", t);
+    CHECK(symlink("/etc/shadow", ln) == 0);
+    free(ln);
+
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+    rs_buf_init(&missing);
+    paths = rs_packages_keep(t, &out, &n, &missing);
+    CHECK_INT(n, 4);
+    pkgs = rs_jobject_get(rs_jobject_get(&out, "apt"), "packages");
+    CHECK_STR(rs_jobject_str(find(pkgs, "name", "zoom"), "kept"),
+              "/var/cache/apt/archives/zoom_6.7_amd64.deb");
+    CHECK_STR(rs_jobject_str(find(pkgs, "name", "epoch"), "kept"),
+              "/var/cache/apt/archives/epoch_1%3a2.0_amd64.deb");
+    /* dpkg-repack names its file without the epoch. */
+    CHECK_STR(rs_jobject_str(find(pkgs, "name", "repacked"), "kept"),
+              "/var/cache/apt/archives/repacked_1.5_amd64.deb");
+    CHECK_STR(rs_jobject_str(find(pkgs, "name", "gone"), "not_kept"), "not in apt's cache");
+    CHECK(rs_jobject_get(find(pkgs, "name", "odd"), "kept") == NULL);
+    CHECK(rs_jobject_get(find(pkgs, "name", "odd"), "not_kept") == NULL);
+    CHECK(rs_jobject_get(find(pkgs, "name", "fine"), "kept") == NULL);
+    snaps = rs_jobject_get(&out, "snap");
+    CHECK_STR(rs_jobject_str(find(snaps, "name", "mine"), "kept"),
+              "/var/lib/snapd/snaps/mine_x1.snap");
+    CHECK_STR(rs_jobject_str(find(snaps, "name", "lost"), "not_kept"), "not in snapd's cache");
+    CHECK(rs_jobject_get(find(snaps, "name", "store"), "kept") == NULL);
+    CHECK_CONTAINS(missing.data, "gone 9 is not in /var/cache/apt/archives");
+    CHECK_CONTAINS(missing.data, "dpkg-repack gone");
+    CHECK_CONTAINS(missing.data, "the snap lost (revision x2) is not in /var/lib/snapd/snaps");
+    for (i = 0; i < n; i++)
+    {
+        free(paths[i]);
+    }
+    free(paths);
+    rs_buf_free(&missing);
+    rs_jval_free(&out);
+
+    TEST_CASE("nothing to keep");
+    memset(&out, 0, sizeof(out));
+    rs_jval_set_object(&out);
+    rs_buf_init(&missing);
+    paths = rs_packages_keep(t, &out, &n, &missing);
+    CHECK_INT(n, 0);
+    CHECK(paths == NULL);
+    CHECK_INT(missing.len, 0);
+    rs_buf_free(&missing);
+    rs_jval_free(&out);
+    rs_test_rmtree(t);
+    free(t);
+}
+
+static void test_apt_words(void)
+{
+    static const char json[] =
+        "{\"apt\": {\"architectures\": [\"amd64\", \"i386\"], \"packages\": ["
+        "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1\", \"manual\": true},"
+        "{\"name\": \"libx\", \"architecture\": \"i386\", \"version\": \"1\", \"manual\": true},"
+        "{\"name\": \"tz\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": true},"
+        "{\"name\": \"old\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true,"
+        " \"unavailable\": \"superseded\"},"
+        "{\"name\": \"zoom\", \"architecture\": \"amd64\", \"version\": \"6\", \"manual\": true,"
+        " \"unavailable\": \"local\"},"
+        "{\"name\": \"dep\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": false},"
+        "{\"name\": \"grub-pc\", \"architecture\": \"amd64\", \"version\": \"2\", \"manual\": true},"
+        "{\"name\": \"linux-image-generic\", \"architecture\": \"amd64\", \"version\": \"7\","
+        " \"manual\": true},"
+        "{\"name\": \"thermald\", \"architecture\": \"amd64\", \"version\": \"2\", \"manual\": true},"
+        "{\"name\": \"bare\", \"manual\": true}]}}";
+    struct rs_jval        pk;
+    struct rs_jval        skip;
+    struct rs_json_parser jp;
+    struct rs_buf         err;
+    char                **w;
+    size_t                n;
+    size_t                i;
+    struct rs_buf         all;
+
+    TEST_CASE("what apt-get install is given");
+    memset(&pk, 0, sizeof(pk));
+    rs_buf_init(&err);
+    rs_json_init(&jp, json, sizeof(json) - 1, &err);
+    CHECK(rs_json_value(&jp, &pk));
+    rs_buf_free(&err);
+    memset(&skip, 0, sizeof(skip));
+    rs_jval_set_array(&skip);
+    rs_jval_set_string(rs_jarr_add(&skip), "thermald");
+
+    rs_buf_init(&all);
+    w = rs_packages_apt_words(&pk, &skip, true, &n);
+    for (i = 0; i < n; i++)
+    {
+        rs_buf_addf(&all, "%s ", w[i]);
+        free(w[i]);
+    }
+    free(w);
+    CHECK_STR(all.data, "vim=2:9.1 libx:i386=1 tz=2026a old bare ");
+    rs_buf_reset(&all);
+    w = rs_packages_apt_words(&pk, NULL, false, &n);
+    for (i = 0; i < n; i++)
+    {
+        rs_buf_addf(&all, "%s ", w[i]);
+        free(w[i]);
+    }
+    free(w);
+    CHECK_STR(all.data, "vim libx:i386 tz old thermald bare ");
+    rs_buf_free(&all);
+    rs_jval_free(&skip);
+    rs_jval_free(&pk);
+}
+
 static void test_empty(void)
 {
     char                 *t = rs_test_tmpdir();
@@ -650,9 +894,13 @@ void test_packages(void)
 {
     test_uri_file();
     test_apt();
+    test_hostile();
     test_snap();
     test_flatpak();
     test_languages();
+    test_alternatives();
+    test_keep();
+    test_apt_words();
     test_empty();
     test_in_index();
 }

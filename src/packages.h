@@ -31,6 +31,9 @@
  *            what was installed outside any project: system-wide and in
  *            each home
  *   pkg      OpenBSD's and NetBSD's installed packages
+ *   alternatives
+ *            the ones chosen by hand (update-alternatives --set), and what
+ *            each points at
  *
  * And which other package managers are present at all -- rpm, pacman, apk,
  * Nix, Guix, Homebrew, conda, FreeBSD's pkg, macOS receipts -- so an image
@@ -50,6 +53,32 @@
  * What could not be read goes into its "notes" array rather than failing.
  */
 void rs_packages_describe(const char *root, struct rs_jval *out);
+
+/*
+ * The files that put back what no repository or store can: for each apt
+ * package whose installed version is "unavailable", its .deb in apt's cache
+ * (/var/cache/apt/archives); for each snap installed from a file, its .snap
+ * in snapd's (/var/lib/snapd/snaps). Each one there is marked "kept" in
+ * `packages` with its path, and the paths are returned for the capture to
+ * keep (the caller frees them); each one not there is marked "not_kept" and
+ * described in `missing`, a line each.
+ */
+char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
+                        struct rs_buf *missing);
+
+/*
+ * What `apt-get install` is given to put back the apt packages installed by
+ * hand, from an inventory (`packages`): NAME=VERSION where the version
+ * installed can still be had and `pinned` is set, so it comes from the
+ * repository it came from; NAME where it cannot be, or without `pinned`.
+ * ":ARCH" follows the name where it is not the machine's own architecture.
+ * None installed from a .deb (those are installed from the file), none
+ * named in `skip` (an array of names, or NULL), and no boot loader or kernel,
+ * which the installer chooses for the machine it installs onto. The caller
+ * frees the words.
+ */
+char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
+                             bool pinned, size_t *n);
 
 /*
  * apt's name for the files it keeps a repository's indexes in, as

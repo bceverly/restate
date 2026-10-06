@@ -235,6 +235,10 @@ Options:
                           capture: encrypt the image to the OpenPGP public key
                           in KEYFILE (gpg --export); repeatable, for more than
                           one recipient
+      --keep-local-packages
+                          capture: keep the .deb and .snap files of installed
+                          packages no repository or store has, from apt's and
+                          snapd's caches, so a rebuild can install them
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
@@ -246,6 +250,9 @@ Options:
       --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
                           (vm) or on other hardware (metal) rather than the
                           same machine
+      --image-at=PATH     autoinstall: where the installer will find the image
+                          (a mounted disk or share); the file then installs the
+                          packages and restores the files from it
   -P, --progress          show progress on standard error: paths and bytes so
                           far while walking, a percentage and time left while
                           writing an image or downloading
@@ -297,6 +304,13 @@ was installed since, and from where, and `restate packages` prints it:
 - **OpenBSD and NetBSD packages.** rpm, pacman, apk, Nix, Guix, Homebrew,
   conda, FreeBSD's pkg and macOS receipts are noted as present, without an
   inventory yet.
+- **Alternatives** chosen by hand (`update-alternatives --set`).
+
+`capture --keep-local-packages` also keeps what no repository or store can
+give back: the `.deb` of each unavailable version, from apt's cache, and the
+`.snap` of each snap installed from a file. A package installed from a
+downloaded file is often not in apt's cache; the capture warns of each one,
+and `dpkg-repack NAME`, run in `/var/cache/apt/archives`, rebuilds it there.
 
 ```console
 $ restate packages | jq -c '.apt | {count, manual, superseded, local}'
@@ -351,9 +365,11 @@ run by a person.
 The packages go back before the files, from the image's
 [inventory](#packages): `/etc/apt` and the repository keys kept outside it,
 then every package installed by hand pinned to its old version (so it comes
-from the repository it came from), the snaps by channel, the flatpak apps,
-and what pip, npm, pipx, cargo and gem installed. The packages no repository
-has are listed with what to do about them.
+from the repository it came from) -- but not the boot loader or kernel, which
+the installer chose for the new machine -- the kept `.deb` files, the snaps by
+channel, the flatpak apps, what pip, npm, pipx, cargo and gem installed, and
+the alternatives chosen by hand. The packages no repository has are listed
+with what to do about them.
 
 `restate autoinstall` writes the same layout as an Ubuntu autoinstall file for
 an unattended reinstall, with the locale, keyboard, time zone, host name,
@@ -378,8 +394,14 @@ $ restate buildsheet web01.tgz -o web01-rebuild.txt
 $ restate autoinstall --target vm web01.tgz -o user-data
 ```
 
-The autoinstall file does not install the packages yet; that is next on the
-[roadmap](ROADMAP.md).
+Given `--image-at PATH` -- where the installer will find the image -- the
+autoinstall file does all of that unattended in its late-commands, then
+restores the files and rebuilds the initramfs and boot loader, so the machine
+comes up as it was:
+
+```console
+$ restate autoinstall --target vm --image-at /restate/web01.tgz web01.tgz -o user-data
+```
 
 ## Images and indexes
 

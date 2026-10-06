@@ -61,6 +61,12 @@ struct rs_scan_opts {
      * bytes the same walk would read are added up in stats->bytes_hashed,
      * which is what lets a progress bar show a percentage. */
     bool                   count_only;
+    /* Files recorded and kept as state whatever the rules say, even under a
+     * directory the walk leaves out: the packages no repository has, from
+     * apt's and snapd's caches. Each is reached as the walk reaches anything,
+     * one directory at a time, never through a symlink. */
+    const char *const     *keep;
+    size_t                 nkeep;
 };
 
 struct rs_scan_stats {

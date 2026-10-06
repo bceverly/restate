@@ -23,7 +23,9 @@ enum {
     OPT_CACHE,
     OPT_MIRROR,
     OPT_TARGET,
-    OPT_ENCRYPT_TO
+    OPT_ENCRYPT_TO,
+    OPT_KEEP_LOCAL,
+    OPT_IMAGE_AT
 };
 
 enum rs_command {
@@ -51,6 +53,8 @@ struct rs_options {
     size_t          nrecipients;
     bool            all;
     bool            baseline_content;
+    bool            keep_local;     /* --keep-local-packages */
+    const char     *image_at;       /* --image-at */
     bool            one_fs;
     bool            no_hash;
     bool            quiet;

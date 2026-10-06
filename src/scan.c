@@ -42,6 +42,7 @@ struct walk {
     dev_t                      root_dev;
     unsigned                   max_depth;
     bool                       failed;    /* the store callback gave up */
+    bool                       forced;    /* visiting a kept path: state, whatever the rules */
 };
 
 static char type_of(mode_t mode)
@@ -437,7 +438,7 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         unreadable(w, tree_path, errno);
         return;
     }
-    cls = rs_rules_classify(w->opts->rules, tree_path, NULL);
+    cls = w->forced ? RS_CLASS_STATE : rs_rules_classify(w->opts->rules, tree_path, NULL);
     if (cls == RS_CLASS_EPHEMERAL)
     {
         w->stats->skipped_ephemeral++;
@@ -570,6 +571,70 @@ static void walk_dir(struct walk *w, int dirfd, /* NOLINT(misc-no-recursion) */
     free(names);
 }
 
+/* Whether the walk recorded `path` already: a rule may keep it anyway. */
+static bool recorded(const struct rs_index *ix, const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        if (strcmp(ix->entries[i].path, path) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The paths in opts->keep, visited as state. One that is not there is not
+ * recorded, and the caller, which knows what it was, says so. */
+static void visit_kept(struct walk *w, int rootfd)
+{
+    size_t k;
+
+    for (k = 0; k < w->opts->nkeep; k++)
+    {
+        const char *path = w->opts->keep[k];
+        struct stat st;
+        char       *copy;
+        char       *p;
+        char       *slash;
+        int         dirfd;
+        unsigned    depth = 0;
+
+        if (!rs_path_is_clean(path) || strcmp(path, "/") == 0 ||
+            (!w->opts->count_only && recorded(w->out, path)))
+        {
+            continue;
+        }
+        dirfd = dup(rootfd);
+        copy = rs_xstrdup(path + 1);
+        p = copy;
+        while (dirfd >= 0 && (slash = strchr(p, '/')) != NULL)
+        {
+            int next;
+
+            *slash = '\0';
+            next = open_at(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            (void)close(dirfd);
+            dirfd = next;
+            p = slash + 1;
+            depth++;
+        }
+        if (dirfd >= 0 && fstatat(dirfd, p, &st, AT_SYMLINK_NOFOLLOW) == 0)
+        {
+            w->forced = true;
+            visit(w, dirfd, p, path, depth);
+            w->forced = false;
+        }
+        if (dirfd >= 0)
+        {
+            (void)close(dirfd);
+        }
+        free(copy);
+    }
+}
+
 bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
              struct rs_scan_stats *stats, struct rs_buf *err)
 {
@@ -611,6 +676,7 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     {
         stats->recorded = 1;
         walk_dir(&w, fd, "/", 0);
+        visit_kept(&w, fd);
         (void)close(fd);
         return true;
     }
@@ -628,6 +694,10 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     }
     record(&w, &e);
     walk_dir(&w, fd, "/", 0);
+    if (!w.failed)
+    {
+        visit_kept(&w, fd);
+    }
     (void)close(fd);
     if (w.failed)
     {

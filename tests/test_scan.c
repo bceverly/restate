@@ -205,6 +205,52 @@ void test_scan(void)
     o.all = false;
     o.hash = true;
 
+    TEST_CASE("scan: kept paths are recorded as state, under a directory left out");
+    {
+        const char *keep[] = { "/var/cache/blob", "/etc/hosts", "/var/cache/missing",
+                               "/etc/link/through", "/etc/../etc/hosts", "/" };
+        char       *dir = rs_xasprintf("%s/var/cache/sub", root);
+        char       *ln = rs_xasprintf("%s/var/cache/sub/escape", root);
+
+        o.keep = keep;
+        o.nkeep = sizeof(keep) / sizeof(keep[0]);
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        e = rs_index_find(&m, "/var/cache/blob");
+        CHECK(e && e->cls == RS_CLASS_STATE && e->hash_state == RS_HASH_PRESENT);
+        /* Recorded once, by the walk, not again. */
+        CHECK(rs_index_find(&m, "/etc/hosts") != NULL);
+        CHECK(rs_index_find(&m, "/var/cache/missing") == NULL);
+        CHECK_INT(st.unreadable, 0);
+        CHECK(rs_index_find(&m, "/etc/link/through") == NULL);
+        CHECK(rs_index_find(&m, "/var/cache") == NULL);
+        rs_index_free(&m);
+
+        /* Never through a symlink on the way. */
+        CHECK(mkdir(dir, 0755) == 0);
+        CHECK(symlink("/etc", ln) == 0);
+        keep[0] = "/var/cache/sub/escape/hosts";
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/var/cache/sub/escape/hosts") == NULL);
+        rs_index_free(&m);
+
+        /* Counted, for a progress total, as the walk would read it. */
+        keep[0] = "/var/cache/blob";
+        o.count_only = true;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(st.bytes_hashed >= 4);
+        rs_index_free(&m);
+        o.count_only = false;
+        o.keep = NULL;
+        o.nkeep = 0;
+        CHECK(unlink(ln) == 0);
+        CHECK(rmdir(dir) == 0);
+        free(ln);
+        free(dir);
+    }
+
     TEST_CASE("scan: --one-file-system on a single filesystem changes nothing");
     o.one_fs = true;
     rs_index_init(&m);

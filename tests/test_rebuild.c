@@ -219,6 +219,11 @@ static const char *const packages_json[] = {
     "    \"origins\": [], \"unavailable\": \"local\"},"
     "   {\"name\": \"oldie\", \"architecture\": \"amd64\", \"version\": \"1.0\", \"manual\": true,"
     "    \"origins\": [], \"unavailable\": \"superseded\"},"
+    "   {\"name\": \"chef\", \"architecture\": \"amd64\", \"version\": \"18\", \"manual\": true,"
+    "    \"origins\": [], \"unavailable\": \"local\","
+    "    \"kept\": \"/var/cache/apt/archives/chef_18_amd64.deb\"},"
+    "   {\"name\": \"grub-pc\", \"architecture\": \"amd64\", \"version\": \"2\", \"manual\": true,"
+    "    \"origins\": [\"x\"]},"
     "   {\"name\": \"noversion\", \"architecture\": \"amd64\", \"manual\": true},"
     "   {\"architecture\": \"amd64\", \"manual\": true}]},",
     " \"snap\": [{\"name\": \"firefox\", \"revision\": \"1\", \"channel\": \"latest/stable\","
@@ -227,7 +232,11 @@ static const char *const packages_json[] = {
     "   \"disabled\": true, \"channel\": \"latest/edge\"},"
     "  {\"name\": \"core22\", \"type\": \"base\"}, {\"name\": \"core24\"}, {\"name\": \"bare\"},"
     "  {\"name\": \"lxd\"}, {\"name\": \"mine\", \"revision\": \"x1\", \"local\": true},"
-    "  {\"name\": \"what\", \"local\": true}, {\"type\": \"app\"}],",
+    "  {\"name\": \"what\", \"local\": true}, {\"type\": \"app\"},"
+    "  {\"name\": \"asana\", \"revision\": \"x1\", \"local\": true,"
+    "   \"kept\": \"/var/lib/snapd/snaps/asana_x1.snap\"}],"
+    " \"alternatives\": [{\"name\": \"java\", \"path\": \"/usr/lib/jvm/21/bin/java\"},"
+    "  {\"name\": \"nopath\"}],",
     " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": \"https://dl.flathub.org/repo/\","
     "   \"scope\": \"system\"}, {\"name\": \"mine\", \"url\": \"https://x/repo\","
     "   \"scope\": \"user /home/pat\"}, {\"name\": \"nourl\"}],"
@@ -331,20 +340,29 @@ static char *sheet(const struct rs_jval *m, enum rs_target t, const char *image)
     return sheet_with(m, t, image, NULL);
 }
 
-static char *autoinst(const struct rs_jval *m, enum rs_target t)
+static char *autoinst_with(const struct rs_jval *m, enum rs_target t,
+                           const struct rs_jval *packages, const char *image_at)
 {
     struct rs_auto_opts o;
     struct rs_buf       out;
     struct rs_buf       err;
 
+    memset(&o, 0, sizeof(o));
     o.target = t;
     o.image = NULL;
     o.version = "9.9";
+    o.packages = packages;
+    o.image_at = image_at;
     rs_buf_init(&out);
     rs_buf_init(&err);
     CHECK(rs_autoinstall(m, &o, &out, &err));
     rs_buf_free(&err);
     return rs_buf_detach(&out);
+}
+
+static char *autoinst(const struct rs_jval *m, enum rs_target t)
+{
+    return autoinst_with(m, t, NULL, NULL);
 }
 
 static void layout_cases(void)
@@ -623,6 +641,17 @@ static void package_cases(void)
     CHECK_CONTAINS(s, "apt-mark hold libfoo");
     CHECK_CONTAINS(s, "oldie                            was 1.0");
     CHECK_CONTAINS(s, "zoom                             6.7");
+    CHECK(strstr(s, "chef                             18") == NULL);
+    CHECK_CONTAINS(s, "The image keeps these; install them from it:");
+    CHECK_CONTAINS(s, "mkdir -p /tmp/restate && tar -xpzf web01.tgz -C /tmp/restate "
+                      "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "apt-get install -y /tmp/restate/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "dpkg-repack NAME");
+    CHECK(strstr(s, "grub-pc=") == NULL);
+    CHECK_CONTAINS(s, "restate/files/var/lib/snapd/snaps/asana_x1.snap && snap install --dangerous "
+                      "/tmp/restate/var/lib/snapd/snaps/asana_x1.snap");
+    CHECK_CONTAINS(s, "update-alternatives --set java /usr/lib/jvm/21/bin/java");
+    CHECK(strstr(s, "nopath") == NULL);
     CHECK_CONTAINS(s, "snap install firefox --channel=latest/stable\n");
     CHECK_CONTAINS(s, "snap install code --channel=latest/edge --classic --devmode && "
                       "snap disable code");
@@ -684,6 +713,93 @@ static void package_cases(void)
     CHECK(strstr(s, "Install the packages again") == NULL);
     CHECK_CONTAINS(s, "has no package inventory");
     free(s);
+    rs_jval_free(&m);
+}
+
+static void autoinstall_package_cases(void)
+{
+    struct rs_jval m;
+    struct rs_jval pk;
+    struct rs_buf  text;
+    char          *s;
+    size_t         i;
+
+    TEST_CASE("autoinstall: the packages, then the files, from the image");
+    server(&m);
+    rs_buf_init(&text);
+    for (i = 0; packages_json[i]; i++)
+    {
+        rs_buf_addstr(&text, packages_json[i]);
+    }
+    parse(text.data, &pk);
+    rs_buf_free(&text);
+    s = autoinst_with(&m, RS_TARGET_VM, &pk, "/media/restate/web 01.tgz");
+    CHECK_CONTAINS(s, "# image at /media/restate/web 01.tgz, so it has to be there");
+    CHECK_CONTAINS(s, "  snaps:\n    - name: \"firefox\"\n      channel: \"latest/stable\"\n"
+                      "      classic: false\n");
+    CHECK_CONTAINS(s, "    - name: \"code\"\n      channel: \"latest/edge\"\n      classic: true\n");
+    CHECK(strstr(s, "name: \"core22\"") == NULL);
+    CHECK(strstr(s, "name: \"mine\"") == NULL);
+    CHECK_CONTAINS(s, "test -f '/media/restate/web 01.tgz' || { echo 'restate: the image is not at "
+                      "/media/restate/web 01.tgz' >&2; exit 1; }");
+    CHECK_CONTAINS(s, "tar -xpzf '/media/restate/web 01.tgz' --numeric-owner -C /target "
+                      "--strip-components=2 restate/files/etc/apt");
+    CHECK_CONTAINS(s, "mkdir -p /target/usr/share/keyrings/ && echo dmVuZG9yIGtleQ== | base64 -d > "
+                      "/target/usr/share/keyrings/vendor.gpg");
+    CHECK(strstr(s, "local.gpg") == NULL);
+    CHECK(strstr(s, "odd.gpg") == NULL);
+    CHECK_CONTAINS(s, "curtin in-target -- apt-get update || true");
+    CHECK_CONTAINS(s, "apt-get install -y vim=2:9.1-1 'libfoo:i386=1.0~rc1' tzdata=2026a");
+    CHECK_CONTAINS(s, " || curtin in-target -- env DEBIAN_FRONTEND=noninteractive apt-get install "
+                      "-y vim libfoo:i386 tzdata");
+    CHECK(strstr(s, "grub-pc") == NULL);
+    CHECK(strstr(s, "intel-microcode=") == NULL);
+    CHECK_CONTAINS(s, "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "apt-get install -y /var/cache/apt/archives/chef_18_amd64.deb || echo "
+                      "'restate: the kept packages did not all install' >&2");
+    CHECK_CONTAINS(s, "curtin in-target -- apt-mark hold libfoo");
+    CHECK_CONTAINS(s, "curtin in-target -- flatpak remote-add --if-not-exists flathub "
+                      "https://dl.flathub.org/repo/");
+    CHECK(strstr(s, "remote-add --if-not-exists mine") == NULL);
+    CHECK_CONTAINS(s, "curtin in-target -- flatpak install -y --noninteractive flathub "
+                      "org.example.App//stable");
+    CHECK_CONTAINS(s, "curtin in-target -- pip install --break-system-packages requests==2.31.0 ||");
+    CHECK(strstr(s, "httpie") == NULL);
+    CHECK_CONTAINS(s, "curtin in-target -- npm install -g left-pad@1.3.0 ||");
+    CHECK_CONTAINS(s, "curtin in-target -- gem install rake:13.0.6 ||");
+    CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java /usr/lib/jvm/21/bin/java");
+    CHECK_CONTAINS(s, "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
+                      "restate/files");
+    CHECK_CONTAINS(s, "curtin in-target -- update-grub");
+    CHECK(strstr(s, "update-alternatives") < strstr(s, "--exclude=restate/files/etc/fstab"));
+    CHECK_CONTAINS(s, "#   snap install --dangerous /var/lib/snapd/snaps/asana_x1.snap");
+    CHECK_CONTAINS(s, "#   the snap mine, from the file it was installed from");
+    CHECK_CONTAINS(s, "#   zoom, from its .deb (no repository has it)");
+    CHECK_CONTAINS(s, "#   pip's packages in the home directories, each by its owner");
+    CHECK_CONTAINS(s, "#   pipx's packages in the home directories");
+    CHECK_CONTAINS(s, "#   cargo's packages in the home directories");
+    /* One late-commands key, the hardware purges in it too. */
+    CHECK(strstr(strstr(s, "late-commands:") + 1, "late-commands:") == NULL);
+    CHECK_CONTAINS(s, "apt-get purge -y intel-microcode || true");
+    free(s);
+
+    TEST_CASE("autoinstall: an inventory, but nowhere to find the image");
+    s = autoinst_with(&m, RS_TARGET_SAME, &pk, NULL);
+    CHECK_CONTAINS(s, "make this file with\n# --image-at PATH");
+    CHECK_CONTAINS(s, "  snaps:\n");
+    CHECK(strstr(s, "late-commands:") == NULL);
+    free(s);
+    rs_jval_free(&pk);
+
+    TEST_CASE("autoinstall: an inventory with no apt");
+    parse("{\"snap\": [], \"pip\": [{\"name\": \"x\", \"where\": \"/usr/local/lib/p\"}]}", &pk);
+    s = autoinst_with(&m, RS_TARGET_SAME, &pk, "/i.tgz");
+    CHECK(strstr(s, "restate/files/etc/apt") == NULL);
+    CHECK(strstr(s, "snaps:") == NULL);
+    CHECK_CONTAINS(s, "curtin in-target -- pip install --break-system-packages x ||");
+    CHECK_CONTAINS(s, "curtin in-target -- update-initramfs -u -k all");
+    free(s);
+    rs_jval_free(&pk);
     rs_jval_free(&m);
 }
 
@@ -760,7 +876,7 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 
@@ -788,6 +904,7 @@ static void autoinstall_cases(void)
 void test_rebuild(void)
 {
     package_cases();
+    autoinstall_package_cases();
     layout_cases();
     sheet_cases();
     autoinstall_cases();

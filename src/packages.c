@@ -27,25 +27,95 @@
 /* Files                                                                     */
 /* ------------------------------------------------------------------------- */
 
-static char *path_join(const char *a, const char *b)
-{
-    size_t n = strlen(a);
+/*
+ * Everything here is read beneath `root`, and the names come partly from the
+ * tree itself: a repository's signed-by, a home directory in /etc/passwd. So
+ * nothing is opened by its whole path, which would follow a symlink anywhere
+ * along it -- out of a disk mounted from another machine and into this one.
+ * Each directory on the way is opened from the one before with O_NOFOLLOW,
+ * as the scan walks, and a symlink anywhere stops the read.
+ */
 
-    while (n > 1 && a[n - 1] == '/')
+/* The directory holding the last component of `rel`, opened beneath `root`,
+ * or -1; `*last` points at that component, inside `*copy` (the caller's to
+ * free). `rel` must be absolute and clean. */
+static int open_parent(const char *root, const char *rel, char **copy, const char **last)
+{
+    int   fd;
+    char *p;
+    char *slash;
+
+    *copy = NULL;
+    *last = NULL;
+    if (!rs_path_is_clean(rel) || strcmp(rel, "/") == 0)
     {
-        n--;
+        return -1;
     }
-    if (n == 1 && a[0] == '/')
+    fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
     {
-        return rs_xstrdup(b);
+        return -1;
     }
-    return rs_xasprintf("%.*s%s", (int)n, a, b);
+    *copy = rs_xstrdup(rel + 1);
+    p = *copy;
+    while ((slash = strchr(p, '/')) != NULL)
+    {
+        int next;
+
+        *slash = '\0';
+        next = openat(fd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        (void)close(fd);
+        if (next < 0)
+        {
+            free(*copy);
+            *copy = NULL;
+            return -1;
+        }
+        fd = next;
+        p = slash + 1;
+    }
+    *last = p;
+    return fd;
 }
 
-/* A regular file, opened for reading, or -1. */
-static int open_file(const char *path)
+/* root + rel, opened beneath root with `flags` (O_NOFOLLOW added), or -1. */
+static int open_beneath(const char *root, const char *rel, int flags)
 {
-    int         fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    char       *copy;
+    const char *last;
+    int         dir = open_parent(root, rel, &copy, &last);
+    int         fd = -1;
+
+    if (dir >= 0)
+    {
+        fd = openat(dir, last, flags | O_NOFOLLOW | O_CLOEXEC);
+        (void)close(dir);
+    }
+    free(copy);
+    return fd;
+}
+
+/* What root + rel is, without following a symlink; false if it is not there. */
+static bool stat_beneath(const char *root, const char *rel, struct stat *st)
+{
+    char       *copy;
+    const char *last;
+    int         dir = open_parent(root, rel, &copy, &last);
+    bool        ok = false;
+
+    if (dir >= 0)
+    {
+        ok = fstatat(dir, last, st, AT_SYMLINK_NOFOLLOW) == 0;
+        (void)close(dir);
+    }
+    free(copy);
+    return ok;
+}
+
+/* A regular file beneath root, opened for reading, or -1. */
+static int open_file(const char *root, const char *rel)
+{
+    int         fd = open_beneath(root, rel, O_RDONLY | O_NONBLOCK);
     struct stat st;
 
     if (fd >= 0 && (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)))
@@ -60,12 +130,10 @@ static int open_file(const char *path)
  * not be read, or is larger. */
 static bool read_file(const char *root, const char *rel, size_t max, struct rs_buf *out)
 {
-    char *path = path_join(root, rel);
-    int   fd = open_file(path);
+    int   fd = open_file(root, rel);
     char  chunk[8192];
     bool  ok = fd >= 0;
 
-    free(path);
     rs_buf_init(out);
     rs_buf_add(out, "", 0);
     while (ok)
@@ -102,11 +170,9 @@ static bool read_file(const char *root, const char *rel, size_t max, struct rs_b
 /* root + rel opened as a stream, or NULL. */
 static FILE *open_stream(const char *root, const char *rel)
 {
-    char *path = path_join(root, rel);
-    int   fd = open_file(path);
+    int   fd = open_file(root, rel);
     FILE *fp = fd >= 0 ? fdopen(fd, "r") : NULL;
 
-    free(path);
     if (fd >= 0 && !fp)
     {
         (void)close(fd);
@@ -116,22 +182,38 @@ static FILE *open_stream(const char *root, const char *rel)
 
 static bool exists(const char *root, const char *rel)
 {
-    char       *path = path_join(root, rel);
     struct stat st;
-    bool        ok = lstat(path, &st) == 0;
 
-    free(path);
-    return ok;
+    return stat_beneath(root, rel, &st);
 }
 
 static bool is_dir(const char *root, const char *rel)
 {
-    char       *path = path_join(root, rel);
     struct stat st;
-    bool        ok = lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
 
-    free(path);
-    return ok;
+    return stat_beneath(root, rel, &st) && S_ISDIR(st.st_mode);
+}
+
+/* A symlink's target, beneath root; false if rel is not a symlink. */
+static bool read_link(const char *root, const char *rel, char *buf, size_t len)
+{
+    char       *copy;
+    const char *last;
+    int         dir = open_parent(root, rel, &copy, &last);
+    ssize_t     n = -1;
+
+    if (dir >= 0)
+    {
+        n = readlinkat(dir, last, buf, len - 1); /* Flawfinder: ignore */
+        (void)close(dir);
+    }
+    free(copy);
+    if (n <= 0)
+    {
+        return false;
+    }
+    buf[n] = '\0';
+    return true;
 }
 
 static int compare_names(const void *a, const void *b)
@@ -143,16 +225,19 @@ static int compare_names(const void *a, const void *b)
  * starting with a dot. */
 static char **list_dir(const char *root, const char *rel, size_t *count)
 {
-    char                *path = path_join(root, rel);
-    DIR                 *d = opendir(path);
+    int                  fd = open_beneath(root, rel, O_RDONLY | O_DIRECTORY);
+    DIR                 *d = fd >= 0 ? fdopendir(fd) : NULL;
     const struct dirent *de;
     char               **names = NULL;
     size_t               n = 0;
 
-    free(path);
     *count = 0;
     if (!d)
     {
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
         return NULL;
     }
     while ((de = readdir(d)) != NULL)
@@ -1066,6 +1151,35 @@ static void trusted_keys(const char *root, struct repos *rs)
     }
 }
 
+/*
+ * Whether `data` is an OpenPGP public key, as apt reads one: ASCII-armored,
+ * or binary starting with a public-key packet (tag 6, in the old packet
+ * format or the new). A signed-by in the tree can name any file at all, and
+ * only a key's content belongs in the inventory.
+ */
+static bool looks_like_key(const unsigned char *data, size_t len)
+{
+    static const char armor[] = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
+    size_t            skip = 0;
+    unsigned          tag;
+
+    while (skip < len && (data[skip] == ' ' || data[skip] == '\t' || data[skip] == '\r' ||
+                          data[skip] == '\n'))
+    {
+        skip++;
+    }
+    if (len - skip >= sizeof(armor) - 1 && memcmp(data + skip, armor, sizeof(armor) - 1) == 0)
+    {
+        return true;
+    }
+    if (len == 0 || (data[0] & 0x80) == 0)
+    {
+        return false;
+    }
+    tag = (data[0] & 0x40) ? (unsigned)(data[0] & 0x3f) : (unsigned)((data[0] >> 2) & 0x0f);
+    return tag == 6;
+}
+
 /* Each key file, whole: a restore puts it back before adding its repository,
  * whether or not the file was kept in the image. */
 static void describe_keys(const char *root, struct repos *rs, struct rs_jval *apt,
@@ -1104,6 +1218,17 @@ static void describe_keys(const char *root, struct repos *rs, struct rs_jval *ap
         rs_sha256_hex(data.data, data.len, hex);
         rs_jobj_u64(k, "size", data.len);
         rs_jobj_str(k, "sha256", hex);
+        if (!looks_like_key((const unsigned char *)data.data, data.len))
+        {
+            char *why = rs_xasprintf("%s is named as a repository key and is not one: its "
+                                     "content is not recorded", rs->keys[i]);
+
+            rs_jobj_bool(k, "not_a_key", true);
+            note(out, why);
+            free(why);
+            rs_buf_free(&data);
+            continue;
+        }
         rs_buf_init(&b64);
         rs_base64_encode(&b64, data.data, data.len);
         rs_jobj_str(k, "data", b64.data ? b64.data : "");
@@ -1280,18 +1405,15 @@ static void snaps_from_mounts(const char *root, struct rs_jval *arr)
     for (i = 0; i < n; i++)
     {
         char           *rel = rs_xasprintf("/snap/%s/current", names[i]);
-        char           *path = path_join(root, rel);
         char            target[256];
-        ssize_t         len = readlink(path, target, sizeof(target) - 1); /* Flawfinder: ignore */
+        bool            ok = read_link(root, rel, target, sizeof(target));
         struct rs_jval *o;
 
         free(rel);
-        free(path);
-        if (len <= 0)
+        if (!ok)
         {
             continue;
         }
-        target[len] = '\0';
         o = rs_jarr_add(arr);
         rs_jval_set_object(o);
         rs_jobj_str(o, "name", names[i]);
@@ -1367,6 +1489,254 @@ static void add_manager(struct rs_jval *out, const char *name, const char *where
         rs_jobj_bool(m, "inventory", inventory);
     }
     rs_jval_set_string(rs_jarr_add(array_member(m, "where")), where);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Keeping what cannot be fetched                                            */
+/* ------------------------------------------------------------------------- */
+
+/* The member `key` of `obj`, writable, or NULL. */
+static struct rs_jval *member(struct rs_jval *obj, const char *key)
+{
+    size_t i;
+
+    for (i = 0; obj && obj->type == RS_JOBJECT && i < obj->n; i++)
+    {
+        if (strcmp(obj->keys[i], key) == 0)
+        {
+            return &obj->items[i];
+        }
+    }
+    return NULL;
+}
+
+/* Whether a name taken from the inventory is one file name, no more. */
+static bool plain_name(const char *s)
+{
+    return s && s[0] != '\0' && s[0] != '.' && !strchr(s, '/');
+}
+
+/* Records `rel` as kept if it is a regular file beneath root. */
+static bool keep_one(const char *root, struct rs_jval *item, const char *rel,
+                     char ***paths, size_t *n)
+{
+    struct stat st;
+
+    if (!stat_beneath(root, rel, &st) || !S_ISREG(st.st_mode))
+    {
+        return false;
+    }
+    rs_jobj_str(item, "kept", rel);
+    *paths = rs_xreallocarray(*paths, *n + 1, sizeof(**paths));
+    (*paths)[(*n)++] = rs_xstrdup(rel);
+    return true;
+}
+
+char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
+                        struct rs_buf *missing)
+{
+    struct rs_jval *pkgs = member(member(packages, "apt"), "packages");
+    struct rs_jval *snaps = member(packages, "snap");
+    char          **paths = NULL;
+    size_t          i;
+
+    *n = 0;
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        struct rs_jval *p = &pkgs->items[i];
+        const char     *name = rs_jobject_str(p, "name");
+        const char     *version = rs_jobject_str(p, "version");
+        const char     *arch = rs_jobject_str(p, "architecture");
+        struct rs_buf   rel;
+        const char     *c;
+        char           *bare;
+
+        if (!rs_jobject_str(p, "unavailable") || !plain_name(name) || !plain_name(version) ||
+            !plain_name(arch))
+        {
+            continue;
+        }
+        /* apt's own name for it: NAME_VERSION_ARCH.deb, an epoch's colon
+         * written %3a -- or, as dpkg-repack names what it rebuilds, with no
+         * epoch at all. */
+        rs_buf_init(&rel);
+        rs_buf_addf(&rel, "/var/cache/apt/archives/%s_", name);
+        for (c = version; *c; c++)
+        {
+            if (*c == ':')
+            {
+                rs_buf_addstr(&rel, "%3a");
+            } else
+            {
+                rs_buf_addc(&rel, *c);
+            }
+        }
+        rs_buf_addf(&rel, "_%s.deb", arch);
+        bare = rs_xasprintf("/var/cache/apt/archives/%s_%s_%s.deb", name,
+                            strchr(version, ':') ? strchr(version, ':') + 1 : version, arch);
+        if (!keep_one(root, p, rel.data, &paths, n) && !keep_one(root, p, bare, &paths, n))
+        {
+            rs_jobj_str(p, "not_kept", "not in apt's cache");
+            rs_buf_addf(missing, "%s %s is not in /var/cache/apt/archives, so it cannot be "
+                        "kept; `cd /var/cache/apt/archives && dpkg-repack %s` rebuilds it "
+                        "there from the installed files\n", name, version, name);
+        }
+        free(bare);
+        rs_buf_free(&rel);
+    }
+    for (i = 0; snaps && snaps->type == RS_JARRAY && i < snaps->n; i++)
+    {
+        struct rs_jval *sn = &snaps->items[i];
+        const char     *name = rs_jobject_str(sn, "name");
+        const char     *rev = rs_jobject_str(sn, "revision");
+        char           *rel;
+
+        if (!flag(sn, "local") || !plain_name(name) || !plain_name(rev))
+        {
+            continue;
+        }
+        rel = rs_xasprintf("/var/lib/snapd/snaps/%s_%s.snap", name, rev);
+        if (!keep_one(root, sn, rel, &paths, n))
+        {
+            rs_jobj_str(sn, "not_kept", "not in snapd's cache");
+            rs_buf_addf(missing, "the snap %s (revision %s) is not in /var/lib/snapd/snaps, so "
+                        "it cannot be kept\n", name, rev);
+        }
+        free(rel);
+    }
+    return paths;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Alternatives                                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The alternatives someone chose by hand: the ones dpkg's (or Fedora's)
+ * alternatives database marks "manual", and what each points at. The rest are
+ * automatic -- the highest priority wins -- and come back by themselves once
+ * the packages providing them are installed.
+ */
+static void describe_alternatives(const char *root, struct rs_jval *out)
+{
+    static const char *const dbs[] = { "/var/lib/dpkg/alternatives", "/var/lib/alternatives" };
+    size_t                   d;
+
+    for (d = 0; d < sizeof(dbs) / sizeof(dbs[0]); d++)
+    {
+        char **names;
+        size_t n;
+        size_t i;
+
+        names = list_dir(root, dbs[d], &n);
+        for (i = 0; i < n; i++)
+        {
+            char         *rel = rs_xasprintf("%s/%s", dbs[d], names[i]);
+            struct rs_buf text;
+            char          target[1024];
+
+            if (!read_file(root, rel, SMALL_MAX, &text))
+            {
+                free(rel);
+                continue;
+            }
+            free(rel);
+            rel = rs_xasprintf("/etc/alternatives/%s", names[i]);
+            if (rs_starts_with(text.data, "manual\n") &&
+                read_link(root, rel, target, sizeof(target)))
+            {
+                struct rs_jval *o = rs_jarr_add(array_member(out, "alternatives"));
+
+                rs_jval_set_object(o);
+                rs_jobj_str(o, "name", names[i]);
+                rs_jobj_str(o, "path", target);
+            }
+            free(rel);
+            rs_buf_free(&text);
+        }
+        free_list(names, n);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Installing again                                                          */
+/* ------------------------------------------------------------------------- */
+
+static bool named_in(const struct rs_jval *arr, const char *name)
+{
+    size_t i;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        if (arr->items[i].type == RS_JSTRING && strcmp(arr->items[i].s, name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * The boot loader and the kernel are the installer's to choose: they follow
+ * the firmware (grub-pc for BIOS conflicts with grub-efi-amd64 for UEFI) and
+ * the hardware, and asking for the old ones by name onto a different machine
+ * -- a VM, say -- can remove the boot loader the installer just set up.
+ */
+static bool installers_choice(const char *name)
+{
+    static const char *const prefixes[] = { "grub-", "grub2-", "shim", "linux-image-",
+                                            "linux-headers-", "linux-modules-", "linux-generic",
+                                            "linux-signed-", "linux-virtual", "linux-oem-" };
+    size_t                   i;
+
+    for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+    {
+        if (rs_starts_with(name, prefixes[i]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
+                             bool pinned, size_t *n)
+{
+    const struct rs_jval *apt = rs_jobject_get(packages, "apt");
+    const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
+    const struct rs_jval *archs = rs_jobject_get(apt, "architectures");
+    const char           *native = archs && archs->type == RS_JARRAY && archs->n > 0 &&
+                                   archs->items[0].type == RS_JSTRING ? archs->items[0].s : NULL;
+    char                **words = NULL;
+    size_t                i;
+
+    *n = 0;
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+        const char           *name = rs_jobject_str(p, "name");
+        const char           *arch = rs_jobject_str(p, "architecture");
+        const char           *version = rs_jobject_str(p, "version");
+        const char           *why = rs_jobject_str(p, "unavailable");
+        bool                  foreign = arch && native && strcmp(arch, "all") != 0 &&
+                                        strcmp(arch, native) != 0;
+
+        if (!name || !flag(p, "manual") || (why && strcmp(why, "local") == 0) ||
+            named_in(skip, name) || installers_choice(name))
+        {
+            continue;
+        }
+        words = rs_xreallocarray(words, *n + 1, sizeof(*words));
+        if (pinned && !why && version)
+        {
+            words[(*n)++] = rs_xasprintf("%s%s%s=%s", name, foreign ? ":" : "",
+                                         foreign ? arch : "", version);
+        } else
+        {
+            words[(*n)++] = rs_xasprintf("%s%s%s", name, foreign ? ":" : "", foreign ? arch : "");
+        }
+    }
+    return words;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1968,6 +2338,7 @@ void rs_packages_describe(const char *root, struct rs_jval *out)
     {
         add_manager(out, "apt", "/var/lib/dpkg/status", true);
     }
+    describe_alternatives(root, out);
     describe_snap(root, out);
     if (rs_jobject_get(out, "snap"))
     {

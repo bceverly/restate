@@ -447,13 +447,37 @@ For flatpak it records the remotes and the apps of each installation, the
 system's and each user's. For pip, npm, cargo, pipx and Ruby gems it records
 what was installed outside any project: system-wide, and in the home
 directory of root and of each user who logs in. On OpenBSD and NetBSD it
-records the installed packages. Other package managers \- rpm, pacman, apk,
+records the installed packages. It records the alternatives chosen by hand
+.RB ( "update-alternatives \-\-set" ),
+and what each points at; the rest follow the packages by themselves.
+Other package managers \- rpm, pacman, apk,
 Nix, Guix, Homebrew, conda, FreeBSD's
 .BR pkg ,
 macOS receipts \- are listed in
 .B """managers"""
 as present, with no inventory in this version, so that an image says what it
 is missing rather than leaving it out silently.
+.PP
+With
+.BR \-\-keep\-local\-packages ,
+a capture also keeps the files that put back what no repository or store
+can: the
+.I .deb
+of each installed version the inventory marks unavailable, from apt's cache
+.RI ( /var/cache/apt/archives ),
+and the
+.I .snap
+of each snap installed from a file, from snapd's
+.RI ( /var/lib/snapd/snaps ).
+Both caches are left out of an image otherwise. A package installed from a
+downloaded file is often not in apt's cache; the capture warns of each one
+it cannot keep, and
+.B dpkg\-repack
+.I NAME
+run in
+.I /var/cache/apt/archives
+rebuilds one from what is installed, under the name the next capture looks
+for. Off by default: those files can be large.
 .SH BASELINE
 .I Baseline
 means
@@ -607,10 +631,12 @@ the inventory with
 .BR base64 (1);
 then every package installed by hand, pinned to the version that was
 installed, so it comes from the repository it came from and not another
-that has the same name; the held ones held again; the ones no repository has
-any more, or ever had, listed with what to do about them; then the snaps by
-channel, the flatpak apps by remote, and what pip, npm, pipx, cargo and gem
-installed, each by its owner. Every name and version in those commands is
+that has the same name \- except the boot loader and the kernel, which the
+installer chose for the machine it installed onto; the held ones held again;
+the ones the image keeps, installed from it; the ones no repository has any
+more, or ever had, listed with what to do about them; then the snaps by
+channel, the flatpak apps by remote, what pip, npm, pipx, cargo and gem
+installed, each by its owner, and the alternatives chosen by hand. Every name and version in those commands is
 quoted where it needs to be, because the inventory says whatever the
 captured tree said. The restore that follows puts the old configuration
 back over the packages' own.
@@ -626,9 +652,24 @@ writes the same layout as an Ubuntu autoinstall file, for an install nobody
 has to attend: storage in curtin's terms, locale, keyboard, time zone, host
 name, network and the SSH server. A LUKS passphrase has to be in the file
 for the installer to format the volume, and is left as CHANGE-ME, as is the
-first account's password, which the restore replaces. The packages
-installed since the original install are in the build sheet, and not yet in
-the autoinstall file.
+first account's password, which the restore replaces. The snaps go in the
+installer's own
+.B snaps
+section. Given
+.B \-\-image\-at
+.IR PATH ,
+where the installer will find the image (a disk or share mounted there), its
+late-commands do the rest of what the build sheet does, unattended and in
+the same order: the packages, then the image's files over them \- keeping
+the installer's
+.I /etc/fstab
+and
+.IR /etc/crypttab ,
+since it formatted the volumes \- and the initramfs and boot loader rebuilt.
+A package that will not install is said in the installer's log and the
+restore goes on; an image that is not there stops the install, saying so.
+What only a person can do \- per-user installations, a package from a file
+the image does not keep \- is listed in the file, for after the first boot.
 .PP
 With
 .BR "\-\-target vm" ,

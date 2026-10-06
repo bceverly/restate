@@ -64,4 +64,11 @@ void rs_error(const char *fmt, ...) RESTATE_PRINTF(1, 2);
 /* true if `s` starts with `prefix`. */
 bool rs_starts_with(const char *s, const char *prefix);
 
+/*
+ * Appends `word` to `b` as one shell word: as it is where it is plainly safe,
+ * single-quoted otherwise. For commands written out for a person or an
+ * installer to run, from names that came from a captured tree.
+ */
+void rs_shell_word(struct rs_buf *b, const char *word);
+
 #endif /* RESTATE_UTIL_H */

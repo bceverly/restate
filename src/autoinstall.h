@@ -14,8 +14,15 @@
  *
  * Two things cannot come from a description and are left as CHANGE-ME for the
  * person to fill in: a LUKS passphrase, which curtin needs in the file, and a
- * password for the first account, which the restore replaces anyway. The
- * packages installed since the original install are a later version's.
+ * password for the first account, which the restore replaces anyway.
+ *
+ * With a package inventory (packages.h), the snaps go in the installer's own
+ * snaps section. With the image's path as the installer will see it, too,
+ * the late-commands put the rest back as the build sheet does, packages
+ * before files: /etc/apt and the keys outside it, the packages installed by
+ * hand at their versions, the ones the image keeps, holds, flatpaks,
+ * system-wide pip, npm and gems, the alternatives chosen by hand -- then the
+ * image's files, and the initramfs and boot loader rebuilt over them.
  */
 #ifndef RESTATE_AUTOINSTALL_H
 #define RESTATE_AUTOINSTALL_H
@@ -27,9 +34,11 @@
 #include "util.h"
 
 struct rs_auto_opts {
-    enum rs_target target;
-    const char    *image;    /* the image it was made from, or NULL */
-    const char    *version;  /* restate's, for the header */
+    enum rs_target        target;
+    const char           *image;      /* the image it was made from, or NULL */
+    const char           *version;    /* restate's, for the header */
+    const struct rs_jval *packages;   /* the package inventory, or NULL */
+    const char           *image_at;   /* the image as the installer sees it, or NULL */
 };
 
 /* Writes the autoinstall file for `machine` to `out`. */
