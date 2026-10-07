@@ -10,7 +10,7 @@
  * to the nanosecond -- the ustar header alone cannot hold a path over 100
  * bytes, a file over 8 GiB, a uid over 2097151 or a fraction of a second. GNU
  * tar, bsdtar and every libarchive reader understand pax, so an image is also
- * an ordinary .tgz that `tar -xzpf` can unpack by hand.
+ * ordinary tar that `tar` can unpack by hand.
  *
  * The reader exists to pull index.json out of the front of an image without
  * reading the rest. Its input is a file somebody hands restate, so it checks

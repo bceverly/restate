@@ -679,9 +679,14 @@ static void test_keep(void)
         "Package: repacked\nStatus: install ok installed\nArchitecture: amd64\nVersion: 3:1.5\n\n"
         "Package: gone\nStatus: install ok installed\nArchitecture: amd64\nVersion: 9\n\n"
         "Package: odd\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1/2\n\n"
+        "Package: vc\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.26\n\n"
+        "Package: oldie\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n\n"
         "Package: fine\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n");
     put(t, "var/lib/apt/lists/x.example.com_dists_s_main_binary-amd64_Packages",
-        "Package: fine\nArchitecture: amd64\nVersion: 1\n");
+        "Package: fine\nArchitecture: amd64\nVersion: 1\n\n"
+        "Package: oldie\nArchitecture: amd64\nVersion: 2\n");
+    put(t, "home/u/Downloads/vc-1.26-amd64.deb", "!<arch>\ndebian-binary   1  ");
+    put(t, "home/u/Downloads/notes.txt", "not a deb at all, just some words");
     put(t, "var/cache/apt/archives/zoom_6.7_amd64.deb", "deb");
     put(t, "var/cache/apt/archives/epoch_1%3a2.0_amd64.deb", "deb");
     put(t, "var/cache/apt/archives/repacked_1.5_amd64.deb", "deb");
@@ -701,8 +706,16 @@ static void test_keep(void)
     memset(&out, 0, sizeof(out));
     rs_packages_describe(t, &out);
     rs_buf_init(&missing);
-    paths = rs_packages_keep(t, &out, &n, &missing);
-    CHECK_INT(n, 4);
+    {
+        static const char *const debs[] = {
+            "vc=/home/u/Downloads/vc-1.26-amd64.deb", "gone=/home/u/Downloads/notes.txt",
+            "fine=/home/u/Downloads/vc-1.26-amd64.deb", "nosuch=/x.deb", "noequals",
+            "zoom=relative.deb"
+        };
+
+        paths = rs_packages_keep(t, &out, debs, sizeof(debs) / sizeof(debs[0]), &n, &missing);
+    }
+    CHECK_INT(n, 5);
     pkgs = rs_jobject_get(rs_jobject_get(&out, "apt"), "packages");
     CHECK_STR(rs_jobject_str(find(pkgs, "name", "zoom"), "kept"),
               "/var/cache/apt/archives/zoom_6.7_amd64.deb");
@@ -712,6 +725,19 @@ static void test_keep(void)
     CHECK_STR(rs_jobject_str(find(pkgs, "name", "repacked"), "kept"),
               "/var/cache/apt/archives/repacked_1.5_amd64.deb");
     CHECK_STR(rs_jobject_str(find(pkgs, "name", "gone"), "not_kept"), "not in apt's cache");
+    CHECK_STR(rs_jobject_str(find(pkgs, "name", "vc"), "kept"),
+              "/home/u/Downloads/vc-1.26-amd64.deb");
+    CHECK(rs_jobject_get(find(pkgs, "name", "oldie"), "kept") == NULL);
+    CHECK(rs_jobject_get(find(pkgs, "name", "oldie"), "not_kept") == NULL);
+    CHECK(strstr(missing.data, "oldie") == NULL);
+    CHECK_CONTAINS(missing.data, "--deb gone=/home/u/Downloads/notes.txt: "
+                                 "/home/u/Downloads/notes.txt is not a .deb file");
+    CHECK_CONTAINS(missing.data, "--deb fine=/home/u/Downloads/vc-1.26-amd64.deb: a repository "
+                                 "has fine's installed version");
+    CHECK_CONTAINS(missing.data, "--deb nosuch=/x.deb: no package nosuch is installed");
+    CHECK_CONTAINS(missing.data, "--deb noequals: give it as NAME=PATH");
+    CHECK_CONTAINS(missing.data, "--deb zoom=relative.deb: give it as NAME=PATH");
+    CHECK_CONTAINS(missing.data, "or --deb gone=FILE names its .deb");
     CHECK(rs_jobject_get(find(pkgs, "name", "odd"), "kept") == NULL);
     CHECK(rs_jobject_get(find(pkgs, "name", "odd"), "not_kept") == NULL);
     CHECK(rs_jobject_get(find(pkgs, "name", "fine"), "kept") == NULL);
@@ -735,7 +761,7 @@ static void test_keep(void)
     memset(&out, 0, sizeof(out));
     rs_jval_set_object(&out);
     rs_buf_init(&missing);
-    paths = rs_packages_keep(t, &out, &n, &missing);
+    paths = rs_packages_keep(t, &out, NULL, 0, &n, &missing);
     CHECK_INT(n, 0);
     CHECK(paths == NULL);
     CHECK_INT(missing.len, 0);
@@ -802,6 +828,45 @@ static void test_apt_words(void)
     rs_buf_free(&all);
     rs_jval_free(&skip);
     rs_jval_free(&pk);
+
+    TEST_CASE("the install script takes only what Debian allows");
+    {
+        static const char odd[] =
+            "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+            "{\"name\": \"ok-pkg\", \"architecture\": \"amd64\", \"version\": \"1:2.0~rc1+b1\","
+            " \"manual\": true},"
+            "{\"name\": \"Upper\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
+            "{\"name\": \"-dash\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
+            "{\"name\": \"sp\", \"architecture\": \"amd64\", \"version\": \"1 2\", \"manual\": true},"
+            "{\"name\": \"PACKAGES\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
+            "{\"name\": \"noversion\", \"architecture\": \"amd64\", \"manual\": true},"
+            "{\"name\": \"emptyver\", \"architecture\": \"amd64\", \"version\": \"\","
+            " \"manual\": true}]}}";
+        struct rs_buf script;
+
+        memset(&pk, 0, sizeof(pk));
+        rs_buf_init(&err);
+        rs_json_init(&jp, odd, sizeof(odd) - 1, &err);
+        CHECK(rs_json_value(&jp, &pk));
+        rs_buf_free(&err);
+        rs_buf_init(&script);
+        rs_packages_apt_script(&pk, NULL, &script);
+        CHECK_CONTAINS(script.data, "<<'PACKAGES'\nok-pkg=1:2.0~rc1+b1\nnoversion\nPACKAGES\n");
+        CHECK_CONTAINS(script.data, "restate: 5 packages were left out");
+        CHECK(strstr(script.data, "Upper") == NULL);
+        rs_buf_free(&script);
+        rs_jval_free(&pk);
+
+        /* Nothing to install: the script still runs, and does nothing. */
+        memset(&pk, 0, sizeof(pk));
+        rs_jval_set_object(&pk);
+        rs_buf_init(&script);
+        rs_packages_apt_script(&pk, NULL, &script);
+        CHECK_CONTAINS(script.data, "<<'PACKAGES'\nPACKAGES\n");
+        CHECK(strstr(script.data, "left out") == NULL);
+        rs_buf_free(&script);
+        rs_jval_free(&pk);
+    }
 }
 
 static void test_empty(void)

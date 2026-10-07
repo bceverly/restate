@@ -60,11 +60,23 @@ void rs_packages_describe(const char *root, struct rs_jval *out);
  * (/var/cache/apt/archives); for each snap installed from a file, its .snap
  * in snapd's (/var/lib/snapd/snaps). Each one there is marked "kept" in
  * `packages` with its path, and the paths are returned for the capture to
- * keep (the caller frees them); each one not there is marked "not_kept" and
- * described in `missing`, a line each.
+ * keep (the caller frees them). A version no repository has at all that is
+ * not there is marked "not_kept" and described in `missing`, a line each; a
+ * superseded one is kept if it is there and passed over quietly if not,
+ * since a rebuild installs the version that superseded it.
+ *
+ * `debs` (`ndebs` of them, "NAME=PATH", from capture --deb) name the .deb
+ * that is package NAME's where apt's cache does not have it -- the vendor's
+ * file in Downloads, say. Each has to be a .deb beneath root, and NAME a
+ * package no repository has; one that is not is described in `missing`.
  */
-char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
-                        struct rs_buf *missing);
+char **rs_packages_keep(const char *root, struct rs_jval *packages, const char *const *debs,
+                        size_t ndebs, size_t *n, struct rs_buf *missing);
+
+/* The paths an inventory says were kept ("kept"), for a walk that should
+ * keep them again -- verify's, of the tree an image was taken from. The
+ * caller frees them. */
+char **rs_packages_kept(const struct rs_jval *packages, size_t *n);
 
 /*
  * What `apt-get install` is given to put back the apt packages installed by
@@ -79,6 +91,21 @@ char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
  */
 char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
                              bool pinned, size_t *n);
+
+/*
+ * A POSIX sh script that installs the apt packages installed by hand (as
+ * rs_packages_apt_words chooses them) as nearly as it can, because one
+ * package that cannot be had must not sink all the others, as it does in a
+ * single apt-get install. Each is looked up first: at the version recorded
+ * where a repository still has it, at the version a repository has now where
+ * not -- a vendor that keeps only its newest release -- and passed over, and
+ * said so, where none has it at all. Those found are installed together, and
+ * if apt refuses even that, one at a time, each failure said. Names and
+ * versions that are not what Debian allows them to be are left out, so the
+ * script runs nothing the captured tree wrote.
+ */
+void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval *skip,
+                            struct rs_buf *out);
 
 /*
  * apt's name for the files it keeps a repository's indexes in, as

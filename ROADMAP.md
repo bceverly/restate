@@ -117,6 +117,15 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       `.snap` of each snap installed from a file
 - [ ] Superseded versions from snapshot.ubuntu.com, where a pinned version
       has left the archive
+- [ ] **Repositories apt can no longer use:** check each source's InRelease
+      against the keys it names (gpgv, and the key's expiry) at capture, and
+      warn -- the second rebuild found HashiCorp and NordLayer refused, as
+      they had been on the laptop for months, unnoticed
+- [x] **The image in parts:** the index, a kit (/etc/apt and the kept
+      packages) and the files, each compressed (and encrypted) on its own in
+      an uncompressed tar, so a rebuild has the kit in seconds rather than
+      after a pass over the whole image; `--deb NAME=FILE` for a package
+      dpkg-repack cannot rebuild
 - [x] snap revisions, channels and confinement; flatpak apps, branches and
       remotes
 - [x] /etc/alternatives: the manual choices recorded, and set again once the

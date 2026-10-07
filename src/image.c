@@ -90,6 +90,28 @@ void rs_image_abort(struct rs_image_writer *iw)
     iw->content_fd = -1;
     free(iw->dest);
     iw->dest = NULL;
+    free(iw->spans);
+    iw->spans = NULL;
+    iw->nspans = 0;
+}
+
+/* Whether `path` goes into the kit too: one of iw->kit, or beneath one that
+ * ends in a slash. */
+static bool in_kit(const struct rs_image_writer *iw, const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < iw->nkit; i++)
+    {
+        const char *k = iw->kit[i];
+        size_t      n = strlen(k);
+
+        if (n > 0 && k[n - 1] == '/' ? strncmp(path, k, n) == 0 : strcmp(path, k) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* "/etc/hosts" -> "restate/files/etc/hosts"; "/" -> "restate/files". */
@@ -184,6 +206,7 @@ bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st
     struct rs_image_writer *iw = ctx;
     struct rs_tar_member    m;
     char                   *name;
+    uint64_t                start;
     bool                    ok;
 
     memset(&m, 0, sizeof(m));
@@ -210,6 +233,7 @@ bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st
     }
     name = member_name(e->path);
     m.name = name;
+    start = iw->tar.offset;
     m.mode = e->mode;
     m.uid = e->uid;
     m.gid = e->gid;
@@ -230,6 +254,13 @@ bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st
         return false;
     }
     e->stored = name;
+    if (in_kit(iw, e->path))
+    {
+        iw->spans = rs_xreallocarray(iw->spans, iw->nspans + 1, sizeof(*iw->spans));
+        iw->spans[iw->nspans].offset = start;
+        iw->spans[iw->nspans].length = iw->tar.offset - start;
+        iw->nspans++;
+    }
     return true;
 }
 
@@ -288,21 +319,217 @@ static bool copy_content(int from, int to, struct rs_buf *err)
     }
 }
 
+/* The end of a tar archive: two zero blocks. */
+static bool tar_end(int fd)
+{
+    static const unsigned char zero[2 * RS_TAR_BLOCK];
+
+    return write_all(fd, zero, sizeof(zero));
+}
+
+/* Copies `len` bytes of `from` at `offset` to `to`. */
+static bool copy_range(int from, uint64_t offset, uint64_t len, int to, struct rs_buf *err)
+{
+    char chunk[65536];
+
+    while (len > 0)
+    {
+        size_t  want = len < sizeof(chunk) ? (size_t)len : sizeof(chunk);
+        ssize_t n = pread(from, chunk, want, (off_t)offset);
+
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n <= 0)
+        {
+            rs_buf_addf(err, "reading the content back: %s", n < 0 ? strerror(errno)
+                                                                   : "it is shorter than written");
+            return false;
+        }
+        if (!write_all(to, chunk, (size_t)n))
+        {
+            rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
+            return false;
+        }
+        offset += (uint64_t)n;
+        len -= (uint64_t)n;
+    }
+    return true;
+}
+
+/* What goes into one part of the image, written to `fd` (gzip's input). */
+struct part {
+    const char             *name;      /* "restate/kit.tar.gz", say */
+    struct rs_image_writer *iw;
+    const char             *text;      /* the index part's */
+    size_t                  len;
+    bool (*produce)(const struct part *pt, int fd, struct rs_buf *err);
+};
+
+static bool produce_index(const struct part *pt, int fd, struct rs_buf *err)
+{
+    if (!write_all(fd, pt->text, pt->len))
+    {
+        rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+/* The kit: the members recorded as it went, copied out of the content. */
+static bool produce_kit(const struct part *pt, int fd, struct rs_buf *err)
+{
+    size_t i;
+
+    for (i = 0; i < pt->iw->nspans; i++)
+    {
+        if (!copy_range(pt->iw->content_fd, pt->iw->spans[i].offset, pt->iw->spans[i].length,
+                        fd, err))
+        {
+            return false;
+        }
+    }
+    if (!tar_end(fd))
+    {
+        rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static bool produce_files(const struct part *pt, int fd, struct rs_buf *err)
+{
+    struct stat staged;
+    uint64_t    total = 0;
+    bool        ok;
+
+    /* The one step whose total is known: the content staged during the walk,
+     * through gzip (and gpg) into the image. */
+    if (fstat(pt->iw->content_fd, &staged) == 0)
+    {
+        total = (uint64_t)staged.st_size;
+    }
+    rs_progress_phase("writing", total);
+    ok = copy_content(pt->iw->content_fd, fd, err);
+    rs_progress_done();
+    if (ok && !tar_end(fd))
+    {
+        rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
+
+static bool to_buf(void *ctx, const void *data, size_t n)
+{
+    rs_buf_add(ctx, data, n);
+    return true;
+}
+
+/*
+ * One part of the image, as a member of the outer tar archive in `out`: its
+ * content gzip'd (and encrypted, with recipients) straight into the file
+ * after a header that is only written once the size is known. The header is
+ * the same three blocks whatever the size -- a pax header, its records, the
+ * ustar header -- so its place is kept with zeros first.
+ */
+static bool write_part(const struct part *pt, int out, const struct rs_time *mtime,
+                       struct rs_buf *err)
+{
+    static const unsigned char zero[3 * RS_TAR_BLOCK];
+    struct rs_tar_member       m;
+    struct rs_tar_writer       tw;
+    struct rs_gzip             gz;
+    struct rs_pgp              pg;
+    struct rs_buf              head;
+    struct rs_image_writer    *iw = pt->iw;
+    bool                       sealed = iw->nrecipients > 0;
+    off_t                      at = lseek(out, 0, SEEK_CUR);
+    off_t                      end;
+    char                      *name;
+    bool                       ok;
+
+    if (at < 0 || !write_all(out, zero, sizeof(zero)))
+    {
+        rs_buf_addf(err, "writing %s: %s", iw->dest, strerror(errno));
+        return false;
+    }
+    /* Encrypted, gzip writes into gpg and gpg into the file; our copy of the
+     * pipe into gpg is closed once gzip has its own, so gpg sees the end of
+     * the data when gzip exits. */
+    memset(&pg, 0, sizeof(pg));
+    pg.fd = -1;
+    ok = !sealed || rs_pgp_encrypt(iw->recipients, iw->nrecipients, out, &pg, err);
+    ok = ok && rs_gzip_compress(sealed ? pg.fd : out, &gz, err);
+    if (sealed && pg.fd >= 0)
+    {
+        (void)close(pg.fd);
+        pg.fd = -1;
+    }
+    if (ok)
+    {
+        ok = pt->produce(pt, gz.fd, err);
+        if (!rs_gzip_finish(&gz, false, err))
+        {
+            ok = false;
+        }
+    }
+    if (sealed && pg.pid > 0 && !rs_pgp_finish(&pg, false, err))
+    {
+        ok = false;
+    }
+    end = lseek(out, 0, SEEK_END);
+    if (!ok || end < at + (off_t)sizeof(zero))
+    {
+        if (ok)
+        {
+            rs_buf_addf(err, "writing %s: %s", iw->dest, strerror(errno));
+        }
+        return false;
+    }
+    /* Padded to a whole block, then the header in its place. */
+    {
+        uint64_t size = (uint64_t)(end - at) - sizeof(zero);
+        size_t   pad = (size_t)((RS_TAR_BLOCK - size % RS_TAR_BLOCK) % RS_TAR_BLOCK);
+
+        name = rs_xasprintf("%s%s", pt->name, sealed ? ".gpg" : "");
+        memset(&m, 0, sizeof(m));
+        m.name = name;
+        m.typeflag = '0';
+        m.mode = 0600;
+        m.uid = (uint64_t)geteuid();
+        m.gid = (uint64_t)getegid();
+        m.size = size;
+        m.mtime = *mtime;
+        rs_buf_init(&head);
+        rs_tar_writer_init(&tw, to_buf, &head);
+        ok = rs_tar_header(&tw, &m) && head.len == sizeof(zero) && write_all(out, zero, pad) &&
+             pwrite(out, head.data, head.len, at) == (ssize_t)head.len;
+        if (!ok)
+        {
+            rs_buf_addf(err, "writing %s's header in %s: %s", name, iw->dest,
+                        head.len == sizeof(zero) ? strerror(errno) : "it is not three blocks");
+        }
+        rs_buf_free(&head);
+        free(name);
+    }
+    return ok;
+}
+
 bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
                      struct rs_buf *err)
 {
-    struct rs_tar_member m;
-    struct rs_tar_writer tw;
-    struct rs_gzip       gz;
-    struct rs_pgp        pg;
-    bool                 sealed = false;
-    struct sigaction     ignore;
-    struct sigaction     saved;
-    char                *tmp = NULL;
-    char                *text;
-    size_t               len = 0;
-    int                  out;
-    bool                 ok;
+    struct sigaction ignore;
+    struct sigaction saved;
+    struct rs_time   mtime;
+    struct part      parts[3];
+    char            *tmp = NULL;
+    char            *text;
+    size_t           len = 0;
+    size_t           i;
+    int              out;
+    bool             ok = true;
 
     text = index_text(ix, &len);
     if (!text)
@@ -318,89 +545,46 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
         rs_image_abort(iw);
         return false;
     }
+    /* The index's own creation time, which honors SOURCE_DATE_EPOCH, so two
+     * captures of an unchanged tree are the same bytes. */
+    memset(&mtime, 0, sizeof(mtime));
+    if (!ix->created || !rs_time_parse(ix->created, &mtime))
+    {
+        mtime.sec = (int64_t)time(NULL);
+        mtime.set = true;
+    }
 
     /* A gzip that dies would otherwise kill restate with SIGPIPE on the next
      * write, before it could say why or remove the half-written file. */
     memset(&ignore, 0, sizeof(ignore));
     ignore.sa_handler = SIG_IGN;
     (void)sigaction(SIGPIPE, &ignore, &saved);
-
-    /* Encrypted, gzip writes into gpg and gpg into the file; our copy of the
-     * pipe into gpg is closed once gzip has its own, so gpg sees the end of
-     * the data when gzip exits. */
-    ok = true;
-    memset(&pg, 0, sizeof(pg));
-    pg.fd = -1;
-    if (iw->nrecipients > 0)
-    {
-        ok = rs_pgp_encrypt(iw->recipients, iw->nrecipients, out, &pg, err);
-        sealed = ok;
-    }
-    if (ok && !rs_gzip_parallel())
+    if (!rs_gzip_parallel())
     {
         rs_warn("pigz is not installed, so the image is compressed on one core with gzip; "
                 "installing pigz makes this several times faster");
     }
-    ok = ok && rs_gzip_compress(sealed ? pg.fd : out, &gz, err);
-    if (sealed && pg.fd >= 0)
-    {
-        (void)close(pg.fd);
-        pg.fd = -1;
-    }
-    if (ok)
-    {
-        memset(&m, 0, sizeof(m));
-        m.name = RS_IMAGE_INDEX_NAME;
-        m.typeflag = '0';
-        m.mode = 0600;
-        m.uid = (uint64_t)geteuid();
-        m.gid = (uint64_t)getegid();
-        m.size = len;
-        /* The index's own creation time, which honors SOURCE_DATE_EPOCH, so two
-         * captures of an unchanged tree are the same bytes. */
-        if (!ix->created || !rs_time_parse(ix->created, &m.mtime))
-        {
-            m.mtime.sec = (int64_t)time(NULL);
-            m.mtime.set = true;
-        }
-        rs_tar_writer_init(&tw, tar_to_fd, &gz.fd);
-        ok = rs_tar_header(&tw, &m) && rs_tar_data(&tw, text, len) && rs_tar_pad(&tw);
-        if (!ok)
-        {
-            rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
-        }
-        if (ok)
-        {
-            struct stat staged;
-            uint64_t    total = 0;
 
-            /* The one step whose total is known: the content staged during
-             * the walk, through gzip (and gpg) into the image. */
-            if (fstat(iw->content_fd, &staged) == 0)
-            {
-                total = (uint64_t)staged.st_size;
-            }
-            rs_progress_phase("writing", total);
-            ok = copy_content(iw->content_fd, gz.fd, err);
-            rs_progress_done();
-        }
-        if (ok)
-        {
-            /* Every member in the content ends on a block boundary, so the
-             * archive's end is just the two zero blocks. */
-            ok = rs_tar_finish(&tw);
-            if (!ok)
-            {
-                rs_buf_addf(err, "writing to gzip: %s", strerror(errno));
-            }
-        }
-        if (!rs_gzip_finish(&gz, false, err))
-        {
-            ok = false;
-        }
-    }
-    if (sealed && !rs_pgp_finish(&pg, false, err))
+    /* Three parts, each compressed on its own, so each can be read without
+     * the others: the index, the kit a reinstall needs before anything else,
+     * and every file kept. */
+    memset(parts, 0, sizeof(parts));
+    parts[0].name = RS_IMAGE_INDEX_PART;
+    parts[0].text = text;
+    parts[0].len = len;
+    parts[0].produce = produce_index;
+    parts[1].name = RS_IMAGE_KIT_PART;
+    parts[1].produce = produce_kit;
+    parts[2].name = RS_IMAGE_FILES_PART;
+    parts[2].produce = produce_files;
+    for (i = 0; ok && i < sizeof(parts) / sizeof(parts[0]); i++)
     {
+        parts[i].iw = iw;
+        ok = write_part(&parts[i], out, &mtime, err);
+    }
+    if (ok && !tar_end(out))
+    {
+        rs_buf_addf(err, "%s: %s", tmp, strerror(errno));
         ok = false;
     }
     (void)sigaction(SIGPIPE, &saved, NULL);
@@ -428,6 +612,20 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     free(text);
     rs_image_abort(iw);
     return ok;
+}
+
+void rs_image_part_command(struct rs_buf *out, const char *image, const char *part,
+                           const char *dest, const char *extra)
+{
+    rs_buf_addstr(out, "tar -xOf ");
+    rs_shell_word(out, image);
+    rs_buf_addf(out, " %s | tar -xzpf - --numeric-owner -C ", part);
+    rs_shell_word(out, dest);
+    rs_buf_addstr(out, " --strip-components=2");
+    if (extra && *extra)
+    {
+        rs_buf_addf(out, " %s", extra);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -532,6 +730,93 @@ static bool index_from_image(int fd, const char *path, bool sealed, struct rs_bu
     return ok;
 }
 
+/*
+ * The index of an image in parts: the first member of the outer archive,
+ * read as it is -- a few megabytes of gzip -- and only then given to gzip
+ * (and gpg), from a temporary file, so neither ever sees the rest.
+ */
+static bool index_from_parts(int fd, const char *path, struct rs_buf *text, struct rs_buf *err)
+{
+    struct rs_buf  name;
+    struct rs_buf  packed;
+    struct rs_buf  terr;
+    struct rs_gzip gz;
+    struct rs_pgp  pg;
+    FILE          *tmp = NULL;
+    bool           sealed = false;
+    bool           ok;
+
+    rs_buf_init(&name);
+    rs_buf_init(&packed);
+    rs_buf_init(&terr);
+    memset(&pg, 0, sizeof(pg));
+    pg.fd = -1;
+    ok = rs_tar_read_first(read_fd, &fd, RS_IMAGE_INDEX_MAX, &name, &packed, &terr);
+    if (!ok)
+    {
+        rs_buf_addf(err, "%s: %s", path, terr.data);
+    } else if (strcmp(name.data, RS_IMAGE_INDEX_PART ".gpg") == 0)
+    {
+        sealed = true;
+    } else if (strcmp(name.data, RS_IMAGE_INDEX_PART) != 0)
+    {
+        rs_buf_addf(err, "%s: not a restate image (it does not start with %s)", path,
+                    RS_IMAGE_INDEX_PART);
+        ok = false;
+    }
+    if (ok)
+    {
+        tmp = tmpfile();
+        ok = tmp && (packed.len == 0 || fwrite(packed.data, 1, packed.len, tmp) == packed.len) &&
+             fflush(tmp) == 0 && lseek(fileno(tmp), 0, SEEK_SET) == 0;
+        if (!ok)
+        {
+            rs_buf_addf(err, "%s: a temporary file for its index: %s", path, strerror(errno));
+        }
+    }
+    if (ok && sealed)
+    {
+        ok = rs_pgp_decrypt(fileno(tmp), &pg, err);
+    }
+    if (ok)
+    {
+        ok = rs_gzip_decompress(sealed ? pg.fd : fileno(tmp), &gz, err);
+        if (sealed)
+        {
+            (void)close(pg.fd);
+            pg.fd = -1;
+        }
+        if (ok)
+        {
+            bool read_ok = slurp(gz.fd, text, path, err);
+
+            ok = rs_gzip_finish(&gz, !read_ok, err) && read_ok;
+        }
+    }
+    if (sealed && pg.pid > 0)
+    {
+        struct rs_buf perr;
+
+        rs_buf_init(&perr);
+        if (!rs_pgp_finish(&pg, false, &perr))
+        {
+            rs_buf_reset(err);
+            rs_buf_addf(err, "%s: could not decrypt it (%s); is the secret key for it in "
+                        "this user's GnuPG keyring?", path, perr.data);
+            ok = false;
+        }
+        rs_buf_free(&perr);
+    }
+    if (tmp)
+    {
+        (void)fclose(tmp);
+    }
+    rs_buf_free(&name);
+    rs_buf_free(&packed);
+    rs_buf_free(&terr);
+    return ok;
+}
+
 bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
 {
     struct rs_buf text;
@@ -549,10 +834,20 @@ bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
     }
     if (!is_stdin)
     {
-        unsigned char magic[64];
+        unsigned char magic[RS_TAR_BLOCK];
         ssize_t       got = pread(fd, magic, sizeof(magic), 0);
         bool          sealed = got > 0 && rs_pgp_detect(magic, (size_t)got);
 
+        /* An image in parts: a tar archive, "ustar" at 257 of its first block. */
+        if (got == (ssize_t)sizeof(magic) && memcmp(magic + 257, "ustar", 5) == 0)
+        {
+            ok = index_from_parts(fd, path, &text, err);
+            (void)close(fd);
+            ok = ok && rs_index_parse(ix, text.data, text.len, name, err);
+            ix->in_parts = ok;
+            rs_buf_free(&text);
+            return ok;
+        }
         if (sealed || (got >= 2 && magic[0] == 0x1f && magic[1] == 0x8b))
         {
             ok = index_from_image(fd, path, sealed, &text, err);
@@ -567,8 +862,9 @@ bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
     {
         (void)close(fd);
     }
-    if (ok && text.len >= 2 && (unsigned char)text.data[0] == 0x1f &&
-        (unsigned char)text.data[1] == 0x8b)
+    if (ok && ((text.len >= 2 && (unsigned char)text.data[0] == 0x1f &&
+                (unsigned char)text.data[1] == 0x8b) ||
+               (text.len >= RS_TAR_BLOCK && memcmp(text.data + 257, "ustar", 5) == 0)))
     {
         rs_buf_addf(err, "%s: an image cannot be read from standard input; "
                     "name the file instead", name);

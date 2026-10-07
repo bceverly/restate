@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "image.h"
 #include "packages.h"
 
 #define MIB ((uint64_t)1024 * 1024)
@@ -670,6 +671,24 @@ static void late_comment(struct gen *g, const char *text)
     rs_buf_addf(&g->late, "    # %s\n", text);
 }
 
+/* A file written into the new system, carried as base64 so that nothing in
+ * it is ever read by the shell or YAML. */
+static void late_file(struct gen *g, const char *path, const char *content, const char *mode)
+{
+    struct rs_buf b64;
+    struct rs_buf cmd;
+    const char   *slash = strrchr(path, '/');
+
+    rs_buf_init(&b64);
+    rs_buf_init(&cmd);
+    rs_base64_encode(&b64, content, strlen(content));
+    rs_buf_addf(&cmd, "mkdir -p /target%.*s && echo %s | base64 -d > /target%s && chmod %s /target%s",
+                (int)(slash - path), path, b64.data ? b64.data : "", path, mode, path);
+    late(g, cmd.data);
+    rs_buf_free(&cmd);
+    rs_buf_free(&b64);
+}
+
 /* "curtin in-target -- " COMMAND WORDS..., then "|| echo ... >&2" with
  * `failed`: a package that will not install is said in the installer's log,
  * and the restore goes on, because the files are worth more than any one
@@ -739,22 +758,56 @@ static void free_words(char **words, size_t n)
     free(words);
 }
 
-/* The snaps the store has, in the installer's own snaps section. */
-static void snaps(struct gen *g)
+/* Whether a snap's name or channel from the inventory is what snapd allows. */
+static bool snap_word(const char *s)
+{
+    return s && s[0] != '\0' &&
+           strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789-./_") == strlen(s);
+}
+
+/*
+ * The snaps, at the new system's first boot. Not in the installer's snaps
+ * section: the desktop installer ignores it ("not interactive for desktop"),
+ * and snapd does not run in the installer's chroot. So a service is left in
+ * the new system that installs them once snapd has seeded, then removes
+ * itself; what it says goes to the journal (journalctl -u restate-firstboot).
+ */
+static void first_boot_snaps(struct gen *g)
 {
     static const char *const implied[] = { "base", "core", "os", "snapd", "gadget", "kernel" };
-    const struct rs_jval    *arr = rs_jobject_get(g->o->packages, "snap");
-    size_t                   i;
-    size_t                   j;
-    bool                     any = false;
+    static const char        unit[] =
+        "[Unit]\n"
+        "Description=restate: install the snaps the old machine had\n"
+        "Wants=network-online.target\n"
+        "After=network-online.target snapd.seeded.service\n"
+        "ConditionPathExists=/usr/local/sbin/restate-firstboot\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/usr/local/sbin/restate-firstboot\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n";
+    const struct rs_jval *arr = rs_jobject_get(g->o->packages, "snap");
+    struct rs_buf         sh;
+    size_t                i;
+    size_t                j;
+    size_t                any = 0;
 
+    rs_buf_init(&sh);
+    rs_buf_addstr(&sh, "#!/bin/sh\n"
+                       "# Written by restate: the snaps the old machine had, installed once\n"
+                       "# the new one is running, by restate-firstboot.service, which this\n"
+                       "# then removes.\n"
+                       "snap wait system seed.loaded\n");
     for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
     {
         const struct rs_jval *sn = &arr->items[i];
         const char           *name = rs_jobject_str(sn, "name");
         const char           *type = rs_jobject_str(sn, "type");
         const char           *channel = rs_jobject_str(sn, "channel");
-        bool                  skip = !name || flag_set(sn, "local");
+        const char           *kept = rs_jobject_str(sn, "kept");
+        bool                  skip = !snap_word(name);
 
         for (j = 0; type && j < sizeof(implied) / sizeof(implied[0]); j++)
         {
@@ -766,24 +819,49 @@ static void snaps(struct gen *g)
                    (rs_starts_with(name, "core") &&
                     strspn(name + 4, "0123456789") == strlen(name + 4));
         }
-        if (skip)
+        if (skip || (flag_set(sn, "local") && !kept))
         {
             continue;
         }
-        if (!any)
+        if (flag_set(sn, "local"))
         {
-            rs_buf_addstr(g->out, "  snaps:\n");
-            any = true;
-        }
-        rs_buf_addstr(g->out, "    - name: ");
-        q(g->out, name);
-        rs_buf_addc(g->out, '\n');
-        if (channel)
+            rs_buf_addstr(&sh, "snap install --dangerous ");
+            rs_shell_word(&sh, kept);
+        } else
         {
-            kv(g, 6, "channel", channel);
+            rs_buf_addf(&sh, "snap install %s", name);
+            if (snap_word(channel))
+            {
+                rs_buf_addf(&sh, " --channel=%s", channel);
+            }
+            if (flag_set(sn, "classic"))
+            {
+                rs_buf_addstr(&sh, " --classic");
+            }
+            if (flag_set(sn, "devmode"))
+            {
+                rs_buf_addstr(&sh, " --devmode");
+            }
         }
-        rs_buf_addf(g->out, "      classic: %s\n", flag_set(sn, "classic") ? "true" : "false");
+        rs_buf_addf(&sh, " || echo 'restate: the snap %s did not install' >&2\n", name);
+        if (flag_set(sn, "disabled"))
+        {
+            rs_buf_addf(&sh, "snap disable %s\n", name);
+        }
+        any++;
     }
+    rs_buf_addstr(&sh, "systemctl disable restate-firstboot.service\n"
+                       "rm -f /etc/systemd/system/restate-firstboot.service \"$0\"\n");
+    if (any > 0)
+    {
+        late_comment(g, "The snaps, at the first boot: a service that installs them, then goes.");
+        late_file(g, "/usr/local/sbin/restate-firstboot", sh.data, "0755");
+        late_file(g, "/etc/systemd/system/restate-firstboot.service", unit, "0644");
+        late(g, "mkdir -p /target/etc/systemd/system/multi-user.target.wants && "
+                "ln -sf /etc/systemd/system/restate-firstboot.service "
+                "/target/etc/systemd/system/multi-user.target.wants/restate-firstboot.service");
+    }
+    rs_buf_free(&sh);
 }
 
 /* The keys kept outside /etc, written into the new system from the inventory. */
@@ -845,7 +923,8 @@ static void late_kept_debs(struct gen *g, const char *img, const struct rs_jval 
         const char *kept = rs_jobject_str(&pkgs->items[i], "kept");
         char       *member;
 
-        if (!kept || !rs_starts_with(kept, "/var/cache/apt/archives/"))
+        if (!kept || !rs_starts_with(kept, "/") ||
+            (g->o->old_image && !rs_starts_with(kept, "/var/cache/apt/archives/")))
         {
             continue;
         }
@@ -859,7 +938,11 @@ static void late_kept_debs(struct gen *g, const char *img, const struct rs_jval 
     if (n > 0)
     {
         late_comment(g, "the packages no repository has, kept in the image");
-        late(g, tar.data);
+        /* From an image in parts the kit has put them in place already. */
+        if (g->o->old_image)
+        {
+            late(g, tar.data);
+        }
         late_in_target(g, "env DEBIAN_FRONTEND=noninteractive apt-get install -y", files, n,
                        "the kept packages did not all install");
     }
@@ -882,7 +965,8 @@ static void first_boot(struct gen *g)
         const char *name = rs_jobject_str(&arr->items[i], "name");
         const char *kept = rs_jobject_str(&arr->items[i], "kept");
 
-        if (!name || !flag_set(&arr->items[i], "local"))
+        /* A kept one the first-boot service installs. */
+        if (!name || !flag_set(&arr->items[i], "local") || kept)
         {
             continue;
         }
@@ -891,14 +975,7 @@ static void first_boot(struct gen *g)
             late_comment(g, "Left for after the first boot (the build sheet has the commands):");
             listed = true;
         }
-        if (kept)
-        {
-            rs_buf_addf(&g->late, "    #   snap install --dangerous %s\n", kept);
-        } else
-        {
-            rs_buf_addf(&g->late, "    #   the snap %s, from the file it was installed from\n",
-                        name);
-        }
+        rs_buf_addf(&g->late, "    #   the snap %s, from the file it was installed from\n", name);
     }
     for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
     {
@@ -976,41 +1053,27 @@ static void late_packages(struct gen *g)
     rs_buf_reset(&b);
     if (apt)
     {
-        rs_buf_addstr(&b, "tar -xpzf ");
-        rs_shell_word(&b, img);
-        rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 restate/files/etc/apt");
+        if (g->o->old_image)
+        {
+            rs_buf_addstr(&b, "tar -xpzf ");
+            rs_shell_word(&b, img);
+            rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 "
+                              "restate/files/etc/apt");
+        } else
+        {
+            /* The kit: /etc/apt and the kept packages, in seconds. */
+            rs_image_part_command(&b, img, RS_IMAGE_KIT_PART, "/target", NULL);
+        }
         late(g, b.data);
         late_keys(g, rs_jobject_get(apt, "keys"));
         late(g, "curtin in-target -- apt-get update || true");
-        /* Pinned, so each comes from where it came from; if a pinned version
-         * has gone since, the current ones rather than none. */
-        words = rs_packages_apt_words(pk, skip, true, &n);
-        if (n > 0)
-        {
-            char **names;
-            size_t nn;
-
-            rs_buf_reset(&b);
-            rs_buf_addstr(&b, "curtin in-target -- env DEBIAN_FRONTEND=noninteractive "
-                              "apt-get install -y");
-            for (i = 0; i < n; i++)
-            {
-                rs_buf_addc(&b, ' ');
-                rs_shell_word(&b, words[i]);
-            }
-            names = rs_packages_apt_words(pk, skip, false, &nn);
-            rs_buf_addstr(&b, " || curtin in-target -- env DEBIAN_FRONTEND=noninteractive "
-                              "apt-get install -y");
-            for (i = 0; i < nn; i++)
-            {
-                rs_buf_addc(&b, ' ');
-                rs_shell_word(&b, names[i]);
-            }
-            rs_buf_addstr(&b, " || echo 'restate: the packages did not all install' >&2");
-            late(g, b.data);
-            free_words(names, nn);
-        }
-        free_words(words, n);
+        /* Each package looked up first, so one that cannot be had -- a
+         * version gone, a repository refused -- does not sink the others. */
+        rs_buf_reset(&b);
+        rs_packages_apt_script(pk, skip, &b);
+        late_file(g, "/var/tmp/restate-packages.sh", b.data, "0700");
+        late(g, "curtin in-target -- sh /var/tmp/restate-packages.sh; "
+                "rm -f /target/var/tmp/restate-packages.sh");
         late_kept_debs(g, img, pkgs);
         words = NULL;
         n = 0;
@@ -1088,11 +1151,19 @@ static void late_packages(struct gen *g)
 
     late_comment(g, "The files, over the packages' own; the installer's fstab and crypttab stay.");
     rs_buf_reset(&b);
-    rs_buf_addstr(&b, "tar -xpzf ");
-    rs_shell_word(&b, img);
-    rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 "
-                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
-                      "restate/files");
+    if (g->o->old_image)
+    {
+        rs_buf_addstr(&b, "tar -xpzf ");
+        rs_shell_word(&b, img);
+        rs_buf_addstr(&b, " --numeric-owner -C /target --strip-components=2 "
+                          "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
+                          "restate/files");
+    } else
+    {
+        rs_image_part_command(&b, img, RS_IMAGE_FILES_PART, "/target",
+                              "--exclude=restate/files/etc/fstab "
+                              "--exclude=restate/files/etc/crypttab");
+    }
     late(g, b.data);
     late(g, "curtin in-target -- update-initramfs -u -k all");
     late(g, "curtin in-target -- update-grub");
@@ -1153,6 +1224,10 @@ static void late_commands(struct gen *g)
     {
         late_packages(g);
     }
+    if (g->o->packages)
+    {
+        first_boot_snaps(g);
+    }
     if (g->late.len)
     {
         rs_buf_addstr(g->out, "  late-commands:\n");
@@ -1199,7 +1274,6 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     network(&g);
     storage(&g);
     rs_buf_init(&g.late);
-    snaps(&g);
     extras(&g);
     late_commands(&g);
     rs_buf_free(&g.late);

@@ -39,6 +39,7 @@ struct rs_auto_opts {
     const char           *version;    /* restate's, for the header */
     const struct rs_jval *packages;   /* the package inventory, or NULL */
     const char           *image_at;   /* the image as the installer sees it, or NULL */
+    bool                  old_image;  /* the image is one stream, from before 1.1 */
 };
 
 /* Writes the autoinstall file for `machine` to `out`. */

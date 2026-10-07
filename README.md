@@ -43,12 +43,12 @@ difference is usually a small fraction of the disk — and it is what `restate`
 records.
 
 ```console
-# restate capture -o /var/backups/web01.tgz
+# restate capture -o /var/backups/web01.tar
 restate: recorded 41873 paths (40102 state, 1771 baseline, 0 expendable); kept the content of 40102
 restate: skipped 2114 ephemeral, 9 expendable, 14 sockets, 0 mount points
 restate: hashed 812447112 bytes
 
-# restate verify /var/backups/web01.tgz
+# restate verify /var/backups/web01.tar
 M	/etc/ssh/sshd_config	content
 A	/etc/nginx/sites-enabled/new-site.conf
 restate: 1 added, 0 deleted, 1 modified
@@ -80,7 +80,7 @@ restate: 1 added, 0 deleted, 1 modified
   packages: `/usr`, the package database) or *state* (`/etc`, `/home`,
   `/var/lib`, `/usr/local` — always kept). Built-in rules for Linux, FreeBSD,
   OpenBSD, NetBSD and macOS; your own rules file overrides any of them.
-- **Captures an image**: a `.tgz` holding `index.json` — every recorded path
+- **Captures an image**: a tar holding `index.json` — every recorded path
   with its owner, mode, size, link count, inode, access, modification,
   change and birth times to the nanosecond, and SHA-256 — followed by the
   content of everything kept. It is also an ordinary tarball: `tar -xzpf`
@@ -99,9 +99,9 @@ has been added, deleted or modified since — content, mode, owner or link
 target — without the noise of timestamps:
 
 ```bash
-restate capture -o /var/backups/web01-$(date +%F).tgz
-restate verify /var/backups/web01-2026-09-28.tgz          # against the server as it is now
-restate diff web01-2026-09-28.tgz web01-2026-10-05.tgz    # between two captures
+restate capture -o /var/backups/web01-$(date +%F).tar
+restate verify /var/backups/web01-2026-09-28.tar          # against the server as it is now
+restate diff web01-2026-09-28.tar web01-2026-10-05.tar    # between two captures
 ```
 
 **Why does this one behave differently?** Diff two servers that are supposed
@@ -157,8 +157,8 @@ package inventory, package-aware capture, and `restore`:
 git clone https://github.com/bceverly/restate.git
 cd restate
 make build                                    # compiles ./bin/restate and its manpage
-sudo ./bin/restate capture -o /tmp/me.tgz     # an image of this machine
-sudo ./bin/restate verify /tmp/me.tgz         # what has changed since
+sudo ./bin/restate capture -o /tmp/me.tar     # an image of this machine
+sudo ./bin/restate verify /tmp/me.tar         # what has changed since
 ```
 
 Building needs a C11 compiler and GNU make, and nothing else. Running it needs
@@ -184,11 +184,11 @@ operating system, so that after a reinstall the difference can be put
 back. Every path is classified by a set of rules as ephemeral (never
 kept), expendable (kept only with --all), baseline (supplied by the
 operating system or its packages) or state (always kept). An image is a
-.tgz holding index.json -- every recorded path with its owner, mode,
+.tar holding index.json -- every recorded path with its owner, mode,
 times and SHA-256 -- and the content of everything kept.
 
 Commands:
-  capture                 walk the tree and write an image (-o FILE.tgz):
+  capture                 walk the tree and write an image (-o FILE.tar):
                           index.json and the content of everything kept
   scan                    walk the tree and write its index alone, as JSON,
                           with no content
@@ -239,6 +239,9 @@ Options:
                           capture: keep the .deb and .snap files of installed
                           packages no repository or store has, from apt's and
                           snapd's caches, so a rebuild can install them
+      --deb=NAME=FILE     capture, with --keep-local-packages: keep FILE as the
+                          .deb of package NAME, which no repository has and
+                          apt's cache does not hold; repeatable
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
@@ -268,7 +271,7 @@ A whole-machine capture can read hundreds of gigabytes. `--progress` (`-P`)
 shows how far it has got, redrawn in place on the terminal:
 
 ```console
-$ sudo restate capture --progress -o /backup/web01.tgz
+$ sudo restate capture --progress -o /backup/web01.tar
 restate: counting  812345 paths  184 GiB to read  0:00:41
 restate: walking [#######.............]  35%  64 GiB of 184 GiB  91 MiB/s  0:22:30 left
   .../home/alice/dev/project/src/main.c
@@ -307,15 +310,26 @@ was installed since, and from where, and `restate packages` prints it:
 - **Alternatives** chosen by hand (`update-alternatives --set`).
 
 `capture --keep-local-packages` also keeps what no repository or store can
-give back: the `.deb` of each unavailable version, from apt's cache, and the
-`.snap` of each snap installed from a file. A package installed from a
+give back: the `.deb` of each version no repository has, from apt's cache, and
+the `.snap` of each snap installed from a file. A package installed from a
 downloaded file is often not in apt's cache; the capture warns of each one,
-and `dpkg-repack NAME`, run in `/var/cache/apt/archives`, rebuilds it there.
+and `dpkg-repack NAME`, run in `/var/cache/apt/archives`, rebuilds it there --
+or `--deb NAME=FILE` names the vendor's file, wherever it is (a package whose
+own maintainer scripts dpkg-repack refuses, say):
+
+```console
+$ sudo restate capture --keep-local-packages \
+      --deb veracrypt=/home/me/Downloads/veracrypt-1.26.24-Ubuntu-24.04-amd64.deb -o laptop.tar
+```
+
+A superseded version -- one a repository has a newer version of -- is kept
+if it is in the cache and passed over quietly if not: the rebuild installs
+the newer one.
 
 ```console
 $ restate packages | jq -c '.apt | {count, manual, superseded, local}'
 {"count":3184,"manual":234,"superseded":2,"local":5}
-$ restate packages laptop.tgz | jq -r '.apt.packages[] | select(.unavailable == "local") | .name'
+$ restate packages laptop.tar | jq -r '.apt.packages[] | select(.unavailable == "local") | .name'
 chef
 osquery
 otelcol-contrib
@@ -366,7 +380,11 @@ The packages go back before the files, from the image's
 [inventory](#packages): `/etc/apt` and the repository keys kept outside it,
 then every package installed by hand pinned to its old version (so it comes
 from the repository it came from) -- but not the boot loader or kernel, which
-the installer chose for the new machine -- the kept `.deb` files, the snaps by
+the installer chose for the new machine. A script looks each package up first,
+so one that cannot be had (a vendor that keeps only its newest version, a
+repository whose key has expired) does not stop all the others: the recorded
+version where it is still there, the current one where not, and a word about
+any no repository has. Then the kept `.deb` files, the snaps by
 channel, the flatpak apps, what pip, npm, pipx, cargo and gem installed, and
 the alternatives chosen by hand. The packages no repository has are listed
 with what to do about them.
@@ -390,30 +408,48 @@ interface names and MACs, TPM-held LUKS keys, Secure Boot keys, the
 hibernation resume device.
 
 ```console
-$ restate buildsheet web01.tgz -o web01-rebuild.txt
-$ restate autoinstall --target vm web01.tgz -o user-data
+$ restate buildsheet web01.tar -o web01-rebuild.txt
+$ restate autoinstall --target vm web01.tar -o user-data
 ```
 
 Given `--image-at PATH` -- where the installer will find the image -- the
 autoinstall file does all of that unattended in its late-commands, then
 restores the files and rebuilds the initramfs and boot loader, so the machine
-comes up as it was:
+comes up as it was. The snaps go in at its first boot, by a one-time
+`restate-firstboot` service: the desktop installer ignores an autoinstall
+file's `snaps` section, and snapd does not run during an install.
 
 ```console
-$ restate autoinstall --target vm --image-at /restate/web01.tgz web01.tgz -o user-data
+$ restate autoinstall --target vm --image-at /restate/web01.tar web01.tar -o user-data
 ```
 
 ## Images and indexes
 
-An image is an ordinary gzip'd POSIX tar archive with the index first:
+An image is an ordinary POSIX tar archive of three parts, each compressed on
+its own, so each can be read without decompressing the others:
 
 ```console
-$ tar -tzvf web01.tgz | head -4
--rw------- 0/0       9283117 2026-10-03 14:00 restate/index.json
-drwxr-xr-x root/root       0 2026-09-30 08:12 restate/files
-drwxr-xr-x root/root       0 2026-10-01 17:40 restate/files/etc
--rw-r--r-- root/root    3279 2026-09-12 10:03 restate/files/etc/ssh/sshd_config
+$ tar -tvf web01.tar
+-rw------- 0/0      48211337 2026-10-03 14:00 restate/index.json.gz
+-rw------- 0/0     412204410 2026-10-03 14:00 restate/kit.tar.gz
+-rw------- 0/0  106374598111 2026-10-03 14:00 restate/files.tar.gz
 ```
+
+| Part | |
+|---|---|
+| `index.json.gz` | the index: what `verify`, `diff`, `buildsheet` and `autoinstall` read — and all they read |
+| `kit.tar.gz` | what a reinstall needs before anything else: `/etc/apt`, and the packages the image keeps that no repository has. A few megabytes to a few hundred, had in seconds |
+| `files.tar.gz` | every file kept, with its owner, mode and times (the kit's too) |
+
+The outer archive is not compressed, so tar skips past the parts it is not
+asked for instead of reading them, and each part unpacks with plain tar:
+
+```console
+$ tar -xOf web01.tar restate/files.tar.gz | sudo tar -xzpf - --numeric-owner -C / --strip-components=2
+```
+
+An image made before 1.1 is one gzip'd tar with `restate/index.json` first; it
+is still read.
 
 `index.json` is one JSON object, with one entry per line, sorted by path:
 
@@ -454,11 +490,12 @@ drwxr-xr-x root/root       0 2026-10-01 17:40 restate/files/etc
 file could compare equal to the one it replaced. SHA-256 costs little more, and
 is implemented here — restate links nothing but libc.
 
-**Why the index comes first:** `diff` and `verify` read only `index.json`, and
-stop. The content is written during the walk to an unlinked temporary file
-beside the destination — each file read once, the same bytes hashed and stored
-— and the image is assembled afterwards, so the digest always describes
-exactly the bytes in the image.
+**Why the parts:** `diff` and `verify` read only the index, and a rebuild needs
+the kit long before the files; neither should mean decompressing a hundred
+gigabytes. The content is written during the walk to an unlinked temporary
+file beside the destination — each file read once, the same bytes hashed and
+stored — and compressed once, into its part, when the image is assembled, so
+the digest always describes exactly the bytes in the image.
 
 `scan` writes the index alone, without content, for when the question is "what
 changed" rather than "keep a copy".
@@ -472,14 +509,16 @@ more OpenPGP public keys:
 
 ```console
 $ gpg --export -o backup-key.gpg backup@example.com
-$ sudo restate capture -o web01.tgz.gpg --encrypt-to=backup-key.gpg
-$ restate verify web01.tgz.gpg          # decrypts with your own keyring
+$ sudo restate capture -o web01.tar --encrypt-to=backup-key.gpg
+$ restate verify web01.tar          # decrypts the index with your own keyring
 ```
 
 Capturing needs only the public key, so it can run from cron with no
-passphrase anywhere. The result is an ordinary OpenPGP message (`gpg -d`
-reads it), and `diff`, `verify`, `installer`, `buildsheet` and `autoinstall`
-all read it directly. While the tree is walked, the content is staged
+passphrase anywhere. Each part is encrypted on its own, an ordinary OpenPGP
+message with `.gpg` after its name (`tar -xOf web01.tar
+restate/files.tar.gz.gpg | gpg -d | tar -xzf -` unpacks the files), so reading
+the index decrypts only the index; `diff`, `verify`, `installer`, `buildsheet`
+and `autoinstall` all read it directly. While the tree is walked, the content is staged
 unencrypted in an unlinked temporary file beside the image; where that
 matters, write the image to encrypted storage or a tmpfs.
 
@@ -508,8 +547,8 @@ ephemeral   *.sock
 
 ```bash
 restate rules > site.rules          # the built-in set, with a reason for each rule
-restate -N -R site.rules capture -o web01.tgz   # use only yours
-restate -R site.rules capture -o web01.tgz      # or add yours after the built-ins
+restate -N -R site.rules capture -o web01.tar   # use only yours
+restate -R site.rules capture -o web01.tar      # or add yours after the built-ins
 ```
 
 ### What is left out by default

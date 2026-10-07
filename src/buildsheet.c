@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "image.h"
 #include "installer.h"
 #include "packages.h"
 
@@ -1253,7 +1254,7 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
     const struct rs_jval *keys = rs_jobject_get(apt, "keys");
     const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
     const struct rs_jval *skip = NULL;
-    const char           *img = s->o->image ? s->o->image : "IMAGE.tgz";
+    const char           *img = s->o->image ? s->o->image : "IMAGE.tar";
     struct wrap           w;
     size_t                i;
     size_t                nlocal = 0;
@@ -1268,10 +1269,26 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
     {
         skip = rs_jobject_get(s->sys, "guest_packages");
     }
-    say(s, "%s", "The repositories and the keys they are signed with first. /etc/apt comes");
-    say(s, "%s", "back from the image:");
-    say(s, "%s", "");
-    say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files/etc/apt", img);
+    if (s->o->old_image)
+    {
+        say(s, "%s", "The repositories and the keys they are signed with first. /etc/apt comes");
+        say(s, "%s", "back from the image:");
+        say(s, "%s", "");
+        say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files/etc/apt",
+            img);
+    } else
+    {
+        struct rs_buf cmd;
+
+        say(s, "%s", "The repositories and the keys they are signed with first. The image's kit");
+        say(s, "%s", "holds /etc/apt, and the packages it keeps that no repository has; it is a");
+        say(s, "%s", "few megabytes, apart from the rest, so this takes seconds:");
+        say(s, "%s", "");
+        rs_buf_init(&cmd);
+        rs_image_part_command(&cmd, img, RS_IMAGE_KIT_PART, "/", NULL);
+        say(s, "    %s", cmd.data);
+        rs_buf_free(&cmd);
+    }
     for (i = 0; keys && keys->type == RS_JARRAY && i < keys->n; i++)
     {
         const struct rs_jval *k = &keys->items[i];
@@ -1320,23 +1337,25 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
     say(s, "%s", "pinned, so each comes from the repository it came from before and not from");
     say(s, "%s", "another that happens to have the name. Their dependencies come with them");
     say(s, "(%" PRIu64 " were installed that way). The boot loader and kernel are left to", deps);
-    say(s, "%s", "the installer, which chose them for this machine. If a pinned version has");
-    say(s, "%s", "gone since, or apt would have to downgrade one, run it again without the");
-    say(s, "%s", "versions.");
+    say(s, "%s", "the installer, which chose them for this machine.");
     say(s, "%s", "");
+    say(s, "%s", "One apt-get install of them all would stop at the first that cannot be had");
+    say(s, "%s", "-- a vendor keeps only its newest version, a repository's key has expired --");
+    say(s, "%s", "and install none. This script looks each up first: the version recorded");
+    say(s, "%s", "where it is still there, the current one where not, and names any no");
+    say(s, "%s", "repository has. It is written flush left, as it has to be pasted:");
+    say(s, "%s", "");
+    say(s, "%s", "    cat > /tmp/restate-packages.sh <<'SCRIPT'");
     {
-        size_t n;
-        char **words = rs_packages_apt_words(s->o->packages, skip, true, &n);
+        struct rs_buf script;
 
-        wrap_start(&w, s, "apt-get install -y");
-        for (i = 0; i < n; i++)
-        {
-            wrap_word(&w, words[i]);
-            free(words[i]);
-        }
-        wrap_end(&w);
-        free(words);
+        rs_buf_init(&script);
+        rs_packages_apt_script(s->o->packages, skip, &script);
+        rs_buf_addstr(s->out, script.data);
+        rs_buf_free(&script);
     }
+    say(s, "%s", "SCRIPT");
+    say(s, "%s", "    sh /tmp/restate-packages.sh");
 
     wrap_start(&w, s, "apt-mark hold");
     for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
@@ -1374,8 +1393,11 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
         say(s, "%s", "No repository has these at all: they were installed from .deb files.");
         wrap_start(&extract, s, "");
         rs_buf_reset(&extract.line);
-        rs_buf_addf(&extract.line, "    mkdir -p /tmp/restate && tar -xpzf %s -C /tmp/restate "
-                    "--strip-components=2", img);
+        if (s->o->old_image)
+        {
+            rs_buf_addf(&extract.line, "    mkdir -p /tmp/restate && tar -xpzf %s -C /tmp/restate "
+                        "--strip-components=2", img);
+        }
         wrap_start(&from_image, s, "apt-get install -y");
         for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
         {
@@ -1387,18 +1409,29 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
                 char *member = rs_xasprintf("restate/files%s", path);
                 char *staged = rs_xasprintf("/tmp/restate%s", path);
 
-                wrap_word(&extract, member);
-                wrap_word(&from_image, staged);
+                /* From an image in parts, the kit put it where it was. */
+                if (s->o->old_image)
+                {
+                    wrap_word(&extract, member);
+                }
+                wrap_word(&from_image, s->o->old_image ? staged : path);
                 free(member);
                 free(staged);
             }
         }
         if (from_image.words > 0)
         {
-            say(s, "%s", "The image keeps these; install them from it:");
+            say(s, "%s", s->o->old_image ? "The image keeps these; install them from it:"
+                                         : "The kit brought back the ones the image keeps:");
             say(s, "%s", "");
         }
-        wrap_end(&extract);
+        if (s->o->old_image)
+        {
+            wrap_end(&extract);
+        } else
+        {
+            rs_buf_free(&extract.line);
+        }
         wrap_end(&from_image);
         if (from_image.words < nlocal)
         {
@@ -1462,18 +1495,26 @@ static void reinstall_snaps(struct sheet *s, const struct rs_jval *snaps)
         }
         if (flag_set(sn, "local") && rs_jobject_str(sn, "kept"))
         {
-            const char   *img = s->o->image ? s->o->image : "IMAGE.tgz";
+            const char   *img = s->o->image ? s->o->image : "IMAGE.tar";
             struct rs_buf q;
             char         *member = rs_xasprintf("restate/files%s", rs_jobject_str(sn, "kept"));
             char         *staged = rs_xasprintf("/tmp/restate%s", rs_jobject_str(sn, "kept"));
 
-            /* Kept in the image: installed from it, unsigned, as it was. */
+            /* Kept in the image: installed from it, unsigned, as it was --
+             * from where the kit put it, or out of an older image. */
             rs_buf_init(&q);
-            rs_buf_addf(&q, "    mkdir -p /tmp/restate && tar -xpzf %s -C /tmp/restate "
-                        "--strip-components=2 ", img);
-            rs_shell_word(&q, member);
-            rs_buf_addstr(&q, " && snap install --dangerous ");
-            rs_shell_word(&q, staged);
+            if (s->o->old_image)
+            {
+                rs_buf_addf(&q, "    mkdir -p /tmp/restate && tar -xpzf %s -C /tmp/restate "
+                            "--strip-components=2 ", img);
+                rs_shell_word(&q, member);
+                rs_buf_addstr(&q, " && snap install --dangerous ");
+                rs_shell_word(&q, staged);
+            } else
+            {
+                rs_buf_addstr(&q, "    snap install --dangerous ");
+                rs_shell_word(&q, rs_jobject_str(sn, "kept"));
+            }
             rs_buf_addc(&kept_snaps, '\n');
             rs_buf_addstr(&kept_snaps, q.data);
             rs_buf_free(&q);
@@ -1781,20 +1822,44 @@ static void reinstall(struct sheet *s)
 
 static void restore(struct sheet *s)
 {
-    const char *img = s->o->image ? s->o->image : "IMAGE.tgz";
+    const char *img = s->o->image ? s->o->image : "IMAGE.tar";
 
     heading(s, "Restore the files");
     say(s, "%s", "`restate restore` is not in this version. Until it is, an image's files go");
     say(s, "%s", "back with tar, as root, on the new system:");
     say(s, "%s", "");
-    say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files", img);
-    say(s, "%s", "");
-    say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
-    say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
-    say(s, "%s", "");
-    say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 \\", img);
-    say(s, "%s", "        --exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab \\");
-    say(s, "%s", "        restate/files");
+    if (s->o->old_image)
+    {
+        say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files", img);
+        say(s, "%s", "");
+        say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
+        say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
+        say(s, "%s", "");
+        say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 \\", img);
+        say(s, "%s", "        --exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab \\");
+        say(s, "%s", "        restate/files");
+    } else
+    {
+        struct rs_buf cmd;
+
+        rs_buf_init(&cmd);
+        rs_image_part_command(&cmd, img, RS_IMAGE_FILES_PART, "/", NULL);
+        say(s, "    %s", cmd.data);
+        say(s, "%s", "");
+        say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
+        say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
+        say(s, "%s", "");
+        rs_buf_reset(&cmd);
+        rs_image_part_command(&cmd, img, RS_IMAGE_FILES_PART, "/",
+                              "--exclude=restate/files/etc/fstab "
+                              "--exclude=restate/files/etc/crypttab");
+        say(s, "    %s", cmd.data);
+        rs_buf_free(&cmd);
+        say(s, "%s", "");
+        say(s, "%s", "An encrypted image (capture --encrypt-to) has each part encrypted, its name");
+        say(s, "%s", "ending in .gpg: read restate/files.tar.gz.gpg instead, with `gpg -d |`");
+        say(s, "%s", "between the two tars, as the holder of the secret key.");
+    }
     say(s, "%s", "");
     if (!s->o->packages)
     {

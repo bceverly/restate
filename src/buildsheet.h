@@ -31,6 +31,7 @@ struct rs_sheet_opts {
     const char           *image;      /* the image the sheet was made from, or NULL */
     const char           *version;    /* restate's, for the heading */
     const struct rs_jval *packages;   /* the package inventory (packages.h), or NULL */
+    bool                  old_image;  /* the image is one stream, from before 1.1 */
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

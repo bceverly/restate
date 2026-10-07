@@ -263,9 +263,14 @@ static bool is_live_root(const char *root)
            a.st_ino == b.st_ino;
 }
 
+/*
+ * `kept_from`, where given, is the inventory of an image this walk is being
+ * compared with: the files it kept outside the rules (capture
+ * --keep-local-packages) are walked again, so they are not reported deleted.
+ */
 static bool run_scan(const struct rs_options *o, const char *root, bool hash,
                      struct rs_image_writer *image, struct rs_index *m,
-                     struct rs_scan_stats *st)
+                     struct rs_scan_stats *st, const struct rs_jval *kept_from)
 {
     struct rs_rules     rules;
     struct rs_scan_opts so;
@@ -273,6 +278,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     const char         *os_used = NULL;
     char              **keep = NULL;
     size_t              nkeep = 0;
+    const char        **kit = NULL;
     size_t              i;
     bool                ok;
 
@@ -325,7 +331,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         const char   *p;
 
         rs_buf_init(&missing);
-        keep = rs_packages_keep(root, &m->packages, &nkeep, &missing);
+        keep = rs_packages_keep(root, &m->packages, o->debs, o->ndebs, &nkeep, &missing);
         so.keep = (const char *const *)keep;
         so.nkeep = nkeep;
         for (p = missing.data; p && *p; )
@@ -336,8 +342,27 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
             p += len + (p[len] == '\n' ? 1 : 0);
         }
         rs_buf_free(&missing);
+    } else if (kept_from && kept_from->type == RS_JOBJECT)
+    {
+        keep = rs_packages_kept(kept_from, &nkeep);
+        so.keep = (const char *const *)keep;
+        so.nkeep = nkeep;
     }
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
+    if (image)
+    {
+        /* The kit, the part of the image a reinstall reads first: apt's
+         * sources and keys, and the packages no repository has. */
+        kit = rs_xreallocarray(NULL, nkeep + 2, sizeof(*kit));
+        kit[0] = "/etc/apt";
+        kit[1] = "/etc/apt/";
+        for (i = 0; i < nkeep; i++)
+        {
+            kit[i + 2] = keep[i];
+        }
+        image->kit = kit;
+        image->nkit = nkeep + 2;
+    }
 
     rs_buf_init(&err);
     {
@@ -373,6 +398,12 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     rs_buf_free(&err);
     rs_rules_free(&rules);
+    if (image)
+    {
+        image->kit = NULL;
+        image->nkit = 0;
+    }
+    free(kit);
     for (i = 0; i < nkeep; i++)
     {
         free(keep[i]);
@@ -388,7 +419,7 @@ int rs_cmd_scan(const struct rs_options *o)
     struct output        out;
     bool                 ok;
 
-    if (!run_scan(o, o->root ? o->root : "/", !o->no_hash, NULL, &m, &st))
+    if (!run_scan(o, o->root ? o->root : "/", !o->no_hash, NULL, &m, &st, NULL))
     {
         rs_index_free(&m);
         return RESTATE_EXIT_TROUBLE;
@@ -424,7 +455,7 @@ int rs_cmd_capture(const struct rs_options *o)
 
     if (!o->output || strcmp(o->output, "-") == 0)
     {
-        rs_error("capture writes an image to a file: give one with -o FILE.tgz");
+        rs_error("capture writes an image to a file: give one with -o FILE.tar");
         return RESTATE_EXIT_TROUBLE;
     }
     if (o->no_hash)
@@ -463,7 +494,7 @@ int rs_cmd_capture(const struct rs_options *o)
     }
     image.recipients = o->recipients;
     image.nrecipients = o->nrecipients;
-    if (!run_scan(o, o->root ? o->root : "/", true, &image, &m, &st))
+    if (!run_scan(o, o->root ? o->root : "/", true, &image, &m, &st, NULL))
     {
         rs_image_abort(&image);
         rs_index_free(&m);
@@ -578,7 +609,8 @@ int rs_cmd_verify(const struct rs_options *o)
     /* The root the index was taken from, unless told otherwise: verifying an
      * index of /mnt/old against / would report every file as changed. */
     root = o->root ? o->root : (recorded.root ? recorded.root : "/");
-    if (!run_scan(o, root, recorded.hashed && !o->no_hash, NULL, &live, &st))
+    if (!run_scan(o, root, recorded.hashed && !o->no_hash, NULL, &live, &st,
+                  &recorded.packages))
     {
         rs_index_free(&live);
         rs_index_free(&recorded);
@@ -694,7 +726,8 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
  * The machine description in `path`: an image or index with a "machine"
  * section, or what `restate machine -o` writes.
  */
-static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages)
+static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages,
+                         bool *old_image)
 {
     struct rs_index ix;
     struct rs_buf   err;
@@ -711,6 +744,10 @@ static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jv
             if (packages && ix.packages.type == RS_JOBJECT)
             {
                 rs_jval_copy(packages, &ix.packages);
+            }
+            if (old_image)
+            {
+                *old_image = !ix.in_parts;
             }
             ok = true;
         } else
@@ -796,7 +833,7 @@ int rs_cmd_installer(const struct rs_options *o)
     memset(&machine, 0, sizeof(machine));
     if (image)
     {
-        if (!load_machine(image, &machine, NULL))
+        if (!load_machine(image, &machine, NULL, NULL))
         {
             rs_jval_free(&machine);
             return RESTATE_EXIT_TROUBLE;
@@ -896,8 +933,9 @@ static enum rs_target target_of(const struct rs_options *o)
 /* The machine to describe: the one in IMAGE, or this one -- and, with
  * `packages`, what is installed on it, which an image may not record. */
 static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine,
-                        struct rs_jval *packages)
+                        struct rs_jval *packages, bool *old_image)
 {
+    *old_image = false;
     memset(machine, 0, sizeof(*machine));
     if (packages)
     {
@@ -905,7 +943,7 @@ static bool machine_for(const struct rs_options *o, const char *image, struct rs
     }
     if (image)
     {
-        return load_machine(image, machine, packages);
+        return load_machine(image, machine, packages, old_image);
     }
     rs_machine_describe("/", o->root ? o->root : "/", machine);
     if (packages)
@@ -984,15 +1022,17 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     struct rs_buf        err;
     struct rs_sheet_opts so;
     struct rs_jval       packages;
+    bool                 old_image;
     bool                 ok;
 
-    if (!machine_for(o, image, &machine, &packages))
+    if (!machine_for(o, image, &machine, &packages, &old_image))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
     memset(&so, 0, sizeof(so));
+    so.old_image = old_image;
     so.target = target_of(o);
     so.image = image;
     so.version = RESTATE_VERSION;
@@ -1021,15 +1061,17 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     struct rs_buf       err;
     struct rs_auto_opts ao;
     struct rs_jval      packages;
+    bool                old_image;
     bool                ok;
 
-    if (!machine_for(o, image, &machine, &packages))
+    if (!machine_for(o, image, &machine, &packages, &old_image))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
     memset(&ao, 0, sizeof(ao));
+    ao.old_image = old_image;
     ao.target = target_of(o);
     ao.image = image;
     ao.version = RESTATE_VERSION;

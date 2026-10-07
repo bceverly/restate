@@ -3,11 +3,28 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 /*
- * An image: a gzip'd tar of the index and the content worth keeping.
+ * An image: a tar archive of three parts, each compressed on its own -- and,
+ * with --encrypt-to, encrypted on its own, with ".gpg" after its name -- so
+ * that each can be read without reading the others:
  *
- *   restate/index.json            first, so it can be read without the rest
- *   restate/files/etc/hosts       every kept file, directory, symlink and FIFO,
- *   restate/files/etc/ssh/...     with its owner, mode and times
+ *   restate/index.json.gz     the index, first: what verify, diff, buildsheet
+ *                             and autoinstall read, without touching the rest
+ *   restate/kit.tar.gz        what a reinstall needs before anything else --
+ *                             /etc/apt, and the packages no repository has --
+ *                             small, so it is had in seconds
+ *   restate/files.tar.gz      every kept file, directory, symlink and FIFO,
+ *                             with its owner, mode and times, as
+ *                             restate/files/etc/hosts, ... (the kit's
+ *                             members are here too)
+ *
+ * The outer archive is not compressed, so tar finds a part by skipping past
+ * the others' bytes rather than decompressing them:
+ *
+ *   tar -xOf IMAGE restate/files.tar.gz | tar -xzpf - --numeric-owner \
+ *       -C / --strip-components=2
+ *
+ * An image written before 1.1 is one gzip'd tar with index.json first and
+ * the files after it; it is still read.
  *
  * index.json has to come first and has to describe the content exactly, and
  * those pull in opposite directions: the digests are only known once every
@@ -30,7 +47,10 @@
 #include "index.h"
 #include "tar.h"
 
-#define RS_IMAGE_INDEX_NAME "restate/index.json"
+#define RS_IMAGE_INDEX_NAME "restate/index.json"      /* before 1.1 */
+#define RS_IMAGE_INDEX_PART "restate/index.json.gz"
+#define RS_IMAGE_KIT_PART   "restate/kit.tar.gz"
+#define RS_IMAGE_FILES_PART "restate/files.tar.gz"
 #define RS_IMAGE_FILES_DIR  "restate/files"
 /* An index larger than this is not one restate wrote. */
 #define RS_IMAGE_INDEX_MAX  ((size_t)2 * 1024 * 1024 * 1024 - 1)
@@ -41,6 +61,15 @@ struct rs_image_writer {
     char                *dest;
     const char *const   *recipients;   /* public key files to encrypt to; see pgp.h */
     size_t               nrecipients;
+    /* Paths that go into the kit as well as the files: each exactly, or, if
+     * it ends in a slash, everything beneath it. */
+    const char *const   *kit;
+    size_t               nkit;
+    struct {
+        uint64_t offset;   /* in the content, where a kit member starts */
+        uint64_t length;
+    }                   *spans;
+    size_t               nspans;
 };
 
 /* Creates the temporary content file beside `dest`. */
@@ -57,9 +86,19 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
 void rs_image_abort(struct rs_image_writer *iw);
 
 /*
- * Reads an index from `path`: an image (gzip'd, recognized by its first two
- * bytes) or a bare index.json. "-" is standard input, which must be a bare
- * index -- a stream cannot be handed to gzip after its first bytes are read.
+ * The shell command that unpacks one part of `image` (RS_IMAGE_KIT_PART or
+ * RS_IMAGE_FILES_PART) into `dest`, as it was: "tar -xOf IMAGE PART | tar
+ * -xzpf - --numeric-owner -C DEST --strip-components=2", then `extra`, if any,
+ * as further arguments to the second tar.
+ */
+void rs_image_part_command(struct rs_buf *out, const char *image, const char *part,
+                           const char *dest, const char *extra);
+
+/*
+ * Reads an index from `path`: an image -- in parts, or from before 1.1 one
+ * gzip'd stream -- or a bare index.json, and sets ix->in_parts for an image
+ * in parts. "-" is standard input, which must be a bare index -- a stream
+ * cannot be handed to gzip after its first bytes are read.
  */
 bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err);
 

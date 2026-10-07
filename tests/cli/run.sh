@@ -80,6 +80,18 @@ check() {
   fi
 }
 
+# part IMAGE NAME -- one part of an image, on standard output. Not tar -O,
+# which OpenBSD's tar does not have: the outer archive is plain tar, so the
+# part is unpacked into a directory of its own and read from there.
+part() {
+  local d
+  d="$(mktemp -d "$WORK/part.XXXXXX")" || return 1
+  ( cd "$d" && tar -xf "$WORK/$1" "restate/$2" ) && cat "$d/restate/$2"
+  local status=$?
+  rm -rf "$d"
+  return "$status"
+}
+
 # refute DESCRIPTION COMMAND... -- passes when the command fails.
 refute() {
   local what="$1"
@@ -237,16 +249,22 @@ Architecture: amd64
 Version: 2.0
 DPKG
 expect 0 "capture --keep-local-packages" -- \
-  "$BIN" capture --root pkgtree --keep-local-packages -o kept.tgz
+  "$BIN" capture --root pkgtree --keep-local-packages -o kept.tar
 contains "$ERR" "vanished 2.0 is not in /var/cache/apt/archives" "a package not in apt's cache is warned of"
 contains "$ERR" "dpkg-repack vanished" "with how to rebuild it"
 check "the kept .deb is in the image, though /var/cache is left out" \
-  sh -c 'tar -tzf kept.tgz | grep -qx "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
+  eval 'part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
 check "and nothing else of /var/cache" \
-  sh -c '! tar -tzf kept.tgz | grep -v by-hand_1.0_amd64.deb | grep -q "var/cache/apt/archives/"'
-expect 0 "packages of the image" -- "$BIN" packages kept.tgz
+  eval '! part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -v by-hand_1.0_amd64.deb | grep -q "var/cache/apt/archives/"'
+check "the kit holds it, and /etc/apt" \
+  eval 'part kept.tar kit.tar.gz | gzip -dc | tar -tf - | tr "\n" " " | grep -q "restate/files/etc/apt/sources.list .*restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
+check "and nothing else" \
+  eval '! part kept.tar kit.tar.gz | gzip -dc | tar -tf - | grep -v "etc/apt\|by-hand" | grep -q .'
+expect 0 "verify the image with kept packages" -- "$BIN" verify --root pkgtree kept.tar
+lacks "$OUT" "by-hand_1.0_amd64.deb" "verify walks what the image kept, and finds it unchanged"
+expect 0 "packages of the image" -- "$BIN" packages kept.tar
 contains "$OUT" '"kept": "/var/cache/apt/archives/by-hand_1.0_amd64.deb"' "the inventory says what it kept"
-expect 2 "autoinstall --image-at a relative path" -- "$BIN" autoinstall --image-at x.tgz
+expect 2 "autoinstall --image-at a relative path" -- "$BIN" autoinstall --image-at x.tar
 contains "$ERR" "not an absolute path" "--image-at has to be absolute"
 printf '{"format": "restate-index", "version": 1, "entries": []}' > old-index.json
 expect 2 "packages of an old index" -- "$BIN" packages old-index.json
@@ -311,7 +329,7 @@ contains "$OUT" "restate build sheet: db01" "buildsheet names the machine"
 contains "$OUT" "sda2 : start=1050624, size=39062500" "buildsheet keeps the exact sectors"
 contains "$OUT" "mkfs.ext4 -F -U root-uuid" "buildsheet keeps the filesystem UUID"
 contains "$OUT" "Custom storage layout" "buildsheet says how to drive the installer"
-contains "$OUT" "tar -xpzf layout.json" "buildsheet says how to restore"
+contains "$OUT" "tar -xOf layout.json restate/files.tar.gz" "buildsheet says how to restore"
 expect 0 "buildsheet --target=vm" -- "$BIN" buildsheet --target=vm layout.json -o sheet.txt
 check "buildsheet -o writes the file" test -s sheet.txt
 contains "$(cat sheet.txt)" "virt-install --name db01" "a VM build sheet defines the VM"
@@ -390,52 +408,62 @@ refute "a failed scan creates no output" test -e no
 # ---------------------------------------------------------------------------
 expect 2 "capture with no -o" -- "$BIN" capture -r tree
 contains "$ERR" "give one with -o" "capture needs a file"
-expect 0 "capture" -- "$BIN" capture -r tree --os=linux -o img1.tgz
+expect 0 "capture" -- "$BIN" capture -r tree --os=linux -o img1.tar
 contains "$ERR" "kept the content of" "the capture summary"
-check "the image is mode 600" test "$(file_mode img1.tgz)" = "600"
-check "the image is gzip" sh -c 'gzip -t img1.tgz'
-gzip -dc img1.tgz | tar -tf - > members.txt 2>/dev/null
-check "index.json is the first member" test "$(head -1 members.txt)" = "restate/index.json"
+check "the image is mode 600" test "$(file_mode img1.tar)" = "600"
+tar -tf img1.tar > parts.txt 2>/dev/null
+check "the image is three parts, the index first" \
+  test "$(tr '\n' ' ' < parts.txt)" = "restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz "
+# Called through check.
+# shellcheck disable=SC2329
+parts_are_gzip() {
+  local p
+  for p in index.json.gz kit.tar.gz files.tar.gz; do
+    part img1.tar "$p" | gzip -t || return 1
+  done
+}
+check "each part is gzip" parts_are_gzip
+part img1.tar files.tar.gz | gzip -dc | tar -tf - > members.txt 2>/dev/null
 contains "$(cat members.txt)" "restate/files/etc/ssh/sshd_config" "state content is in the image"
 lacks "$(cat members.txt)" "restate/files/usr/bin/tool" "baseline content is not, by default"
-expect 0 "capture --baseline-content" -- "$BIN" capture -r tree --os=linux -B -q -o img-b.tgz
-gzip -dc img-b.tgz | tar -tf - > members-b.txt 2>/dev/null
+expect 0 "capture --baseline-content" -- "$BIN" capture -r tree --os=linux -B -q -o img-b.tar
+part img-b.tar files.tar.gz | gzip -dc | tar -tf - > members-b.txt 2>/dev/null
 contains "$(cat members-b.txt)" "restate/files/usr/bin/tool" "-B keeps baseline content too"
-expect 0 "capture again" -- "$BIN" capture -r tree --os=linux -q -o img2.tgz
+expect 0 "capture again" -- "$BIN" capture -r tree --os=linux -q -o img2.tar
 
-# The image is also a plain tarball: system tar restores it by hand.
+# The image is also plain tar: system tar restores it by hand.
 mkdir -p unpacked
-gzip -dc img1.tgz | ( cd unpacked && tar -xf - ) 2>/dev/null
+part img1.tar files.tar.gz | ( cd unpacked && gzip -dc | tar -xf - ) 2>/dev/null
 check "system tar restores a file's content" \
   cmp tree/etc/ssh/sshd_config unpacked/restate/files/etc/ssh/sshd_config
 chmod 640 tree/etc/hostname
-expect 0 "capture after a mode change" -- "$BIN" capture -r tree --os=linux -q -o img-m.tgz
+expect 0 "capture after a mode change" -- "$BIN" capture -r tree --os=linux -q -o img-m.tar
 mkdir -p unpacked-m
-gzip -dc img-m.tgz | ( cd unpacked-m && tar -xpf - ) 2>/dev/null
+part img-m.tar files.tar.gz | ( cd unpacked-m && gzip -dc | tar -xpf - ) 2>/dev/null
 check "and its mode" test "$(file_mode unpacked-m/restate/files/etc/hostname)" = "640"
 check "and a symlink" test -L unpacked/restate/files/home/u/link
 
 # ---------------------------------------------------------------------------
 # diff
 # ---------------------------------------------------------------------------
-expect 0 "diff identical images" -- "$BIN" diff img1.tgz img2.tgz
+expect 0 "diff identical images" -- "$BIN" diff img1.tar img2.tar
 check "diff of identical images prints nothing" test -z "$OUT"
 contains "$ERR" "0 added, 0 deleted, 0 modified" "the diff summary"
-expect 0 "diff an image against an index" -- "$BIN" diff img1.tgz m1.json
+expect 0 "diff an image against an index" -- "$BIN" diff img1.tar m1.json
 
 printf 'Port 2222\n' > tree/etc/ssh/sshd_config
 chmod 700 tree/usr/bin/tool
 rm tree/etc/hostname
 printf 'new\n' > tree/etc/motd
 expect 0 "scan the changed tree" -- "$BIN" scan -r tree --os=linux -o m2.json -q
-expect 1 "diff a changed tree" -- "$BIN" diff img1.tgz m2.json
+expect 1 "diff a changed tree" -- "$BIN" diff img1.tar m2.json
 contains "$OUT" "M	/etc/ssh/sshd_config	content" "a content change"
 contains "$OUT" "M	/usr/bin/tool	mode" "a mode change"
 contains "$OUT" "D	/etc/hostname" "a deletion"
 contains "$OUT" "A	/etc/motd" "an addition"
 expect 1 "diff an index from standard input" -- sh -c "\"$BIN\" diff - m2.json < m1.json"
 contains "$OUT" "A	/etc/motd" "diff reads standard input"
-expect 2 "an image on standard input" -- sh -c "\"$BIN\" diff - m2.json < img1.tgz"
+expect 2 "an image on standard input" -- sh -c "\"$BIN\" diff - m2.json < img1.tar"
 contains "$ERR" "name the file instead" "an image on stdin says what to do"
 expect 2 "diff of two standard inputs" -- "$BIN" diff - -
 expect 2 "diff of a missing file" -- "$BIN" diff m1.json nonexistent
@@ -451,13 +479,13 @@ check "diff -o writes the file" test -f d.txt
 # ---------------------------------------------------------------------------
 # verify
 # ---------------------------------------------------------------------------
-expect 0 "scan for verify" -- "$BIN" capture -r tree --os=linux -q -o img3.tgz
-expect 0 "verify an unchanged tree" -- "$BIN" verify img3.tgz --os=linux
+expect 0 "scan for verify" -- "$BIN" capture -r tree --os=linux -q -o img3.tar
+expect 0 "verify an unchanged tree" -- "$BIN" verify img3.tar --os=linux
 contains "$ERR" "0 added, 0 deleted, 0 modified" "verify with no changes"
 touch tree/etc/motd
-expect 0 "verify after touch(1)" -- "$BIN" verify img3.tgz --os=linux
+expect 0 "verify after touch(1)" -- "$BIN" verify img3.tar --os=linux
 printf 'changed\n' > tree/etc/motd
-expect 1 "verify a changed tree" -- "$BIN" verify img3.tgz --os=linux
+expect 1 "verify a changed tree" -- "$BIN" verify img3.tar --os=linux
 contains "$OUT" "M	/etc/motd	content" "verify finds the change"
 expect 1 "verify an index against another root" -- "$BIN" verify m2.json --os=linux -r outside
 expect 2 "verify a missing image" -- "$BIN" verify nonexistent
@@ -472,7 +500,7 @@ if [ "$(id -u)" != "0" ]; then
   contains "$ERR" "/etc/locked" "the unreadable file is named"
   contains "$ERR" "incomplete" "the summary says the index is incomplete"
   contains "$OUT" '"unreadable": true' "it is recorded as unreadable"
-  expect 3 "capture with an unreadable file" -- "$BIN" capture -r tree --os=linux -o img4.tgz
+  expect 3 "capture with an unreadable file" -- "$BIN" capture -r tree --os=linux -o img4.tar
   chmod 600 tree/etc/locked
 fi
 

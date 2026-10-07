@@ -131,15 +131,18 @@ void test_pgp(void)
     CHECK(rs_image_finish(&iw, &ix, &err));
     CHECK_STR(err.data ? err.data : "", "");
     {
-        FILE         *fp = fopen(img, "rb");
-        unsigned char head[4] = { 0, 0, 0, 0 };
+        /* Each part encrypted on its own, and named so. */
+        char *list = rs_xasprintf("tar -tf '%s' | tr '\\n' ' ' | grep -qx "
+                                  "'restate/index.json.gz.gpg restate/kit.tar.gz.gpg "
+                                  "restate/files.tar.gz.gpg '", img);
+        char *head = rs_xasprintf("cd '%s' && tar -xf '%s' restate/files.tar.gz.gpg && "
+                                  "head -c 2 restate/files.tar.gz.gpg | od -An -tx1 | "
+                                  "grep -qv '1f 8b'", dir, img);
 
-        CHECK(fp && fread(head, 1, 4, fp) == 4);
-        CHECK(rs_pgp_detect(head, 4));
-        if (fp)
-        {
-            (void)fclose(fp);
-        }
+        CHECK(system(list) == 0);
+        CHECK(system(head) == 0);
+        free(list);
+        free(head);
     }
     rs_index_init(&back);
     CHECK(rs_index_load(&back, img, &err));

@@ -437,7 +437,7 @@ static void fuzz_packages(const char *text, size_t len)
     memset(&inv, 0, sizeof(inv));
     rs_packages_describe(pkg_root, &inv);
     rs_buf_init(&missing);
-    kept = rs_packages_keep(pkg_root, &inv, &n, &missing);
+    kept = rs_packages_keep(pkg_root, &inv, NULL, 0, &n, &missing);
     for (i = 0; i < n; i++)
     {
         free(kept[i]);

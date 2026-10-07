@@ -463,21 +463,37 @@ With
 a capture also keeps the files that put back what no repository or store
 can: the
 .I .deb
-of each installed version the inventory marks unavailable, from apt's cache
+of each installed version no repository has, from apt's cache
 .RI ( /var/cache/apt/archives ),
 and the
 .I .snap
 of each snap installed from a file, from snapd's
-.RI ( /var/lib/snapd/snaps ).
-Both caches are left out of an image otherwise. A package installed from a
-downloaded file is often not in apt's cache; the capture warns of each one
-it cannot keep, and
+.RI ( /var/lib/snapd/snaps ),
+in the image's kit as well as its files. Both caches are left out of an image
+otherwise. A package installed from a downloaded file is often not in apt's
+cache; the capture warns of each one it cannot keep, and
 .B dpkg\-repack
 .I NAME
 run in
 .I /var/cache/apt/archives
 rebuilds one from what is installed, under the name the next capture looks
-for. Off by default: those files can be large.
+for. Where that will not do \- dpkg\-repack refuses a package whose own
+maintainer scripts have the wrong permissions \-
+.BI \-\-deb " NAME" = FILE
+names the
+.I .deb
+to keep for package
+.IR NAME ,
+wherever it is; it has to be a
+.I .deb
+file, and
+.I NAME
+a package no repository has. A superseded version, one a repository has a
+newer version of, is kept if it is in the cache and passed over quietly if
+not, since a rebuild installs the newer one.
+.B verify
+walks the files an image kept, so they are not reported as deleted. Off by
+default: those files can be large.
 .SH BASELINE
 .I Baseline
 means
@@ -632,7 +648,15 @@ the inventory with
 then every package installed by hand, pinned to the version that was
 installed, so it comes from the repository it came from and not another
 that has the same name \- except the boot loader and the kernel, which the
-installer chose for the machine it installed onto; the held ones held again;
+installer chose for the machine it installed onto. They are installed by a
+script that looks each one up first, because one that cannot be had \- a
+vendor that keeps only its newest version, a repository whose key has
+expired \- would otherwise stop a single
+.B apt\-get install
+of them all and install none: the version recorded where a repository still
+has it, the current one where not, and a word about any none has; those
+found together, or one at a time if apt refuses them together. Then the held
+ones held again;
 the ones the image keeps, installed from it; the ones no repository has any
 more, or ever had, listed with what to do about them; then the snaps by
 channel, the flatpak apps by remote, what pip, npm, pipx, cargo and gem
@@ -652,10 +676,14 @@ writes the same layout as an Ubuntu autoinstall file, for an install nobody
 has to attend: storage in curtin's terms, locale, keyboard, time zone, host
 name, network and the SSH server. A LUKS passphrase has to be in the file
 for the installer to format the volume, and is left as CHANGE-ME, as is the
-first account's password, which the restore replaces. The snaps go in the
-installer's own
+first account's password, which the restore replaces. The snaps are
+installed at the new system's first boot, by a service the file leaves
+behind
+.RB ( restate\-firstboot ,
+which removes itself; what it says is in its journal): the desktop
+installer ignores an autoinstall file's
 .B snaps
-section. Given
+section, and snapd does not run while the system is being installed. Given
 .B \-\-image\-at
 .IR PATH ,
 where the installer will find the image (a disk or share mounted there), its
@@ -693,27 +721,47 @@ what does not move: network interface names and MAC addresses, LUKS keys
 held by the old machine's TPM, Secure Boot keys and the hibernation
 resume device.
 .SH IMAGES AND INDEXES
-An image is an ordinary gzip'd POSIX tar archive:
+An image is an ordinary POSIX tar archive of three parts, each compressed on
+its own:
 .PP
 .RS
 .nf
-restate/index.json
-restate/files/etc/hosts
-restate/files/etc/ssh/sshd_config
-\&...
+restate/index.json.gz
+restate/kit.tar.gz
+restate/files.tar.gz
 .fi
 .RE
 .PP
-.I index.json
-is always the first member, so it can be read without the rest. Under
-.I restate/files
-is every kept file, directory, symbolic link and FIFO with its owner, mode
-and times, so that
-.B tar \-xzpf
-can unpack an image by hand when nothing else is available. State is always
-kept; baseline content only with
+The index is first, and is all that
+.BR verify ,
+.BR diff ,
+.BR packages ,
+.B buildsheet
+and
+.B autoinstall
+read. The kit holds what a reinstall needs before anything else \-
+.IR /etc/apt ,
+and the packages the image keeps that no repository has \- so that it can
+be had in seconds. The files part holds every kept file, directory, symbolic
+link and FIFO under
+.IR restate/files ,
+with its owner, mode and times (the kit's members too). The outer archive is
+not compressed, so tar skips the parts it is not asked for rather than
+reading them, and each part unpacks by hand when nothing else is available:
+.PP
+.RS
+.nf
+tar \-xOf IMAGE restate/files.tar.gz |
+    tar \-xzpf \- \-\-numeric\-owner \-C / \-\-strip\-components=2
+.fi
+.RE
+.PP
+State is always kept; baseline content only with
 .BR \-\-baseline\-content ,
-because the operating system can supply it again.
+because the operating system can supply it again. An image made before 1.1
+is one gzip'd tar with
+.I restate/index.json
+first and the files after it, and is still read.
 .PP
 The index is JSON, one entry per line, sorted by path. Each entry records
 the full
@@ -791,12 +839,16 @@ capture can run unattended with no passphrase anywhere, and only the holder
 of a matching secret key can read the image.
 .BR gpg (1)
 runs in the same pipe as gzip, in an empty GnuPG home of its own that is
-removed afterwards, and the result is an ordinary OpenPGP message that
+removed afterwards, once for each part of the image: each is an ordinary
+OpenPGP message, its name ending in
+.IR .gpg ,
+that
 .B gpg \-d
-reads anywhere. One thing is not encrypted: while the tree is walked, the
+reads anywhere, and reading the index decrypts only the index. One thing is
+not encrypted: while the tree is walked, the
 content being kept is staged in an unlinked temporary file in the image's
-directory, because the index has to come first in the archive and is not
-complete until the walk is. It is never visible by name and is gone when
+directory, because the index comes first in the image and is not complete
+until the walk is. It is never visible by name and is gone when
 restate exits, but its blocks were written; where even that must not
 happen, write the image to encrypted storage or a tmpfs.
 .BR diff ,

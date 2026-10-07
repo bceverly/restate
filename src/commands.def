@@ -12,7 +12,7 @@
  */
 
 RS_CMD(CMD_CAPTURE,  "capture",  "",           0,  0,
-       "walk the tree and write an image (-o FILE.tgz): index.json and the "
+       "walk the tree and write an image (-o FILE.tar): index.json and the "
        "content of everything kept")
 RS_CMD(CMD_SCAN,     "scan",     "",           0,  0,
        "walk the tree and write its index alone, as JSON, with no content")

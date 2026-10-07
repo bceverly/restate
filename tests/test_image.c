@@ -338,8 +338,14 @@ void test_image(void)
 
         TEST_CASE("image: system tar can unpack it");
         {
-            char *cmd = rs_xasprintf("cd '%s' && gzip -dc img.tgz | tar -xf - && "
-                                     "cmp tree/etc/conf restate/files/etc/conf", dir);
+            /* The outer archive as it is; each part a gzip'd tar of its own.
+             * Unpacked, not read with tar -O, which OpenBSD's tar lacks. */
+            char *cmd = rs_xasprintf("cd '%s' && tar -tf img.tgz > parts.txt && "
+                                     "printf 'restate/index.json.gz\\nrestate/kit.tar.gz\\n"
+                                     "restate/files.tar.gz\\n' | cmp - parts.txt && "
+                                     "tar -xf img.tgz && gzip -dc restate/files.tar.gz | tar -xf - && "
+                                     "cmp tree/etc/conf restate/files/etc/conf && "
+                                     "gzip -dc restate/index.json.gz | grep -q restate-index", dir);
 
             CHECK(system(cmd) == 0);
             free(cmd);

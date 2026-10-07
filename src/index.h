@@ -121,6 +121,7 @@ struct rs_index {
     bool             hashed;
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
     struct rs_jval   packages;  /* what is installed, or null; see packages.h */
+    bool             in_parts;  /* read from an image in parts (image.h); not written */
 };
 
 void rs_index_init(struct rs_index *ix);

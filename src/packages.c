@@ -1532,8 +1532,98 @@ static bool keep_one(const char *root, struct rs_jval *item, const char *rel,
     return true;
 }
 
-char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
-                        struct rs_buf *missing)
+/* Whether root + rel is a .deb: an ar archive whose first member is
+ * debian-binary. */
+static bool is_deb(const char *root, const char *rel)
+{
+    static const char magic[] = "!<arch>\ndebian-binary";
+    int               fd = open_file(root, rel);
+    bool              ok = false;
+
+    if (fd >= 0)
+    {
+        char head[sizeof(magic) - 1];
+
+        ok = read(fd, head, sizeof(head)) == (ssize_t)sizeof(head) &&
+             memcmp(head, magic, sizeof(head)) == 0;
+        (void)close(fd);
+    }
+    return ok;
+}
+
+/* The --deb files: each NAME=PATH, checked, and kept for NAME. */
+static void keep_named(const char *root, struct rs_jval *pkgs, const char *const *debs,
+                       size_t ndebs, char ***paths, size_t *n, struct rs_buf *missing)
+{
+    size_t d;
+
+    for (d = 0; d < ndebs; d++)
+    {
+        const char     *eq = strchr(debs[d], '=');
+        char           *name = eq ? rs_xstrndup(debs[d], (size_t)(eq - debs[d])) : NULL;
+        const char     *path = eq ? eq + 1 : NULL;
+        struct rs_jval *p = NULL;
+        size_t          i;
+
+        for (i = 0; name && pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+        {
+            const char *pn = rs_jobject_str(&pkgs->items[i], "name");
+
+            if (pn && strcmp(pn, name) == 0)
+            {
+                p = &pkgs->items[i];
+                break;
+            }
+        }
+        if (!name || !path || !rs_path_is_clean(path))
+        {
+            rs_buf_addf(missing, "--deb %s: give it as NAME=PATH, PATH absolute\n", debs[d]);
+        } else if (!p)
+        {
+            rs_buf_addf(missing, "--deb %s: no package %s is installed\n", debs[d], name);
+        } else if (!rs_jobject_str(p, "unavailable"))
+        {
+            rs_buf_addf(missing, "--deb %s: a repository has %s's installed version, so it "
+                        "is installed from there; not kept\n", debs[d], name);
+        } else if (!is_deb(root, path))
+        {
+            rs_buf_addf(missing, "--deb %s: %s is not a .deb file\n", debs[d], path);
+        } else
+        {
+            (void)keep_one(root, p, path, paths, n);
+        }
+        free(name);
+    }
+}
+
+char **rs_packages_kept(const struct rs_jval *packages, size_t *n)
+{
+    const struct rs_jval *lists[2];
+    char                **paths = NULL;
+    size_t                l;
+    size_t                i;
+
+    lists[0] = rs_jobject_get(rs_jobject_get(packages, "apt"), "packages");
+    lists[1] = rs_jobject_get(packages, "snap");
+    *n = 0;
+    for (l = 0; l < 2; l++)
+    {
+        for (i = 0; lists[l] && lists[l]->type == RS_JARRAY && i < lists[l]->n; i++)
+        {
+            const char *kept = rs_jobject_str(&lists[l]->items[i], "kept");
+
+            if (kept && rs_path_is_clean(kept))
+            {
+                paths = rs_xreallocarray(paths, *n + 1, sizeof(*paths));
+                paths[(*n)++] = rs_xstrdup(kept);
+            }
+        }
+    }
+    return paths;
+}
+
+char **rs_packages_keep(const char *root, struct rs_jval *packages, const char *const *debs,
+                        size_t ndebs, size_t *n, struct rs_buf *missing)
 {
     struct rs_jval *pkgs = member(member(packages, "apt"), "packages");
     struct rs_jval *snaps = member(packages, "snap");
@@ -1541,6 +1631,7 @@ char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
     size_t          i;
 
     *n = 0;
+    keep_named(root, pkgs, debs, ndebs, &paths, n, missing);
     for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
     {
         struct rs_jval *p = &pkgs->items[i];
@@ -1551,8 +1642,8 @@ char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
         const char     *c;
         char           *bare;
 
-        if (!rs_jobject_str(p, "unavailable") || !plain_name(name) || !plain_name(version) ||
-            !plain_name(arch))
+        if (!rs_jobject_str(p, "unavailable") || rs_jobject_str(p, "kept") ||
+            !plain_name(name) || !plain_name(version) || !plain_name(arch))
         {
             continue;
         }
@@ -1574,12 +1665,14 @@ char **rs_packages_keep(const char *root, struct rs_jval *packages, size_t *n,
         rs_buf_addf(&rel, "_%s.deb", arch);
         bare = rs_xasprintf("/var/cache/apt/archives/%s_%s_%s.deb", name,
                             strchr(version, ':') ? strchr(version, ':') + 1 : version, arch);
-        if (!keep_one(root, p, rel.data, &paths, n) && !keep_one(root, p, bare, &paths, n))
+        if (!keep_one(root, p, rel.data, &paths, n) && !keep_one(root, p, bare, &paths, n) &&
+            strcmp(rs_jobject_str(p, "unavailable"), "local") == 0)
         {
             rs_jobj_str(p, "not_kept", "not in apt's cache");
             rs_buf_addf(missing, "%s %s is not in /var/cache/apt/archives, so it cannot be "
                         "kept; `cd /var/cache/apt/archives && dpkg-repack %s` rebuilds it "
-                        "there from the installed files\n", name, version, name);
+                        "there from the installed files, or --deb %s=FILE names its .deb\n",
+                        name, version, name, name);
         }
         free(bare);
         rs_buf_free(&rel);
@@ -1737,6 +1830,109 @@ char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jva
         }
     }
     return words;
+}
+
+/* Whether `word` (NAME[:ARCH][=VERSION]) is made only of what Debian allows
+ * in package names, architectures and versions. */
+static bool debian_word(const char *word)
+{
+    const char *eq = strchr(word, '=');
+    size_t      name = eq ? (size_t)(eq - word) : strlen(word);
+    size_t      i;
+
+    if (name == 0 || !((word[0] >= 'a' && word[0] <= 'z') || (word[0] >= '0' && word[0] <= '9')))
+    {
+        return false;
+    }
+    for (i = 0; i < name; i++)
+    {
+        if (!strchr("abcdefghijklmnopqrstuvwxyz0123456789+.-:", word[i]))
+        {
+            return false;
+        }
+    }
+    return !eq || (eq[1] != '\0' &&
+                   strspn(eq + 1, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                  "0123456789.+~:-") == strlen(eq + 1));
+}
+
+void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval *skip,
+                            struct rs_buf *out)
+{
+    size_t n;
+    size_t i;
+    size_t left_out = 0;
+    char **words = rs_packages_apt_words(packages, skip, true, &n);
+
+    rs_buf_addstr(out,
+                  "#!/bin/sh\n"
+                  "# Written by restate: the packages installed by hand, put back as nearly\n"
+                  "# as the repositories allow. Each is looked up first, so that one that\n"
+                  "# cannot be had does not stop the others.\n"
+                  "set -f\n"
+                  "export DEBIAN_FRONTEND=noninteractive\n"
+                  "ok=''\n"
+                  "newer=''\n"
+                  "gone=''\n"
+                  "# A simulated install, not apt-cache show, which finds a package by name\n"
+                  "# whatever version is asked for: this checks the version, and that what\n"
+                  "# it needs can be had too.\n"
+                  "while read -r want; do\n"
+                  "  name=${want%%=*}\n"
+                  "  if apt-get -s install \"$want\" > /dev/null 2>&1; then\n"
+                  "    ok=\"$ok $want\"\n"
+                  "  elif apt-get -s install \"$name\" > /dev/null 2>&1; then\n"
+                  "    ok=\"$ok $name\"\n"
+                  "    newer=\"$newer $name\"\n"
+                  "  else\n"
+                  "    gone=\"$gone $name\"\n"
+                  "  fi\n"
+                  "done <<'PACKAGES'\n");
+    for (i = 0; i < n; i++)
+    {
+        if (debian_word(words[i]))
+        {
+            rs_buf_addf(out, "%s\n", words[i]);
+        } else
+        {
+            left_out++;
+        }
+        free(words[i]);
+    }
+    free(words);
+    rs_buf_addstr(out,
+                  "PACKAGES\n"
+                  "if [ -n \"$newer\" ]; then\n"
+                  "  echo \"restate: the version recorded has gone; the current one instead:$newer\" >&2\n"
+                  "fi\n"
+                  "if [ -n \"$gone\" ]; then\n"
+                  "  echo \"restate: apt cannot install these (no repository has them, or what\" \\\n"
+                  "       \"they need):$gone\" >&2\n"
+                  "fi\n"
+                  "# Together if apt will; one at a time if it will not.\n"
+                  "# shellcheck disable=SC2086\n"
+                  "if [ -n \"$ok\" ] && ! apt-get install -y $ok; then\n"
+                  "  for p in $ok; do\n"
+                  "    apt-get install -y \"$p\" || true\n"
+                  "  done\n"
+                  "fi\n"
+                  "# What dpkg says is installed, not what apt-get exited with: one package\n"
+                  "# that will not configure makes every later apt-get fail, whatever it did.\n"
+                  "missing=''\n"
+                  "for p in $ok; do\n"
+                  "  name=${p%%=*}\n"
+                  "  if [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$name\" 2> /dev/null)\" != installed ]; then\n"
+                  "    missing=\"$missing $name\"\n"
+                  "  fi\n"
+                  "done\n"
+                  "if [ -n \"$missing\" ]; then\n"
+                  "  echo \"restate: these did not install:$missing\" >&2\n"
+                  "fi\n");
+    if (left_out > 0)
+    {
+        rs_buf_addf(out, "echo \"restate: %zu packages were left out: their names or versions "
+                    "are not ones Debian allows\" >&2\n", left_out);
+    }
 }
 
 /* ------------------------------------------------------------------------- */

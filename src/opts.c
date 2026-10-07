@@ -151,6 +151,9 @@ void rs_options_free(struct rs_options *o)
     free(o->recipients);
     o->recipients = NULL;
     o->nrecipients = 0;
+    free(o->debs);
+    o->debs = NULL;
+    o->ndebs = 0;
 }
 
 bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf *err)
@@ -221,6 +224,10 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_KEEP_LOCAL:
             o->keep_local = true;
+            break;
+        case OPT_DEB:
+            o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));
+            o->debs[o->ndebs++] = optarg;
             break;
         case OPT_IMAGE_AT:
             if (optarg[0] != '/')
@@ -367,7 +374,7 @@ void rs_print_help(FILE *out)
                        "back. Every path is classified by a set of rules as ephemeral (never\n"
                        "kept), expendable (kept only with --all), baseline (supplied by the\n"
                        "operating system or its packages) or state (always kept). An image is a\n"
-                       ".tgz holding index.json -- every recorded path with its owner, mode,\n"
+                       ".tar holding index.json -- every recorded path with its owner, mode,\n"
                        "times and SHA-256 -- and the content of everything kept.\n"
                        "\n"
                        "Commands:\n");
@@ -403,11 +410,11 @@ void rs_print_help(FILE *out)
                        "  3  the scan finished, but some files could not be read\n"
                        "\n"
                        "Examples:\n"
-                       "  restate capture -o /var/backups/web01.tgz\n"
-                       "  restate capture --progress -o /var/backups/web01.tgz\n"
+                       "  restate capture -o /var/backups/web01.tar\n"
+                       "  restate capture --progress -o /var/backups/web01.tar\n"
                        "  restate scan -o web01.json\n"
-                       "  restate diff monday.tgz tuesday.tgz\n"
-                       "  restate verify /var/backups/web01.tgz\n"
+                       "  restate diff monday.tar tuesday.tar\n"
+                       "  restate verify /var/backups/web01.tar\n"
                        "  restate classify /etc/passwd /var/cache/apt /usr/bin/ls\n"
                        "  restate rules > site.rules && restate -N -R site.rules scan\n"
                        "\n"

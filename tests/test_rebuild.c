@@ -316,6 +316,9 @@ static void server(struct rs_jval *m)
     rs_jobj_str(vg, "name", "nometa");
 }
 
+/* Whether the sheets are for an image from before 1.1, in one stream. */
+static bool old_layout;
+
 static char *sheet_with(const struct rs_jval *m, enum rs_target t, const char *image,
                         const struct rs_jval *packages)
 {
@@ -328,6 +331,7 @@ static char *sheet_with(const struct rs_jval *m, enum rs_target t, const char *i
     o.image = image;
     o.version = "9.9";
     o.packages = packages;
+    o.old_image = old_layout;
     rs_buf_init(&out);
     rs_buf_init(&err);
     CHECK(rs_buildsheet(m, &o, &out, &err));
@@ -353,6 +357,7 @@ static char *autoinst_with(const struct rs_jval *m, enum rs_target t,
     o.version = "9.9";
     o.packages = packages;
     o.image_at = image_at;
+    o.old_image = old_layout;
     rs_buf_init(&out);
     rs_buf_init(&err);
     CHECK(rs_autoinstall(m, &o, &out, &err));
@@ -503,7 +508,7 @@ static void sheet_cases(void)
     CHECK_CONTAINS(s, "systemd-cryptenroll --tpm2-device=auto /dev/disk/by-uuid/luks-uuid");
     CHECK_CONTAINS(s, "cryptsetup luksAddKey /dev/disk/by-uuid/luks-uuid /etc/keys/root.key");
     CHECK_CONTAINS(s, "mokutil --import");
-    CHECK_CONTAINS(s, "tar -xpzf web01.tgz --numeric-owner");
+    CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/files.tar.gz | tar -xzpf - --numeric-owner");
     CHECK_CONTAINS(s, "/dev/sdz1 is a removable disk, not part of the machine");
     CHECK_CONTAINS(s, "/mnt/nas is mounted from nas:/export (nfs4)");
     CHECK_CONTAINS(s, "something was not readable");
@@ -533,7 +538,7 @@ static void sheet_cases(void)
     CHECK(strstr(s, "purge -y mdadm") == NULL);
     CHECK_CONTAINS(s, "was eno1 (52:54:00:00:00:01)");
     CHECK_CONTAINS(s, "was eno2 (no MAC recorded)");
-    CHECK_CONTAINS(s, "IMAGE.tgz");
+    CHECK_CONTAINS(s, "IMAGE.tar");
     free(s);
     rs_jval_free(&m);
 
@@ -577,7 +582,7 @@ static void sheet_cases(void)
 
     TEST_CASE("buildsheet: what it cannot do");
     {
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false };
         struct rs_buf        out;
         struct rs_buf        err;
 
@@ -621,35 +626,41 @@ static void package_cases(void)
     /* Before the files. */
     CHECK(strstr(s, "Install the packages again") < strstr(s, "Restore the files"));
     CHECK(strstr(s, "no package inventory") == NULL);
-    CHECK_CONTAINS(s, "tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 "
-                      "restate/files/etc/apt");
+    CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/kit.tar.gz | tar -xzpf - --numeric-owner -C / "
+                      "--strip-components=2\n");
     CHECK_CONTAINS(s, "base64 -d > /usr/share/keyrings/vendor.gpg <<'KEY'\ndmVuZG9yIGtleQ==\nKEY");
     CHECK(strstr(s, "/etc/apt/keyrings/local.gpg <<") == NULL);
     CHECK(strstr(s, "ubuntu-archive-keyring.gpg <<") == NULL);
     CHECK(strstr(s, "odd.gpg") == NULL);
     CHECK_CONTAINS(s, "The key /usr/share/keyrings/gone.gpg was missing");
     CHECK_CONTAINS(s, "apt-get update");
-    CHECK_CONTAINS(s, "apt-get install -y vim=2:9.1-1 'libfoo:i386=1.0~rc1' tzdata=2026a");
-    /* Whatever the tree said, a copied line runs only the command shown. */
-    CHECK_CONTAINS(s, "'evil=1$(reboot)'\\'''");
+    CHECK_CONTAINS(s, "    cat > /tmp/restate-packages.sh <<'SCRIPT'\n#!/bin/sh\n");
+    CHECK_CONTAINS(s, "\nvim=2:9.1-1\nlibfoo:i386=1.0~rc1\ntzdata=2026a\n");
+    CHECK_CONTAINS(s, "\nPACKAGES\n");
+    CHECK_CONTAINS(s, "\nSCRIPT\n    sh /tmp/restate-packages.sh\n");
+    /* Whatever the tree said, the script runs nothing it wrote. */
+    CHECK(strstr(s, "$(reboot)") == NULL);
+    CHECK_CONTAINS(s, "restate: 1 packages were left out");
     CHECK(strstr(s, " dep=") == NULL);
     CHECK(strstr(s, "intel-microcode=") == NULL);
     CHECK(strstr(s, "zoom=") == NULL);
     CHECK_CONTAINS(s, " oldie");
-    CHECK_CONTAINS(s, " noversion");
+    CHECK_CONTAINS(s, "\nnoversion\n");
     CHECK_CONTAINS(s, "(1 were installed that way)");
     CHECK_CONTAINS(s, "apt-mark hold libfoo");
     CHECK_CONTAINS(s, "oldie                            was 1.0");
     CHECK_CONTAINS(s, "zoom                             6.7");
     CHECK(strstr(s, "chef                             18") == NULL);
-    CHECK_CONTAINS(s, "The image keeps these; install them from it:");
-    CHECK_CONTAINS(s, "mkdir -p /tmp/restate && tar -xpzf web01.tgz -C /tmp/restate "
-                      "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
-    CHECK_CONTAINS(s, "apt-get install -y /tmp/restate/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "The kit brought back the ones the image keeps:");
+    CHECK(strstr(s, "/tmp/restate/") == NULL);
+    CHECK_CONTAINS(s, "apt-get install -y /var/cache/apt/archives/chef_18_amd64.deb");
     CHECK_CONTAINS(s, "dpkg-repack NAME");
     CHECK(strstr(s, "grub-pc=") == NULL);
-    CHECK_CONTAINS(s, "restate/files/var/lib/snapd/snaps/asana_x1.snap && snap install --dangerous "
-                      "/tmp/restate/var/lib/snapd/snaps/asana_x1.snap");
+    CHECK_CONTAINS(s, "    snap install --dangerous /var/lib/snapd/snaps/asana_x1.snap\n");
+    CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/files.tar.gz | tar -xzpf - --numeric-owner -C / "
+                      "--strip-components=2 --exclude=restate/files/etc/fstab "
+                      "--exclude=restate/files/etc/crypttab");
+    CHECK_CONTAINS(s, "read restate/files.tar.gz.gpg instead, with `gpg -d |`");
     CHECK_CONTAINS(s, "update-alternatives --set java /usr/lib/jvm/21/bin/java");
     CHECK(strstr(s, "nopath") == NULL);
     CHECK_CONTAINS(s, "snap install firefox --channel=latest/stable\n");
@@ -681,11 +692,27 @@ static void package_cases(void)
     /* Onto hardware, the guest's packages are left out instead. */
     s = sheet_with(&m, RS_TARGET_METAL, NULL, &pk);
     CHECK_CONTAINS(s, "intel-microcode=3");
-    CHECK_CONTAINS(s, "tar -xpzf IMAGE.tgz");
+    CHECK_CONTAINS(s, "tar -xOf IMAGE.tar restate/files.tar.gz");
     free(s);
+
+    TEST_CASE("buildsheet: the packages from an image from before 1.1");
+    old_layout = true;
+    s = sheet_with(&m, RS_TARGET_VM, "web01.tgz", &pk);
+    CHECK_CONTAINS(s, "tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 "
+                      "restate/files/etc/apt");
+    CHECK_CONTAINS(s, "The image keeps these; install them from it:");
+    CHECK_CONTAINS(s, "mkdir -p /tmp/restate && tar -xpzf web01.tgz -C /tmp/restate "
+                      "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "apt-get install -y /tmp/restate/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "restate/files/var/lib/snapd/snaps/asana_x1.snap && snap install --dangerous "
+                      "/tmp/restate/var/lib/snapd/snaps/asana_x1.snap");
+    CHECK_CONTAINS(s, "    tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 restate/files\n");
+    CHECK(strstr(s, "kit.tar.gz") == NULL);
+    free(s);
+    old_layout = false;
     rs_jval_free(&pk);
 
-    TEST_CASE("buildsheet: a long install wraps, and an empty inventory says little");
+    TEST_CASE("buildsheet: a long command wraps, and an empty inventory says little");
     rs_buf_init(&text);
     rs_buf_addstr(&text, "{\"apt\": {\"packages\": [");
     for (i = 0; i < 30; i++)
@@ -693,16 +720,23 @@ static void package_cases(void)
         rs_buf_addf(&text, "%s{\"name\": \"package-number-%zu\", \"version\": \"1.0\","
                     " \"manual\": true, \"origins\": [\"x\"]}", i ? ", " : "", i);
     }
-    rs_buf_addstr(&text, "]}, \"snap\": [], \"flatpak\": {\"apps\": []}, \"pip\": []}");
+    rs_buf_addstr(&text, "]}, \"snap\": [], \"flatpak\": {\"apps\": []}, \"pip\": [");
+    for (i = 0; i < 12; i++)
+    {
+        rs_buf_addf(&text, "%s{\"name\": \"python-package-%zu\", \"version\": \"1.0\","
+                    " \"where\": \"/usr/local/lib/python3/dist-packages\"}", i ? ", " : "", i);
+    }
+    rs_buf_addstr(&text, "]}");
     parse(text.data, &pk);
     rs_buf_free(&text);
     s = sheet_with(&m, RS_TARGET_SAME, NULL, &pk);
-    CHECK_CONTAINS(s, "apt-get install -y package-number-0=1.0 package-number-1=1.0 \\\n"
-                      "        package-number-2=1.0");
+    CHECK_CONTAINS(s, "\npackage-number-0=1.0\npackage-number-1=1.0\n");
+    CHECK_CONTAINS(s, "pip install --break-system-packages python-package-0==1.0 \\\n"
+                      "        python-package-");
     CHECK(strstr(s, "apt-mark hold") == NULL);
     CHECK(strstr(s, "The snaps") == NULL);
     CHECK(strstr(s, "flatpak") == NULL);
-    CHECK(strstr(s, "Python") == NULL);
+    CHECK_CONTAINS(s, "Python packages in /usr/local/lib/python3/dist-packages");
     free(s);
     rs_jval_free(&pk);
     rs_jval_free(&m);
@@ -714,6 +748,30 @@ static void package_cases(void)
     CHECK_CONTAINS(s, "has no package inventory");
     free(s);
     rs_jval_free(&m);
+}
+
+/* The content of a file the late-commands write into the new system: the
+ * base64 between "echo " and " | base64 -d > /target<path>". */
+static char *late_file_text(const char *yaml, const char *path)
+{
+    char         *tail = rs_xasprintf(" | base64 -d > /target%s ", path);
+    const char   *end = strstr(yaml, tail);
+    const char   *start = end;
+    struct rs_buf out;
+
+    free(tail);
+    rs_buf_init(&out);
+    while (start && start > yaml && strncmp(start, "echo ", 5) != 0)
+    {
+        start--;
+    }
+    if (!end || !start || !rs_base64_decode(start + 5, (size_t)(end - start - 5), &out))
+    {
+        rs_buf_free(&out);
+        return rs_xstrdup("");
+    }
+    rs_buf_add(&out, "", 1);
+    return rs_buf_detach(&out);
 }
 
 static void autoinstall_package_cases(void)
@@ -735,26 +793,52 @@ static void autoinstall_package_cases(void)
     rs_buf_free(&text);
     s = autoinst_with(&m, RS_TARGET_VM, &pk, "/media/restate/web 01.tgz");
     CHECK_CONTAINS(s, "# image at /media/restate/web 01.tgz, so it has to be there");
-    CHECK_CONTAINS(s, "  snaps:\n    - name: \"firefox\"\n      channel: \"latest/stable\"\n"
-                      "      classic: false\n");
-    CHECK_CONTAINS(s, "    - name: \"code\"\n      channel: \"latest/edge\"\n      classic: true\n");
-    CHECK(strstr(s, "name: \"core22\"") == NULL);
-    CHECK(strstr(s, "name: \"mine\"") == NULL);
+    /* The snaps at the first boot: the desktop installer ignores a snaps
+     * section. */
+    CHECK(strstr(s, "  snaps:") == NULL);
+    {
+        char *fb = late_file_text(s, "/usr/local/sbin/restate-firstboot");
+        char *unit = late_file_text(s, "/etc/systemd/system/restate-firstboot.service");
+
+        CHECK_CONTAINS(fb, "snap wait system seed.loaded\n");
+        CHECK_CONTAINS(fb, "snap install firefox --channel=latest/stable || echo "
+                           "'restate: the snap firefox did not install' >&2\n");
+        CHECK_CONTAINS(fb, "snap install code --channel=latest/edge --classic --devmode || ");
+        CHECK_CONTAINS(fb, "snap disable code\n");
+        CHECK_CONTAINS(fb, "snap install --dangerous /var/lib/snapd/snaps/asana_x1.snap || ");
+        CHECK(strstr(fb, "core22") == NULL);
+        CHECK(strstr(fb, "snap install core24") == NULL);
+        CHECK(strstr(fb, "snap install mine") == NULL);
+        CHECK_CONTAINS(fb, "systemctl disable restate-firstboot.service\n");
+        CHECK_CONTAINS(unit, "After=network-online.target snapd.seeded.service\n");
+        CHECK_CONTAINS(unit, "WantedBy=multi-user.target\n");
+        free(fb);
+        free(unit);
+    }
+    CHECK_CONTAINS(s, "ln -sf /etc/systemd/system/restate-firstboot.service "
+                      "/target/etc/systemd/system/multi-user.target.wants/");
     CHECK_CONTAINS(s, "test -f '/media/restate/web 01.tgz' || { echo 'restate: the image is not at "
                       "/media/restate/web 01.tgz' >&2; exit 1; }");
-    CHECK_CONTAINS(s, "tar -xpzf '/media/restate/web 01.tgz' --numeric-owner -C /target "
-                      "--strip-components=2 restate/files/etc/apt");
+    CHECK_CONTAINS(s, "tar -xOf '/media/restate/web 01.tgz' restate/kit.tar.gz | tar -xzpf - "
+                      "--numeric-owner -C /target --strip-components=2\"");
     CHECK_CONTAINS(s, "mkdir -p /target/usr/share/keyrings/ && echo dmVuZG9yIGtleQ== | base64 -d > "
                       "/target/usr/share/keyrings/vendor.gpg");
     CHECK(strstr(s, "local.gpg") == NULL);
     CHECK(strstr(s, "odd.gpg") == NULL);
     CHECK_CONTAINS(s, "curtin in-target -- apt-get update || true");
-    CHECK_CONTAINS(s, "apt-get install -y vim=2:9.1-1 'libfoo:i386=1.0~rc1' tzdata=2026a");
-    CHECK_CONTAINS(s, " || curtin in-target -- env DEBIAN_FRONTEND=noninteractive apt-get install "
-                      "-y vim libfoo:i386 tzdata");
+    {
+        char *sh = late_file_text(s, "/var/tmp/restate-packages.sh");
+
+        CHECK_CONTAINS(sh, "\nvim=2:9.1-1\nlibfoo:i386=1.0~rc1\ntzdata=2026a\n");
+        CHECK_CONTAINS(sh, "if [ -n \"$ok\" ] && ! apt-get install -y $ok; then\n");
+        CHECK(strstr(sh, "reboot") == NULL);
+        free(sh);
+    }
+    CHECK_CONTAINS(s, "curtin in-target -- sh /var/tmp/restate-packages.sh; "
+                      "rm -f /target/var/tmp/restate-packages.sh");
     CHECK(strstr(s, "grub-pc") == NULL);
     CHECK(strstr(s, "intel-microcode=") == NULL);
-    CHECK_CONTAINS(s, "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK(strstr(s, "restate/files/var/cache/apt/archives/chef_18_amd64.deb") == NULL);
     CHECK_CONTAINS(s, "apt-get install -y /var/cache/apt/archives/chef_18_amd64.deb || echo "
                       "'restate: the kept packages did not all install' >&2");
     CHECK_CONTAINS(s, "curtin in-target -- apt-mark hold libfoo");
@@ -768,11 +852,12 @@ static void autoinstall_package_cases(void)
     CHECK_CONTAINS(s, "curtin in-target -- npm install -g left-pad@1.3.0 ||");
     CHECK_CONTAINS(s, "curtin in-target -- gem install rake:13.0.6 ||");
     CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java /usr/lib/jvm/21/bin/java");
-    CHECK_CONTAINS(s, "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
-                      "restate/files");
+    CHECK_CONTAINS(s, "tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
+                      "--numeric-owner -C /target --strip-components=2 "
+                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab\"");
     CHECK_CONTAINS(s, "curtin in-target -- update-grub");
     CHECK(strstr(s, "update-alternatives") < strstr(s, "--exclude=restate/files/etc/fstab"));
-    CHECK_CONTAINS(s, "#   snap install --dangerous /var/lib/snapd/snaps/asana_x1.snap");
+    CHECK(strstr(s, "#   snap install --dangerous") == NULL);
     CHECK_CONTAINS(s, "#   the snap mine, from the file it was installed from");
     CHECK_CONTAINS(s, "#   zoom, from its .deb (no repository has it)");
     CHECK_CONTAINS(s, "#   pip's packages in the home directories, each by its owner");
@@ -783,11 +868,24 @@ static void autoinstall_package_cases(void)
     CHECK_CONTAINS(s, "apt-get purge -y intel-microcode || true");
     free(s);
 
+    TEST_CASE("autoinstall: from an image from before 1.1");
+    old_layout = true;
+    s = autoinst_with(&m, RS_TARGET_VM, &pk, "/i.tgz");
+    CHECK_CONTAINS(s, "tar -xpzf /i.tgz --numeric-owner -C /target --strip-components=2 "
+                      "restate/files/etc/apt");
+    CHECK_CONTAINS(s, "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
+                      "restate/files\"");
+    CHECK(strstr(s, "kit.tar.gz") == NULL);
+    free(s);
+    old_layout = false;
+
     TEST_CASE("autoinstall: an inventory, but nowhere to find the image");
     s = autoinst_with(&m, RS_TARGET_SAME, &pk, NULL);
     CHECK_CONTAINS(s, "make this file with\n# --image-at PATH");
-    CHECK_CONTAINS(s, "  snaps:\n");
-    CHECK(strstr(s, "late-commands:") == NULL);
+    CHECK(strstr(s, "  snaps:") == NULL);
+    CHECK_CONTAINS(s, "restate-firstboot");
+    CHECK(strstr(s, "restate-packages.sh") == NULL);
     free(s);
     rs_jval_free(&pk);
 
@@ -876,7 +974,7 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false };
         struct rs_buf       out;
         struct rs_buf       err;
 
