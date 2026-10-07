@@ -17,6 +17,7 @@ int rs_cmd_capture(const struct rs_options *o);
 int rs_cmd_scan(const struct rs_options *o);
 int rs_cmd_diff(const struct rs_options *o);
 int rs_cmd_verify(const struct rs_options *o);
+int rs_cmd_restore(const struct rs_options *o);
 int rs_cmd_machine(const struct rs_options *o);
 int rs_cmd_packages(const struct rs_options *o);
 int rs_cmd_installer(const struct rs_options *o);

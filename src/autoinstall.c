@@ -213,8 +213,42 @@ static void identity(struct gen *g)
     }
     rs_buf_addstr(g->out, "  identity:\n");
     kv(g, 4, "hostname", host ? host : "restored");
-    kv(g, 4, "realname", "restate");
-    kv(g, 4, "username", "restate");
+    {
+        /* The old machine's first person, as the install's own account: the
+         * restore's merged accounts then give them back their password,
+         * groups and home, with no installer account on their number. */
+        const struct rs_jval *users = rs_jobject_get(g->sys, "users");
+        const struct rs_jval *first = NULL;
+        size_t                i;
+        uint64_t              best = UINT64_MAX;
+
+        for (i = 0; users && users->type == RS_JARRAY && i < users->n; i++)
+        {
+            uint64_t    uid = 0;
+            const char *name = rs_jobject_str(&users->items[i], "name");
+
+            if (name && rs_jval_u64(rs_jobject_get(&users->items[i], "uid"), &uid) && uid < best &&
+                strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789_-.") == strlen(name) &&
+                name[0] >= 'a' && name[0] <= 'z')
+            {
+                best = uid;
+                first = &users->items[i];
+            }
+        }
+        if (first)
+        {
+            const char *gecos = rs_jobject_str(first, "gecos");
+            char       *real = rs_xstrndup(gecos ? gecos : "", gecos ? strcspn(gecos, ",") : 0);
+
+            kv(g, 4, "realname", real[0] ? real : rs_jobject_str(first, "name"));
+            kv(g, 4, "username", rs_jobject_str(first, "name"));
+            free(real);
+        } else
+        {
+            kv(g, 4, "realname", "restate");
+            kv(g, 4, "username", "restate");
+        }
+    }
     rs_buf_addstr(g->out,
                   "    # Locked until the restore brings back /etc/shadow and the real accounts.\n"
                   "    # To log in before that, replace it with a hash from `mkpasswd -m sha-512`.\n");
@@ -1160,9 +1194,9 @@ static void late_packages(struct gen *g)
                           "restate/files");
     } else
     {
-        rs_image_part_command(&b, img, RS_IMAGE_FILES_PART, "/target",
-                              "--exclude=restate/files/etc/fstab "
-                              "--exclude=restate/files/etc/crypttab");
+        /* restate restore, from the kit -- each file checked against the
+         * index before it lands -- or tar, if the kit had no restate. */
+        rs_image_restore_command(&b, img, "/target", true);
     }
     late(g, b.data);
     late(g, "curtin in-target -- update-initramfs -u -k all");

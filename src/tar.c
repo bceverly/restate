@@ -484,3 +484,229 @@ bool rs_tar_read_first(rs_tar_read_fn fn, void *ctx, size_t max,
     rs_buf_free(&pax);
     return false;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Member by member                                                          */
+/* ------------------------------------------------------------------------- */
+
+void rs_tar_reader_init(struct rs_tar_reader *r, rs_tar_read_fn fn, void *ctx)
+{
+    memset(r, 0, sizeof(*r));
+    r->fn = fn;
+    r->ctx = ctx;
+}
+
+void rs_tar_entry_init(struct rs_tar_entry *e)
+{
+    memset(e, 0, sizeof(*e));
+    rs_buf_init(&e->name);
+    rs_buf_init(&e->linkname);
+}
+
+void rs_tar_entry_free(struct rs_tar_entry *e)
+{
+    rs_buf_free(&e->name);
+    rs_buf_free(&e->linkname);
+}
+
+/* Discards `n` bytes. */
+static bool skip(struct rs_tar_reader *r, uint64_t n, struct rs_buf *err)
+{
+    unsigned char chunk[8192];
+
+    while (n > 0)
+    {
+        size_t take = n < sizeof(chunk) ? (size_t)n : sizeof(chunk);
+
+        if (!read_full(r->fn, r->ctx, chunk, take, err))
+        {
+            return false;
+        }
+        n -= take;
+    }
+    return true;
+}
+
+/* The pax records this reader uses: path, linkpath and size. */
+static bool pax_records(const struct rs_buf *pax, struct rs_tar_entry *e, bool *have_name,
+                        bool *have_link, bool *have_size, struct rs_buf *err)
+{
+    size_t pos = 0;
+
+    while (pos < pax->len)
+    {
+        size_t      len = 0;
+        size_t      start = pos;
+        const char *rec;
+        const char *eq;
+        const char *val;
+        size_t      vlen;
+
+        while (pos < pax->len && pax->data[pos] >= '0' && pax->data[pos] <= '9' && len <= pax->len)
+        {
+            len = len * 10 + (size_t)(pax->data[pos] - '0');
+            pos++;
+        }
+        if (pos == start || pos >= pax->len || pax->data[pos] != ' ' ||
+            len <= pos - start + 1 || len > pax->len - start ||
+            pax->data[start + len - 1] != '\n')
+        {
+            rs_buf_addstr(err, "a malformed pax header");
+            return false;
+        }
+        rec = pax->data + pos + 1;
+        eq = memchr(rec, '=', start + len - 1 - (pos + 1));
+        if (!eq)
+        {
+            rs_buf_addstr(err, "a malformed pax header");
+            return false;
+        }
+        val = eq + 1;
+        vlen = (size_t)(pax->data + start + len - 1 - val);
+        if ((size_t)(eq - rec) == 4 && memcmp(rec, "path", 4) == 0)
+        {
+            rs_buf_reset(&e->name);
+            rs_buf_add(&e->name, val, vlen);
+            rs_buf_add(&e->name, "", 0);
+            *have_name = true;
+        } else if ((size_t)(eq - rec) == 8 && memcmp(rec, "linkpath", 8) == 0)
+        {
+            rs_buf_reset(&e->linkname);
+            rs_buf_add(&e->linkname, val, vlen);
+            rs_buf_add(&e->linkname, "", 0);
+            *have_link = true;
+        } else if ((size_t)(eq - rec) == 4 && memcmp(rec, "size", 4) == 0)
+        {
+            uint64_t v = 0;
+            size_t   i;
+
+            for (i = 0; i < vlen; i++)
+            {
+                if (val[i] < '0' || val[i] > '9' || v > (UINT64_MAX - 9) / 10)
+                {
+                    rs_buf_addstr(err, "a bad size in a pax header");
+                    return false;
+                }
+                v = v * 10 + (uint64_t)(val[i] - '0');
+            }
+            if (vlen == 0)
+            {
+                rs_buf_addstr(err, "a bad size in a pax header");
+                return false;
+            }
+            e->size = v;
+            *have_size = true;
+        }
+        pos = start + len;
+    }
+    return true;
+}
+
+int rs_tar_next(struct rs_tar_reader *r, struct rs_tar_entry *e, struct rs_buf *err)
+{
+    unsigned char h[RS_TAR_BLOCK];
+    struct rs_buf pax;
+    bool          have_name = false;
+    bool          have_link = false;
+    bool          have_size = false;
+    int           headers;
+
+    if (r->ended)
+    {
+        return 0;
+    }
+    if (!skip(r, r->left + r->pad, err))
+    {
+        return -1;
+    }
+    r->left = 0;
+    r->pad = 0;
+    rs_buf_reset(&e->name);
+    rs_buf_reset(&e->linkname);
+    rs_buf_init(&pax);
+    for (headers = 0; headers < 8; headers++)
+    {
+        uint64_t size;
+
+        if (!read_full(r->fn, r->ctx, h, sizeof(h), err))
+        {
+            rs_buf_free(&pax);
+            return -1;
+        }
+        if (memcmp(h, zeros, sizeof(h)) == 0)
+        {
+            /* The end: two zero blocks, though one is enough to know. */
+            r->ended = true;
+            rs_buf_free(&pax);
+            return 0;
+        }
+        if (!checksum_ok(h))
+        {
+            rs_buf_addstr(err, "not a tar archive (bad header checksum)");
+            rs_buf_free(&pax);
+            return -1;
+        }
+        if (!parse_octal(h + H_SIZE, 12, &size))
+        {
+            rs_buf_addstr(err, "a bad size in a tar header");
+            rs_buf_free(&pax);
+            return -1;
+        }
+        if (h[H_TYPE] == 'x' || h[H_TYPE] == 'g')
+        {
+            if (size > (uint64_t)1024 * 1024)
+            {
+                rs_buf_addstr(err, "a pax header larger than 1 MiB");
+                rs_buf_free(&pax);
+                return -1;
+            }
+            if (!read_data(r->fn, r->ctx, size, &pax, err) ||
+                (h[H_TYPE] == 'x' &&
+                 !pax_records(&pax, e, &have_name, &have_link, &have_size, err)))
+            {
+                rs_buf_free(&pax);
+                return -1;
+            }
+            continue;
+        }
+        rs_buf_free(&pax);
+        if (!have_name)
+        {
+            rs_buf_add(&e->name, h + H_NAME, strnlen((const char *)h + H_NAME, 100));
+            rs_buf_add(&e->name, "", 0);
+        }
+        if (!have_link)
+        {
+            rs_buf_add(&e->linkname, h + H_LINK, strnlen((const char *)h + H_LINK, 100));
+            rs_buf_add(&e->linkname, "", 0);
+        }
+        e->typeflag = (char)(h[H_TYPE] == '\0' ? '0' : h[H_TYPE]);
+        if (!have_size)
+        {
+            e->size = size;
+        }
+        /* Only a regular file's size is data that follows it. */
+        r->left = (e->typeflag == '0' || e->typeflag == '7') ? e->size : 0;
+        r->pad = (RS_TAR_BLOCK - r->left % RS_TAR_BLOCK) % RS_TAR_BLOCK;
+        return 1;
+    }
+    rs_buf_free(&pax);
+    rs_buf_addstr(err, "too many extension headers");
+    return -1;
+}
+
+ssize_t rs_tar_read(struct rs_tar_reader *r, void *buf, size_t n, struct rs_buf *err)
+{
+    size_t want = r->left < n ? (size_t)r->left : n;
+
+    if (want == 0)
+    {
+        return 0;
+    }
+    if (!read_full(r->fn, r->ctx, buf, want, err))
+    {
+        return -1;
+    }
+    r->left -= want;
+    return (ssize_t)want;
+}

@@ -26,7 +26,10 @@ enum {
     OPT_ENCRYPT_TO,
     OPT_KEEP_LOCAL,
     OPT_IMAGE_AT,
-    OPT_DEB
+    OPT_DEB,
+    OPT_EXCLUDE,
+    OPT_DRY_RUN,
+    OPT_NUMERIC_OWNER
 };
 
 enum rs_command {
@@ -57,6 +60,10 @@ struct rs_options {
     bool            keep_local;     /* --keep-local-packages */
     const char    **debs;           /* --deb NAME=FILE, each */
     size_t          ndebs;
+    const char    **excludes;       /* --exclude PATTERN, each */
+    size_t          nexcludes;
+    bool            dry_run;
+    bool            numeric_owner;
     const char     *image_at;       /* --image-at */
     bool            one_fs;
     bool            no_hash;

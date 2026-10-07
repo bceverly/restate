@@ -196,6 +196,9 @@ Commands:
                           modified, and how
   verify IMAGE            compare an image or index against the tree as it is
                           now
+  restore IMAGE           put an image's files back under the root (--root,
+                          default /): each checked against the index before it
+                          is put in place, with its owner, mode and times
   machine                 describe this machine: hardware, firmware, disks,
                           partitions, encryption, LVM, RAID, mounts
   packages [IMAGE]        list what is installed, and where each package came
@@ -256,6 +259,13 @@ Options:
       --image-at=PATH     autoinstall: where the installer will find the image
                           (a mounted disk or share); the file then installs the
                           packages and restores the files from it
+      --exclude=PATTERN   restore: leave out PATTERN (written as in a rules
+                          file, everything beneath it too); repeatable
+      --numeric-owner     restore: owners by the numbers the index records, and
+                          the image's own account files, rather than by name
+                          through the image's accounts merged with the system's
+      --dry-run           restore: check the image and say what would be put
+                          back, writing nothing
   -P, --progress          show progress on standard error: paths and bytes so
                           far while walking, a percentage and time left while
                           writing an image or downloading
@@ -422,6 +432,36 @@ file's `snaps` section, and snapd does not run during an install.
 ```console
 $ restate autoinstall --target vm --image-at /restate/web01.tar web01.tar -o user-data
 ```
+
+## Restoring
+
+`restate restore IMAGE` puts an image's files back, and distrusts the image
+while it does: every member has to be one the index lists, every file's
+content has to hash to the index's digest before it is renamed into place (a
+tampered file never lands), and nothing in the tree it writes into -- a
+symlink planted where a directory belongs -- can steer it elsewhere. Owners,
+modes and nanosecond times come from the index; hard links come back as
+links; device nodes are made from the index.
+
+Owners are restored by name. A rebuilt machine's packages numbered their own
+users as they went in (postgres may be 128 where it was 125), so the image's
+`/etc/passwd`, `/etc/group` and shadows are merged with the new system's
+rather than laid over them -- both systems' users, the new numbers where both
+have one, the old passwords, homes and shells -- and every file's owner is
+mapped through them by name. `--numeric-owner` restores the recorded numbers
+instead.
+
+```console
+$ sudo restate restore --dry-run web01.tar            # check it all, write nothing
+$ sudo restate restore --exclude /etc/fstab web01.tar
+$ sudo restate restore --root /target web01.tar       # from an installer
+```
+
+The image's kit carries the restate that made it, so a rebuilt machine can
+restore before restate is installed; the build sheet and autoinstall file do
+just that. The autoinstall file makes the old machine's first person the
+install's own account, so the merge gives them back their password and
+groups with no installer account on their number.
 
 ## Images and indexes
 

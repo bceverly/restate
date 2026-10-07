@@ -26,6 +26,9 @@ static const char *const server_json[] = {
     "   \"type\": \"server\", \"type_evidence\": \"no desktop\", \"virtualization\": \"none\","
     "   \"locale\": \"en_GB.UTF-8\", \"keyboard_layout\": \"gb\", \"keyboard_variant\": \"extd\","
     "   \"timezone\": \"Europe/London\", \"ssh_server\": true,"
+    "   \"users\": [{\"name\": \"sam\", \"uid\": 1001, \"gecos\": \"\"},"
+    "     {\"name\": \"Bad Name\", \"uid\": 900},"
+    "     {\"name\": \"pat\", \"uid\": 1000, \"gecos\": \"Pat Smith,,,\"}],"
     "   \"hardware_packages\": [\"mdadm\", \"intel-microcode\"], \"guest_packages\": []},"
     " \"hardware\": {\"sys_vendor\": \"Example\", \"product_name\": \"Box 1\", \"cpu\": \"Fast CPU\","
     "   \"cpus\": 16, \"memory\": 34359738368,"
@@ -660,7 +663,11 @@ static void package_cases(void)
     CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/files.tar.gz | tar -xzpf - --numeric-owner -C / "
                       "--strip-components=2 --exclude=restate/files/etc/fstab "
                       "--exclude=restate/files/etc/crypttab");
-    CHECK_CONTAINS(s, "read restate/files.tar.gz.gpg instead, with `gpg -d |`");
+    CHECK_CONTAINS(s, "    r=; for p in ''/usr/local/bin/restate ''/usr/bin/restate; do "
+                      "[ -x \"$p\" ] && r=$p && break; done; if [ -n \"$r\" ]; then "
+                      "\"$r\" restore --root / --exclude /etc/fstab --exclude /etc/crypttab "
+                      "web01.tgz || [ \"$?\" -eq 3 ]; else tar -xOf web01.tgz");
+    CHECK_CONTAINS(s, "restate restore reads an encrypted image");
     CHECK_CONTAINS(s, "update-alternatives --set java /usr/lib/jvm/21/bin/java");
     CHECK(strstr(s, "nopath") == NULL);
     CHECK_CONTAINS(s, "snap install firefox --channel=latest/stable\n");
@@ -852,9 +859,12 @@ static void autoinstall_package_cases(void)
     CHECK_CONTAINS(s, "curtin in-target -- npm install -g left-pad@1.3.0 ||");
     CHECK_CONTAINS(s, "curtin in-target -- gem install rake:13.0.6 ||");
     CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java /usr/lib/jvm/21/bin/java");
-    CHECK_CONTAINS(s, "tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
+    CHECK_CONTAINS(s, "for p in /target/usr/local/bin/restate /target/usr/bin/restate; do");
+    CHECK_CONTAINS(s, "\\\"$r\\\" restore --root /target --exclude /etc/fstab --exclude "
+                      "/etc/crypttab '/media/restate/web 01.tgz' || [ \\\"$?\\\" -eq 3 ]; else "
+                      "tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
                       "--numeric-owner -C /target --strip-components=2 "
-                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab\"");
+                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab; fi\"");
     CHECK_CONTAINS(s, "curtin in-target -- update-grub");
     CHECK(strstr(s, "update-alternatives") < strstr(s, "--exclude=restate/files/etc/fstab"));
     CHECK(strstr(s, "#   snap install --dangerous") == NULL);
@@ -914,6 +924,8 @@ static void autoinstall_cases(void)
     CHECK_CONTAINS(s, "    layout: \"gb\"\n    variant: \"extd\"");
     CHECK_CONTAINS(s, "  timezone: \"Europe/London\"");
     CHECK_CONTAINS(s, "    hostname: \"web01\"");
+    /* The old machine's first person, as the install's own account. */
+    CHECK_CONTAINS(s, "    realname: \"Pat Smith\"\n    username: \"pat\"\n");
     CHECK_CONTAINS(s, "install-server: true");
     CHECK_CONTAINS(s, "      eno1:\n        match:\n          macaddress: \"52:54:00:00:00:01\"");
     CHECK(strstr(s, "wlp2s0") == NULL);

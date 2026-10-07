@@ -24,6 +24,7 @@
 #include "meta.h"
 #include "packages.h"
 #include "progress.h"
+#include "restore.h"
 #include "rules.h"
 #include "run.h"
 #include "scan.h"
@@ -263,6 +264,26 @@ static bool is_live_root(const char *root)
            a.st_ino == b.st_ino;
 }
 
+/* This program's own path, where the system says (Linux's /proc), if it is a
+ * clean absolute path to a regular file; else NULL. */
+static char *self_path(void)
+{
+    char        buf[4096];
+    struct stat st;
+    ssize_t     n = readlink("/proc/self/exe", buf, sizeof(buf) - 1); /* Flawfinder: ignore */
+
+    if (n <= 0)
+    {
+        return NULL;
+    }
+    buf[n] = '\0';
+    if (!rs_path_is_clean(buf) || lstat(buf, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        return NULL;
+    }
+    return rs_xstrdup(buf);
+}
+
 /*
  * `kept_from`, where given, is the inventory of an image this walk is being
  * compared with: the files it kept outside the rules (capture
@@ -348,20 +369,41 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         so.keep = (const char *const *)keep;
         so.nkeep = nkeep;
     }
+    if (image && is_live_root(root))
+    {
+        /* The restate making the image, kept in its kit: a new system can
+         * run `restate restore` before restate is installed on it. */
+        char *self = self_path();
+
+        if (self)
+        {
+            keep = rs_xreallocarray(keep, nkeep + 1, sizeof(*keep));
+            keep[nkeep++] = self;
+            so.keep = (const char *const *)keep;
+            so.nkeep = nkeep;
+        }
+    }
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
     if (image)
     {
         /* The kit, the part of the image a reinstall reads first: apt's
-         * sources and keys, and the packages no repository has. */
-        kit = rs_xreallocarray(NULL, nkeep + 2, sizeof(*kit));
-        kit[0] = "/etc/apt";
-        kit[1] = "/etc/apt/";
+         * sources and keys, the packages no repository has, and the accounts
+         * restore merges before it puts any file back. */
+        static const char *const fixed[] = { "/etc/apt", "/etc/apt/", "/etc/passwd",
+                                             "/etc/group", "/etc/shadow", "/etc/gshadow" };
+        const size_t             nfixed = sizeof(fixed) / sizeof(fixed[0]);
+
+        kit = rs_xreallocarray(NULL, nkeep + nfixed, sizeof(*kit));
+        for (i = 0; i < nfixed; i++)
+        {
+            kit[i] = fixed[i];
+        }
         for (i = 0; i < nkeep; i++)
         {
-            kit[i + 2] = keep[i];
+            kit[i + nfixed] = keep[i];
         }
         image->kit = kit;
-        image->nkit = nkeep + 2;
+        image->nkit = nkeep + nfixed;
     }
 
     rs_buf_init(&err);
@@ -624,6 +666,73 @@ int rs_cmd_verify(const struct rs_options *o)
     rs_index_free(&live);
     rs_index_free(&recorded);
     return status;
+}
+
+int rs_cmd_restore(const struct rs_options *o)
+{
+    struct rs_index         ix;
+    struct rs_restore_opts  ro;
+    struct rs_restore_stats st;
+    struct rs_buf           err;
+    bool                    ok;
+
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    if (!rs_index_load(&ix, o->args[0], &err))
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_index_free(&ix);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_reset(&err);
+    memset(&ro, 0, sizeof(ro));
+    ro.root = o->root ? o->root : "/";
+    ro.exclude = o->excludes;
+    ro.nexclude = o->nexcludes;
+    ro.dry_run = o->dry_run;
+    ro.verbose = o->verbose;
+    ro.numeric_owner = o->numeric_owner;
+    ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
+    rs_index_free(&ix);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    if (!o->quiet)
+    {
+        (void)fprintf(stderr, "restate: %s %" PRIu64 " files (%" PRIu64 " bytes), %" PRIu64
+                      " directories, %" PRIu64 " symlinks, %" PRIu64 " hard links, %" PRIu64
+                      " others under %s\n", o->dry_run ? "would put back" : "put back",
+                      st.files, st.bytes, st.directories, st.symlinks, st.links, st.other,
+                      ro.root);
+        if (st.merged)
+        {
+            (void)fprintf(stderr, "restate: owners mapped by name, through the image's accounts "
+                          "merged with %s's own\n", ro.root);
+        }
+        if (st.excluded > 0)
+        {
+            (void)fprintf(stderr, "restate: left out %" PRIu64 " paths (--exclude)\n",
+                          st.excluded);
+        }
+        if (st.owners > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " owners could not be set: restoring "
+                          "owners needs root\n", st.owners);
+        }
+    }
+    if (st.refused + st.failed + st.missing > 0)
+    {
+        (void)fprintf(stderr, "restate: %" PRIu64 " refused, %" PRIu64 " not written, %" PRIu64
+                      " missing from the image; the restore is incomplete\n",
+                      st.refused, st.failed, st.missing);
+        return RESTATE_EXIT_INCOMPLETE;
+    }
+    return RESTATE_EXIT_OK;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1184,6 +1293,8 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_diff(o);
     case CMD_VERIFY:
         return rs_cmd_verify(o);
+    case CMD_RESTORE:
+        return rs_cmd_restore(o);
     case CMD_MACHINE:
         return rs_cmd_machine(o);
     case CMD_PACKAGES:

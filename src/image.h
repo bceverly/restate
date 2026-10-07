@@ -44,7 +44,9 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 
+#include "gzip.h"
 #include "index.h"
+#include "pgp.h"
 #include "tar.h"
 
 #define RS_IMAGE_INDEX_NAME "restate/index.json"      /* before 1.1 */
@@ -86,6 +88,37 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
 void rs_image_abort(struct rs_image_writer *iw);
 
 /*
+ * An image's files, as a tar stream to read member by member: from an image
+ * in parts, the files part alone -- its bytes, and no more, written into
+ * gzip (or gpg) as reading makes room for them, so neither ever reads past
+ * it -- and from an image made before 1.1, the one stream, index.json first.
+ * No process but gzip and gpg: the part is fed from the reading loop itself.
+ */
+struct rs_image_stream {
+    int            fd;         /* gzip's output: the tar stream */
+    int            image_fd;
+    struct rs_gzip gz;
+    struct rs_pgp  pg;
+    bool           sealed;
+    int            feed;       /* the pipe into gzip or gpg, or -1 */
+    uint64_t       feed_at;    /* where the part's next bytes are in the image */
+    uint64_t       feed_left;
+    bool           feed_failed;
+    unsigned char  chunk[65536];
+    size_t         chunk_len;
+    size_t         chunk_pos;
+};
+
+bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_buf *err);
+/* The kit, the same way; an image from before 1.1 has none. */
+bool rs_image_open_kit(const char *path, struct rs_image_stream *s, struct rs_buf *err);
+/* Up to `n` bytes of the tar stream: how many, 0 at its end, -1 on error. */
+ssize_t rs_image_read_files(struct rs_image_stream *s, void *buf, size_t n);
+/* Stops everything, and with `abandon` does not mind how: true if gzip and
+ * gpg finished cleanly and the whole part was fed to them. */
+bool rs_image_close_files(struct rs_image_stream *s, bool abandon, struct rs_buf *err);
+
+/*
  * The shell command that unpacks one part of `image` (RS_IMAGE_KIT_PART or
  * RS_IMAGE_FILES_PART) into `dest`, as it was: "tar -xOf IMAGE PART | tar
  * -xzpf - --numeric-owner -C DEST --strip-components=2", then `extra`, if any,
@@ -93,6 +126,19 @@ void rs_image_abort(struct rs_image_writer *iw);
  */
 void rs_image_part_command(struct rs_buf *out, const char *image, const char *part,
                            const char *dest, const char *extra);
+
+/*
+ * The shell command that puts `image`'s files back under `dest` ("/" on the
+ * system itself, "/target" from an installer): `restate restore`, as the
+ * image's kit put it back under `dest` -- in /usr/local/bin or /usr/bin --
+ * or, if neither is there, the files part unpacked with tar, as
+ * rs_image_part_command does it, without restore's checks. `fstab` leaves
+ * /etc/fstab and /etc/crypttab out, for an installer that formatted the
+ * volumes itself. An incomplete restore (some files refused, exit 3) is
+ * said, not taken as failure; anything worse fails the command.
+ */
+void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
+                              bool fstab);
 
 /*
  * Reads an index from `path`: an image -- in parts, or from before 1.1 one

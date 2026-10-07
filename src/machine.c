@@ -1161,6 +1161,68 @@ static void describe_packages(const char *root, struct rs_jval *sys)
     free(status);
 }
 
+/*
+ * The people who log in: each account from 1000 up (and below the range
+ * where nobody and its kind live), with its name, number, full name, home
+ * and shell -- never a password. An unattended reinstall creates the first
+ * as its own account, so the restore's merged accounts have no installer
+ * account sitting on that person's number.
+ */
+static void describe_users(const char *root, struct rs_jval *sys)
+{
+    char           *path = path_join(root, "/etc/passwd");
+    char           *text = read_text(path);
+    struct rs_jval *arr = NULL;
+    const char     *p;
+
+    free(path);
+    for (p = text; p && *p; )
+    {
+        const char *nl = strchr(p, '\n');
+        size_t      len = nl ? (size_t)(nl - p) : strlen(p);
+        char       *line = rs_xstrndup(p, len);
+        char       *f[7];
+        char       *q = line;
+        size_t      k;
+
+        for (k = 0; k < 7 && q; k++)
+        {
+            f[k] = q;
+            q = strchr(q, ':');
+            if (q)
+            {
+                *q++ = '\0';
+            }
+        }
+        if (k == 7)
+        {
+            char              *end = NULL;
+            unsigned long long uid = strtoull(f[2], &end, 10);
+
+            if (end && *end == '\0' && end != f[2] && uid >= 1000 && uid < 60000 && f[0][0])
+            {
+                struct rs_jval *u;
+
+                if (!arr)
+                {
+                    arr = rs_jobj_add(sys, "users");
+                    rs_jval_set_array(arr);
+                }
+                u = rs_jarr_add(arr);
+                rs_jval_set_object(u);
+                rs_jobj_str(u, "name", f[0]);
+                rs_jobj_u64(u, "uid", uid);
+                rs_jobj_str(u, "gecos", f[4]);
+                rs_jobj_str(u, "home", f[5]);
+                rs_jobj_str(u, "shell", f[6]);
+            }
+        }
+        free(line);
+        p = nl ? nl + 1 : NULL;
+    }
+    free(text);
+}
+
 static void describe_system(const char *sysroot, const char *root, struct rs_jval *machine)
 {
     struct rs_jval *sys = rs_jobj_add(machine, "system");
@@ -1217,6 +1279,7 @@ static void describe_system(const char *sysroot, const char *root, struct rs_jva
     rs_jobj_str(sys, "install_media", s);
     free(s);
     describe_locale(root, sys);
+    describe_users(root, sys);
     describe_type(root, sys);
     describe_packages(root, sys);
     describe_virtualization(sysroot, root, sys);

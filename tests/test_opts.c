@@ -91,8 +91,10 @@ void test_opts(void)
     CHECK_CONTAINS(err.data, "contradict");
     CHECK(!parse_args(&o, &err, ARGS("-n")));
     CHECK_CONTAINS(err.data, "no command given");
+    CHECK(!parse_args(&o, &err, ARGS("frobnicate")));
+    CHECK_CONTAINS(err.data, "unknown command \"frobnicate\"");
     CHECK(!parse_args(&o, &err, ARGS("restore")));
-    CHECK_CONTAINS(err.data, "unknown command \"restore\"");
+    CHECK_CONTAINS(err.data, "usage: restate restore IMAGE");
     CHECK(!parse_args(&o, &err, ARGS("scan", "extra")));
     CHECK_CONTAINS(err.data, "scan takes no arguments");
     CHECK(!parse_args(&o, &err, ARGS("diff", "one")));

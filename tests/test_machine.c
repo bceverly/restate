@@ -234,6 +234,14 @@ static void build_fake(const char *sys, const char *root)
         "short line\n");
 
     /* The installed system's /etc and friends. */
+    put(root, "etc/passwd",
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+        "pat:x:1000:1000:Pat Smith,,,:/home/pat:/bin/zsh\n"
+        "sam:x:1001:1001::/home/sam:/bin/bash\n"
+        "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+        "short:x:1002\n"
+        "bad:x:12x:1::/:/bin/sh\n");
     put(root, "etc/os-release", "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"26.04\"\n"
                                 "VERSION_CODENAME=resolute\nPRETTY_NAME='Ubuntu 26.04 LTS'\nBOGUS\n");
     put(root, "etc/hostname", "  web01  \n");
@@ -307,6 +315,19 @@ void test_machine(void)
 
     TEST_CASE("machine: system identity");
     v = rs_jobject_get(&m, "system");
+    {
+        const struct rs_jval *users = rs_jobject_get(v, "users");
+
+        /* People only: no root, no system accounts, no nobody. */
+        CHECK_INT(users ? users->n : 0, 2);
+        if (users && users->n == 2)
+        {
+            CHECK_STR(rs_jobject_str(&users->items[0], "name"), "pat");
+            CHECK_STR(rs_jobject_str(&users->items[0], "gecos"), "Pat Smith,,,");
+            CHECK_STR(rs_jobject_str(&users->items[0], "shell"), "/bin/zsh");
+            CHECK_STR(rs_jobject_str(&users->items[1], "name"), "sam");
+        }
+    }
     CHECK_STR(rs_jobject_str(v, "id"), "ubuntu");
     CHECK_STR(rs_jobject_str(v, "version_id"), "26.04");
     CHECK_STR(rs_jobject_str(v, "version_codename"), "resolute");

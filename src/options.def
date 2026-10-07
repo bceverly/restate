@@ -57,6 +57,14 @@ RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
 RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
        "autoinstall: where the installer will find the image (a mounted disk or "
        "share); the file then installs the packages and restores the files from it")
+RS_OPT(OPT_EXCLUDE, "exclude",        required_argument, "PATTERN",
+       "restore: leave out PATTERN (written as in a rules file, everything beneath "
+       "it too); repeatable")
+RS_OPT(OPT_NUMERIC_OWNER, "numeric-owner", no_argument,     NULL,
+       "restore: owners by the numbers the index records, and the image's own account "
+       "files, rather than by name through the image's accounts merged with the system's")
+RS_OPT(OPT_DRY_RUN, "dry-run",        no_argument,       NULL,
+       "restore: check the image and say what would be put back, writing nothing")
 RS_OPT('P', "progress",         no_argument,       NULL,
        "show progress on standard error: paths and bytes so far while walking, "
        "a percentage and time left while writing an image or downloading")

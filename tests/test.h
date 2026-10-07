@@ -86,6 +86,8 @@ void test_index(void);
 void test_image(void);
 void test_machine(void);
 void test_packages(void);
+void test_restore(void);
+void test_accounts(void);
 void test_installer(void);
 void test_rebuild(void);
 void test_pgp(void);

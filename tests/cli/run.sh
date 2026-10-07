@@ -146,8 +146,8 @@ expect 2 "no command" -- "$BIN"
 contains "$ERR" "no command given" "no command"
 contains "$ERR" "Try 'restate --help'" "the usage hint"
 check "a usage error wrote nothing to stdout" test -z "$OUT"
-expect 2 "an unknown command" -- "$BIN" restore
-contains "$ERR" 'unknown command "restore"' "unknown command"
+expect 2 "an unknown command" -- "$BIN" frobnicate
+contains "$ERR" 'unknown command "frobnicate"' "unknown command"
 expect 2 "an unknown option" -- "$BIN" --frobnicate scan
 expect 2 "a missing option argument" -- "$BIN" scan --root
 contains "$ERR" "--root needs an argument" "missing argument names the long option"
@@ -442,6 +442,126 @@ mkdir -p unpacked-m
 part img-m.tar files.tar.gz | ( cd unpacked-m && gzip -dc | tar -xpf - ) 2>/dev/null
 check "and its mode" test "$(file_mode unpacked-m/restate/files/etc/hostname)" = "640"
 check "and a symlink" test -L unpacked/restate/files/home/u/link
+
+# ---------------------------------------------------------------------------
+# restore
+# ---------------------------------------------------------------------------
+mkdir -p rtree/etc/app rtree/home/u rtree/var/lib/x
+echo "127.0.0.1 localhost" > rtree/etc/hosts
+printf 'secret\n' > rtree/etc/app/key
+chmod 600 rtree/etc/app/key
+chmod 750 rtree/etc/app
+echo doc > "rtree/home/u/with space"
+ln -s ../../etc/hosts rtree/home/u/link
+echo shared > rtree/var/lib/x/one
+ln rtree/var/lib/x/one rtree/var/lib/x/two
+expect 0 "capture for restore" -- "$BIN" capture -r rtree --os=linux -q -o rimg.tar
+
+mkdir -p rout
+expect 0 "restore" -- "$BIN" restore --root rout rimg.tar
+contains "$ERR" "put back 5 files" "restore says what it put back"
+check "the content is back" cmp rtree/etc/app/key rout/etc/app/key
+check "and its mode" test "$(file_mode rout/etc/app/key)" = "600"
+check "and a directory's mode" test "$(file_mode rout/etc/app)" = "750"
+check "and a symlink" test "$(readlink rout/home/u/link)" = "../../etc/hosts"
+check "and a hard link is a link" test "$(stat -c %i rout/var/lib/x/one)" = "$(stat -c %i rout/var/lib/x/two)"
+expect 0 "verify finds the restored tree the same" -- "$BIN" verify --root rout rimg.tar
+contains "$ERR" "0 added, 0 deleted, 0 modified" "nothing differs"
+
+mkdir -p rdry
+expect 0 "restore --dry-run" -- "$BIN" restore --dry-run --root rdry rimg.tar
+contains "$OUT" "would restore /etc/app/key" "a dry run says what it would do"
+check "and writes nothing" test -z "$(ls -A rdry)"
+
+mkdir -p rex
+expect 0 "restore --exclude" -- "$BIN" restore --root rex --exclude /etc/app rimg.tar
+check "leaves the excluded path out" test ! -e rex/etc/app
+check "and everything beneath it" test ! -e rex/etc/app/key
+check "but restores the rest" test -f rex/etc/hosts
+contains "$ERR" "left out 2 paths" "and says what it left out"
+
+# A symlink where a directory should be is replaced, not followed.
+mkdir -p rtrap elsewhere
+ln -s "$WORK/elsewhere" rtrap/etc
+expect 0 "restore over a planted symlink" -- "$BIN" restore --root rtrap rimg.tar
+check "the symlink did not lead out" test -z "$(ls -A elsewhere)"
+check "a directory is there instead" test -d rtrap/etc -a ! -L rtrap/etc
+
+# A tampered file: the index says one thing, the files part another.
+mkdir -p tamper && ( cd tamper && tar -xf ../rimg.tar && gzip -dc restate/files.tar.gz > files.tar &&
+  sed -i 's/secret/SECRET/' files.tar && gzip -c files.tar > restate/files.tar.gz &&
+  tar -cf ../rbad.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
+mkdir -p rbad
+expect 3 "restore a tampered image" -- "$BIN" restore --root rbad rbad.tar
+contains "$ERR" "/etc/app/key: its content is not what the index says it is; not put back" \
+  "a file that does not match its digest is refused"
+check "and never lands" test ! -e rbad/etc/app/key
+check "while the rest is put back" test -f rbad/etc/hosts
+
+# A member the index does not list.
+mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil
+( cd tamper && gzip -dc ../tamper/restate/files.tar.gz > /dev/null; tar -xf ../rimg.tar &&
+  gzip -dc restate/files.tar.gz > clean.tar && tar -rf clean.tar -C ../extra restate/files/etc/evil &&
+  gzip -c clean.tar > restate/files.tar.gz &&
+  tar -cf ../rextra.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
+mkdir -p rextra
+expect 3 "restore an image with a member the index does not list" -- \
+  "$BIN" restore --root rextra rextra.tar
+contains "$ERR" "/etc/evil: in the image, but not as the index records it; refused" \
+  "a member the index does not list is refused"
+check "and not written" test ! -e rextra/etc/evil
+
+# An image from before 1.1: one gzip'd stream, index.json first.
+mkdir -p old && ( cd old && tar -xf ../rimg.tar && gzip -dc restate/index.json.gz > restate/index.json &&
+  tar -xzf restate/files.tar.gz && tar -czf ../rold.tgz restate/index.json restate/files )
+mkdir -p rold
+expect 0 "restore an image from before 1.1" -- "$BIN" restore --root rold rold.tgz
+check "puts its files back" cmp rtree/etc/app/key rold/etc/app/key
+
+# The kit carries the restate that made the image, so a new system can run
+# restore before restate is installed. Only a capture of the live root, and
+# only where /proc names the running program; everything else ruled out.
+if [ -r /proc/self/exe ]; then
+  echo "ephemeral /*" > nothing.rules
+  expect 0 "capture of / with nothing kept" -- "$BIN" capture -N -R nothing.rules -q -o self.tar
+  # Called through check.
+  # shellcheck disable=SC2329
+  kit_holds() { part self.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files$1"; }
+  check "the kit holds the restate binary" kit_holds "$(readlink -f "$BIN")"
+fi
+
+# Owners by name: the image's accounts merged with the system's own.
+me="$(id -un)"
+myuid="$(id -u)"
+mygid="$(id -g)"
+mygroup="$(id -gn)"
+mkdir -p atree/etc atree/home/me
+printf 'root:x:0:0:root:/root:/bin/bash\n%s:x:4242:4242:Me:/home/me:/bin/zsh\nold:x:1500:1500::/home/old:/bin/sh\n' \
+  "$me" > atree/etc/passwd
+printf 'root:x:0:\n%s:x:4242:\nold:x:1500:\n' "$mygroup" > atree/etc/group
+printf 'root:*:1:0:99999:7:::\n%s:%s:1:0:99999:7:::\n' "$me" "\$6\$oldhash" > atree/etc/shadow
+echo note > atree/home/me/note
+expect 0 "capture a tree with accounts" -- "$BIN" capture -r atree --os=linux -q -o aimg.tar
+check "the kit holds the accounts" \
+  eval 'part aimg.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx restate/files/etc/passwd'
+mkdir -p aout/etc
+printf 'root:x:0:0:root:/root:/bin/bash\n%s:x:%s:%s:Installer:/home/me:/bin/sh\n' \
+  "$me" "$myuid" "$mygid" > aout/etc/passwd
+printf 'root:x:0:\n%s:x:%s:\n' "$mygroup" "$mygid" > aout/etc/group
+expect 0 "restore onto a system with accounts of its own" -- "$BIN" restore --root aout aimg.tar
+contains "$ERR" "owners mapped by name" "restore maps owners by name"
+contains "$(cat aout/etc/passwd)" "$me:x:$myuid:$mygid:Me:/home/me:/bin/zsh" \
+  "a person both have: the system's number, the image's name, home and shell"
+contains "$(cat aout/etc/passwd)" "old:x:1500:1500::/home/old:/bin/sh" \
+  "a user only the image had, at its own number"
+contains "$(cat aout/etc/shadow)" "$me:\$6\$oldhash:" "the image's password"
+mkdir -p anum
+expect 0 "restore --numeric-owner" -- "$BIN" restore --numeric-owner --root anum aimg.tar
+lacks "$ERR" "owners mapped by name" "--numeric-owner does not merge"
+check "and lays down the image's account files as they are" cmp atree/etc/passwd anum/etc/passwd
+
+expect 2 "restore a missing image" -- "$BIN" restore --root rout no-such.tar
+expect 2 "restore into a missing root" -- "$BIN" restore --root no-such-dir rimg.tar
 
 # ---------------------------------------------------------------------------
 # diff

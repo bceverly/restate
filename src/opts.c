@@ -154,6 +154,9 @@ void rs_options_free(struct rs_options *o)
     free(o->debs);
     o->debs = NULL;
     o->ndebs = 0;
+    free(o->excludes);
+    o->excludes = NULL;
+    o->nexcludes = 0;
 }
 
 bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf *err)
@@ -224,6 +227,16 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_KEEP_LOCAL:
             o->keep_local = true;
+            break;
+        case OPT_EXCLUDE:
+            o->excludes = rs_xreallocarray(o->excludes, o->nexcludes + 1, sizeof(*o->excludes));
+            o->excludes[o->nexcludes++] = optarg;
+            break;
+        case OPT_DRY_RUN:
+            o->dry_run = true;
+            break;
+        case OPT_NUMERIC_OWNER:
+            o->numeric_owner = true;
             break;
         case OPT_DEB:
             o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));

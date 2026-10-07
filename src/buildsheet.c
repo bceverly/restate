@@ -1825,11 +1825,11 @@ static void restore(struct sheet *s)
     const char *img = s->o->image ? s->o->image : "IMAGE.tar";
 
     heading(s, "Restore the files");
-    say(s, "%s", "`restate restore` is not in this version. Until it is, an image's files go");
-    say(s, "%s", "back with tar, as root, on the new system:");
-    say(s, "%s", "");
     if (s->o->old_image)
     {
+        say(s, "%s", "This image is from before restate 1.1; its files go back with tar, as root,");
+        say(s, "%s", "on the new system:");
+        say(s, "%s", "");
         say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 restate/files", img);
         say(s, "%s", "");
         say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
@@ -1842,23 +1842,26 @@ static void restore(struct sheet *s)
     {
         struct rs_buf cmd;
 
+        say(s, "%s", "With restate restore, which checks every file against the index before it");
+        say(s, "%s", "puts it in place, and puts back owners, modes, times and hard links as they");
+        say(s, "%s", "were. The kit put restate back (above); if it is not there, this falls back");
+        say(s, "%s", "to tar, which does the same without the checks:");
+        say(s, "%s", "");
         rs_buf_init(&cmd);
-        rs_image_part_command(&cmd, img, RS_IMAGE_FILES_PART, "/", NULL);
+        rs_image_restore_command(&cmd, img, "/", false);
         say(s, "    %s", cmd.data);
         say(s, "%s", "");
         say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
         say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
         say(s, "%s", "");
         rs_buf_reset(&cmd);
-        rs_image_part_command(&cmd, img, RS_IMAGE_FILES_PART, "/",
-                              "--exclude=restate/files/etc/fstab "
-                              "--exclude=restate/files/etc/crypttab");
+        rs_image_restore_command(&cmd, img, "/", true);
         say(s, "    %s", cmd.data);
         rs_buf_free(&cmd);
         say(s, "%s", "");
-        say(s, "%s", "An encrypted image (capture --encrypt-to) has each part encrypted, its name");
-        say(s, "%s", "ending in .gpg: read restate/files.tar.gz.gpg instead, with `gpg -d |`");
-        say(s, "%s", "between the two tars, as the holder of the secret key.");
+        say(s, "%s", "restate restore reads an encrypted image (capture --encrypt-to) as the holder");
+        say(s, "%s", "of its secret key; by hand, each part ends in .gpg, and `gpg -d |` goes");
+        say(s, "%s", "between the two tars.");
     }
     say(s, "%s", "");
     if (!s->o->packages)

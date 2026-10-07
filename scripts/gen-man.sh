@@ -720,6 +720,65 @@ runs it, and the guest-only packages removed. Either way the sheet covers
 what does not move: network interface names and MAC addresses, LUKS keys
 held by the old machine's TPM, Secure Boot keys and the hibernation
 resume device.
+.SH RESTORING
+.B restate restore
+.I IMAGE
+puts an image's files back under the root
+.RB ( \-\-root ,
+default
+.IR / ).
+The image is distrusted. Every member has to be an entry the index lists,
+as the index lists it, and a member it does not list is refused. A regular
+file is written beside its destination, hashed as it is written, and renamed
+into place only if its digest is the index's, so a file that does not match
+never lands. Every path is reached from the root one directory at a time,
+never through a symbolic link: a link where a directory belongs is replaced,
+not followed.
+.PP
+Owners, modes and times (to the nanosecond) come from the index, a
+directory's only once everything in it is in; hard links are made links
+again, and device nodes, which the index records but the image does not
+archive, are made from the index.
+.PP
+Owners are restored by name. The system being restored onto has accounts
+of its own: its packages made their system users as they were installed,
+numbered in that order \- postgres may be 128 where it was 125 \- and its
+installer made an account. So the image's
+.IR /etc/passwd ,
+.IR /etc/group ,
+.I /etc/shadow
+and
+.IR /etc/gshadow ,
+from its kit, are merged with the system's rather than laid over them. A
+user or group both have keeps the system's number, which its packages'
+files already carry, and a person (root, and uids from 1000) the image's
+name, home and shell; every password is the image's; a group's members are
+both systems'; a user or group only the image had keeps its number if it is
+free, or takes the next free one in its range. Every file's owner is then
+mapped through the merged accounts by the names the index records, and the
+merged files are written in place of the image's.
+.B \-\-numeric\-owner
+restores the numbers the index records, and the image's account files as
+they are, instead \- as an image from before 1.1, which has no kit, is
+always restored. An autoinstall file creates the image's first person as
+the install's own account, so no installer account is left on their number.
+.PP
+.B \-\-exclude
+.I PATTERN
+leaves paths out (a pattern as a rules file writes one, everything beneath
+it too), and
+.B \-\-dry\-run
+reads and checks the whole image and says what would be put back, writing
+nothing. The exit status is 3 if any file was refused, could not be written
+or is missing from the image.
+.PP
+An image's kit carries the
+.B restate
+that made it, so a rebuilt system \- or an installer, with
+.B \-\-root /target
+\- can restore before restate is installed; the build sheet and the
+autoinstall file do it that way, and fall back to tar where the kit has no
+restate.
 .SH IMAGES AND INDEXES
 An image is an ordinary POSIX tar archive of three parts, each compressed on
 its own:

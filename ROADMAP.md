@@ -196,6 +196,17 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 - [ ] **`restate baseline fetch`**: the exact packages, verified against the
       vendor's signed archive, into `/var/cache/restate` (`/Library/Caches/restate`
       on macOS) — itself expendable, so never inside an image
+- [x] **`restore`, the files:** every member checked against the index -- a
+      file renamed into place only if its digest matches, a member the index
+      does not list refused -- written beneath the root without following a
+      symlink, with owners, modes, nanosecond times, hard links and device
+      nodes; `--exclude`, `--dry-run`; the restate binary in the kit, so the
+      build sheet and autoinstall file restore with it
+- [x] **Owners by name, and the accounts:** the image's /etc/passwd,
+      /etc/group and shadows (from the kit) merged with the new system's --
+      its numbers where both have a user, the old passwords, homes and
+      shells -- every owner mapped by name; `--numeric-owner`; the
+      autoinstall file's account is the old machine's first person
 - [ ] **`restore`**: onto a fresh install, add the recorded sources and keys,
       install the recorded packages at their versions (from the archive, the
       snapshot archive, or kept `.deb` files), remove what the vendor ships

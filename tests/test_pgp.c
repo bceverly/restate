@@ -199,6 +199,32 @@ void test_pgp(void)
         free(out);
         free(errs);
 
+        /* Restored: the files part decrypted on its own, and only it. */
+        {
+            char *into = rs_xasprintf("%s/restored", dir);
+            char *key = rs_xasprintf("%s/restored/secret.key", dir);
+
+            (void)mkdir(into, 0755);
+            o.command = CMD_RESTORE;
+            o.root = into;
+            CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_OK);
+            CHECK(access(key, F_OK) == 0);
+            free(out);
+            free(errs);
+
+            /* Without the secret key, nothing is put back. */
+            (void)unlink(key);
+            (void)setenv("GNUPGHOME", empty, 1);
+            CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_TROUBLE);
+            CHECK(access(key, F_OK) != 0);
+            (void)setenv("GNUPGHOME", home, 1);
+            free(out);
+            free(errs);
+            o.root = tree;
+            free(key);
+            free(into);
+        }
+
         o.command = CMD_CAPTURE;
         o.output = img;
         o.args = NULL;

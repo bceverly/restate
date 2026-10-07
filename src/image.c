@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -628,6 +629,32 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
     }
 }
 
+void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
+                              bool fstab)
+{
+    const char *prefix = strcmp(dest, "/") == 0 ? "" : dest;
+
+    rs_buf_addstr(out, "r=; for p in ");
+    rs_shell_word(out, prefix);
+    rs_buf_addstr(out, "/usr/local/bin/restate ");
+    rs_shell_word(out, prefix);
+    rs_buf_addstr(out, "/usr/bin/restate; do [ -x \"$p\" ] && r=$p && break; done; "
+                       "if [ -n \"$r\" ]; then \"$r\" restore --root ");
+    rs_shell_word(out, dest);
+    if (fstab)
+    {
+        rs_buf_addstr(out, " --exclude /etc/fstab --exclude /etc/crypttab");
+    }
+    rs_buf_addc(out, ' ');
+    rs_shell_word(out, image);
+    rs_buf_addstr(out, " || [ \"$?\" -eq 3 ]; else ");
+    rs_image_part_command(out, image, RS_IMAGE_FILES_PART, dest,
+                          fstab ? "--exclude=restate/files/etc/fstab "
+                                  "--exclude=restate/files/etc/crypttab"
+                                : NULL);
+    rs_buf_addstr(out, "; fi");
+}
+
 /* ------------------------------------------------------------------------- */
 /* Reading                                                                   */
 /* ------------------------------------------------------------------------- */
@@ -814,6 +841,275 @@ static bool index_from_parts(int fd, const char *path, struct rs_buf *text, stru
     rs_buf_free(&name);
     rs_buf_free(&packed);
     rs_buf_free(&terr);
+    return ok;
+}
+
+/* One part of an image in parts, `part` (RS_IMAGE_KIT_PART or
+ * RS_IMAGE_FILES_PART); for an image from before 1.1, which has no parts,
+ * the files are the one stream and there is no kit. */
+static bool open_part(const char *path, const char *part, struct rs_image_stream *s,
+                      struct rs_buf *err)
+{
+    unsigned char magic[RS_TAR_BLOCK];
+    ssize_t       got;
+    int           in = -1;
+
+    memset(s, 0, sizeof(*s));
+    s->fd = -1;
+    s->pg.fd = -1;
+    s->feed = -1;
+    s->image_fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (s->image_fd < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        return false;
+    }
+    got = pread(s->image_fd, magic, sizeof(magic), 0);
+    if (got == (ssize_t)sizeof(magic) && memcmp(magic + 257, "ustar", 5) == 0)
+    {
+        /* In parts: find the files part, skipping past the others. */
+        struct rs_tar_reader r;
+        struct rs_tar_entry  e;
+        int                  more;
+
+        rs_tar_reader_init(&r, read_fd, &s->image_fd);
+        rs_tar_entry_init(&e);
+        while ((more = rs_tar_next(&r, &e, err)) == 1)
+        {
+            if (strcmp(e.name.data, part) == 0 ||
+                (strncmp(e.name.data, part, strlen(part)) == 0 &&
+                 strcmp(e.name.data + strlen(part), ".gpg") == 0))
+            {
+                off_t at = lseek(s->image_fd, 0, SEEK_CUR);
+                int   p[2];
+
+                s->sealed = strcmp(e.name.data, part) != 0;
+                if (at >= 0 && pipe(p) == 0)
+                {
+                    /* Our end never blocks, and never reaches gzip or gpg. */
+                    (void)fcntl(p[1], F_SETFD, FD_CLOEXEC);
+                    (void)fcntl(p[1], F_SETFL, O_NONBLOCK);
+                    (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
+                    in = p[0];
+                    s->feed = p[1];
+                    s->feed_at = (uint64_t)at;
+                    s->feed_left = e.size;
+                    if (s->feed_left == 0)
+                    {
+                        (void)close(s->feed);
+                        s->feed = -1;
+                    }
+                } else
+                {
+                    rs_buf_addf(err, "%s: %s", path, strerror(errno));
+                }
+                break;
+            }
+            if (lseek(s->image_fd, (off_t)(r.left + r.pad), SEEK_CUR) < 0)
+            {
+                rs_buf_addf(err, "%s: %s", path, strerror(errno));
+                more = -1;
+                break;
+            }
+            r.left = 0;
+            r.pad = 0;
+        }
+        rs_tar_entry_free(&e);
+        if (more == 0)
+        {
+            rs_buf_addf(err, "%s: there is no %s in it", path, part);
+        }
+        if (in < 0)
+        {
+            if (more < 0 && err->len)
+            {
+                char *why = rs_xstrdup(err->data);
+
+                rs_buf_reset(err);
+                rs_buf_addf(err, "%s: %s", path, why);
+                free(why);
+            }
+            (void)rs_image_close_files(s, true, err);
+            return false;
+        }
+    } else if (strcmp(part, RS_IMAGE_FILES_PART) != 0)
+    {
+        rs_buf_addf(err, "%s: an image from before restate 1.1 has no %s", path, part);
+        (void)rs_image_close_files(s, true, err);
+        return false;
+    } else
+    {
+        /* From before 1.1: one gzip'd stream, which may be encrypted whole. */
+        s->sealed = got > 0 && rs_pgp_detect(magic, (size_t)got);
+        in = dup(s->image_fd);
+        if (in < 0)
+        {
+            rs_buf_addf(err, "%s: %s", path, strerror(errno));
+            (void)rs_image_close_files(s, true, err);
+            return false;
+        }
+    }
+    if (s->sealed && !rs_pgp_decrypt(in, &s->pg, err))
+    {
+        (void)close(in);
+        (void)rs_image_close_files(s, true, err);
+        return false;
+    }
+    if (!rs_gzip_decompress(s->sealed ? s->pg.fd : in, &s->gz, err))
+    {
+        (void)close(in);
+        (void)rs_image_close_files(s, true, err);
+        return false;
+    }
+    (void)close(in);
+    if (s->sealed)
+    {
+        (void)close(s->pg.fd);
+        s->pg.fd = -1;
+    }
+    s->fd = s->gz.fd;
+    return true;
+}
+
+/* Writes what it can of the part into the pipe, without blocking. */
+static void feed_some(struct rs_image_stream *s)
+{
+    if (s->chunk_pos == s->chunk_len)
+    {
+        size_t  want = s->feed_left < sizeof(s->chunk) ? (size_t)s->feed_left : sizeof(s->chunk);
+        ssize_t n = pread(s->image_fd, s->chunk, want, (off_t)s->feed_at);
+
+        if (n <= 0)
+        {
+            if (n < 0 && errno == EINTR)
+            {
+                return;
+            }
+            s->feed_failed = true;   /* the image is shorter than its part */
+            (void)close(s->feed);
+            s->feed = -1;
+            return;
+        }
+        s->chunk_len = (size_t)n;
+        s->chunk_pos = 0;
+    }
+    {
+        ssize_t w = write(s->feed, s->chunk + s->chunk_pos, s->chunk_len - s->chunk_pos);
+
+        if (w < 0)
+        {
+            if (errno != EAGAIN && errno != EINTR)
+            {
+                /* gzip or gpg has gone: what it said comes out of close. */
+                s->feed_failed = true;
+                (void)close(s->feed);
+                s->feed = -1;
+            }
+            return;
+        }
+        s->chunk_pos += (size_t)w;
+        if (s->chunk_pos == s->chunk_len)
+        {
+            s->feed_at += s->chunk_len;
+            s->feed_left -= s->chunk_len;
+            s->chunk_pos = 0;
+            s->chunk_len = 0;
+            if (s->feed_left == 0)
+            {
+                (void)close(s->feed);
+                s->feed = -1;
+            }
+        }
+    }
+}
+
+bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_buf *err)
+{
+    return open_part(path, RS_IMAGE_FILES_PART, s, err);
+}
+
+bool rs_image_open_kit(const char *path, struct rs_image_stream *s, struct rs_buf *err)
+{
+    return open_part(path, RS_IMAGE_KIT_PART, s, err);
+}
+
+ssize_t rs_image_read_files(struct rs_image_stream *s, void *buf, size_t n)
+{
+    for (;;)
+    {
+        struct pollfd fds[2];
+        nfds_t        nfds = 1;
+
+        fds[0].fd = s->fd;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        if (s->feed >= 0)
+        {
+            fds[1].fd = s->feed;
+            fds[1].events = POLLOUT;
+            fds[1].revents = 0;
+            nfds = 2;
+        }
+        if (poll(fds, nfds, -1) < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return -1;
+        }
+        if (fds[0].revents != 0)
+        {
+            ssize_t r = read(s->fd, buf, n);
+
+            if (r < 0 && (errno == EINTR || errno == EAGAIN))
+            {
+                continue;
+            }
+            return r;
+        }
+        if (nfds == 2 && fds[1].revents != 0)
+        {
+            feed_some(s);
+        }
+    }
+}
+
+bool rs_image_close_files(struct rs_image_stream *s, bool abandon, struct rs_buf *err)
+{
+    bool ok = true;
+
+    if (s->feed >= 0)
+    {
+        (void)close(s->feed);
+        s->feed = -1;
+    }
+    if (s->fd >= 0)
+    {
+        if (!rs_gzip_finish(&s->gz, abandon, err))
+        {
+            ok = false;
+        }
+        s->fd = -1;
+    }
+    if (s->sealed && s->pg.pid > 0)
+    {
+        if (!rs_pgp_finish(&s->pg, abandon, err))
+        {
+            ok = false;
+        }
+        s->pg.pid = 0;
+    }
+    if (!abandon && (s->feed_failed || s->feed_left > 0))
+    {
+        rs_buf_addstr(err, "the image's files part could not be read to its end");
+        ok = false;
+    }
+    if (s->image_fd >= 0)
+    {
+        (void)close(s->image_fd);
+        s->image_fd = -1;
+    }
     return ok;
 }
 

@@ -46,6 +46,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "accounts.h"
 #include "diff.h"
 #include "glob.h"
 #include "index.h"
@@ -208,6 +209,28 @@ static void fuzz_tar(const char *text, size_t len)
     }
     rs_buf_free(&name);
     rs_buf_free(&content);
+
+    /* Member by member, as restore reads an image's files: every header,
+     * and every member's data, to the end or the first thing wrong. */
+    {
+        struct mem_reader    again = { text, len, 0 };
+        struct rs_tar_reader tr;
+        struct rs_tar_entry  e;
+        unsigned char        chunk[512];
+        int                  members = 0;
+
+        rs_tar_reader_init(&tr, mem_read, &again);
+        rs_tar_entry_init(&e);
+        rs_buf_reset(&err);
+        while (members++ < 64 && rs_tar_next(&tr, &e, &err) == 1)
+        {
+            /* Every other member read, the rest left for rs_tar_next to skip. */
+            while (members % 2 == 0 && rs_tar_read(&tr, chunk, sizeof(chunk), &err) > 0)
+            {
+            }
+        }
+        rs_tar_entry_free(&e);
+    }
     rs_buf_free(&err);
 }
 
@@ -453,6 +476,58 @@ static void fuzz_packages(const char *text, size_t len)
     rs_jval_free(&inv);
 }
 
+/* The account merge restore does before any file goes back: the input's
+ * parts, between NULs, are the system's passwd, group, shadow and gshadow,
+ * then the image's. Every name the merge produced is looked up again. */
+static void fuzz_accounts(const char *text, size_t len)
+{
+    char                   *parts[8];
+    const char             *p = text;
+    const char             *end = text + len;
+    struct rs_account_files now;
+    struct rs_account_files old;
+    struct rs_accounts      a;
+    struct rs_buf           err;
+    size_t                  i;
+
+    for (i = 0; i < 8; i++)
+    {
+        const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
+        size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
+
+        parts[i] = rs_xstrndup(p, n);
+        p += n + (nul ? 1 : 0);
+    }
+    now.passwd = parts[0];
+    now.group = parts[1];
+    now.shadow = parts[2];
+    now.gshadow = parts[3];
+    old.passwd = parts[4];
+    old.group = parts[5];
+    old.shadow = parts[6];
+    old.gshadow = parts[7];
+    rs_buf_init(&err);
+    if (rs_accounts_merge(&now, &old, &a, &err))
+    {
+        uint64_t id;
+
+        for (i = 0; i < a.nuids; i++)
+        {
+            (void)rs_accounts_uid(&a, a.uids[i].name, &id);
+        }
+        for (i = 0; i < a.ngids; i++)
+        {
+            (void)rs_accounts_gid(&a, a.gids[i].name, &id);
+        }
+        rs_accounts_free(&a);
+    }
+    rs_buf_free(&err);
+    for (i = 0; i < 8; i++)
+    {
+        free(parts[i]);
+    }
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     const char *text;
@@ -462,7 +537,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 10)
+    switch (data[0] % 11)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -491,8 +566,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 8:
         fuzz_sums(text, size - 1);
         break;
-    default:
+    case 9:
         fuzz_packages(text, size - 1);
+        break;
+    default:
+        fuzz_accounts(text, size - 1);
         break;
     }
     return 0;

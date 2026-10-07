@@ -74,4 +74,37 @@ void rs_tar_pax_record(struct rs_buf *out, const char *key, const char *value, s
 bool rs_tar_read_first(rs_tar_read_fn fn, void *ctx, size_t max,
                        struct rs_buf *name, struct rs_buf *content, struct rs_buf *err);
 
+/*
+ * Reading an archive member by member. Each member's header -- with the pax
+ * records that extend it: its path, its link target, its size where the
+ * ustar field cannot hold it -- then its data, read in pieces; whatever of
+ * one member's data is not read is skipped on the way to the next.
+ */
+struct rs_tar_entry {
+    struct rs_buf name;
+    struct rs_buf linkname;
+    char          typeflag;    /* '0' file, '5' directory, '2' symlink, '6' FIFO, ... */
+    uint64_t      size;
+};
+
+struct rs_tar_reader {
+    rs_tar_read_fn fn;
+    void          *ctx;
+    uint64_t       left;   /* of the current member's data, not yet read */
+    uint64_t       pad;    /* the padding after it */
+    bool           ended;  /* the two zero blocks were read */
+};
+
+void rs_tar_reader_init(struct rs_tar_reader *r, rs_tar_read_fn fn, void *ctx);
+void rs_tar_entry_init(struct rs_tar_entry *e);
+void rs_tar_entry_free(struct rs_tar_entry *e);
+
+/* The next member into `e`: 1 a member, 0 the end of the archive, -1 a
+ * malformed or truncated archive, with the reason in `err`. */
+int rs_tar_next(struct rs_tar_reader *r, struct rs_tar_entry *e, struct rs_buf *err);
+
+/* Up to `n` bytes of the current member's data: how many, 0 at its end, -1
+ * on a read error or a truncated archive. */
+ssize_t rs_tar_read(struct rs_tar_reader *r, void *buf, size_t n, struct rs_buf *err);
+
 #endif /* RESTATE_TAR_H */
