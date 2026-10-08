@@ -629,8 +629,12 @@ static void package_cases(void)
     /* Before the files. */
     CHECK(strstr(s, "Install the packages again") < strstr(s, "Restore the files"));
     CHECK(strstr(s, "no package inventory") == NULL);
+    /* The kit by hand, without the accounts restore merges: laid down
+     * before the packages, they would take the new system's away. */
     CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/kit.tar.gz | tar -xzpf - --numeric-owner -C / "
-                      "--strip-components=2\n");
+                      "--strip-components=2 --exclude=restate/files/etc/passwd "
+                      "--exclude=restate/files/etc/group --exclude=restate/files/etc/shadow "
+                      "--exclude=restate/files/etc/gshadow\n");
     CHECK_CONTAINS(s, "base64 -d > /usr/share/keyrings/vendor.gpg <<'KEY'\ndmVuZG9yIGtleQ==\nKEY");
     CHECK(strstr(s, "/etc/apt/keyrings/local.gpg <<") == NULL);
     CHECK(strstr(s, "ubuntu-archive-keyring.gpg <<") == NULL);
@@ -812,7 +816,9 @@ static void autoinstall_package_cases(void)
                            "'restate: the snap firefox did not install' >&2\n");
         CHECK_CONTAINS(fb, "snap install code --channel=latest/edge --classic --devmode || ");
         CHECK_CONTAINS(fb, "snap disable code\n");
-        CHECK_CONTAINS(fb, "snap install --dangerous /var/lib/snapd/snaps/asana_x1.snap || ");
+        /* From restate's directory: snapd clears its own of strangers. */
+        CHECK_CONTAINS(fb, "snap install --dangerous /var/lib/restate/snaps/asana_x1.snap || ");
+        CHECK_CONTAINS(fb, "rm -rf /var/lib/restate/snaps\n");
         CHECK(strstr(fb, "core22") == NULL);
         CHECK(strstr(fb, "snap install core24") == NULL);
         CHECK(strstr(fb, "snap install mine") == NULL);
@@ -827,7 +833,12 @@ static void autoinstall_package_cases(void)
     CHECK_CONTAINS(s, "test -f '/media/restate/web 01.tgz' || { echo 'restate: the image is not at "
                       "/media/restate/web 01.tgz' >&2; exit 1; }");
     CHECK_CONTAINS(s, "tar -xOf '/media/restate/web 01.tgz' restate/kit.tar.gz | tar -xzpf - "
-                      "--numeric-owner -C /target --strip-components=2\"");
+                      "--numeric-owner -C /target --strip-components=2 "
+                      "--exclude=restate/files/etc/passwd --exclude=restate/files/etc/group "
+                      "--exclude=restate/files/etc/shadow --exclude=restate/files/etc/gshadow\"");
+    CHECK_CONTAINS(s, "mkdir -p /target/var/lib/restate/snaps && { [ ! -f "
+                      "/target/var/lib/snapd/snaps/asana_x1.snap ] || cp "
+                      "/target/var/lib/snapd/snaps/asana_x1.snap /target/var/lib/restate/snaps/; }");
     CHECK_CONTAINS(s, "mkdir -p /target/usr/share/keyrings/ && echo dmVuZG9yIGtleQ== | base64 -d > "
                       "/target/usr/share/keyrings/vendor.gpg");
     CHECK(strstr(s, "local.gpg") == NULL);

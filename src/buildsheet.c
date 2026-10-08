@@ -1285,7 +1285,7 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
         say(s, "%s", "few megabytes, apart from the rest, so this takes seconds:");
         say(s, "%s", "");
         rs_buf_init(&cmd);
-        rs_image_part_command(&cmd, img, RS_IMAGE_KIT_PART, "/", NULL);
+        rs_image_part_command(&cmd, img, RS_IMAGE_KIT_PART, "/", RS_IMAGE_KIT_KEEP_ACCOUNTS);
         say(s, "    %s", cmd.data);
         rs_buf_free(&cmd);
     }

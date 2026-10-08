@@ -824,11 +824,13 @@ static void first_boot_snaps(struct gen *g)
         "WantedBy=multi-user.target\n";
     const struct rs_jval *arr = rs_jobject_get(g->o->packages, "snap");
     struct rs_buf         sh;
+    struct rs_buf         copies;   /* late-commands copying kept snaps */
     size_t                i;
     size_t                j;
     size_t                any = 0;
 
     rs_buf_init(&sh);
+    rs_buf_init(&copies);
     rs_buf_addstr(&sh, "#!/bin/sh\n"
                        "# Written by restate: the snaps the old machine had, installed once\n"
                        "# the new one is running, by restate-firstboot.service, which this\n"
@@ -859,8 +861,31 @@ static void first_boot_snaps(struct gen *g)
         }
         if (flag_set(sn, "local"))
         {
+            /* Not from snapd's own directory, which snapd clears of files
+             * it does not know before this runs: from restate's, where the
+             * late-commands copy it. */
+            const char   *base = strrchr(kept, '/') ? strrchr(kept, '/') + 1 : kept;
+            char         *held = rs_xasprintf("/var/lib/restate/snaps/%s", base);
+            struct rs_buf cp;
+
+            rs_buf_init(&cp);
+            rs_buf_addstr(&cp, "mkdir -p /target/var/lib/restate/snaps && ");
+            rs_buf_addstr(&cp, "{ [ ! -f ");
+            {
+                char *from = rs_xasprintf("/target%s", kept);
+
+                rs_shell_word(&cp, from);
+                rs_buf_addstr(&cp, " ] || cp ");
+                rs_shell_word(&cp, from);
+                free(from);
+            }
+            rs_buf_addstr(&cp, " /target/var/lib/restate/snaps/; }");
+            rs_buf_addc(&copies, '\n');
+            rs_buf_addstr(&copies, cp.data);
+            rs_buf_free(&cp);
             rs_buf_addstr(&sh, "snap install --dangerous ");
-            rs_shell_word(&sh, kept);
+            rs_shell_word(&sh, held);
+            free(held);
         } else
         {
             rs_buf_addf(&sh, "snap install %s", name);
@@ -885,10 +910,24 @@ static void first_boot_snaps(struct gen *g)
         any++;
     }
     rs_buf_addstr(&sh, "systemctl disable restate-firstboot.service\n"
+                       "rm -rf /var/lib/restate/snaps\n"
                        "rm -f /etc/systemd/system/restate-firstboot.service \"$0\"\n");
     if (any > 0)
     {
         late_comment(g, "The snaps, at the first boot: a service that installs them, then goes.");
+        {
+            const char *p = copies.data;
+
+            while (p && *p)
+            {
+                const char *nl = strchr(p + 1, '\n');
+                char       *one = rs_xstrndup(p + 1, nl ? (size_t)(nl - p - 1) : strlen(p + 1));
+
+                late(g, one);
+                free(one);
+                p = nl;
+            }
+        }
         late_file(g, "/usr/local/sbin/restate-firstboot", sh.data, "0755");
         late_file(g, "/etc/systemd/system/restate-firstboot.service", unit, "0644");
         late(g, "mkdir -p /target/etc/systemd/system/multi-user.target.wants && "
@@ -896,6 +935,7 @@ static void first_boot_snaps(struct gen *g)
                 "/target/etc/systemd/system/multi-user.target.wants/restate-firstboot.service");
     }
     rs_buf_free(&sh);
+    rs_buf_free(&copies);
 }
 
 /* The keys kept outside /etc, written into the new system from the inventory. */
@@ -1096,7 +1136,8 @@ static void late_packages(struct gen *g)
         } else
         {
             /* The kit: /etc/apt and the kept packages, in seconds. */
-            rs_image_part_command(&b, img, RS_IMAGE_KIT_PART, "/target", NULL);
+            rs_image_part_command(&b, img, RS_IMAGE_KIT_PART, "/target",
+                                  RS_IMAGE_KIT_KEEP_ACCOUNTS);
         }
         late(g, b.data);
         late_keys(g, rs_jobject_get(apt, "keys"));

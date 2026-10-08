@@ -54,6 +54,17 @@
 #define RS_IMAGE_KIT_PART   "restate/kit.tar.gz"
 #define RS_IMAGE_FILES_PART "restate/files.tar.gz"
 #define RS_IMAGE_FILES_DIR  "restate/files"
+
+/*
+ * The kit carries the image's account files for restore to merge with the
+ * system's (see accounts.h); unpacking the kit by hand must leave them out,
+ * or it lays the old accounts over the new system's before its packages
+ * are installed -- and dpkg stops at the first system group it cannot find.
+ * These are tar's arguments for that.
+ */
+#define RS_IMAGE_KIT_KEEP_ACCOUNTS                                             \
+    "--exclude=restate/files/etc/passwd --exclude=restate/files/etc/group "   \
+    "--exclude=restate/files/etc/shadow --exclude=restate/files/etc/gshadow"
 /* An index larger than this is not one restate wrote. */
 #define RS_IMAGE_INDEX_MAX  ((size_t)2 * 1024 * 1024 * 1024 - 1)
 
