@@ -142,6 +142,18 @@ static struct timespec ts_of(const struct rs_time *t)
     return ts;
 }
 
+/* Whether `err` says the system cannot do this at all. */
+static bool unsupported(int err)
+{
+#if defined(EOPNOTSUPP) && EOPNOTSUPP != ENOTSUP
+    if (err == EOPNOTSUPP)
+    {
+        return true;
+    }
+#endif
+    return err == ENOTSUP || err == ENOSYS || err == EINVAL;
+}
+
 /* Owner, mode and times on `name` in `dir` (a temporary, not yet renamed).
  * Owner first: chown clears set-id bits that chmod then puts back. */
 static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_entry *e,
@@ -168,6 +180,14 @@ static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_e
         c->st->owners++;
     }
     if (!symlink && fchmodat(dir, name, (mode_t)e->mode, 0) != 0)
+    {
+        return false;
+    }
+    /* A symlink's own mode: real on macOS and the BSDs, where a link takes
+     * its mode from the umask it was made under (restate's is tight); on
+     * Linux always 0777, and not to be changed, so "not supported" is fine. */
+    if (symlink && fchmodat(dir, name, (mode_t)e->mode, AT_SYMLINK_NOFOLLOW) != 0 &&
+        !unsupported(errno))
     {
         return false;
     }

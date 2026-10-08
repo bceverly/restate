@@ -59,10 +59,14 @@ HELP="$("$BINARY" --help)"
 
 # The lines of one section of --help, between its heading and the next blank
 # line, with wrapped continuation lines joined back onto their entry.
+# awk reads to the end rather than exiting at the section's end: exiting
+# would leave printf writing into a closed pipe, and SIGPIPE under pipefail
+# fails the build where pipes are small (OpenBSD's).
 section() {
   printf '%s\n' "$HELP" | awk -v want="$1" '
+    done           { next }
     $0 == want ":" { on = 1; next }
-    on && /^$/     { exit }
+    on && /^$/     { on = 0; done = 1; next }
     on {
       if ($0 ~ /^                    /) {     # a continuation line
         sub(/^ +/, "")
