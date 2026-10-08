@@ -154,10 +154,77 @@ static bool unsupported(int err)
     return err == ENOTSUP || err == ENOSYS || err == EINVAL;
 }
 
-/* Owner, mode and times on `name` in `dir` (a temporary, not yet renamed).
- * Owner first: chown clears set-id bits that chmod then puts back. */
+/* The name the image's accounts gave an id, as the index records it beside
+ * the files that id owned; NULL if no file it recorded had that owner. */
+static const char *old_name(const struct ctx *c, unsigned long id, bool group)
+{
+    size_t i;
+
+    for (i = 0; i < c->ix->count; i++)
+    {
+        const struct rs_entry *e = &c->ix->entries[i];
+
+        if (!group && e->user && e->uid == id)
+        {
+            return e->user;
+        }
+        if (group && e->group && e->gid == id)
+        {
+            return e->group;
+        }
+    }
+    return NULL;
+}
+
+static unsigned long acl_uid(const void *ctx, unsigned long id)
+{
+    const struct ctx *c = ctx;
+    const char       *name = old_name(c, id, false);
+    uint64_t          now;
+
+    return name && rs_accounts_uid(&c->accounts, name, &now) ? (unsigned long)now : id;
+}
+
+static unsigned long acl_gid(const void *ctx, unsigned long id)
+{
+    const struct ctx *c = ctx;
+    const char       *name = old_name(c, id, true);
+    uint64_t          now;
+
+    return name && rs_accounts_gid(&c->accounts, name, &now) ? (unsigned long)now : id;
+}
+
+/* The entry's extended attributes on the open `fd`, after its owner. An
+ * ACL's users and groups are mapped by name, as owners are. */
+static void set_xattrs(struct ctx *c, int fd, const struct rs_entry *e)
+{
+    size_t i;
+
+    for (i = 0; i < e->nxattrs; i++)
+    {
+        struct rs_xattr one = e->xattrs[i];
+
+        one.value = rs_xmalloc(one.len ? one.len : 1);
+        if (one.len)
+        {
+            memcpy(one.value, e->xattrs[i].value, one.len);
+        }
+        if (c->st->merged && rs_xattr_is_acl(one.name))
+        {
+            (void)rs_xattr_map_acl(one.value, one.len, acl_uid, acl_gid, c);
+        }
+        c->st->xattrs += rs_xattr_write(fd, &one, 1);
+        free(one.value);
+    }
+}
+
+/* Owner, extended attributes, mode and times on `name` in `dir` (a
+ * temporary, not yet renamed); the attributes through `xfd`, open on it, or
+ * none if it is -1. Owner first: chown clears set-id bits and capabilities,
+ * which the attributes and chmod then put back; mode after the attributes,
+ * since setting an ACL sets the group bits from it. */
 static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_entry *e,
-                     bool symlink)
+                     bool symlink, int xfd)
 {
     struct timespec ts[2];
     int             flags = symlink ? AT_SYMLINK_NOFOLLOW : 0;
@@ -178,6 +245,10 @@ static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_e
             return false;
         }
         c->st->owners++;
+    }
+    if (xfd >= 0)
+    {
+        set_xattrs(c, xfd, e);
     }
     if (!symlink && fchmodat(dir, name, (mode_t)e->mode, 0) != 0)
     {
@@ -351,7 +422,7 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     }
     if (out >= 0)
     {
-        if (wrote && ok && !set_meta(c, dir, tmp, e, false))
+        if (wrote && ok && !set_meta(c, dir, tmp, e, false, out))
         {
             failed(c, e->path, strerror(errno));
             wrote = false;
@@ -420,7 +491,7 @@ static void restore_special(struct ctx *c, const struct rs_entry *e)
     if (made != 0)
     {
         failed(c, e->path, strerror(errno));
-    } else if (!set_meta(c, dir, tmp, e, e->type == 'l'))
+    } else if (!set_meta(c, dir, tmp, e, e->type == 'l', -1))
     {
         failed(c, e->path, strerror(errno));
         (void)unlinkat(dir, tmp, 0);
@@ -501,7 +572,7 @@ static void finish_dirs(struct ctx *c)
         }
         dir = open_parent(c, e->path, &name);
         fd = dir >= 0 ? openat(dir, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
-        if (fd < 0 || !set_meta(c, fd, ".", e, false))
+        if (fd < 0 || !set_meta(c, fd, ".", e, false, fd))
         {
             failed(c, e->path, strerror(errno));
         }

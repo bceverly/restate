@@ -28,6 +28,10 @@
  *   7  a LUKS1 or LUKS2 header, as the start of a block device holds it
  *   8  a SHA256SUMS file, as a vendor's mirror serves it: an image is picked
  *      from it, and what is picked must be a plain file name with a digest
+ *   9  the package inventories: dpkg's status, apt's sources, snapd's state
+ *  10  account files, the system's and the image's, merged
+ *  11  dpkg's record of the files it installed -- diversions, status,
+ *      md5sums and list, between NULs -- loaded, and every path looked up
  *
  * It is reached two ways:
  *
@@ -55,6 +59,7 @@
 #include "machine.h"
 #include "meta.h"
 #include "packages.h"
+#include "pkgdb.h"
 #include "rules.h"
 #include "tar.h"
 #include "util.h"
@@ -62,6 +67,62 @@
 /* Patterns and paths longer than this say nothing a shorter one does not, and
  * the matcher is O(pattern x path), so cap them to keep the run fast. */
 #define GLOB_MAX 2048
+
+/* dpkg's database, its four kinds of file between NULs. Every path loaded is
+ * found again, under its own name and its merged-/usr one. */
+static void fuzz_pkgdb(const char *text, size_t len)
+{
+    char           *parts[4];
+    const char     *p = text;
+    const char     *end = text + len;
+    struct rs_pkgdb db;
+    size_t          i;
+
+    for (i = 0; i < 4; i++)
+    {
+        const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
+        size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
+
+        parts[i] = rs_xstrndup(p, n);
+        p += n + (nul ? 1 : 0);
+    }
+    rs_pkgdb_init(&db);
+    rs_pkgdb_parse_diversions(&db, parts[0]);
+    (void)rs_pkgdb_parse_status(&db, parts[1]);
+    for (i = 0; i < db.nnames; i++)
+    {
+        rs_pkgdb_parse_md5sums(&db, (uint32_t)i, parts[2]);
+        rs_pkgdb_parse_list(&db, (uint32_t)i, parts[3]);
+    }
+    rs_pkgdb_parse_md5sums(&db, (uint32_t)db.nnames, parts[2]);
+    rs_pkgdb_sort(&db);
+    for (i = 0; i < db.nfiles; i++)
+    {
+        const struct rs_pkgfile *f;
+        size_t                   n = rs_pkgdb_lookup(&db, db.files[i].path, &f);
+        size_t                   blen;
+        char                    *other;
+
+        if (n == 0 || f > &db.files[i] || &db.files[i] >= f + n ||
+            !rs_path_is_clean(db.files[i].path))
+        {
+            abort();
+        }
+        (void)rs_pkgdb_package(&db, f, &blen);
+        if (blen == 0 || blen > strlen(db.names[f->pkg]))
+        {
+            abort();
+        }
+        other = rs_xasprintf("/usr%s", db.files[i].path);
+        (void)rs_pkgdb_lookup(&db, other, &f);
+        free(other);
+    }
+    rs_pkgdb_free(&db);
+    for (i = 0; i < 4; i++)
+    {
+        free(parts[i]);
+    }
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -164,8 +225,23 @@ static void fuzz_glob(const char *text, size_t len)
         bool matched = rs_glob_match(pattern, path);
         bool covered = rs_glob_covers(pattern, path);
 
-        /* Covering is matching the path or an ancestor, so it can only add. */
-        if (matched && !covered)
+        bool   ancestor = false;
+        char  *copy = rs_xstrdup(path);
+        size_t i;
+
+        /* Covering is matching the path or an ancestor -- the path up to any
+         * '/' after its first character -- however it is worked out. */
+        for (i = 1; copy[0] != '\0' && copy[i] != '\0' && !ancestor; i++)
+        {
+            if (copy[i] == '/')
+            {
+                copy[i] = '\0';
+                ancestor = rs_glob_match(pattern, copy);
+                copy[i] = '/';
+            }
+        }
+        free(copy);
+        if (covered != (matched || ancestor))
         {
             abort();
         }
@@ -537,7 +613,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 11)
+    switch (data[0] % 12)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -569,8 +645,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 9:
         fuzz_packages(text, size - 1);
         break;
-    default:
+    case 10:
         fuzz_accounts(text, size - 1);
+        break;
+    default:
+        fuzz_pkgdb(text, size - 1);
         break;
     }
     return 0;

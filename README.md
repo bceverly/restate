@@ -77,9 +77,13 @@ restate: 1 added, 0 deleted, 1 modified
 - **Classifies every path.** Each path is *ephemeral* (`/proc`, `/run`, `/tmp`,
   PID files — never kept), *expendable* (caches, logs, downloaded packages,
   snap images — kept only with `--all`), *baseline* (supplied by the OS and its
-  packages: `/usr`, the package database) or *state* (`/etc`, `/home`,
-  `/var/lib`, `/usr/local` — always kept). Built-in rules for Linux, FreeBSD,
-  OpenBSD, NetBSD and macOS; your own rules file overrides any of them.
+  packages: `/usr`, the kernel) or *state* (`/etc`, `/home`, `/var/lib`,
+  `/usr/local` — always kept). Built-in rules for Linux, FreeBSD, OpenBSD,
+  NetBSD and macOS; your own rules file overrides any of them.
+- **Checks every file against the package that installed it**, where dpkg
+  manages the system: a file just as its package left it is that package's
+  and is not kept, wherever it lives; an edited one, or one under `/usr` or
+  `/boot` that no package installed, is kept.
 - **Captures an image**: a tar holding `index.json` — every recorded path
   with its owner, mode, size, link count, inode, access, modification,
   change and birth times to the nanosecond, and SHA-256 — followed by the
@@ -230,6 +234,8 @@ Options:
                           set
       --os=NAME           use the built-in rules for NAME (linux, freebsd,
                           openbsd, netbsd, darwin) rather than this system's
+      --rules-only        classify by the rules alone, without checking files
+                          against the packages that installed them
   -a, --all               record expendable paths too: caches, logs, downloaded
                           packages
   -B, --baseline-content  capture: keep the content of baseline files too, not
@@ -441,7 +447,12 @@ content has to hash to the index's digest before it is renamed into place (a
 tampered file never lands), and nothing in the tree it writes into -- a
 symlink planted where a directory belongs -- can steer it elsewhere. Owners,
 modes and nanosecond times come from the index; hard links come back as
-links; device nodes are made from the index.
+links; device nodes are made from the index. Extended attributes come back
+too, and with them, on Linux, POSIX ACLs and file capabilities: set after
+the owner, since a change of owner clears a file's capabilities, with the
+users and groups an ACL names mapped by name, as owners are. SELinux and
+Smack labels and IMA and EVM signatures are left to the target's own policy
+and keys.
 
 Owners are restored by name. A rebuilt machine's packages numbered their own
 users as they went in (postgres may be 128 where it was 125), so the image's
@@ -524,6 +535,8 @@ is still read.
 | `sha256` | a regular file's content digest; `"unreadable": true` where it could not be read |
 | `target` | a symlink's target |
 | `stored` | where the content is inside the image |
+| `xattrs` | a file's or directory's extended attributes, `[{"name", "value"}]` with the value base64 — on Linux its POSIX ACLs and file capabilities among them |
+| `package`, `modified` | the package a file came from, where dpkg says, and `true` where it no longer matches what that package installed |
 | `path_base64`, `target_base64` | the exact bytes of a name that is not valid UTF-8, which JSON cannot hold directly |
 
 **Why SHA-256 and not MD5:** an MD5 collision can be manufactured, so a planted
@@ -577,6 +590,25 @@ A rules file is `CLASS PATTERN` per line; the **last** matching rule wins, as
 in `.gitignore`, and a rule covers the path it names and everything below it.
 `*` matches within one component, `**` across components, `**/` zero or more
 whole directories, and a pattern with no leading `/` matches at any depth.
+
+Where dpkg manages the system, the rules are only the start. Every regular
+file the rules call baseline or state is checked against the digest dpkg
+recorded when its package installed it:
+
+- one that still matches is **baseline**, and the index names its package —
+  an untouched conffile in `/etc`, a vendor's files in `/opt` are not kept,
+  since reinstalling the package puts them back;
+- one that does not is **state**, `"modified": true` in the index, and kept;
+- one in a baseline tree (`/usr`, `/boot`) that no package installed is
+  **state**, and kept: it was put there by hand.
+
+What packages' own scripts generate there — initramfs images, module
+indexes, font and icon caches — no package owns either, and the built-in
+rules make it expendable. `--rules-only` turns the check off. On this
+project's own test laptop the check stopped keeping 2,013 untouched
+conffiles and 2.4 GB under `/opt`, and found 64 files under `/usr` that
+the rules alone had been leaving out: hand-made systemd sleep hooks, apt
+keyrings, fonts.
 
 ```
 # site.rules

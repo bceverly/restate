@@ -126,9 +126,7 @@ static int open_file(const char *root, const char *rel)
     return fd;
 }
 
-/* The whole of root + rel, up to `max` bytes, into `out`; false if it could
- * not be read, or is larger. */
-static bool read_file(const char *root, const char *rel, size_t max, struct rs_buf *out)
+bool rs_read_beneath(const char *root, const char *rel, size_t max, struct rs_buf *out)
 {
     int   fd = open_file(root, rel);
     char  chunk[8192];
@@ -1206,7 +1204,7 @@ static void describe_keys(const char *root, struct repos *rs, struct rs_jval *ap
         k = rs_jarr_add(arr);
         rs_jval_set_object(k);
         rs_jobj_str(k, "path", rs->keys[i]);
-        if (!read_file(root, rs->keys[i], KEY_MAX, &data))
+        if (!rs_read_beneath(root, rs->keys[i], KEY_MAX, &data))
         {
             char *why = rs_xasprintf("the key %s could not be read", rs->keys[i]);
 
@@ -1259,7 +1257,7 @@ static void describe_apt(const char *root, struct rs_jval *out)
     read_auto(root, &apt);
     a = rs_jobj_add(out, "apt");
     rs_jval_set_object(a);
-    if (read_file(root, "/var/lib/dpkg/arch", SMALL_MAX, &archs))
+    if (rs_read_beneath(root, "/var/lib/dpkg/arch", SMALL_MAX, &archs))
     {
         add_words(array_member(a, "architectures"), archs.data, false);
         rs_buf_free(&archs);
@@ -1439,7 +1437,7 @@ static void describe_snap(const char *root, struct rs_jval *out)
     }
     arr = array_member(out, "snap");
     memset(&state, 0, sizeof(state));
-    if (read_file(root, "/var/lib/snapd/state.json", STATE_MAX, &text))
+    if (rs_read_beneath(root, "/var/lib/snapd/state.json", STATE_MAX, &text))
     {
         struct rs_json_parser jp;
         struct rs_buf         err;
@@ -1728,7 +1726,7 @@ static void describe_alternatives(const char *root, struct rs_jval *out)
             struct rs_buf text;
             char          target[1024];
 
-            if (!read_file(root, rel, SMALL_MAX, &text))
+            if (!rs_read_beneath(root, rel, SMALL_MAX, &text))
             {
                 free(rel);
                 continue;
@@ -1949,7 +1947,7 @@ static char **homes(const char *root, size_t *count)
     const char   *p;
 
     *count = 0;
-    if (!read_file(root, "/etc/passwd", SMALL_MAX, &text))
+    if (!rs_read_beneath(root, "/etc/passwd", SMALL_MAX, &text))
     {
         return NULL;
     }
@@ -2014,7 +2012,7 @@ static void flatpak_remotes(const char *root, const char *dir, const char *scope
     const char     *p;
     struct rs_jval *cur = NULL;
 
-    if (!read_file(root, rel, SMALL_MAX, &text))
+    if (!rs_read_beneath(root, rel, SMALL_MAX, &text))
     {
         free(rel);
         return;
@@ -2235,7 +2233,7 @@ static char *npm_version(const char *root, const char *rel)
     struct rs_buf         err;
     char                 *out = NULL;
 
-    if (!read_file(root, rel, SMALL_MAX, &text))
+    if (!rs_read_beneath(root, rel, SMALL_MAX, &text))
     {
         return NULL;
     }
@@ -2306,7 +2304,7 @@ static bool cargo_home(const char *root, const char *home, struct rs_jval *out)
     const struct rs_jval *installs = NULL;
     bool                  any = false;
 
-    if (!read_file(root, rel, SMALL_MAX, &text))
+    if (!rs_read_beneath(root, rel, SMALL_MAX, &text))
     {
         free(rel);
         return false;

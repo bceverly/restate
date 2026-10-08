@@ -397,6 +397,106 @@ void test_restore(void)
         free(atree);
     }
 
+    TEST_CASE("restore: extended attributes, an ACL's users mapped by name");
+    {
+        char            *xtree = at(dir, "xtree");
+        char            *ximg = at(dir, "ximg.tar");
+        char            *root = at(dir, "xroot");
+        char            *file = at(xtree, "home/u/doc");
+        char            *text;
+        struct rs_index  xix;
+        struct rs_entry *e;
+        const char      *me = getenv("USER") ? getenv("USER") : "nobody"; /* Flawfinder: ignore */
+        /* version 2; USER_OBJ, USER 4242, GROUP_OBJ, MASK, OTHER */
+        unsigned char    acl[] = {
+            2, 0, 0, 0,
+            0x01, 0, 6, 0, 0xff, 0xff, 0xff, 0xff,
+            0x02, 0, 4, 0, 0x92, 0x10, 0, 0,
+            0x04, 0, 4, 0, 0xff, 0xff, 0xff, 0xff,
+            0x10, 0, 4, 0, 0xff, 0xff, 0xff, 0xff,
+            0x20, 0, 4, 0, 0xff, 0xff, 0xff, 0xff,
+        };
+        struct rs_xattr  set[2];
+        size_t           failed;
+        int              fd;
+
+        text = rs_xasprintf("root:x:0:0:root:/root:/bin/sh\n%s:x:4242:4242::/home/u:/bin/sh\n", me);
+        put(xtree, "etc/passwd", text);
+        free(text);
+        put(xtree, "etc/group", "root:x:0:\n");
+        put(xtree, "home/u/doc", "doc\n");
+        set[0].name = (char *)(uintptr_t)"user.color";
+        set[0].value = (unsigned char *)(uintptr_t)"blue";
+        set[0].len = 4;
+        set[1].name = (char *)(uintptr_t)"system.posix_acl_access";
+        set[1].value = acl;
+        set[1].len = sizeof(acl);
+        fd = open(file, O_RDONLY);
+        failed = fd >= 0 ? rs_xattr_write(fd, set, 2) : 2;
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        capture(xtree, ximg, &xix);
+        e = (struct rs_entry *)(uintptr_t)rs_index_find(&xix, "/home/u/doc");
+        CHECK(e != NULL);
+        /* Where this filesystem keeps attributes at all, they are recorded. */
+        CHECK(e && e->nxattrs == 2 - failed);
+        if (e)
+        {
+            free(e->user);
+            e->user = rs_xstrdup(me);
+            e->uid = 4242;
+        }
+        text = rs_xasprintf("root:x:0:0:root:/root:/bin/sh\n%s:x:%lu:%lu::/home/u:/bin/sh\n", me,
+                            (unsigned long)getuid(), (unsigned long)getgid());
+        put(root, "etc/passwd", text);
+        free(text);
+        put(root, "etc/group", "root:x:0:\n");
+        memset(&r, 0, sizeof(r));
+        restore_into(&r, ximg, &xix, root, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.xattrs, 0);
+        {
+            char            *doc = at(root, "home/u/doc");
+            struct rs_xattr *got = NULL;
+            size_t           n = 0;
+            size_t           i;
+
+            fd = open(doc, O_RDONLY);
+            CHECK(fd >= 0 && rs_xattr_read(fd, &got, &n));
+            CHECK_INT(n, 2 - failed);
+            for (i = 0; i < n; i++)
+            {
+                if (rs_xattr_is_acl(got[i].name) && got[i].len == sizeof(acl))
+                {
+                    /* 4242 was this user's number in the image's accounts;
+                     * the system's gives the user its own. */
+                    unsigned long id = (unsigned long)got[i].value[16] |
+                                       ((unsigned long)got[i].value[17] << 8) |
+                                       ((unsigned long)got[i].value[18] << 16) |
+                                       ((unsigned long)got[i].value[19] << 24);
+
+                    CHECK_INT(id, (unsigned long)getuid());
+                }
+            }
+            rs_xattr_free(got, n);
+            if (fd >= 0)
+            {
+                (void)close(fd);
+            }
+            free(doc);
+        }
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        rs_index_free(&xix);
+        free(file);
+        free(root);
+        free(ximg);
+        free(xtree);
+    }
+
     TEST_CASE("restore: images it cannot read");
     {
         char *root = at(dir, "bad");

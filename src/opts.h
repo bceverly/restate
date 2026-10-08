@@ -29,7 +29,8 @@ enum {
     OPT_DEB,
     OPT_EXCLUDE,
     OPT_DRY_RUN,
-    OPT_NUMERIC_OWNER
+    OPT_NUMERIC_OWNER,
+    OPT_RULES_ONLY
 };
 
 enum rs_command {
@@ -56,6 +57,7 @@ struct rs_options {
     const char    **recipients;   /* --encrypt-to: public key files */
     size_t          nrecipients;
     bool            all;
+    bool            rules_only;     /* --rules-only */
     bool            baseline_content;
     bool            keep_local;     /* --keep-local-packages */
     const char    **debs;           /* --deb NAME=FILE, each */

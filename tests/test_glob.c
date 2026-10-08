@@ -93,4 +93,53 @@ void test_glob(void)
         rs_buf_free(&pat);
         rs_buf_free(&path);
     }
+
+    TEST_CASE("glob: covering in one pass is covering an ancestor at a time");
+    {
+        static const char *const pats[] = {
+            "/usr", "/usr/", "/", "/usr/lib/*/gio/modules/giomodule.cache", "/boot/initrd.img*",
+            "/usr/share/fonts/**/fonts.dir", "*.pid", ".cache", "**/node_modules",
+            "/home/*/Downloads", "/a\\*b", "/**", "a/b", "/usr/lib/modules/*/modules.*", "?",
+            "/x*", "**", "*", "/etc/systemd/system/*.wants/snap-*",
+        };
+        static const char *const paths[] = {
+            "/", "/usr", "/usr/lib", "/usrx", "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache",
+            "/boot/initrd.img-7.0", "/boot/initrd.img-7.0/x", "/usr/share/fonts/X11/misc/fonts.dir",
+            "/run/sshd.pid", "/run/sshd.pid/x", "/home/u/.cache/a/b", "/home/u/x.cache",
+            "/p/node_modules/q/r", "/home/u/Downloads/f", "/a*b/c", "/ab", "/a/b/c", "/x/a/b",
+            "//", "//x", "", "a", "/usr/lib/modules/7.0/modules.dep",
+            "/etc/systemd/system/multi-user.target.wants/snap-x.mount",
+        };
+        size_t i;
+        size_t j;
+
+        for (i = 0; i < sizeof(pats) / sizeof(pats[0]); i++)
+        {
+            for (j = 0; j < sizeof(paths) / sizeof(paths[0]); j++)
+            {
+                /* The definition: the path, or the path up to any '/' after
+                 * its first character. */
+                bool   want = rs_glob_match(pats[i], paths[j]);
+                char  *copy = rs_xstrdup(paths[j]);
+                size_t k;
+
+                for (k = 1; copy[0] != '\0' && copy[k] != '\0' && !want; k++)
+                {
+                    if (copy[k] == '/')
+                    {
+                        copy[k] = '\0';
+                        want = rs_glob_match(pats[i], copy);
+                        copy[k] = '/';
+                    }
+                }
+                free(copy);
+                if (rs_glob_covers(pats[i], paths[j]) != want)
+                {
+                    CHECK_STR(pats[i], paths[j]);
+                }
+            }
+        }
+        CHECK(rs_glob_covers("/usr", "/usr/lib/x"));
+        CHECK(!rs_glob_covers("/usr", "/usrx"));
+    }
 }

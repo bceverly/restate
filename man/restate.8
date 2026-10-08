@@ -100,6 +100,9 @@ start from no rules at all rather than the built\-in set
 \fB\-\-os\fR=\fINAME\fR
 use the built\-in rules for NAME (linux, freebsd, openbsd, netbsd, darwin) rather than this system's
 .TP
+\-\-rules\-only
+classify by the rules alone, without checking files against the packages that installed them
+.TP
 \fB\-a\fR, \-\-all
 record expendable paths too: caches, logs, downloaded packages
 .TP
@@ -177,9 +180,10 @@ is given, or a rule makes it state.
 .B baseline
 Supplied by the operating system or its packages:
 .IR /usr ,
-the package database, the kernel. Recorded with content digests, so that a
-comparison against what the vendor shipped can tell which of these files were
-changed locally.
+the kernel, and on a system dpkg manages, any file still as its package
+installed it; see
+.BR BASELINE .
+Recorded with content digests, but not kept.
 .TP
 .B state
 What makes this machine this machine:
@@ -492,16 +496,62 @@ default: those files can be large.
 .I Baseline
 means
 .I supplied by the operating system or its packages
-\- the files a reinstall puts back on its own. In this version that is
-decided by the rules alone, from where a file lives:
+\- the files a reinstall puts back on its own. The rules say where only
+packages put files:
 .IR /usr ,
 .IR /bin ,
 .IR /sbin ,
 .IR /lib ,
 .IR /boot ,
-the package database, and the equivalents on each system, as
+and the equivalents on each system, as
 .B restate rules
-lists them.
+lists them. On a system dpkg manages, the package manager then says which
+files those are. dpkg records, for every package installed, each file it put
+there and an MD5 digest of what it put there
+.RI ( /var/lib/dpkg/info/*.md5sums ,
+and for configuration files the
+.B Conffiles
+of
+.IR /var/lib/dpkg/status ),
+and every regular file the rules call baseline or state is checked against
+it:
+.IP \(bu 2
+A file that still matches what its package installed is baseline, and the
+index names the package, wherever the file is \- an unchanged configuration
+file in
+.IR /etc ,
+a vendor's files in
+.IR /opt .
+Reinstalling the package puts it back, so its content is not kept.
+.IP \(bu 2
+A file that no longer matches is state, marked
+.B modified
+in the index, and kept: an edited configuration file, a patched binary.
+.IP \(bu 2
+A file in a baseline tree that no package installed is state, and kept: it
+was put there by hand.
+.PP
+What packages' own scripts generate beneath those trees \- initramfs images,
+module indexes, icon and font caches, the compiled MIME and schema databases,
+the boot loader's files \- no package owns either, and the built-in rules
+make each of them expendable rather than keep it. Diversions are followed,
+and on a merged
+.I /usr
+a file dpkg lists under
+.I /bin
+is found under
+.IR /usr/bin .
+.B \-\-rules\-only
+turns the check off and classifies by the rules alone, as on a system with no
+dpkg, where a baseline file changed or added by hand is recorded but not
+kept; keep those with
+.BR \-\-baseline\-content ,
+or name them as state in a rules file.
+.PP
+MD5 is what dpkg records, so it is what is compared. It is not used to
+protect anything: a file made to match the digest of a packaged one would
+need a second preimage, which MD5 still resists. Every digest restate
+records itself is SHA-256.
 .PP
 The baseline is not read from an installation image, and does not depend on
 whether a machine was installed as a desktop or a server, or for which
@@ -516,17 +566,6 @@ its owner, mode, times and SHA-256, and its content is left out of an image
 unless
 .B \-\-baseline\-content
 is given.
-.PP
-What this version does not yet do is check those digests against what the
-vendor shipped, so a baseline file changed by hand \- an edited file under
-.IR /usr/share ,
-a replaced binary \- is recorded but not kept. Every system restate supports
-already holds the vendor's digests for every installed file in its own package
-database, and a later version reads them; see
-.BR BUGS .
-Until then, keep anything changed under a baseline path with
-.BR \-\-baseline\-content ,
-or classify it as state in a rules file.
 .SH INSTALLERS
 .B restate installer
 names the installation image a machine is rebuilt from, worked out from its
@@ -733,6 +772,23 @@ Owners, modes and times (to the nanosecond) come from the index, a
 directory's only once everything in it is in; hard links are made links
 again, and device nodes, which the index records but the image does not
 archive, are made from the index.
+.PP
+Extended attributes come back as well \- on Linux, a file's POSIX ACLs
+.RI ( system.posix_acl_access ,
+and a directory's
+.IR system.posix_acl_default )
+and its capabilities
+.RI ( security.capability )
+among them. They are set after the owner, since a change of owner clears a
+file's capabilities, and before the mode, since setting an ACL sets the
+group bits from it; the users and groups an ACL names are mapped by name, as
+owners are. SELinux and Smack labels and IMA and EVM signatures describe the
+machine rather than the file, and are neither recorded nor set. FreeBSD and
+NetBSD keep attributes in a user and a system namespace, recorded as
+.I user.
+and
+.IR system. ;
+OpenBSD has none.
 .PP
 Owners are restored by name. The system being restored onto has accounts
 of its own: its packages made their system users as they were installed,
@@ -1143,13 +1199,13 @@ signature by the pinned vendor key.
 .SH AUTHORS
 Bryan C. Everly.
 .SH BUGS
-This is the first stage of a larger tool. It captures and compares state; it
-does not yet compare baseline files against the digests the package manager
-already holds \- dpkg on Debian and Ubuntu, rpm on Red Hat and its relatives,
-pkg on FreeBSD, the package databases of OpenBSD and NetBSD, and the sealed
-system volume and installer receipts on macOS \- record extended attributes,
-ACLs or file capabilities, keep hard links as links, or restore an image
-itself. The project's ROADMAP lists what comes next.
+Files are checked against their packages only where dpkg manages them; rpm,
+FreeBSD's pkg, the package databases of OpenBSD and NetBSD and macOS's sealed
+system volume all hold the same digests, and are not read yet. ACLs are
+recorded on Linux, where they are extended attributes, and on FreeBSD's UFS,
+where they are system attributes, but not macOS's or ZFS's NFSv4 ACLs; a
+symlink's own attributes are not recorded. The project's ROADMAP lists what
+comes next.
 .PP
 Report bugs at
 .UR https://github.com/bceverly/restate/issues

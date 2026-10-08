@@ -78,6 +78,9 @@ int   rs_test_capture(int (*fn)(const void *), const void *arg, char **out, char
 /* Every suite, declared here and called from test_main.c. */
 void test_util(void);
 void test_sha256(void);
+void test_md5(void);
+void test_pkgdb(void);
+void test_xattr(void);
 void test_glob(void);
 void test_rules(void);
 void test_json(void);

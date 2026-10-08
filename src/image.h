@@ -141,9 +141,10 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
 /*
  * The shell command that puts `image`'s files back under `dest` ("/" on the
  * system itself, "/target" from an installer): `restate restore`, as the
- * image's kit put it back under `dest` -- in /usr/local/bin or /usr/bin --
- * or, if neither is there, the files part unpacked with tar, as
- * rs_image_part_command does it, without restore's checks. `fstab` leaves
+ * image's kit put it back under `dest` -- in /usr/local/sbin, /usr/local/bin,
+ * /usr/sbin or /usr/bin -- or, if none is there, the files part unpacked with
+ * tar, as rs_image_part_command does it, without restore's checks or its
+ * merging of the accounts, and saying so. `fstab` leaves
  * /etc/fstab and /etc/crypttab out, for an installer that formatted the
  * volumes itself. An incomplete restore (some files refused, exit 3) is
  * said, not taken as failure; anything worse fails the command.

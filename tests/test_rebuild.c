@@ -667,10 +667,12 @@ static void package_cases(void)
     CHECK_CONTAINS(s, "tar -xOf web01.tgz restate/files.tar.gz | tar -xzpf - --numeric-owner -C / "
                       "--strip-components=2 --exclude=restate/files/etc/fstab "
                       "--exclude=restate/files/etc/crypttab");
-    CHECK_CONTAINS(s, "    r=; for p in ''/usr/local/bin/restate ''/usr/bin/restate; do "
+    CHECK_CONTAINS(s, "    r=; for p in ''/usr/local/sbin/restate ''/usr/local/bin/restate "
+                      "''/usr/sbin/restate ''/usr/bin/restate; do "
                       "[ -x \"$p\" ] && r=$p && break; done; if [ -n \"$r\" ]; then "
                       "\"$r\" restore --root / --exclude /etc/fstab --exclude /etc/crypttab "
-                      "web01.tgz || [ \"$?\" -eq 3 ]; else tar -xOf web01.tgz");
+                      "web01.tgz || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image to "
+                      "restore with; tar instead, owners by number' >&2; tar -xOf web01.tgz");
     CHECK_CONTAINS(s, "restate restore reads an encrypted image");
     CHECK_CONTAINS(s, "update-alternatives --set java /usr/lib/jvm/21/bin/java");
     CHECK(strstr(s, "nopath") == NULL);
@@ -870,10 +872,12 @@ static void autoinstall_package_cases(void)
     CHECK_CONTAINS(s, "curtin in-target -- npm install -g left-pad@1.3.0 ||");
     CHECK_CONTAINS(s, "curtin in-target -- gem install rake:13.0.6 ||");
     CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java /usr/lib/jvm/21/bin/java");
-    CHECK_CONTAINS(s, "for p in /target/usr/local/bin/restate /target/usr/bin/restate; do");
+    CHECK_CONTAINS(s, "for p in /target/usr/local/sbin/restate /target/usr/local/bin/restate "
+                      "/target/usr/sbin/restate /target/usr/bin/restate; do");
     CHECK_CONTAINS(s, "\\\"$r\\\" restore --root /target --exclude /etc/fstab --exclude "
                       "/etc/crypttab '/media/restate/web 01.tgz' || [ \\\"$?\\\" -eq 3 ]; else "
-                      "tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
+                      "echo 'restate: no restate in the image to restore with; tar instead, "
+                      "owners by number' >&2; tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
                       "--numeric-owner -C /target --strip-components=2 "
                       "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab; fi\"");
     CHECK_CONTAINS(s, "curtin in-target -- update-grub");

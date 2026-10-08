@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "md5.h"
 #include "meta.h"
 #include "progress.h"
 
@@ -292,13 +293,46 @@ static void fill_entry(struct rs_entry *e, int dirfd, const char *name,
     e->hash_state = RS_HASH_NONE;
 }
 
+/* A file's or directory's extended attributes, read through a descriptor of
+ * its own, which must be the one fstatat described. One that cannot be
+ * opened has none recorded; reading its content says why, if it is read. */
+static void read_xattrs(int dirfd, const char *name, const struct stat *st,
+                        struct rs_entry *e)
+{
+    struct stat check;
+    int         fd;
+
+    if (e->type == 'f')
+    {
+        fd = rs_open_regular_at(dirfd, name, st);
+    } else
+    {
+        fd = open_at(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd >= 0 && (fstat(fd, &check) != 0 || check.st_dev != st->st_dev ||
+                        check.st_ino != st->st_ino))
+        {
+            (void)close(fd);
+            fd = -1;
+        }
+    }
+    if (fd < 0)
+    {
+        return;
+    }
+    (void)rs_xattr_read(fd, &e->xattrs, &e->nxattrs);
+    (void)close(fd);
+}
+
 /* Hands the entry, and the strings in it, to the index. */
 static void record(struct walk *w, const struct rs_entry *e)
 {
     rs_index_add(w->out, e);
     rs_progress_path(e->path);
     w->stats->recorded++;
-    w->stats->by_class[e->cls]++;
+    if ((size_t)e->cls < sizeof(w->stats->by_class) / sizeof(w->stats->by_class[0]))
+    {
+        w->stats->by_class[e->cls]++;
+    }
 }
 
 /* Whether this entry's content goes into the image. */
@@ -415,6 +449,144 @@ static bool file_content(struct walk *w, int dirfd, const char *name,
     return true;
 }
 
+/* Whether rs_scan_opts' check against the packages applies to this one. */
+static bool package_checked(const struct walk *w, char type, enum rs_class cls)
+{
+    return w->opts->pkgdb && !w->forced && type == 'f' &&
+           (cls == RS_CLASS_BASELINE || cls == RS_CLASS_STATE);
+}
+
+/* The first of the `n` packaged files at one path with a digest, or NULL. */
+static const struct rs_pkgfile *with_digest(const struct rs_pkgfile *f, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (f[i].flags & RS_PKGFILE_MD5)
+        {
+            return &f[i];
+        }
+    }
+    return NULL;
+}
+
+static void name_package(const struct walk *w, struct rs_entry *e, const struct rs_pkgfile *f)
+{
+    size_t      len;
+    const char *pkg = rs_pkgdb_package(w->opts->pkgdb, f, &len);
+
+    e->package = rs_xstrndup(pkg, len);
+}
+
+/*
+ * A regular file checked against the package that installed it, and
+ * classified as rs_scan_opts says. True if its content has been dealt with
+ * here -- read, and its digest set where the scan hashes -- so file_content
+ * need not read it again; false if file_content still has it to do, to keep
+ * it or because it was not read here.
+ */
+static bool check_package(struct walk *w, int dirfd, const char *name,
+                          const struct stat *st, struct rs_entry *e)
+{
+    const struct rs_pkgfile *f;
+    const struct rs_pkgfile *first;
+    const struct rs_pkgfile *match = NULL;
+    size_t                   n = rs_pkgdb_lookup(w->opts->pkgdb, e->path, &f);
+    struct rs_md5            md5;
+    struct rs_sha256         sha;
+    unsigned char            got[RS_MD5_SIZE];
+    unsigned char            chunk[65536];
+    uint64_t                 bytes = 0;
+    size_t                   i;
+    int                      fd;
+
+    if (n == 0)
+    {
+        if (e->cls == RS_CLASS_BASELINE)
+        {
+            e->cls = RS_CLASS_STATE;
+            w->stats->unpackaged++;
+        }
+        return false;
+    }
+    first = with_digest(f, n);
+    if (!first)
+    {
+        /* Owned, but with nothing to compare: as the rules say. */
+        name_package(w, e, f);
+        return false;
+    }
+    fd = rs_open_regular_at(dirfd, name, st);
+    if (fd < 0)
+    {
+        unreadable(w, e->path, errno);
+        e->hash_state = RS_HASH_UNREADABLE;
+        return true;
+    }
+    rs_md5_init(&md5);
+    rs_sha256_init(&sha);
+    for (;;)
+    {
+        ssize_t got_n = read(fd, chunk, sizeof(chunk));
+
+        if (got_n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (got_n < 0)
+        {
+            unreadable(w, e->path, errno);
+            e->hash_state = RS_HASH_UNREADABLE;
+            (void)close(fd);
+            return true;
+        }
+        if (got_n == 0)
+        {
+            break;
+        }
+        rs_md5_update(&md5, chunk, (size_t)got_n);
+        if (w->opts->hash)
+        {
+            rs_sha256_update(&sha, chunk, (size_t)got_n);
+        }
+        rs_progress_bytes((uint64_t)got_n);
+        bytes += (uint64_t)got_n;
+    }
+    rs_md5_final(&md5, got);
+    for (i = 0; i < n && !match; i++)
+    {
+        if ((f[i].flags & RS_PKGFILE_MD5) && memcmp(f[i].md5, got, sizeof(got)) == 0)
+        {
+            match = &f[i];
+        }
+    }
+    name_package(w, e, match ? match : first);
+    if (match)
+    {
+        e->cls = RS_CLASS_BASELINE;
+        w->stats->pkg_unmodified++;
+    } else
+    {
+        e->cls = RS_CLASS_STATE;
+        e->modified = true;
+        w->stats->pkg_modified++;
+    }
+    if (storing(w, e))
+    {
+        (void)close(fd);
+        return false;
+    }
+    if (w->opts->hash)
+    {
+        rs_sha256_final(&sha, e->hash);
+        e->hash_state = RS_HASH_PRESENT;
+        w->stats->bytes_hashed += bytes;
+    }
+    (void)close(fd);
+    return true;
+}
+
 static void walk_dir(struct walk *w, int dirfd, const char *tree_path, unsigned depth);
 
 /*
@@ -464,6 +636,14 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
          * without hashing, every one it keeps. */
         bool kept = w->opts->store && (cls != RS_CLASS_BASELINE || w->opts->store_baseline);
 
+        if (type == 'f' && !w->opts->hash && !kept && package_checked(w, type, cls))
+        {
+            const struct rs_pkgfile *f;
+            size_t                   n = rs_pkgdb_lookup(w->opts->pkgdb, tree_path, &f);
+
+            /* Read to compare with its package, though not hashed or kept. */
+            kept = n > 0 && with_digest(f, n) != NULL;
+        }
         if (type == 'f' && (w->opts->hash || kept))
         {
             w->stats->bytes_hashed += (uint64_t)st.st_size;
@@ -475,6 +655,10 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     {
         fill_entry(&e, dirfd, name, &st, type, cls);
         e.path = rs_xstrdup(tree_path);
+        if (type == 'f' || type == 'd')
+        {
+            read_xattrs(dirfd, name, &st, &e);
+        }
 
         if (type == 'l')
         {
@@ -488,7 +672,10 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         }
         if (type == 'f')
         {
-            if (!file_content(w, dirfd, name, &st, &e))
+            /* Read and classified against its package, or else read here. */
+            bool checked = package_checked(w, type, cls) && check_package(w, dirfd, name, &st, &e);
+
+            if (!checked && !file_content(w, dirfd, name, &st, &e))
             {
                 w->failed = true;
                 rs_entry_free(&e);
@@ -682,6 +869,7 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     }
     fill_entry(&e, fd, ".", &st, 'd', rs_rules_classify(opts->rules, "/", NULL));
     e.path = rs_xstrdup("/");
+    (void)rs_xattr_read(fd, &e.xattrs, &e.nxattrs);
     if (storing(&w, &e))
     {
         if (!opts->store(opts->store_ctx, &e, -1, &st, err))

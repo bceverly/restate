@@ -56,7 +56,19 @@ void test_rules(void)
     CHECK_INT(classify(&rs, "/usr/bin/bash"), RS_CLASS_BASELINE);
     CHECK_INT(classify(&rs, "/usr/local/bin/tool"), RS_CLASS_STATE);
     CHECK_INT(classify(&rs, "/var/lib/postgresql/18/main"), RS_CLASS_STATE);
-    CHECK_INT(classify(&rs, "/var/lib/dpkg/status"), RS_CLASS_BASELINE);
+    CHECK_INT(classify(&rs, "/var/lib/dpkg/status"), RS_CLASS_EXPENDABLE);
+    /* What packages' scripts generate beneath the baseline trees. */
+    CHECK_INT(classify(&rs, "/boot/initrd.img-7.0.0-38-generic"), RS_CLASS_EXPENDABLE);
+    CHECK_INT(classify(&rs, "/boot/vmlinuz-7.0.0-38-generic"), RS_CLASS_BASELINE);
+    CHECK_INT(classify(&rs, "/usr/lib/modules/7.0.0-38-generic/modules.dep"),
+              RS_CLASS_EXPENDABLE);
+    CHECK_INT(classify(&rs, "/usr/lib/modules/7.0.0-38-generic/kernel/fs/x.ko"),
+              RS_CLASS_BASELINE);
+    CHECK_INT(classify(&rs, "/usr/share/mime/globs2"), RS_CLASS_EXPENDABLE);
+    CHECK_INT(classify(&rs, "/usr/share/mime/packages/freedesktop.org.xml"),
+              RS_CLASS_BASELINE);
+    CHECK_INT(classify(&rs, "/usr/share/fonts/X11/misc/fonts.dir"), RS_CLASS_EXPENDABLE);
+    CHECK_INT(classify(&rs, "/usr/share/icons/Yaru/icon-theme.cache"), RS_CLASS_EXPENDABLE);
     CHECK_INT(classify(&rs, "/var/lib/apt/lists/x"), RS_CLASS_EXPENDABLE);
     CHECK_INT(classify(&rs, "/var/cache/apt/archives/x.deb"), RS_CLASS_EXPENDABLE);
     CHECK_INT(classify(&rs, "/snap/core/1"), RS_CLASS_EXPENDABLE);

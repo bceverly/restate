@@ -29,6 +29,9 @@ RS_OPT('N', "no-default-rules", no_argument,       NULL,
 RS_OPT(OPT_OS, "os",            required_argument, "NAME",
        "use the built-in rules for NAME (linux, freebsd, openbsd, netbsd, darwin) "
        "rather than this system's")
+RS_OPT(OPT_RULES_ONLY, "rules-only", no_argument,   NULL,
+       "classify by the rules alone, without checking files against the packages "
+       "that installed them")
 RS_OPT('a', "all",              no_argument,       NULL,
        "record expendable paths too: caches, logs, downloaded packages")
 RS_OPT('B', "baseline-content", no_argument,       NULL,

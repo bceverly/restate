@@ -21,7 +21,11 @@ void rs_entry_free(struct rs_entry *e)
     free(e->user);
     free(e->group);
     free(e->stored);
-    e->path = e->target = e->user = e->group = e->stored = NULL;
+    free(e->package);
+    e->path = e->target = e->user = e->group = e->stored = e->package = NULL;
+    rs_xattr_free(e->xattrs, e->nxattrs);
+    e->xattrs = NULL;
+    e->nxattrs = 0;
 }
 
 void rs_index_free(struct rs_index *ix)
@@ -341,6 +345,34 @@ static void entry_json(struct rs_buf *b, const struct rs_entry *e)
     {
         put_bytes(b, "stored", e->stored, &first);
     }
+    if (e->nxattrs > 0)
+    {
+        size_t i;
+
+        put_key(b, "xattrs", &first);
+        rs_buf_addc(b, '[');
+        for (i = 0; i < e->nxattrs; i++)
+        {
+            bool one = true;
+
+            rs_buf_addstr(b, i ? ", {" : "{");
+            put_bytes(b, "name", e->xattrs[i].name, &one);
+            put_key(b, "value", &one);
+            rs_buf_addc(b, '"');
+            rs_base64_encode(b, e->xattrs[i].value, e->xattrs[i].len);
+            rs_buf_addstr(b, "\"}");
+        }
+        rs_buf_addc(b, ']');
+    }
+    if (e->package)
+    {
+        put_bytes(b, "package", e->package, &first);
+        if (e->modified)
+        {
+            put_key(b, "modified", &first);
+            rs_buf_addstr(b, "true");
+        }
+    }
     rs_buf_addc(b, '}');
 }
 
@@ -412,6 +444,55 @@ bool rs_index_write(const struct rs_index *ix, FILE *out)
 /* ------------------------------------------------------------------------- */
 /* Reading                                                                   */
 /* ------------------------------------------------------------------------- */
+
+static char *get_bytes(const struct rs_jval *obj, const char *key, bool *bad);
+
+/* An entry's "xattrs": an array of {"name", "value"}, the value base64. At
+ * most as many, and as large, as a file can carry. */
+static bool get_xattrs(struct rs_entry *e, const struct rs_jval *v)
+{
+    enum { MOST = 4096, VALUE_MOST = 64 * 1024 };
+    size_t i;
+
+    if (v->type != RS_JARRAY || v->n > MOST || (e->type != 'f' && e->type != 'd'))
+    {
+        return false;
+    }
+    for (i = 0; i < v->n; i++)
+    {
+        const struct rs_jval *item = &v->items[i];
+        const struct rs_jval *value = rs_jobject_get(item, "value");
+        bool                  bad = false;
+        char                 *name;
+        struct rs_buf         raw;
+        struct rs_xattr      *x;
+
+        if (item->type != RS_JOBJECT || !value || value->type != RS_JSTRING)
+        {
+            return false;
+        }
+        name = get_bytes(item, "name", &bad);
+        rs_buf_init(&raw);
+        if (bad || !name || !rs_base64_decode(value->s, value->slen, &raw) ||
+            raw.len > VALUE_MOST)
+        {
+            free(name);
+            rs_buf_free(&raw);
+            return false;
+        }
+        e->xattrs = rs_xreallocarray(e->xattrs, e->nxattrs + 1, sizeof(*e->xattrs));
+        x = &e->xattrs[e->nxattrs++];
+        x->name = name;
+        x->len = raw.len;
+        x->value = rs_xmalloc(raw.len ? raw.len : 1);
+        if (raw.len)
+        {
+            memcpy(x->value, raw.data, raw.len);
+        }
+        rs_buf_free(&raw);
+    }
+    return true;
+}
 
 /* A string member: exactly from key_base64 if present, else from key. NULL
  * with *bad set if either is present and malformed. */
@@ -561,9 +642,18 @@ static bool entry_from_json(const struct rs_jval *obj, struct rs_entry *e, const
     e->user = get_bytes(obj, "user", &bad);
     e->group = get_bytes(obj, "group", &bad);
     e->stored = get_bytes(obj, "stored", &bad);
+    e->package = get_bytes(obj, "package", &bad);
     if (bad)
     {
-        *why = "a bad \"user\", \"group\" or \"stored\"";
+        *why = "a bad \"user\", \"group\", \"stored\" or \"package\"";
+        return false;
+    }
+    v = rs_jobject_get(obj, "modified");
+    e->modified = e->package && v && v->type == RS_JBOOL && v->b;
+    v = rs_jobject_get(obj, "xattrs");
+    if (v && v->type != RS_JNULL && !get_xattrs(e, v))
+    {
+        *why = "bad \"xattrs\"";
         return false;
     }
     v = rs_jobject_get(obj, "sha256");

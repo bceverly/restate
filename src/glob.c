@@ -13,6 +13,7 @@
  */
 #include "glob.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -126,29 +127,56 @@ static void add_closure(const struct nfa *n, unsigned char *live, size_t start)
     }
 }
 
-bool rs_glob_match(const char *pattern, const char *path)
+/* Patterns this long or shorter are matched without allocating. */
+#define SMALL_PATTERN 256
+
+/*
+ * Runs the automaton for `pattern` over `path`: true if it matches the whole
+ * of `path` or, with `ancestors`, any ancestor of it -- the path up to any
+ * '/' after the first character, "/" itself excepted. An ancestor is a prefix
+ * the automaton has read when it reaches that '/', so one pass answers for
+ * all of them.
+ */
+static bool run(const char *pattern, const char *path, bool ancestors)
 {
-    struct rs_buf  anchored;
+    unsigned char  small[4][SMALL_PATTERN + 4];
+    size_t         small_work[SMALL_PATTERN + 4];
+    char           small_p[SMALL_PATTERN + 4];
+    char          *anchored = small_p;
     struct nfa     n;
     unsigned char *next;
     unsigned char *next_mid;
+    size_t         plen = strlen(pattern);
     size_t         s;
-    bool           matched;
+    bool           heap;
+    bool           matched = false;
 
     /* An unanchored pattern matches at any depth. */
-    rs_buf_init(&anchored);
-    if (pattern[0] != '/')
+    n.plen = plen + (pattern[0] != '/' ? 3 : 0);
+    heap = n.plen > SMALL_PATTERN;
+    if (heap)
     {
-        rs_buf_addstr(&anchored, "**/");
+        anchored = rs_xmalloc(n.plen + 1);
     }
-    rs_buf_addstr(&anchored, pattern);
-    n.p = anchored.data;
-    n.plen = anchored.len;
-    n.live = rs_xcalloc(n.plen + 1, 1);
-    n.mid = rs_xcalloc(n.plen + 1, 1);
-    n.work = rs_xcalloc(n.plen + 1, sizeof(*n.work));
-    next = rs_xcalloc(n.plen + 1, 1);
-    next_mid = rs_xcalloc(n.plen + 1, 1);
+    (void)snprintf(anchored, n.plen + 1, "%s%s", pattern[0] != '/' ? "**/" : "", pattern);
+    n.p = anchored;
+    if (heap)
+    {
+        n.live = rs_xcalloc(n.plen + 1, 1);
+        n.mid = rs_xcalloc(n.plen + 1, 1);
+        n.work = rs_xcalloc(n.plen + 1, sizeof(*n.work));
+        next = rs_xcalloc(n.plen + 1, 1);
+        next_mid = rs_xcalloc(n.plen + 1, 1);
+    } else
+    {
+        n.live = small[0];
+        n.mid = small[1];
+        n.work = small_work;
+        next = small[2];
+        next_mid = small[3];
+        memset(n.live, 0, n.plen + 1);
+        memset(n.mid, 0, n.plen + 1);
+    }
     add_closure(&n, n.live, 0);
 
     for (s = 0; path[s] != '\0'; s++)
@@ -157,6 +185,11 @@ bool rs_glob_match(const char *pattern, const char *path)
         size_t i;
         bool   any = false;
 
+        if (ancestors && c == '/' && s > 0 && n.live[n.plen])
+        {
+            matched = true;
+            break;
+        }
         memset(next, 0, n.plen + 1);
         memset(next_mid, 0, n.plen + 1);
         for (i = 0; i < n.plen; i++)
@@ -237,47 +270,116 @@ bool rs_glob_match(const char *pattern, const char *path)
         }
     }
 
-    matched = path[s] == '\0' && n.live[n.plen];
-    free(n.live);
-    free(n.mid);
-    free(n.work);
-    free(next);
-    free(next_mid);
-    rs_buf_free(&anchored);
+    if (!matched)
+    {
+        matched = path[s] == '\0' && n.live[n.plen];
+    }
+    if (heap)
+    {
+        free(n.live);
+        free(n.mid);
+        free(n.work);
+        free(next);
+        free(next_mid);
+        free(anchored);
+    }
     return matched;
+}
+
+/* The length of the literal start of an anchored pattern: everything before
+ * its first "*", "?" or "\\". */
+static size_t literal_len(const char *pattern)
+{
+    return strcspn(pattern, "*?\\");
+}
+
+/*
+ * Whether `path` holds the longest run of plain characters in `pattern`.
+ * Whatever the pattern matches -- the path, or an ancestor, itself a prefix
+ * of the path -- holds every such run, so a path without it cannot match,
+ * and most paths are turned away here for the cost of a substring search.
+ */
+static bool holds_literal(const char *pattern, const char *path)
+{
+    char   needle[SMALL_PATTERN + 1];
+    size_t best = 0;
+    size_t at = 0;
+    size_t start = 0;
+    size_t i;
+
+    /* An escape makes the plain runs harder to see; leave it to the
+     * automaton. */
+    if (strchr(pattern, '\\'))
+    {
+        return true;
+    }
+    for (i = 0;; i++)
+    {
+        char c = pattern[i];
+
+        if (c == '\0' || c == '*' || c == '?')
+        {
+            if (i - start > best)
+            {
+                best = i - start;
+                at = start;
+            }
+            if (c == '\0')
+            {
+                break;
+            }
+            start = i + 1;
+        }
+    }
+    if (best == 0 || best > SMALL_PATTERN)
+    {
+        return true;
+    }
+    memcpy(needle, pattern + at, best);
+    needle[best] = '\0';
+    return strstr(path, needle) != NULL;
+}
+
+bool rs_glob_match(const char *pattern, const char *path)
+{
+    if (pattern[0] == '/')
+    {
+        size_t lit = literal_len(pattern);
+
+        if (pattern[lit] == '\0')
+        {
+            return strcmp(pattern, path) == 0;
+        }
+        if (strncmp(pattern, path, lit) != 0)
+        {
+            return false;
+        }
+    }
+    return holds_literal(pattern, path) && run(pattern, path, false);
 }
 
 bool rs_glob_covers(const char *pattern, const char *path)
 {
-    char  *prefix;
-    size_t i;
-    bool   hit = false;
+    /* Every caller passes a clean absolute path, but an empty one has no
+     * ancestors, and this is the kind of assumption the fuzzer exists to
+     * test, and it did. "/" itself is never an ancestor that is tried, so a
+     * rule for everything has to say "/" followed by "**": a rule that
+     * silently covered the whole filesystem because of a typo would be a bad
+     * thing to make easy. */
+    if (pattern[0] == '/')
+    {
+        size_t lit = literal_len(pattern);
 
-    if (rs_glob_match(pattern, path))
-    {
-        return true;
-    }
-    /* An empty path has no ancestors, and the loop below starts one byte in.
-     * Every caller passes a clean absolute path, but this is the kind of
-     * assumption the fuzzer exists to test, and it did. */
-    if (path[0] == '\0')
-    {
-        return false;
-    }
-    /* Each ancestor: "/a/b/c" tries "/a" and "/a/b". "/" itself is not
-     * tried, so a rule for everything has to say "/" followed by "**": a rule
-     * that silently covered the whole filesystem because of a typo would be a
-     * bad thing to make easy. */
-    prefix = rs_xstrdup(path);
-    for (i = 1; prefix[i] != '\0' && !hit; i++)
-    {
-        if (prefix[i] == '/')
+        /* Whatever matches -- the path or an ancestor, itself a prefix of
+         * the path -- starts with the pattern's literal start. */
+        if (strncmp(pattern, path, lit) != 0)
         {
-            prefix[i] = '\0';
-            hit = rs_glob_match(pattern, prefix);
-            prefix[i] = '/';
+            return false;
+        }
+        if (pattern[lit] == '\0')
+        {
+            return path[lit] == '\0' || path[lit] == '/';
         }
     }
-    free(prefix);
-    return hit;
+    return holds_literal(pattern, path) && run(pattern, path, path[0] != '\0');
 }

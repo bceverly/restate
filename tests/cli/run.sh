@@ -276,6 +276,26 @@ expect 2 "packages of an old index" -- "$BIN" packages old-index.json
 contains "$ERR" "has no package inventory" "an index from before the inventory says so"
 expect 2 "packages of a missing file" -- "$BIN" packages no-such-index.json
 
+# Files checked against the packages that installed them: dpkg's digests.
+mkdir -p debtree/var/lib/dpkg/info debtree/usr/bin debtree/etc
+printf 'Package: hello\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n' \
+  > debtree/var/lib/dpkg/status
+printf 'Conffiles:\n /etc/hello.conf f968f33f844c98de1d3b4fe70f2e1a0f\n' >> debtree/var/lib/dpkg/status
+printf 'a723176f804503c15766073170b99298  usr/bin/hello\n' > debtree/var/lib/dpkg/info/hello.md5sums
+printf '/usr/bin/hello\n/etc/hello.conf\n' > debtree/var/lib/dpkg/info/hello.list
+printf 'hello-binary' > debtree/usr/bin/hello
+printf 'x=2\n' > debtree/etc/hello.conf
+printf 'mine' > debtree/usr/bin/by-hand
+expect 0 "scan a Debian tree" -- "$BIN" scan --root debtree --os=linux -o deb.json
+contains "$ERR" "1 files as their packages installed them; 1 changed since, and 1 where only packages put files that no package did, kept" \
+  "each file is checked against its package"
+contains "$(grep '"/usr/bin/hello"' deb.json)" '"class": "baseline"' "an unchanged one is its package's"
+contains "$(grep '"/etc/hello.conf"' deb.json)" '"modified": true' "an edited conffile is marked"
+contains "$(grep '"/usr/bin/by-hand"' deb.json)" '"class": "state"' "a file no package installed is state"
+expect 0 "scan --rules-only" -- "$BIN" scan --root debtree --os=linux --rules-only -o deb2.json
+lacks "$ERR" "as their packages installed them" "--rules-only checks nothing against the packages"
+contains "$(grep '"/usr/bin/by-hand"' deb2.json)" '"class": "baseline"' "and classifies by the rules alone"
+
 # ---------------------------------------------------------------------------
 # installer
 # ---------------------------------------------------------------------------
@@ -505,6 +525,16 @@ contains "$ERR" "/etc/app/key: its content is not what the index says it is; not
 check "and never lands" test ! -e rbad/etc/app/key
 check "while the rest is put back" test -f rbad/etc/hosts
 
+# A files part that runs on past its end-of-archive blocks, as some tars
+# pad it -- more than a pipe holds: read to its end, not gzip killed.
+mkdir -p padded && ( cd padded && tar -xf ../rimg.tar && gzip -dc restate/files.tar.gz > files.tar &&
+  dd if=/dev/zero bs=1024 count=512 >> files.tar 2> /dev/null &&
+  gzip -c files.tar > restate/files.tar.gz &&
+  tar -cf ../rpad.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
+mkdir -p rpad
+expect 0 "restore an image padded past its end" -- "$BIN" restore --root rpad rpad.tar
+check "puts its files back" cmp rtree/etc/app/key rpad/etc/app/key
+
 # A member the index does not list.
 mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil
 ( cd tamper && gzip -dc ../tamper/restate/files.tar.gz > /dev/null; tar -xf ../rimg.tar &&
@@ -517,6 +547,51 @@ expect 3 "restore an image with a member the index does not list" -- \
 contains "$ERR" "/etc/evil: in the image, but not as the index records it; refused" \
   "a member the index does not list is refused"
 check "and not written" test ! -e rextra/etc/evil
+
+# Extended attributes: set with whatever this system sets them with, where
+# its filesystem keeps them at all; captured, restored and verified.
+mkdir -p xtree/etc xout
+printf 'x' > xtree/etc/f
+# Called through set_xattr below.
+# shellcheck disable=SC2317,SC2329
+set_xattr() {
+  if command -v setfattr > /dev/null 2>&1; then
+    setfattr -n user.color -v blue "$1"
+  elif [ "$(uname -s)" = Darwin ]; then
+    xattr -w user.color blue "$1"
+  elif command -v setextattr > /dev/null 2>&1; then
+    setextattr user color blue "$1"
+  elif command -v python3 > /dev/null 2>&1; then
+    python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user.color", b"blue")' "$1"
+  else
+    return 1
+  fi
+}
+if set_xattr xtree/etc/f 2> /dev/null; then
+  expect 0 "capture a file with an extended attribute" -- "$BIN" capture -q --root xtree -o x.tar
+  contains "$(part x.tar index.json.gz | gzip -dc | grep '"/etc/f"')" '"name": "user.color", "value": "Ymx1ZQ=="' \
+    "the index records it"
+  expect 0 "restore it" -- "$BIN" restore --root xout x.tar
+  expect 0 "verify finds the attribute put back" -- "$BIN" verify --root xout x.tar
+  contains "$ERR" "0 added, 0 deleted, 0 modified" "and nothing differs"
+  printf 'y' > xtree/etc/g
+  set_xattr xtree/etc/g
+  rm -f xtree/etc/f && printf 'x' > xtree/etc/f
+  expect 1 "verify sees the attribute gone" -- "$BIN" verify --root xtree x.tar
+  contains "$OUT" "xattrs" "and says it is the attributes that changed"
+fi
+# A file capability: root's to set, and cleared by a change of owner, so put
+# back after it.
+if [ "$(id -u)" = 0 ] && command -v setcap > /dev/null 2>&1 && command -v getcap > /dev/null 2>&1; then
+  mkdir -p ctree/usr/local/bin cout
+  printf '#!/bin/sh\n' > ctree/usr/local/bin/ping-ish
+  if setcap cap_net_raw+ep ctree/usr/local/bin/ping-ish 2> /dev/null; then
+    chown 1:1 ctree/usr/local/bin/ping-ish && setcap cap_net_raw+ep ctree/usr/local/bin/ping-ish
+    expect 0 "capture a file with a capability" -- "$BIN" capture -q --root ctree -o c.tar
+    expect 0 "restore it" -- "$BIN" restore --root cout c.tar
+    contains "$(getcap cout/usr/local/bin/ping-ish)" "cap_net_raw" "the capability is put back, after the owner"
+  fi
+fi
 
 # An image from before 1.1: one gzip'd stream, index.json first.
 mkdir -p old && ( cd old && tar -xf ../rimg.tar && gzip -dc restate/index.json.gz > restate/index.json &&

@@ -115,4 +115,12 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
  */
 void rs_apt_uri_file(struct rs_buf *out, const char *uri);
 
+/*
+ * The whole of root + rel, up to `max` bytes, into `out` (initialized here,
+ * and NUL-terminated); false if it could not be read, or is larger. It is
+ * reached from `root` one directory at a time, never through a symlink, and
+ * must be a regular file.
+ */
+bool rs_read_beneath(const char *root, const char *rel, size_t max, struct rs_buf *out);
+
 #endif /* RESTATE_PACKAGES_H */

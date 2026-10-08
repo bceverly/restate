@@ -215,6 +215,9 @@ int main(void)
     test_bsd();
     test_progress();
     test_scan();
+    test_md5();
+    test_pkgdb();
+    test_xattr();
     test_diff();
     test_opts();
     test_cmd();

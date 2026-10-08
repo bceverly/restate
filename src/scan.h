@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 
 #include "index.h"
+#include "pkgdb.h"
 #include "rules.h"
 
 /*
@@ -67,6 +68,20 @@ struct rs_scan_opts {
      * one directory at a time, never through a symlink. */
     const char *const     *keep;
     size_t                 nkeep;
+    /* The package manager's record of the files it installed (pkgdb.h), or
+     * NULL to classify by the rules alone. With it, every regular file the
+     * rules call baseline or state is checked against its package:
+     *
+     *   - one that still matches what its package installed is baseline,
+     *     with the package named, wherever it is -- an unchanged conffile in
+     *     /etc, a vendor's files in /opt
+     *   - one that does not is state, "modified", and kept
+     *   - one in a baseline tree -- /usr, /boot -- that no package installed
+     *     is state, and kept: it was put there by hand
+     *
+     * so the rules' "baseline" comes to mean "where only packages put
+     * files", and a scan no longer takes that on trust. */
+    const struct rs_pkgdb *pkgdb;
 };
 
 struct rs_scan_stats {
@@ -78,6 +93,9 @@ struct rs_scan_stats {
     uint64_t skipped_mounts;
     uint64_t unreadable;
     uint64_t grew;            /* kept as they were when their copy began */
+    uint64_t pkg_unmodified;  /* files as their package installed them */
+    uint64_t pkg_modified;    /* files changed since their package installed them */
+    uint64_t unpackaged;      /* files in a baseline tree no package installed */
     uint64_t bytes_hashed;
     uint64_t stored;
 };

@@ -236,6 +236,13 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
     {
         (void)fprintf(stderr, "restate: hashed %" PRIu64 " bytes\n", st->bytes_hashed);
     }
+    if (st->pkg_unmodified + st->pkg_modified + st->unpackaged > 0)
+    {
+        (void)fprintf(stderr, "restate: %" PRIu64 " files as their packages installed them; "
+                      "%" PRIu64 " changed since, and %" PRIu64 " where only packages put "
+                      "files that no package did, kept\n",
+                      st->pkg_unmodified, st->pkg_modified, st->unpackaged);
+    }
     if (st->grew > 0)
     {
         (void)fprintf(stderr, "restate: %" PRIu64 " files were written to while they were "
@@ -294,6 +301,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
                      struct rs_scan_stats *st, const struct rs_jval *kept_from)
 {
     struct rs_rules     rules;
+    struct rs_pkgdb     db;
     struct rs_scan_opts so;
     struct rs_buf       err;
     const char         *os_used = NULL;
@@ -318,6 +326,11 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     so.all = o->all;
     so.one_fs = o->one_fs;
     so.verbose = o->verbose;
+    rs_pkgdb_init(&db);
+    if (!o->rules_only && rs_pkgdb_load(&db, root))
+    {
+        so.pkgdb = &db;
+    }
     if (image)
     {
         so.store = rs_image_store;
@@ -440,6 +453,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     rs_buf_free(&err);
     rs_rules_free(&rules);
+    rs_pkgdb_free(&db);
     if (image)
     {
         image->kit = NULL;
@@ -723,6 +737,11 @@ int rs_cmd_restore(const struct rs_options *o)
         {
             (void)fprintf(stderr, "restate: %" PRIu64 " owners could not be set: restoring "
                           "owners needs root\n", st.owners);
+        }
+        if (st.xattrs > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " extended attributes could not be set: "
+                          "some need root, and some filesystems have none\n", st.xattrs);
         }
     }
     if (st.refused + st.failed + st.missing > 0)

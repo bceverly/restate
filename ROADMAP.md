@@ -107,9 +107,12 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 - [x] **The inventory in the autoinstall file:** snaps in its snaps
       section; with `--image-at`, the rest as late-commands, then the files
       and the boot files, so an unattended rebuild comes up as it was
-- [ ] **Package-aware capture:** unmodified package files listed, not
+- [x] **Package-aware capture:** unmodified package files listed, not
       stored; modified ones (including edited conffiles) and files no
-      package owns stored
+      package owns stored -- dpkg's md5sums and conffile digests, with
+      diversions and merged /usr; what packages' scripts generate made
+      expendable by rule; `--rules-only` to turn it off
+- [ ] The same for rpm, FreeBSD pkg, OpenBSD and NetBSD `+CONTENTS`
 - [ ] **Package-aware diff:** upgrades and removals reported per package
 - [x] **Fetchability:** `capture --keep-local-packages` keeps the `.deb` of
       each installed version no repository has, from apt's cache (warning,
@@ -236,8 +239,11 @@ Then the 156 were installed by name, in that VM, from the restored sources:
     the command line (no environment variable or rules file can set it). It
     still checks everything, and prints every failure as a warning before
     restoring anything.
-- [ ] Extended attributes, POSIX ACLs and file capabilities; hard links as
-      links; users and groups the image's owners depend on
+- [x] Extended attributes, POSIX ACLs and file capabilities (Linux xattrs,
+      macOS xattrs, FreeBSD and NetBSD extattrs), set after the owner, with
+      an ACL's users and groups mapped by name; hard links as links; users
+      and groups the image's owners depend on
+- [ ] ACLs that are not extended attributes: macOS's, and NFSv4 ACLs on ZFS
 - [ ] `status`: what has changed since the last capture, quickly
 
 ## Then — captures on a schedule

@@ -634,11 +634,19 @@ void rs_image_restore_command(struct rs_buf *out, const char *image, const char 
 {
     const char *prefix = strcmp(dest, "/") == 0 ? "" : dest;
 
-    rs_buf_addstr(out, "r=; for p in ");
-    rs_shell_word(out, prefix);
-    rs_buf_addstr(out, "/usr/local/bin/restate ");
-    rs_shell_word(out, prefix);
-    rs_buf_addstr(out, "/usr/bin/restate; do [ -x \"$p\" ] && r=$p && break; done; "
+    static const char *const dirs[] = {"/usr/local/sbin", "/usr/local/bin", "/usr/sbin",
+                                       "/usr/bin"};
+    size_t                   i;
+
+    /* sbin first: where `make install` puts it. */
+    rs_buf_addstr(out, "r=; for p in");
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+    {
+        rs_buf_addc(out, ' ');
+        rs_shell_word(out, prefix);
+        rs_buf_addf(out, "%s/restate", dirs[i]);
+    }
+    rs_buf_addstr(out, "; do [ -x \"$p\" ] && r=$p && break; done; "
                        "if [ -n \"$r\" ]; then \"$r\" restore --root ");
     rs_shell_word(out, dest);
     if (fstab)
@@ -647,7 +655,8 @@ void rs_image_restore_command(struct rs_buf *out, const char *image, const char 
     }
     rs_buf_addc(out, ' ');
     rs_shell_word(out, image);
-    rs_buf_addstr(out, " || [ \"$?\" -eq 3 ]; else ");
+    rs_buf_addstr(out, " || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image to "
+                       "restore with; tar instead, owners by number' >&2; ");
     rs_image_part_command(out, image, RS_IMAGE_FILES_PART, dest,
                           fstab ? "--exclude=restate/files/etc/fstab "
                                   "--exclude=restate/files/etc/crypttab"
@@ -1079,6 +1088,18 @@ bool rs_image_close_files(struct rs_image_stream *s, bool abandon, struct rs_buf
 {
     bool ok = true;
 
+    if (!abandon && s->fd >= 0)
+    {
+        unsigned char rest[8192];
+
+        /* A tar archive may run on past its end-of-archive blocks -- a tar
+         * pads to its record size, and some to far more than a pipe holds.
+         * Read to gzip's end, so it is not killed writing what nobody
+         * reads. */
+        while (rs_image_read_files(s, rest, sizeof(rest)) > 0)
+        {
+        }
+    }
     if (s->feed >= 0)
     {
         (void)close(s->feed);

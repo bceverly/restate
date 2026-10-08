@@ -46,6 +46,13 @@
  *                     "unreadable": true where the file could not be read
  *   target            a symlink's target
  *   stored            where the file's content is inside the image, if it is
+ *   xattrs            a file's or directory's extended attributes, where it
+ *                     has any -- POSIX ACLs and file capabilities among them on
+ *                     Linux; see xattr.h -- as [{"name", "value"}], the value
+ *                     base64
+ *   package           the package a regular file came from, where the package
+ *                     manager says (see pkgdb.h), and "modified": true where
+ *                     it no longer matches what the package installed
  *
  * JSON strings must be UTF-8 and a file name need not be. A path or target
  * that is not valid UTF-8 is written twice: lossily in "path" (so it can be
@@ -64,6 +71,7 @@
 #include "rules.h"
 #include "sha256.h"
 #include "util.h"
+#include "xattr.h"
 
 #define RS_INDEX_FORMAT  "restate-index"
 #define RS_INDEX_VERSION 1
@@ -88,6 +96,10 @@ struct rs_entry {
     char              *user;     /* NULL where the uid has no name */
     char              *group;
     char              *stored;   /* member name inside the image, or NULL */
+    char              *package;  /* the package it came from, or NULL */
+    bool               modified; /* not what that package installed */
+    struct rs_xattr   *xattrs;   /* sorted by name; NULL when there are none */
+    size_t             nxattrs;
     char               type;     /* f d l c b p */
     uint32_t           mode;     /* permission bits, at most 07777 */
     uint64_t           uid;

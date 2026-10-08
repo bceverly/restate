@@ -238,6 +238,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_NUMERIC_OWNER:
             o->numeric_owner = true;
             break;
+        case OPT_RULES_ONLY:
+            o->rules_only = true;
+            break;
         case OPT_DEB:
             o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));
             o->debs[o->ndebs++] = optarg;

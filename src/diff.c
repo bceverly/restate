@@ -6,6 +6,29 @@
 
 #include <string.h>
 
+/* Both sorted by name, as the walk and the index reader leave them. */
+static bool xattrs_equal(const struct rs_entry *a, const struct rs_entry *b)
+{
+    size_t i;
+
+    if (a->nxattrs != b->nxattrs)
+    {
+        return false;
+    }
+    for (i = 0; i < a->nxattrs; i++)
+    {
+        const struct rs_xattr *x = &a->xattrs[i];
+        const struct rs_xattr *y = &b->xattrs[i];
+
+        if (strcmp(x->name, y->name) != 0 || x->len != y->len ||
+            (x->len && memcmp(x->value, y->value, x->len) != 0))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 unsigned rs_diff_entries(const struct rs_entry *old, const struct rs_entry *new_)
 {
     unsigned what = 0;
@@ -22,6 +45,10 @@ unsigned rs_diff_entries(const struct rs_entry *old, const struct rs_entry *new_
     if (old->uid != new_->uid || old->gid != new_->gid)
     {
         what |= RS_DIFF_OWNER;
+    }
+    if (!xattrs_equal(old, new_))
+    {
+        what |= RS_DIFF_XATTRS;
     }
     if (old->type == 'l')
     {
@@ -59,6 +86,7 @@ void rs_diff_describe(unsigned what, struct rs_buf *out)
         { RS_DIFF_TARGET,  "target" },
         { RS_DIFF_MODE,    "mode" },
         { RS_DIFF_OWNER,   "owner" },
+        { RS_DIFF_XATTRS,  "xattrs" },
     };
     size_t i;
     bool   first = true;

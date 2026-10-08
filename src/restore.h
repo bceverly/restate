@@ -17,7 +17,10 @@
  * file is created beside its destination and renamed.
  *
  * Then what tar does loosely: owners, modes and times (to the nanosecond)
- * from the index, a directory's set only once its contents are in, so
+ * from the index, extended attributes -- POSIX ACLs and file capabilities
+ * among them, set after the owner, since a change of owner clears a file's
+ * capabilities, with the users and groups an ACL names mapped as owners
+ * are -- a directory's set only once its contents are in, so
  * writing them does not undo them; hard links made links again; device
  * nodes, which an image records but does not archive, made from the index.
  *
@@ -62,6 +65,7 @@ struct rs_restore_stats {
     uint64_t failed;      /* could not be written */
     uint64_t missing;     /* the index says stored; the image does not have it */
     uint64_t owners;      /* owners that could not be set (not root) */
+    uint64_t xattrs;      /* extended attributes that could not be set */
     bool     merged;      /* the accounts were merged, owners mapped by name */
 };
 

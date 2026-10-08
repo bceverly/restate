@@ -77,12 +77,43 @@ static const struct builtin linux_rules[] = {
     { B, "/lib64",                 "installed by the distribution" },
     { B, "/libx32",                "installed by the distribution" },
     { B, "/boot",                  "kernels and initramfs images, rebuilt by the package manager" },
+    /* What the packages' own scripts and triggers generate, beneath the
+     * baseline trees: no package owns these files, but they are not the
+     * administrator's either, and a scan that checks files against their
+     * packages would keep them as if they were. */
+    { X, "/boot/initrd.img*",      "initramfs images, made again for each kernel installed" },
+    { X, "/boot/initramfs-*",      "initramfs images, made again for each kernel installed" },
+    { X, "/boot/grub",             "the boot loader's own files, written again by grub-install" },
+    { X, "/boot/grub2",            "the boot loader's own files, written again by grub2-install" },
+    { X, "/boot/efi",              "the EFI system partition, which the installer formats and fills" },
+    { X, "/usr/lib/modules/*/modules.*", "module indexes, made again by depmod" },
+    { X, "/lib/modules/*/modules.*", "module indexes, made again by depmod" },
+    { X, "/usr/lib/modules/*/updates/dkms", "modules DKMS builds again for each kernel" },
+    { X, "/lib/modules/*/updates/dkms", "modules DKMS builds again for each kernel" },
+    { X, "/usr/lib/locale/locale-archive", "compiled locales, made again by locale-gen" },
+    { X, "/usr/lib/udev/hwdb.bin", "the compiled hardware database, made again by systemd-hwdb" },
+    { X, "/usr/share/mime",        "the compiled MIME database, made again by update-mime-database" },
+    { B, "/usr/share/mime/packages", "the MIME definitions packages install" },
+    { X, "/usr/share/info/dir*",   "the Info directory, made again by install-info" },
+    { X, "/usr/share/applications/mimeinfo.cache", "made again by update-desktop-database" },
+    { X, "/usr/share/glib-2.0/schemas/gschemas.compiled", "made again by glib-compile-schemas" },
+    { X, "/usr/share/icons/*/icon-theme.cache", "made again by gtk-update-icon-cache" },
+    { X, "/usr/share/fonts/**/fonts.dir", "font indexes, made again by mkfontdir" },
+    { X, "/usr/share/fonts/**/fonts.scale", "font indexes, made again by mkfontscale" },
+    { X, "/usr/share/fonts/**/encodings.dir", "font indexes, made again by mkfontdir" },
+    { X, "/usr/lib/*/gdk-pixbuf-2.0/*/loaders.cache", "made again by gdk-pixbuf-query-loaders" },
+    { X, "/usr/lib/*/gio/modules/giomodule.cache", "made again by gio-querymodules" },
+    { X, "/usr/lib/*/gtk-*/*/immodules.cache", "made again by gtk-query-immodules" },
+    { X, "/usr/lib/*/graphviz/config*", "Graphviz's plugin list, made again by dot -c" },
     { S, "/usr/local",             "software the administrator installed by hand" },
     { S, "/opt",                   "add-on software and its data" },
     { S, "/srv",                   "data served by this machine" },
     { S, "/var/lib",               "application state: databases, containers, services" },
     { S, "/var/backups",           "the distribution's own copies of critical files" },
-    { B, "/var/lib/dpkg",          "the package database, rebuilt by reinstalling packages" },
+    /* Expendable, not baseline: what it says is in the index's inventory,
+     * and reinstalling the packages writes it again. Laid over a system that
+     * has its own, it would describe packages that are not there. */
+    { X, "/var/lib/dpkg",          "the package database, rebuilt by reinstalling packages" },
     { B, "/var/lib/rpm",           "the package database, rebuilt by reinstalling packages" },
     { B, "/var/lib/pacman",        "the package database, rebuilt by reinstalling packages" },
     { X, "/var/lib/apt/lists",     "package indexes, refetched by apt update" },
@@ -115,6 +146,7 @@ static const struct builtin linux_rules[] = {
     { X, "/var/lib/libvirt/qemu/save", "suspended VMs' memory; without it a VM boots afresh" },
     { X, "/var/snap/lxd/common/lxd/images", "LXD's image cache; the containers themselves stay" },
     { X, "/usr/share/ollama/.ollama/models", "Ollama's model weights, pulled again" },
+    { X, "/var/lib/kdump/initrd.img*", "kdump's initramfs images, made again for each kernel" },
 };
 
 static const struct builtin freebsd_rules[] = {

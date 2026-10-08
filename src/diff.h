@@ -27,7 +27,8 @@ enum {
     RS_DIFF_MODE    = 1u << 1,
     RS_DIFF_OWNER   = 1u << 2,
     RS_DIFF_CONTENT = 1u << 3,
-    RS_DIFF_TARGET  = 1u << 4
+    RS_DIFF_TARGET  = 1u << 4,
+    RS_DIFF_XATTRS  = 1u << 5
 };
 
 struct rs_diff_stats {
