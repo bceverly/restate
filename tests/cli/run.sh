@@ -264,7 +264,7 @@ check "and nothing else of /var/cache" \
 check "the kit holds it, and /etc/apt" \
   eval 'part kept.tar kit.tar.gz | gzip -dc | tar -tf - | tr "\n" " " | grep -q "restate/files/etc/apt/sources.list .*restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
 check "and nothing else" \
-  eval '! part kept.tar kit.tar.gz | gzip -dc | tar -tf - | grep -v "etc/apt\|by-hand" | grep -q .'
+  eval '! part kept.tar kit.tar.gz | gzip -dc | tar -tf - | grep -v -e etc/apt -e by-hand | grep -q .'
 expect 0 "verify the image with kept packages" -- "$BIN" verify --root pkgtree kept.tar
 lacks "$OUT" "by-hand_1.0_amd64.deb" "verify walks what the image kept, and finds it unchanged"
 expect 0 "packages of the image" -- "$BIN" packages kept.tar
