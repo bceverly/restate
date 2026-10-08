@@ -107,6 +107,11 @@ file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+# A file's inode number: GNU stat, or the BSDs'.
+inode() {
+  stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"
+}
+
 build_tree() {
   rm -rf tree
   mkdir -p tree/etc/ssh tree/usr/bin tree/tmp tree/var/cache/apt tree/var/lib/app tree/home/u/.cache
@@ -415,7 +420,7 @@ tar -tf img1.tar > parts.txt 2>/dev/null
 check "the image is three parts, the index first" \
   test "$(tr '\n' ' ' < parts.txt)" = "restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz "
 # Called through check.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 parts_are_gzip() {
   local p
   for p in index.json.gz kit.tar.gz files.tar.gz; do
@@ -464,8 +469,10 @@ check "the content is back" cmp rtree/etc/app/key rout/etc/app/key
 check "and its mode" test "$(file_mode rout/etc/app/key)" = "600"
 check "and a directory's mode" test "$(file_mode rout/etc/app)" = "750"
 check "and a symlink" test "$(readlink rout/home/u/link)" = "../../etc/hosts"
-check "and a hard link is a link" test "$(stat -c %i rout/var/lib/x/one)" = "$(stat -c %i rout/var/lib/x/two)"
+check "and a hard link is a link" test "$(inode rout/var/lib/x/one)" = "$(inode rout/var/lib/x/two)"
 expect 0 "verify finds the restored tree the same" -- "$BIN" verify --root rout rimg.tar
+# What differs, if anything does: verify lists it on standard output.
+[ -z "$OUT" ] || printf '%s\n' "$OUT" | head -5 | sed 's/^/        verify: /'
 contains "$ERR" "0 added, 0 deleted, 0 modified" "nothing differs"
 
 mkdir -p rdry
@@ -489,7 +496,7 @@ check "a directory is there instead" test -d rtrap/etc -a ! -L rtrap/etc
 
 # A tampered file: the index says one thing, the files part another.
 mkdir -p tamper && ( cd tamper && tar -xf ../rimg.tar && gzip -dc restate/files.tar.gz > files.tar &&
-  sed -i 's/secret/SECRET/' files.tar && gzip -c files.tar > restate/files.tar.gz &&
+  sed 's/secret/SECRET/' files.tar > tampered.tar && gzip -c tampered.tar > restate/files.tar.gz &&
   tar -cf ../rbad.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
 mkdir -p rbad
 expect 3 "restore a tampered image" -- "$BIN" restore --root rbad rbad.tar
@@ -521,11 +528,12 @@ check "puts its files back" cmp rtree/etc/app/key rold/etc/app/key
 # The kit carries the restate that made the image, so a new system can run
 # restore before restate is installed. Only a capture of the live root, and
 # only where /proc names the running program; everything else ruled out.
-if [ -r /proc/self/exe ]; then
+# Linux only: NetBSD has a /proc/self/exe of sorts, but restate asks Linux's.
+if [ "$(uname -s)" = Linux ] && [ -r /proc/self/exe ]; then
   echo "ephemeral /*" > nothing.rules
   expect 0 "capture of / with nothing kept" -- "$BIN" capture -N -R nothing.rules -q -o self.tar
   # Called through check.
-  # shellcheck disable=SC2329
+  # shellcheck disable=SC2317,SC2329
   kit_holds() { part self.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files$1"; }
   check "the kit holds the restate binary" kit_holds "$(readlink -f "$BIN")"
 fi
@@ -536,18 +544,19 @@ myuid="$(id -u)"
 mygid="$(id -g)"
 mygroup="$(id -gn)"
 mkdir -p atree/etc atree/home/me
-printf 'root:x:0:0:root:/root:/bin/bash\n%s:x:4242:4242:Me:/home/me:/bin/zsh\nold:x:1500:1500::/home/old:/bin/sh\n' \
+# Only this user and one other, nothing fixed such as root: the test may run
+# as root itself, as CI's containers do.
+printf '%s:x:4242:4242:Me:/home/me:/bin/zsh\nold:x:1500:1500::/home/old:/bin/sh\n' \
   "$me" > atree/etc/passwd
-printf 'root:x:0:\n%s:x:4242:\nold:x:1500:\n' "$mygroup" > atree/etc/group
-printf 'root:*:1:0:99999:7:::\n%s:%s:1:0:99999:7:::\n' "$me" "\$6\$oldhash" > atree/etc/shadow
+printf '%s:x:4242:\nold:x:1500:\n' "$mygroup" > atree/etc/group
+printf '%s:%s:1:0:99999:7:::\n' "$me" "\$6\$oldhash" > atree/etc/shadow
 echo note > atree/home/me/note
 expect 0 "capture a tree with accounts" -- "$BIN" capture -r atree --os=linux -q -o aimg.tar
 check "the kit holds the accounts" \
   eval 'part aimg.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx restate/files/etc/passwd'
 mkdir -p aout/etc
-printf 'root:x:0:0:root:/root:/bin/bash\n%s:x:%s:%s:Installer:/home/me:/bin/sh\n' \
-  "$me" "$myuid" "$mygid" > aout/etc/passwd
-printf 'root:x:0:\n%s:x:%s:\n' "$mygroup" "$mygid" > aout/etc/group
+printf '%s:x:%s:%s:Installer:/home/me:/bin/sh\n' "$me" "$myuid" "$mygid" > aout/etc/passwd
+printf '%s:x:%s:\n' "$mygroup" "$mygid" > aout/etc/group
 expect 0 "restore onto a system with accounts of its own" -- "$BIN" restore --root aout aimg.tar
 contains "$ERR" "owners mapped by name" "restore maps owners by name"
 contains "$(cat aout/etc/passwd)" "$me:x:$myuid:$mygid:Me:/home/me:/bin/zsh" \

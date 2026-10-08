@@ -421,14 +421,35 @@ void test_restore(void)
         free(out);
         free(errs);
 
-        /* Cut short in the files part. */
+        /* Cut short in the files part: copied here, not with head -c, which
+         * OpenBSD's head does not have. */
         {
             struct stat st;
+            int         in = open(img, O_RDONLY);
+            int         to = open(cut, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            char        chunk[4096];
+            off_t       left;
 
-            CHECK(stat(img, &st) == 0);
-            cmd = rs_xasprintf("head -c %lld '%s' > '%s'", (long long)st.st_size - 2048, img, cut);
-            CHECK(system(cmd) == 0);
-            free(cmd);
+            CHECK(stat(img, &st) == 0 && in >= 0 && to >= 0);
+            left = st.st_size - 2048;
+            while (in >= 0 && to >= 0 && left > 0)
+            {
+                ssize_t n = read(in, chunk, left < (off_t)sizeof(chunk) ? (size_t)left : sizeof(chunk));
+
+                if (n <= 0 || write(to, chunk, (size_t)n) != n)
+                {
+                    break;
+                }
+                left -= n;
+            }
+            if (in >= 0)
+            {
+                (void)close(in);
+            }
+            if (to >= 0)
+            {
+                (void)close(to);
+            }
         }
         memset(&r, 0, sizeof(r));
         restore_into(&r, cut, &ix, root, &out, &errs);
