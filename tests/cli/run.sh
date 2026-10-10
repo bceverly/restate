@@ -107,6 +107,17 @@ file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+# Whether restate will run a program: where it looks, root's, and writable by
+# no one else (see run.c). Homebrew's gpg on macOS is the runner's, not root's.
+usable() {
+  for d in /usr/bin /usr/local/bin /bin; do
+    if [ -n "$(find -L "$d/$1" -prune -type f -user 0 ! -perm -020 ! -perm -002 2> /dev/null)" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # A file's inode number: GNU stat, or the BSDs'.
 inode() {
   stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"
@@ -235,7 +246,7 @@ contains "$OUT" '"name": "hello"' "packages lists what dpkg installed"
 contains "$OUT" '"http://deb.example.com/debian stable/main"' "and where it came from"
 contains "$OUT" '"unavailable": "local"' "and what no repository has"
 contains "$OUT" '"path": "/etc/apt/k.gpg"' "and the key the repository is signed with"
-if command -v gpgv > /dev/null 2>&1; then
+if usable gpgv; then
   contains "$OUT" '"problem": "http://deb.example.com/debian stable: apt has no index of it' \
     "and that apt cannot use it"
 fi
@@ -607,7 +618,7 @@ fi
 
 # Signed images: capture --sign-with, restate sign, and restore, verify and
 # diff --trusted-key. A throwaway key, in a GnuPG home of the test's own.
-if command -v gpg > /dev/null 2>&1 && command -v gpgv > /dev/null 2>&1; then
+if usable gpg && usable gpgv && usable gpgconf; then
   mkdir -m 700 gnupg
   gk() { GNUPGHOME="$WORK/gnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
   gk --quick-gen-key 'restate test <signer@example.invalid>' ed25519 sign never 2> /dev/null
@@ -706,15 +717,17 @@ fi
 
 # What is live: a process that looks like a database to /proc is named by
 # capture, and with --quiesce its hook pauses it while its files are copied.
-# A copy of sleep called redis-server, running in its data directory, is
-# Redis as far as /proc can tell. Root's, Linux's, and only on a machine with
+# A script called redis-server, running in its data directory, is Redis as far
+# as /proc can tell: a script's comm is its own name. (A copy of sleep is not,
+# where sleep is a multi-call coreutils that goes by the name it is run as.) Root's, Linux's, and only on a machine with
 # no /etc/restate of its own: the test puts a hook there and takes it away.
 if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ -d /proc/self ] && [ ! -e /etc/restate ] &&
    [ ! -e /srv/restate-redis ] && [ ! -e /var/lib/restate ]; then
   mkdir -p /srv/restate-redis /etc/restate/hooks.d
   echo data > /srv/restate-redis/dump.rdb
-  cp "$(command -v sleep)" "$WORK/redis-server"
-  ( cd /srv/restate-redis && exec "$WORK/redis-server" 600 ) &
+  printf '#!/bin/sh\ntrap "exit 0" TERM\nwhile :; do sleep 1; done\n' > "$WORK/redis-server"
+  chmod 0755 "$WORK/redis-server"
+  ( cd /srv/restate-redis && exec "$WORK/redis-server" ) &
   live_pid=$!
   printf '%s\n' 'ephemeral /*' 'state /srv' 'state /var' 'ephemeral /var/*' 'state /var/lib' \
     'ephemeral /var/lib/*' 'state /var/lib/restate' > live.rules
