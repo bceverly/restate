@@ -63,6 +63,11 @@ MAN_PAGE="${MAN_PAGE:-man/$PROG.8}"
 
 BIN_TARGET="$DESTDIR$BINDIR/$PROG"
 MAN_TARGET="$DESTDIR$MANDIR/man8/$PROG.8"
+# The hooks capture --quiesce runs: restate looks for them in
+# libexec/restate/hooks beside the directory it is installed in, so they go
+# there whatever the prefix -- /usr/local/sbin/restate finds
+# /usr/local/libexec/restate/hooks.
+HOOKS_TARGET="$DESTDIR$(dirname "$BINDIR")/libexec/$PROG/hooks"
 
 ok()   { printf '  \033[92m✓\033[0m %s\n' "$*"; }
 note() { printf '    \033[2m%s\033[0m\n' "$*"; }
@@ -124,6 +129,11 @@ if [ "$UNINSTALL" = "1" ]; then
   $SUDO rm -f "$BIN_TARGET" "$MAN_TARGET" "$MAN_TARGET.gz"
   ok "removed $BIN_TARGET"
   ok "removed $MAN_TARGET"
+  for hook in hooks/*; do
+    $SUDO rm -f "$HOOKS_TARGET/$(basename "$hook")"
+  done
+  $SUDO rmdir "$HOOKS_TARGET" "$(dirname "$HOOKS_TARGET")" 2> /dev/null || true
+  ok "removed $HOOKS_TARGET"
 else
   [ -x "bin/$PROG" ] || die "bin/$PROG is not built — run 'make build' first"
   [ -f "$MAN_PAGE" ] || die "$MAN_PAGE is missing — run 'make build' first"
@@ -135,6 +145,14 @@ else
   $SUDO install -d "$(dirname "$MAN_TARGET")"
   $SUDO install -m 0644 "$MAN_PAGE" "$MAN_TARGET"
   ok "installed $MAN_TARGET"
+
+  # 0755 and root's, directory too: restate runs a hook only if no one but
+  # root could have changed it.
+  $SUDO install -d -m 0755 "$HOOKS_TARGET"
+  for hook in hooks/*; do
+    $SUDO install -m 0755 "$hook" "$HOOKS_TARGET/$(basename "$hook")"
+  done
+  ok "installed the hooks in $HOOKS_TARGET"
 fi
 
 # ---------------------------------------------------------------------------

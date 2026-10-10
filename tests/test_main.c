@@ -218,6 +218,8 @@ int main(void)
     test_md5();
     test_pkgdb();
     test_xattr();
+    test_live();
+    test_sources();
     test_diff();
     test_opts();
     test_cmd();

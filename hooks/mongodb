@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: MongoDB, for capture --quiesce.
+#
+#   pause NAME    dump every database into $RESTATE_DUMP_DIR (mongodump, where
+#                 it is installed), then stop mongod
+#   resume NAME   start it again
+#
+# To change what this does, copy it to /etc/restate/hooks.d/mongodb (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+
+case "$action" in
+pause)
+  if [ -n "${RESTATE_DUMP_DIR:-}" ] && command -v mongodump > /dev/null 2>&1; then
+    mongodump --quiet --gzip --archive="$RESTATE_DUMP_DIR/mongodump.archive.gz.tmp"
+    mv -f "$RESTATE_DUMP_DIR/mongodump.archive.gz.tmp" "$RESTATE_DUMP_DIR/mongodump.archive.gz"
+  fi
+  systemctl stop mongod
+  ;;
+resume)
+  systemctl start mongod
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

@@ -44,7 +44,31 @@ struct walk {
     unsigned                   max_depth;
     bool                       failed;    /* the store callback gave up */
     bool                       forced;    /* visiting a kept path: state, whatever the rules */
+    bool                       deferring; /* visiting a deferred group, at the end */
 };
+
+/* Whether `path` is one the walk leaves to the end. */
+static bool deferred(const struct walk *w, const char *path)
+{
+    size_t g;
+    size_t i;
+
+    if (w->deferring || w->opts->count_only)
+    {
+        return false;
+    }
+    for (g = 0; g < w->opts->ndefer; g++)
+    {
+        for (i = 0; i < w->opts->defer[g].npaths; i++)
+        {
+            if (strcmp(w->opts->defer[g].paths[i], path) == 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 static char type_of(mode_t mode)
 {
@@ -605,6 +629,10 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     enum rs_class   cls;
     char            type;
 
+    if (deferred(w, tree_path))
+    {
+        return;
+    }
     if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) < 0)
     {
         unreadable(w, tree_path, errno);
@@ -773,53 +801,113 @@ static bool recorded(const struct rs_index *ix, const char *path)
     return false;
 }
 
-/* The paths in opts->keep, visited as state. One that is not there is not
- * recorded, and the caller, which knows what it was, says so. */
+/* Whether the walk would have gone into the ancestor of `path` that is its
+ * first `len` characters: neither ephemeral nor, without --all, expendable. */
+static bool reachable(const struct walk *w, const char *path, size_t len)
+{
+    char         *dir = rs_xstrndup(path, len);
+    enum rs_class cls = rs_rules_classify(w->opts->rules, dir, NULL);
+
+    free(dir);
+    return cls != RS_CLASS_EPHEMERAL && (cls != RS_CLASS_EXPENDABLE || w->opts->all);
+}
+
+/*
+ * Visits `path`, reached from the root one directory at a time and never
+ * through a symlink. One that is not there is not recorded, and the caller,
+ * which knows what it was, says so. Unless `forced`, nothing is visited
+ * beneath a directory the rules leave out, or on another filesystem under
+ * --one-file-system: what the walk itself would not have reached.
+ */
+static void visit_path(struct walk *w, int rootfd, const char *path, bool forced)
+{
+    struct stat st;
+    char       *copy;
+    char       *p;
+    char       *slash;
+    int         dirfd;
+    unsigned    depth = 0;
+    bool        reached = true;
+
+    if (!rs_path_is_clean(path) || strcmp(path, "/") == 0 ||
+        (!w->opts->count_only && recorded(w->out, path)))
+    {
+        return;
+    }
+    dirfd = dup(rootfd);
+    copy = rs_xstrdup(path + 1);
+    p = copy;
+    while (dirfd >= 0 && (slash = strchr(p, '/')) != NULL)
+    {
+        int next;
+
+        *slash = '\0';
+        if (!forced && !reachable(w, path, (size_t)(slash - copy) + 1))
+        {
+            reached = false;
+            break;
+        }
+        next = open_at(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        (void)close(dirfd);
+        dirfd = next;
+        p = slash + 1;
+        depth++;
+    }
+    if (reached && dirfd >= 0 && !forced && w->opts->one_fs)
+    {
+        struct stat dir;
+
+        reached = fstat(dirfd, &dir) == 0 && dir.st_dev == w->root_dev;
+    }
+    if (reached && dirfd >= 0 && fstatat(dirfd, p, &st, AT_SYMLINK_NOFOLLOW) == 0)
+    {
+        w->forced = forced;
+        visit(w, dirfd, p, path, depth);
+        w->forced = false;
+    }
+    if (dirfd >= 0)
+    {
+        (void)close(dirfd);
+    }
+    free(copy);
+}
+
+/* The paths in opts->keep, visited as state. */
 static void visit_kept(struct walk *w, int rootfd)
 {
     size_t k;
 
     for (k = 0; k < w->opts->nkeep; k++)
     {
-        const char *path = w->opts->keep[k];
-        struct stat st;
-        char       *copy;
-        char       *p;
-        char       *slash;
-        int         dirfd;
-        unsigned    depth = 0;
-
-        if (!rs_path_is_clean(path) || strcmp(path, "/") == 0 ||
-            (!w->opts->count_only && recorded(w->out, path)))
-        {
-            continue;
-        }
-        dirfd = dup(rootfd);
-        copy = rs_xstrdup(path + 1);
-        p = copy;
-        while (dirfd >= 0 && (slash = strchr(p, '/')) != NULL)
-        {
-            int next;
-
-            *slash = '\0';
-            next = open_at(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            (void)close(dirfd);
-            dirfd = next;
-            p = slash + 1;
-            depth++;
-        }
-        if (dirfd >= 0 && fstatat(dirfd, p, &st, AT_SYMLINK_NOFOLLOW) == 0)
-        {
-            w->forced = true;
-            visit(w, dirfd, p, path, depth);
-            w->forced = false;
-        }
-        if (dirfd >= 0)
-        {
-            (void)close(dirfd);
-        }
-        free(copy);
+        visit_path(w, rootfd, w->opts->keep[k], true);
     }
+}
+
+/* Each deferred group, between its two calls of opts->around. False if the
+ * first call said to stop. */
+static bool visit_deferred(struct walk *w, int rootfd)
+{
+    size_t g;
+
+    for (g = 0; g < w->opts->ndefer && !w->failed; g++)
+    {
+        const struct rs_scan_group *grp = &w->opts->defer[g];
+        bool                        go = w->opts->around(w->opts->around_ctx, g, true);
+        size_t                      i;
+
+        w->deferring = true;
+        for (i = 0; go && i < grp->npaths && !w->failed; i++)
+        {
+            visit_path(w, rootfd, grp->paths[i], false);
+        }
+        w->deferring = false;
+        (void)w->opts->around(w->opts->around_ctx, g, false);
+        if (!go)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
@@ -885,6 +973,12 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     if (!w.failed)
     {
         visit_kept(&w, fd);
+    }
+    if (!w.failed && opts->ndefer > 0 && !visit_deferred(&w, fd))
+    {
+        (void)close(fd);
+        rs_buf_addstr(err, "interrupted");
+        return false;
     }
     (void)close(fd);
     if (w.failed)

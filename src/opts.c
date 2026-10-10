@@ -151,6 +151,9 @@ void rs_options_free(struct rs_options *o)
     free(o->recipients);
     o->recipients = NULL;
     o->nrecipients = 0;
+    free(o->trusted);
+    o->trusted = NULL;
+    o->ntrusted = 0;
     free(o->debs);
     o->debs = NULL;
     o->ndebs = 0;
@@ -217,6 +220,16 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
                                              sizeof(*o->recipients));
             o->recipients[o->nrecipients++] = optarg;
             break;
+        case OPT_SIGN_WITH:
+            o->sign_with = optarg;
+            break;
+        case OPT_TRUSTED_KEY:
+            o->trusted = rs_xreallocarray(o->trusted, o->ntrusted + 1, sizeof(*o->trusted));
+            o->trusted[o->ntrusted++] = optarg;
+            break;
+        case OPT_ALLOW_UNVERIFIED:
+            o->allow_unverified = true;
+            break;
         case OPT_TARGET:
             if (strcmp(optarg, "vm") != 0 && strcmp(optarg, "metal") != 0)
             {
@@ -240,6 +253,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_RULES_ONLY:
             o->rules_only = true;
+            break;
+        case OPT_QUIESCE:
+            o->quiesce = true;
             break;
         case OPT_DEB:
             o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));
@@ -424,6 +440,7 @@ void rs_print_help(FILE *out)
                        "  1  differences were found\n"
                        "  2  trouble: a usage error, a bad image, index or rules file, an I/O error\n"
                        "  3  the scan finished, but some files could not be read\n"
+                       "  4  the image is not signed by a --trusted-key, and was not used\n"
                        "\n"
                        "Examples:\n"
                        "  restate capture -o /var/backups/web01.tar\n"

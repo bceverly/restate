@@ -5,12 +5,13 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs five programs, each for something it should not do itself:
+ * restate runs six programs, each for something it should not do itself:
  * gzip (compression), pigz (the same compression on every core, where it is
- * installed), curl (HTTPS), gpgv (OpenPGP signature checks) and gpg
- * (encrypting and decrypting images). Writing a compressor, a TLS stack or an OpenPGP implementation
- * here would be hundreds of lines of exactly the code that should not be
- * written twice; linking a library for them would end "links nothing but
+ * installed), curl (HTTPS), gpgv (OpenPGP signature checks), gpg (encrypting,
+ * decrypting and signing images) and gpgconf (stopping the gpg-agent a
+ * signature started in a throwaway home). Writing a compressor, a TLS stack
+ * or an OpenPGP implementation here would be hundreds of lines of exactly the
+ * code that should not be written twice; linking a library for them would end "links nothing but
  * libc". As separate processes their code stays out of this address space.
  *
  * Each is found at a fixed absolute path -- never through $PATH, because
@@ -21,6 +22,10 @@
  * LC_ALL plus what that one program needs: the proxy variables for curl, and
  * for gpg the home, terminal and display it finds a key and asks for its
  * passphrase with.
+ *
+ * And, with capture --quiesce, hooks: the scripts that pause a database or a
+ * VM while its files are copied (hooks.h), held to the same rule of being
+ * root's and writable by no one else, file and directory.
  */
 #ifndef RESTATE_RUN_H
 #define RESTATE_RUN_H
@@ -37,10 +42,11 @@ enum rs_program {
     RS_PROG_GPGV,
     RS_PROG_GPG,
     RS_PROG_PIGZ,
+    RS_PROG_GPGCONF,
     RS_PROG_COUNT
 };
 
-/* "gzip", "curl", "gpgv", "gpg", "pigz". */
+/* "gzip", "curl", "gpgv", "gpg", "pigz", "gpgconf". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or
@@ -75,5 +81,20 @@ bool rs_wait(pid_t pid, int *code, struct rs_buf *err);
  */
 bool rs_run(enum rs_program p, char *const argv[], struct rs_buf *out, struct rs_buf *errtext,
             int *code, struct rs_buf *err);
+
+/* Whether `path` is a file restate would run: an executable regular file,
+ * it and its directory root's and writable by no one else. */
+bool rs_hook_usable(const char *path);
+
+/*
+ * Runs the hook at `path` with `argv`, and an environment of PATH (the
+ * system's administration directories), LC_ALL and the "NAME=value" strings
+ * in `env` (NULL-terminated, at most 16). Its standard input, output and error
+ * are restate's own. It is stopped -- SIGTERM, then SIGKILL -- once it has run
+ * `timeout` seconds. True if it ran to an end, with *code as rs_wait's; false,
+ * with the reason in `err`, if it could not be run or had to be stopped.
+ */
+bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsigned timeout,
+                 int *code, struct rs_buf *err);
 
 #endif /* RESTATE_RUN_H */

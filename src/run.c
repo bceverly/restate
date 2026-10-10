@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *const gzip_paths[] = { "/usr/bin/gzip", "/bin/gzip" };
@@ -24,6 +25,8 @@ static const char *const curl_paths[] = { "/usr/bin/curl", "/usr/local/bin/curl"
 static const char *const gpgv_paths[] = { "/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv" };
 static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg" };
 static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz" };
+static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin/gpgconf",
+                                             "/bin/gpgconf" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -38,6 +41,8 @@ static const char *const gpg_env[] = {
 };
 
 #define ENV_MAX 8
+/* What a hook is given beyond PATH and LC_ALL. */
+#define HOOK_ENV_MAX 16
 
 struct program {
     const char        *name;
@@ -57,6 +62,7 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("gpgv", gpgv_paths, no_env),
     PROGRAM("gpg", gpg_paths, gpg_env),
     PROGRAM("pigz", pigz_paths, no_env),
+    PROGRAM("gpgconf", gpgconf_paths, no_env),
 };
 
 #undef PROGRAM
@@ -123,19 +129,57 @@ const char *rs_program_path(enum rs_program p)
     return NULL;
 }
 
+/* Starts `path` with the descriptors given and `envp`; posix_spawn's code. */
+static int spawn_one(const char *path, char *const argv[], char *const envp[], int in_fd,
+                     int out_fd, int err_fd, pid_t *pid)
+{
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t          attr;
+    sigset_t                   reset;
+    sigset_t                   none;
+    int                        rc;
+
+    (void)posix_spawn_file_actions_init(&actions);
+    (void)posix_spawnattr_init(&attr);
+    if (in_fd >= 0)
+    {
+        (void)posix_spawn_file_actions_adddup2(&actions, in_fd, STDIN_FILENO);
+    }
+    if (out_fd >= 0)
+    {
+        (void)posix_spawn_file_actions_adddup2(&actions, out_fd, STDOUT_FILENO);
+    }
+    if (err_fd >= 0)
+    {
+        (void)posix_spawn_file_actions_adddup2(&actions, err_fd, STDERR_FILENO);
+    }
+    /* SIGPIPE may be ignored here while an image is written, and an ignored
+     * signal survives exec; the child should die of it like any filter. And
+     * restate blocks the signals that would stop it while a service is
+     * paused -- it must not die before resuming it -- which a child would
+     * inherit: it gets none blocked, so a Ctrl-C still stops a hook. */
+    (void)sigemptyset(&reset);
+    (void)sigaddset(&reset, SIGPIPE);
+    (void)sigemptyset(&none);
+    (void)posix_spawnattr_setsigdefault(&attr, &reset);
+    (void)posix_spawnattr_setsigmask(&attr, &none);
+    (void)posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    rc = posix_spawn(pid, path, &actions, &attr, argv, envp);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    (void)posix_spawnattr_destroy(&attr);
+    return rc;
+}
+
 bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int err_fd,
               pid_t *pid, struct rs_buf *err)
 {
     /* posix_spawn takes char *const[] and string literals are const, so the
      * environment is built from writable copies and nothing is cast. */
-    const struct program      *prog;
-    char                      *envp[2 + ENV_MAX + 1];
-    size_t                     nenv = 0;
-    posix_spawn_file_actions_t actions;
-    posix_spawnattr_t          attr;
-    sigset_t                   reset;
-    size_t                     i;
-    int                        rc = ENOENT;
+    const struct program *prog;
+    char                 *envp[2 + ENV_MAX + 1];
+    size_t                nenv = 0;
+    size_t                i;
+    int                   rc = ENOENT;
 
     /* Every caller passes one of the enum's values; checked anyway, since
      * it indexes the table. */
@@ -160,41 +204,18 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
     }
     envp[nenv] = NULL;
 
-    (void)posix_spawn_file_actions_init(&actions);
-    (void)posix_spawnattr_init(&attr);
-    if (in_fd >= 0)
-    {
-        (void)posix_spawn_file_actions_adddup2(&actions, in_fd, STDIN_FILENO);
-    }
-    if (out_fd >= 0)
-    {
-        (void)posix_spawn_file_actions_adddup2(&actions, out_fd, STDOUT_FILENO);
-    }
-    if (err_fd >= 0)
-    {
-        (void)posix_spawn_file_actions_adddup2(&actions, err_fd, STDERR_FILENO);
-    }
-    /* SIGPIPE may be ignored here while an image is written, and an ignored
-     * signal survives exec; the child should die of it like any filter. */
-    (void)sigemptyset(&reset);
-    (void)sigaddset(&reset, SIGPIPE);
-    (void)posix_spawnattr_setsigdefault(&attr, &reset);
-    (void)posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF);
-
     for (i = 0; i < prog->npaths; i++)
     {
         if (!usable(prog->paths[i]))
         {
             continue;
         }
-        rc = posix_spawn(pid, prog->paths[i], &actions, &attr, argv, envp);
+        rc = spawn_one(prog->paths[i], argv, envp, in_fd, out_fd, err_fd, pid);
         if (rc == 0)
         {
             break;
         }
     }
-    (void)posix_spawn_file_actions_destroy(&actions);
-    (void)posix_spawnattr_destroy(&attr);
     for (i = 0; i < nenv; i++)
     {
         free(envp[i]);
@@ -214,6 +235,103 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
         return false;
     }
     return true;
+}
+
+bool rs_hook_usable(const char *path)
+{
+    return usable(path);
+}
+
+/* Waits for `pid` until `deadline` (seconds since the epoch, by the monotonic
+ * clock); then asks it to stop, and after a few seconds more makes it. */
+static bool wait_until(pid_t pid, time_t deadline, int *code, bool *late, struct rs_buf *err)
+{
+    struct timespec nap = { 0, 50L * 1000 * 1000 };
+    struct timespec now;
+    int             status = 0;
+    int             sig = 0;
+
+    *late = false;
+    for (;;)
+    {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+
+        if (r == pid)
+        {
+            break;
+        }
+        if (r < 0 && errno != EINTR)
+        {
+            rs_buf_addf(err, "waiting for a child process: %s", strerror(errno));
+            return false;
+        }
+        (void)clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec >= deadline)
+        {
+            /* SIGTERM first; SIGKILL if that has not done it in five more. */
+            *late = true;
+            sig = sig == 0 ? SIGTERM : SIGKILL;
+            (void)kill(pid, sig);
+            deadline = now.tv_sec + 5;
+        }
+        (void)nanosleep(&nap, NULL);
+    }
+    if (WIFEXITED(status))
+    {
+        *code = WEXITSTATUS(status);
+    } else
+    {
+        *code = WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 255;
+    }
+    return true;
+}
+
+bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsigned timeout,
+                 int *code, struct rs_buf *err)
+{
+    char           *envp[2 + HOOK_ENV_MAX + 1];
+    size_t          nenv = 0;
+    size_t          i;
+    pid_t           pid;
+    int             rc;
+    bool            late = false;
+    bool            ok;
+    struct timespec now;
+
+    if (!usable(path))
+    {
+        rs_buf_addf(err, "%s: not run: it and its directory must be root's, and writable by "
+                         "no one else", path);
+        return false;
+    }
+    /* Where the administration tools a hook runs live, /snap/bin (lxc)
+     * among them; nothing from the environment restate was started with. */
+    envp[nenv++] = rs_xstrdup("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"
+                              "/snap/bin");
+    envp[nenv++] = rs_xstrdup("LC_ALL=C");
+    for (i = 0; env && env[i] && i < HOOK_ENV_MAX; i++)
+    {
+        envp[nenv++] = rs_xstrdup(env[i]);
+    }
+    envp[nenv] = NULL;
+    rc = spawn_one(path, argv, envp, -1, -1, -1, &pid);
+    for (i = 0; i < nenv; i++)
+    {
+        free(envp[i]);
+    }
+    if (rc != 0)
+    {
+        rs_buf_addf(err, "could not run %s: %s", path, strerror(rc));
+        return false;
+    }
+    (void)clock_gettime(CLOCK_MONOTONIC, &now);
+    ok = wait_until(pid, now.tv_sec + (time_t)timeout, code, &late, err);
+    if (ok && late)
+    {
+        rs_buf_addf(err, "%s took longer than %u seconds, and was stopped", path, timeout);
+        return false;
+    }
+    return ok;
 }
 
 bool rs_wait(pid_t pid, int *code, struct rs_buf *err)

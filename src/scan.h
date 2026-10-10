@@ -47,6 +47,12 @@
 typedef bool (*rs_store_fn)(void *ctx, struct rs_entry *e, int fd,
                             const struct stat *st, struct rs_buf *err);
 
+/* A group of paths walked last, between two calls of rs_scan_opts.around. */
+struct rs_scan_group {
+    const char *const *paths;
+    size_t             npaths;
+};
+
 struct rs_scan_opts {
     const char            *root;      /* the directory to treat as "/" */
     const struct rs_rules *rules;
@@ -82,6 +88,20 @@ struct rs_scan_opts {
      * so the rules' "baseline" comes to mean "where only packages put
      * files", and a scan no longer takes that on trust. */
     const struct rs_pkgdb *pkgdb;
+    /*
+     * Paths the walk leaves to the end, in groups: everything else first,
+     * then for each group in turn around(around_ctx, i, true), the group's
+     * paths walked as they would have been, and around(around_ctx, i,
+     * false). capture --quiesce pauses a database or a VM in the first call
+     * and resumes it in the second, so it is paused only while its own
+     * files are copied. The second call is made whatever the first returned;
+     * the first returning false stops the walk there (an interrupted
+     * capture), and rs_scan then fails with "interrupted".
+     */
+    const struct rs_scan_group *defer;
+    size_t                      ndefer;
+    bool                        (*around)(const void *ctx, size_t group, bool before);
+    const void                 *around_ctx;
 };
 
 struct rs_scan_stats {

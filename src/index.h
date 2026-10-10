@@ -134,6 +134,9 @@ struct rs_index {
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
     struct rs_jval   packages;  /* what is installed, or null; see packages.h */
     bool             in_parts;  /* read from an image in parts (image.h); not written */
+    /* The SHA-256 of the index part's bytes as read from the image, "" if
+     * it was not read from one: what its signature covers. Not written. */
+    char             part_sha256[RS_SHA256_HEX_SIZE];
 };
 
 void rs_index_init(struct rs_index *ix);

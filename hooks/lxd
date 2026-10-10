@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: an LXD container, for capture --quiesce.
+#
+#   pause NAME    freeze the container (lxc pause): its processes stop where
+#                 they are, so its files stop changing
+#   resume NAME   thaw it again -- unless it was frozen before
+#
+# To change what this does, copy it to /etc/restate/hooks.d/lxd (root's, mode
+# 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+name=$2
+state=/run/restate/hooks
+(umask 077 && mkdir -p "$state")
+mark="$state/lxd-$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+
+case "$action" in
+pause)
+  rm -f "$mark"
+  if [ "$(lxc list "$name" --columns s --format csv)" = RUNNING ]; then
+    lxc pause "$name"
+    : > "$mark"
+  fi
+  ;;
+resume)
+  if [ -e "$mark" ]; then
+    lxc start "$name"
+    rm -f "$mark"
+  fi
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

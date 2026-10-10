@@ -436,7 +436,7 @@ static bool to_buf(void *ctx, const void *data, size_t n)
  * ustar header -- so its place is kept with zeros first.
  */
 static bool write_part(const struct part *pt, int out, const struct rs_time *mtime,
-                       struct rs_buf *err)
+                       uint64_t *data_at, uint64_t *data_len, struct rs_buf *err)
 {
     static const unsigned char zero[3 * RS_TAR_BLOCK];
     struct rs_tar_member       m;
@@ -494,6 +494,9 @@ static bool write_part(const struct part *pt, int out, const struct rs_time *mti
         uint64_t size = (uint64_t)(end - at) - sizeof(zero);
         size_t   pad = (size_t)((RS_TAR_BLOCK - size % RS_TAR_BLOCK) % RS_TAR_BLOCK);
 
+        *data_at = (uint64_t)at + sizeof(zero);
+        *data_len = size;
+
         name = rs_xasprintf("%s%s", pt->name, sealed ? ".gpg" : "");
         memset(&m, 0, sizeof(m));
         m.name = name;
@@ -518,6 +521,73 @@ static bool write_part(const struct part *pt, int out, const struct rs_time *mti
     return ok;
 }
 
+/* A member of `len` bytes at `data`, header, data and padding, into `out`. */
+static bool write_member(int out, const char *name, const void *data, size_t len,
+                         const struct rs_time *mtime)
+{
+    static const unsigned char zero[RS_TAR_BLOCK];
+    struct rs_tar_member       m;
+    struct rs_tar_writer       tw;
+    struct rs_buf              head;
+    bool                       ok;
+
+    memset(&m, 0, sizeof(m));
+    m.name = name;
+    m.typeflag = '0';
+    m.mode = 0600;
+    m.uid = (uint64_t)geteuid();
+    m.gid = (uint64_t)getegid();
+    m.size = len;
+    m.mtime = *mtime;
+    rs_buf_init(&head);
+    rs_tar_writer_init(&tw, to_buf, &head);
+    ok = rs_tar_header(&tw, &m) && write_all(out, head.data, head.len) &&
+         write_all(out, data, len) &&
+         write_all(out, zero, (RS_TAR_BLOCK - len % RS_TAR_BLOCK) % RS_TAR_BLOCK);
+    rs_buf_free(&head);
+    return ok;
+}
+
+/* Copies `len` bytes of `from` at `offset` into a new file `path`. */
+static bool copy_out(int from, uint64_t offset, uint64_t len, const char *path,
+                     struct rs_buf *err)
+{
+    int  to = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    bool ok;
+
+    if (to < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        return false;
+    }
+    ok = copy_range(from, offset, len, to, err);
+    if (close(to) != 0 && ok)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
+
+/* The signature over the `len` bytes of `fd` at `offset`, by `keyfile`. */
+static bool sign_range(int fd, uint64_t offset, uint64_t len, const char *keyfile,
+                       struct rs_buf *sig, struct rs_pgp_signer *signer, struct rs_buf *err)
+{
+    char *dir = rs_pgp_home(err);
+    char *data;
+    bool  ok;
+
+    if (!dir)
+    {
+        return false;
+    }
+    data = rs_xasprintf("%s/index", dir);
+    ok = copy_out(fd, offset, len, data, err) && rs_pgp_sign(keyfile, data, sig, signer, err);
+    free(data);
+    rs_pgp_home_remove(dir);
+    return ok;
+}
+
 bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
                      struct rs_buf *err)
 {
@@ -525,6 +595,7 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     struct sigaction saved;
     struct rs_time   mtime;
     struct part      parts[3];
+    struct rs_buf    sig;
     char            *tmp = NULL;
     char            *text;
     size_t           len = 0;
@@ -532,6 +603,7 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     int              out;
     bool             ok = true;
 
+    rs_buf_init(&sig);
     text = index_text(ix, &len);
     if (!text)
     {
@@ -580,8 +652,22 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     parts[2].produce = produce_files;
     for (i = 0; ok && i < sizeof(parts) / sizeof(parts[0]); i++)
     {
+        uint64_t data_at = 0;
+        uint64_t data_len = 0;
+
         parts[i].iw = iw;
-        ok = write_part(&parts[i], out, &mtime, err);
+        ok = write_part(&parts[i], out, &mtime, &data_at, &data_len, err);
+        /* Signed as soon as the index is written, before the long copy of
+         * the files: gpg may ask for the key's passphrase. */
+        if (ok && i == 0 && iw->sign_with)
+        {
+            ok = sign_range(out, data_at, data_len, iw->sign_with, &sig, &iw->signer, err);
+        }
+    }
+    if (ok && sig.len > 0 && !write_member(out, RS_IMAGE_SIG_PART, sig.data, sig.len, &mtime))
+    {
+        rs_buf_addf(err, "%s: %s", tmp, strerror(errno));
+        ok = false;
     }
     if (ok && !tar_end(out))
     {
@@ -611,6 +697,7 @@ bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
     }
     free(tmp);
     free(text);
+    rs_buf_free(&sig);
     rs_image_abort(iw);
     return ok;
 }
@@ -630,7 +717,7 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
 }
 
 void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
-                              bool fstab)
+                              bool fstab, const char *trust)
 {
     const char *prefix = strcmp(dest, "/") == 0 ? "" : dest;
 
@@ -652,6 +739,10 @@ void rs_image_restore_command(struct rs_buf *out, const char *image, const char 
     if (fstab)
     {
         rs_buf_addstr(out, " --exclude /etc/fstab --exclude /etc/crypttab");
+    }
+    if (trust && *trust)
+    {
+        rs_buf_addf(out, " %s", trust);
     }
     rs_buf_addc(out, ' ');
     rs_shell_word(out, image);
@@ -771,7 +862,8 @@ static bool index_from_image(int fd, const char *path, bool sealed, struct rs_bu
  * read as it is -- a few megabytes of gzip -- and only then given to gzip
  * (and gpg), from a temporary file, so neither ever sees the rest.
  */
-static bool index_from_parts(int fd, const char *path, struct rs_buf *text, struct rs_buf *err)
+static bool index_from_parts(int fd, const char *path, struct rs_buf *text,
+                             char digest[RS_SHA256_HEX_SIZE], struct rs_buf *err)
 {
     struct rs_buf  name;
     struct rs_buf  packed;
@@ -802,6 +894,9 @@ static bool index_from_parts(int fd, const char *path, struct rs_buf *text, stru
     }
     if (ok)
     {
+        /* What a signature over the index covers, so a check of it can be
+         * matched with what was read here. */
+        rs_sha256_hex(packed.len > 0 ? packed.data : "", packed.len, digest);
         tmp = tmpfile();
         ok = tmp && (packed.len == 0 || fwrite(packed.data, 1, packed.len, tmp) == packed.len) &&
              fflush(tmp) == 0 && lseek(fileno(tmp), 0, SEEK_SET) == 0;
@@ -1158,7 +1253,7 @@ bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
         /* An image in parts: a tar archive, "ustar" at 257 of its first block. */
         if (got == (ssize_t)sizeof(magic) && memcmp(magic + 257, "ustar", 5) == 0)
         {
-            ok = index_from_parts(fd, path, &text, err);
+            ok = index_from_parts(fd, path, &text, ix->part_sha256, err);
             (void)close(fd);
             ok = ok && rs_index_parse(ix, text.data, text.len, name, err);
             ix->in_parts = ok;
@@ -1190,4 +1285,280 @@ bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
     ok = ok && rs_index_parse(ix, text.data, text.len, name, err);
     rs_buf_free(&text);
     return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Signatures                                                                */
+/* ------------------------------------------------------------------------- */
+
+/* A signature is a few hundred bytes; anything this large is not one. */
+#define SIG_MAX ((size_t)64 * 1024)
+
+/* Reads the current member's data, all of it, into `out`, up to `max`. */
+static bool member_data(struct rs_tar_reader *r, size_t max, struct rs_buf *out,
+                        struct rs_buf *err)
+{
+    char    chunk[65536];
+    ssize_t n;
+
+    if (r->left > max)
+    {
+        rs_buf_addstr(err, "larger than restate writes");
+        return false;
+    }
+    while ((n = rs_tar_read(r, chunk, sizeof(chunk), err)) > 0)
+    {
+        rs_buf_add(out, chunk, (size_t)n);
+    }
+    return n == 0;
+}
+
+/*
+ * Walks the members of the image in parts open on `fd`: the first, which
+ * must be the index part, read into `index_part`; the signature, if there is
+ * one, into `sig`. Where the archive's members end is put in *end, which is
+ * where another goes.
+ */
+static bool walk_parts(int fd, const char *path, struct rs_buf *index_part, struct rs_buf *sig,
+                       off_t *end, struct rs_buf *err)
+{
+    unsigned char        magic[RS_TAR_BLOCK];
+    struct rs_tar_reader r;
+    struct rs_tar_entry  e;
+    struct rs_buf        why;
+    size_t               k = 0;
+    int                  more;
+    bool                 ok = true;
+
+    if (pread(fd, magic, sizeof(magic), 0) != (ssize_t)sizeof(magic) ||
+        memcmp(magic + 257, "ustar", 5) != 0)
+    {
+        rs_buf_addf(err, "%s: not an image in parts (a bare index, or an image from before "
+                    "restate 1.1), which has nowhere for a signature", path);
+        return false;
+    }
+    rs_buf_init(&why);
+    rs_tar_reader_init(&r, read_fd, &fd);
+    rs_tar_entry_init(&e);
+    *end = 0;
+    while (ok && (more = rs_tar_next(&r, &e, &why)) == 1)
+    {
+        const char *name = e.name.data;
+
+        if (k++ == 0)
+        {
+            if (strcmp(name, RS_IMAGE_INDEX_PART) != 0 &&
+                strcmp(name, RS_IMAGE_INDEX_PART ".gpg") != 0)
+            {
+                rs_buf_addf(err, "%s: not a restate image (it does not start with %s)", path,
+                            RS_IMAGE_INDEX_PART);
+                ok = false;
+            } else if (!member_data(&r, RS_IMAGE_INDEX_MAX, index_part, &why))
+            {
+                rs_buf_addf(err, "%s: its index: %s", path, why.data);
+                ok = false;
+            }
+        } else if (strcmp(name, RS_IMAGE_SIG_PART) == 0)
+        {
+            rs_buf_reset(sig);
+            if (!member_data(&r, SIG_MAX, sig, &why))
+            {
+                rs_buf_addf(err, "%s: its signature: %s", path, why.data);
+                ok = false;
+            }
+        } else if (lseek(fd, (off_t)(r.left + r.pad), SEEK_CUR) < 0)
+        {
+            rs_buf_addf(err, "%s: %s", path, strerror(errno));
+            ok = false;
+        } else
+        {
+            r.left = 0;
+            r.pad = 0;
+        }
+        if (ok && r.left == 0)
+        {
+            /* Past this member's data and its padding. */
+            off_t at = lseek(fd, 0, SEEK_CUR);
+
+            *end = at < 0 ? 0 : at + (off_t)r.pad;
+        }
+    }
+    if (ok && more < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, why.data);
+        ok = false;
+    }
+    rs_tar_entry_free(&e);
+    rs_buf_free(&why);
+    return ok;
+}
+
+bool rs_image_signed_bytes(const char *path, struct rs_buf *index_part, struct rs_buf *sig,
+                           struct rs_buf *err)
+{
+    int   fd = open(path, O_RDONLY | O_CLOEXEC);
+    off_t end;
+    bool  ok;
+
+    if (fd < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        return false;
+    }
+    ok = walk_parts(fd, path, index_part, sig, &end, err);
+    (void)close(fd);
+    return ok;
+}
+
+bool rs_image_add_signature(const char *path, const void *sig, size_t len, struct rs_buf *err)
+{
+    struct rs_buf  index_part;
+    struct rs_buf  old;
+    struct rs_time mtime;
+    off_t          end = 0;
+    int            fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    bool           ok;
+
+    if (fd < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        return false;
+    }
+    rs_buf_init(&index_part);
+    rs_buf_init(&old);
+    ok = walk_parts(fd, path, &index_part, &old, &end, err);
+    if (ok && old.len > 0)
+    {
+        rs_buf_addf(err, "%s: it is signed already", path);
+        ok = false;
+    }
+    memset(&mtime, 0, sizeof(mtime));
+    mtime.sec = (int64_t)time(NULL);
+    mtime.set = true;
+    /* Over the end-of-archive blocks: the signature, then a new end. */
+    ok = ok && end > 0 && lseek(fd, end, SEEK_SET) == end &&
+         write_member(fd, RS_IMAGE_SIG_PART, sig, len, &mtime) && tar_end(fd) && fsync(fd) == 0;
+    if (!ok && err->len == 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+    }
+    if (close(fd) != 0 && ok)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        ok = false;
+    }
+    rs_buf_free(&index_part);
+    rs_buf_free(&old);
+    return ok;
+}
+
+bool rs_image_trusted(const char *path, const char *const *trusted, size_t n,
+                      struct rs_pgp_signer *signer, char digest[RS_SHA256_HEX_SIZE],
+                      struct rs_buf *why)
+{
+    struct rs_buf index_part;
+    struct rs_buf sig;
+    struct rs_buf status;
+    char         *home;
+    char        **rings;
+    size_t        nrings = 0;
+    size_t        i;
+    bool          ok;
+
+    memset(signer, 0, sizeof(*signer));
+    digest[0] = '\0';
+    rs_buf_init(&index_part);
+    rs_buf_init(&sig);
+    if (!rs_image_signed_bytes(path, &index_part, &sig, why))
+    {
+        rs_buf_reset(why);
+        rs_buf_addstr(why, "it is not signed");
+        rs_buf_free(&index_part);
+        return false;
+    }
+    rs_sha256_hex(index_part.data ? index_part.data : "", index_part.len, digest);
+    if (sig.len == 0)
+    {
+        rs_buf_addstr(why, "it is not signed");
+        rs_buf_free(&index_part);
+        return false;
+    }
+    home = rs_pgp_home(why);
+    if (!home)
+    {
+        rs_buf_free(&index_part);
+        rs_buf_free(&sig);
+        return false;
+    }
+    rings = rs_xcalloc(n + 1, sizeof(*rings));
+    {
+        char *data = rs_xasprintf("%s/index", home);
+        char *sigfile = rs_xasprintf("%s/index.sig", home);
+        int   fd = open(data, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        int   sfd = open(sigfile, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+
+        ok = fd >= 0 && sfd >= 0 && write_all(fd, index_part.data, index_part.len) &&
+             write_all(sfd, sig.data, sig.len);
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        if (sfd >= 0)
+        {
+            (void)close(sfd);
+        }
+        if (!ok)
+        {
+            rs_buf_addf(why, "%s: %s", home, strerror(errno));
+        }
+        for (i = 0; ok && i < n; i++)
+        {
+            rings[nrings] = rs_xasprintf("%s/trusted%zu.gpg", home, i);
+            ok = rs_pgp_keyring(trusted[i], rings[nrings], why);
+            nrings++;
+        }
+        rs_buf_init(&status);
+        ok = ok && rs_pgp_gpgv(home, (const char *const *)rings, nrings, sigfile, data, &status,
+                               why);
+        ok = ok && rs_pgp_verdict(status.data ? status.data : "", signer, why);
+        rs_buf_free(&status);
+        free(data);
+        free(sigfile);
+    }
+    for (i = 0; i < nrings; i++)
+    {
+        free(rings[i]);
+    }
+    free(rings);
+    rs_pgp_home_remove(home);
+    rs_buf_free(&index_part);
+    rs_buf_free(&sig);
+    return ok;
+}
+
+bool rs_image_knows_trust(const char *version)
+{
+    /* Signing came after 1.2.0.1: anything later, its -dev builds too.
+     * Every release is numbered; a version that is not is a build of no
+     * release, made from code newer than all of them. */
+    static const unsigned long first[4] = { 1, 2, 0, 2 };
+    const char                *p = version ? version : "";
+    size_t                     i;
+
+    for (i = 0; i < 4; i++)
+    {
+        char         *end;
+        unsigned long v = strtoul(p, &end, 10);
+
+        if (end == p)
+        {
+            return i == 0 && version && version[0] != '\0';
+        }
+        if (v != first[i])
+        {
+            return v > first[i];
+        }
+        p = end + (*end == '.' ? 1 : 0);
+    }
+    return true;
 }

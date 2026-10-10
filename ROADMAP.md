@@ -120,10 +120,15 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       `.snap` of each snap installed from a file
 - [ ] Superseded versions from snapshot.ubuntu.com, where a pinned version
       has left the archive
-- [ ] **Repositories apt can no longer use:** check each source's InRelease
-      against the keys it names (gpgv, and the key's expiry) at capture, and
-      warn -- the second rebuild found HashiCorp and NordLayer refused, as
-      they had been on the laptop for months, unnoticed
+- [x] **Repositories apt can no longer use:** each source's index as apt
+      last fetched it (InRelease, or Release and Release.gpg) checked with
+      gpgv against the keys the source names -- armored ones too -- and its
+      Valid-Until against the clock; each one apt cannot use gets a
+      "problem" in the inventory, and capture warns -- the second rebuild
+      found HashiCorp and NordLayer refused, as they had been on the laptop
+      for months, unnoticed
+- [ ] The same against what each source serves today (curl), for a vendor
+      that changed keys since the last `apt update`
 - [x] **The image in parts:** the index, a kit (/etc/apt and the kept
       packages) and the files, each compressed (and encrypted) on its own in
       an uncompressed tar, so a rebuild has the kit in seconds rather than
@@ -215,30 +220,32 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       snapshot archive, or kept `.deb` files), remove what the vendor ships
       and the machine did not have, lay down the kept content, and restore
       owners — mapped by name — modes, times and attributes
-- [ ] **Signed images, and a restore that refuses a tampered one.**
+- [x] **Signed images, and a restore that refuses a tampered one.**
       Encryption is not authentication: `--encrypt-to` needs only a public
       key, so anyone holding it can make an image that decrypts cleanly. So:
-  - `capture --sign-with KEYFILE` signs the index with an OpenPGP secret key
-    (gpg, in its own throwaway home, as encryption does now), and the
-    detached signature goes into the image beside `index.json`. The index
-    holds every kept file's SHA-256, so signing it covers every file's
-    content as well as its owner, mode and path. `restate sign IMAGE` signs
-    an existing image later, so a capture run unattended from cron needs no
-    secret key on the machine.
-  - `restore`, `verify` and `diff` check the signature with `gpgv` against
-    keys named by `--trusted-key KEYFILE`, and check each file against its
-    digest in the index as it is read. They say who signed the image, and
-    when and on which host it was captured, so a validly signed but older
-    image substituted for the newest one is visible to the person
-    restoring.
-  - `restore` refuses, before writing anything, an image that is unsigned,
-    carries a bad signature, was signed by a key not trusted, or has a file
-    that does not match its digest or is not in the index. It exits with a
-    status of its own, naming each failure.
-  - `--allow-unverified` overrides the refusal for that one run, and only on
-    the command line (no environment variable or rules file can set it). It
-    still checks everything, and prints every failure as a warning before
-    restoring anything.
+  - `capture --sign-with KEYFILE` signs the image with an OpenPGP secret
+    key (gpg, in its own throwaway home, as encryption does), and `restate
+    sign IMAGE` signs one already written, in place, so a capture run from
+    cron needs no secret key on the machine. The detached signature is the
+    archive's last member, `restate/index.sig`, over the index part exactly
+    as stored -- compressed, and encrypted where the image is -- so it covers
+    every kept file's digest, owner, mode and path, and checking it decrypts
+    nothing.
+  - `restore`, and `verify` and `diff` with `--trusted-key KEYFILE`, check it
+    with gpgv before reading anything else, and match the index then read
+    with the bytes checked. They say who signed the image, and when and on
+    which host it was captured.
+  - `restore` refuses an image that is unsigned, badly signed or signed by
+    a key not trusted, with exit status 4, naming the failure;
+    `--allow-unverified` overrides that for one run, on the command line
+    only, with a warning. Each file is still checked against its digest as
+    it is put in place, and one that does not match is refused.
+  - The build sheet and autoinstall file pass restore `--allow-unverified`,
+    or with `--trusted-key` the same keys -- the autoinstall file carries
+    them itself.
+- [ ] A restore that reads the whole image before writing anything, so a
+      damaged one is refused whole rather than restored as far as it is
+      whole
 - [x] Extended attributes, POSIX ACLs and file capabilities (Linux xattrs,
       macOS xattrs, FreeBSD and NetBSD extattrs), set after the owner, with
       an ACL's users and groups mapped by name; hard links as links; users
@@ -251,29 +258,29 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 So that a capture can run from cron, unattended, and keep running every
 night without the disk filling up.
 
-- [ ] **Detecting what is live** (libc only, from `/proc`): database
-      servers (Postgres, MySQL/MariaDB, MongoDB, Redis, ...), QEMU VMs and
-      the disk images they hold open, running LXD and Docker containers, and
-      services known to write to them. `capture` warns by default, naming the
-      command that would pause each one
-- [ ] **Quiescing, through hook scripts.** restate itself still runs no
-      administration tools: it runs root-owned hooks from
-      `/etc/restate/hooks.d` (directory and scripts owned by root and
-      writable by no one else, as with the programs it runs now), and ships
-      ready-made ones for Postgres, MySQL/MariaDB, libvirt, LXD, Docker and
-      systemd services, which a site can add to or replace
-- [ ] **Just in time**: the walk leaves each live service's files to the
-      end, then for each in turn pauses it, copies its files and resumes it,
-      so a service is down for the time its own files take to copy, not for
-      the whole capture. Per kind: a database is dumped into the image
-      (`pg_dumpall`, `mysqldump --single-transaction`) and stopped, copied
-      and started; a VM is suspended (or its filesystems frozen through the
-      guest agent), copied and resumed; a container paused and unpaused; a
-      service that writes to a database stopped before it and started after
-- [ ] **Always put back**: every paused or stopped thing is resumed or
-      started again whether the capture succeeds, fails or is interrupted,
-      with each step reported (`pausing win-msi-lab ... resumed`) and logged
-      to syslog for a cron job's benefit
+- [x] **Detecting what is live** (libc only, from `/proc`): PostgreSQL,
+      MySQL and MariaDB, MongoDB and Redis by their data directories, QEMU
+      VMs by the disks and NVRAM they hold open for writing, LXD containers,
+      and Docker's volumes while a container runs. `capture` warns of each
+      one, naming the command that would stop it
+- [x] **Quiescing, through hook scripts** (`capture --quiesce`). restate
+      itself still runs no administration tools: it runs root-owned hooks
+      from `/etc/restate/hooks.d` (directory and scripts owned by root and
+      writable by no one else, as with the programs it runs), and ships
+      ready-made ones for PostgreSQL, MySQL/MariaDB, MongoDB, Redis, libvirt,
+      LXD and Docker in `libexec/restate/hooks`, which a site can add to or
+      replace. A database's hook dumps it into a directory the image keeps
+      (`pg_dumpall`, `mysqldump --single-transaction`, `mongodump`) and stops
+      it; the PostgreSQL hook stops the services listed in
+      `/etc/restate/also.d/postgresql` before it, and starts them after
+- [x] **Just in time**: the walk leaves each live thing's files to the end,
+      then for each in turn pauses it, copies its files and resumes it, so it
+      is down for the time its own files take to copy, not the whole capture
+- [x] **Always put back**: resume is run whether pausing worked or not, the
+      signals that would end restate are held while a thing is paused (a
+      Ctrl-C reaches the hook, and stops what is left), and every pause and
+      resume is said and logged to syslog for a cron job's benefit
+- [ ] Hooks for other platforms' services, and detection beyond Linux
 - [ ] **A repository** instead of a growing pile of `.tgz` files: a
       directory where file content is stored once, by SHA-256, in compressed
       packs, and each capture adds a snapshot -- an index pointing into it

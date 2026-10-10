@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: PostgreSQL, for capture --quiesce.
+#
+#   pause NAME    dump every database into $RESTATE_DUMP_DIR (pg_dumpall,
+#                 gzipped), stop the units listed in /etc/restate/also.d/
+#                 postgresql -- services that write to the database -- and
+#                 then the cluster
+#   resume NAME   start the cluster, then those units, again
+#
+# NAME is a Debian cluster's VERSION-NAME ("18-main"), whose unit is
+# postgresql@18-main; anything else is stopped as the one unit "postgresql".
+# The dump is the copy that survives a move to another major version, which
+# the data directory alone does not.
+#
+# To change what this does, copy it to /etc/restate/hooks.d/postgresql (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+name=$2
+state=/run/restate/hooks
+also=/etc/restate/also.d/postgresql
+
+case "$name" in
+[0-9]*-*) unit="postgresql@$name" cluster=$(printf '%s' "$name" | sed 's/-/\//') ;;
+*) unit=postgresql cluster= ;;
+esac
+(umask 077 && mkdir -p "$state")
+stopped="$state/postgresql-$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+
+case "$action" in
+pause)
+  if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
+    out="$RESTATE_DUMP_DIR/pg_dumpall.sql"
+    if [ -n "$cluster" ] && command -v pg_lsclusters > /dev/null 2>&1; then
+      runuser -u postgres -- pg_dumpall --cluster "$cluster" > "$out.tmp"
+    else
+      runuser -u postgres -- pg_dumpall > "$out.tmp"
+    fi
+    gzip -f "$out.tmp"
+    mv -f "$out.tmp.gz" "$out.gz"
+  fi
+  : > "$stopped"
+  if [ -r "$also" ]; then
+    grep -v '^[[:space:]]*\(#\|$\)' "$also" | while read -r u; do
+      if systemctl is-active --quiet "$u"; then
+        systemctl stop "$u" && printf '%s\n' "$u" >> "$stopped"
+      fi
+    done
+  fi
+  systemctl stop "$unit"
+  ;;
+resume)
+  systemctl start "$unit"
+  if [ -r "$stopped" ]; then
+    while read -r u; do
+      systemctl start "$u" || echo "restate hook: $u did not start" >&2
+    done < "$stopped"
+    rm -f "$stopped"
+  fi
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

@@ -443,6 +443,35 @@ where none has it at all \- it was installed from a
 file, and only that file puts it back. The lists are as fresh as the last
 .BR "apt update" .
 .PP
+Each source is checked, too, as apt checks it: its index as apt last fetched
+it \-
+.IR InRelease ,
+or
+.I Release
+and
+.I Release.gpg
+\- against the keys it names with
+.B Signed\-By
+(or else apt's
+.I trusted.gpg
+and
+.IR trusted.gpg.d ),
+with
+.BR gpgv (1),
+and its
+.B Valid\-Until
+against the time now. apt refuses a source whose key has gone, changed or
+expired once, in an
+.B apt update
+nobody reads, and goes on with the last index it accepted, for months; a
+rebuild installs from the source as it is now, and gets nothing from it. A
+source apt cannot use has a
+.B """problem"""
+saying why, and
+.B capture
+warns of each one. It checks what apt last fetched, not what the source
+serves today.
+.PP
 For snap it records each snap's revision, channel and confinement, from
 snapd's state, which only root can read; otherwise the revisions alone, from
 .IR /snap ,
@@ -760,6 +789,84 @@ runs it, and the guest-only packages removed. Either way the sheet covers
 what does not move: network interface names and MAC addresses, LUKS keys
 held by the old machine's TPM, Secure Boot keys and the hibernation
 resume device.
+.SH LIVE SERVICES
+A file copied while something writes to it can come back half old and half
+new: a database's pages from two moments, a virtual machine's disk in the
+middle of a write. So
+.B capture
+looks, in
+.I /proc
+(on Linux), for what is running and writing to files the image keeps \-
+PostgreSQL, MySQL and MariaDB, MongoDB and Redis, by their data
+directories; QEMU virtual machines, by the disks and NVRAM they hold open
+for writing; LXD containers; and Docker, while a container runs, by its
+volumes \- and names each one, with the command that would stop or pause
+it.
+.PP
+With
+.BR \-\-quiesce ,
+it pauses each one instead, just in time: everything else is copied first,
+then, for each in turn, it is paused, its own files are copied, and it is
+resumed, so it is stopped for as long as its own files take, not the whole
+capture. While one is paused, the signals that would end restate wait until
+it is resumed again \- a Ctrl-C reaches the pausing itself, and stops what
+is left \- and every pause and resume is said and logged to syslog, for a
+capture run from cron.
+.PP
+restate pauses nothing itself; a hook does. A hook is an executable named
+for the kind of thing it pauses \-
+.BR postgresql ,
+.BR mysql ,
+.BR mongodb ,
+.BR redis ,
+.BR libvirt ,
+.BR lxd ,
+.B docker
+\- looked for first in
+.IR /etc/restate/hooks.d ,
+then among the ones restate ships, in
+.I libexec/restate/hooks
+beside the directory restate is installed in. Either is run only if it and
+its directory are root's and writable by no one else. It is run as
+.I HOOK
+.B pause
+.I NAME
+before the files are copied, and
+.I HOOK
+.B resume
+.I NAME
+after them \- always, even if pausing failed \- with
+.BR RESTATE_ACTION ,
+.BR RESTATE_KIND ,
+.BR RESTATE_NAME ,
+.BR RESTATE_PID ,
+.BR RESTATE_UID " and " RESTATE_USER
+(whose it is: a VM may be a user's own),
+.B RESTATE_PATHS
+(the paths about to be copied, one to a line) and
+.B RESTATE_DUMP_DIR
+in its environment. The dump directory,
+.IR /var/lib/restate/dumps/ KIND\-NAME ,
+root's and 0700, is copied into the image with the files once
+.B pause
+returns: the shipped database hooks put a dump there
+.RB ( pg_dumpall ,
+.BR mysqldump ,
+.BR mongodump ),
+which, unlike the data directory, can be loaded into another major version.
+A hook that fails to pause is warned of, and the files are copied as they
+are. A pause may take 30 minutes and a resume 10; then the hook is stopped.
+.PP
+The shipped hooks stop a database's service and start it again, suspend a
+VM and resume it (through the user's own libvirt for a user's VM), freeze an
+LXD container and thaw it, and pause Docker's running containers; one
+paused already before is left so. The PostgreSQL hook also stops, first,
+the units listed in
+.I /etc/restate/also.d/postgresql
+\- services that write to the database \- and starts them again after. To
+change what a hook does, copy it to
+.I /etc/restate/hooks.d
+and change the copy.
 .SH RESTORING
 .B restate restore
 .I IMAGE
@@ -829,13 +936,42 @@ reads and checks the whole image and says what would be put back, writing
 nothing. The exit status is 3 if any file was refused, could not be written
 or is missing from the image.
 .PP
+An image says whose it is only if it is signed (see
+.BR "IMAGES AND INDEXES" ),
+so
+.B restore
+checks that before reading anything else. It refuses an image that is not
+signed, carries a bad signature, or is signed by a key not given with
+.BI \-\-trusted\-key " KEYFILE"
+(a public key,
+.BR "gpg \-\-export" ,
+armored or not; repeatable), and exits 4, saying why. When it accepts one, it
+says who signed it, and when and on which host the image was captured, so
+an older image signed by the same key, substituted for the newest, is plain
+to see.
+.B \-\-allow\-unverified
+restores it anyway, warning of what it found; it is an option on the command
+line and nothing else \- no variable or file can set it.
+.B verify
+and
+.B diff
+check the same way when given
+.BR \-\-trusted\-key ,
+and refuse an image that fails.
+.PP
 An image's kit carries the
 .B restate
 that made it, so a rebuilt system \- or an installer, with
 .B \-\-root /target
 \- can restore before restate is installed; the build sheet and the
 autoinstall file do it that way, and fall back to tar where the kit has no
-restate.
+restate. They pass
+.B \-\-allow\-unverified
+to it, unless they are made with
+.BR \-\-trusted\-key :
+then the build sheet's restore names the same key files, and the autoinstall
+file carries the keys itself, for the installer's restore to check the image
+against.
 .SH IMAGES AND INDEXES
 An image is an ordinary POSIX tar archive of three parts, each compressed on
 its own:
@@ -976,6 +1112,24 @@ and
 read an encrypted image directly, decrypting with the invoking user's own
 GnuPG keyring.
 .PP
+Encryption is not authentication: anyone with the public key can make an
+image that decrypts cleanly. So
+.BI \-\-sign\-with " KEYFILE"
+signs an image with the OpenPGP secret key in
+.I KEYFILE
+.RB ( "gpg \-\-export\-secret\-keys" ),
+as
+.BR "capture " "makes it, or, with " "restate sign" ,
+afterwards \- so a capture run unattended needs no secret key on the
+machine. The signature, in
+.IR restate/index.sig ,
+the archive's last member, is a detached OpenPGP signature over the index
+part exactly as stored, compressed and, in an encrypted image, encrypted:
+the index holds every kept file's digest, owner, mode and path, so it
+covers them all, and checking it decrypts nothing. gpg runs in a GnuPG home
+of its own the key is imported into, removed afterwards, and asks for the
+key's passphrase the way it always does. An image is signed once.
+.PP
 An image is compressed by
 .BR pigz (1)
 where it is installed \- the same gzip format, on every core, several times
@@ -1096,6 +1250,24 @@ and signature they were checked against
 .RI ( /Library/Caches/restate/installers
 on macOS). Anything here can be deleted; it is fetched again when needed.
 .PP
+.TP
+.I /etc/restate/hooks.d/
+A site's hooks for
+.BR "capture \-\-quiesce" ,
+used in place of the shipped ones of the same name (see
+.BR "LIVE SERVICES" ).
+.TP
+.I /usr/local/libexec/restate/hooks/
+The hooks restate ships, beside the directory it is installed in.
+.TP
+.I /etc/restate/also.d/postgresql
+Services the PostgreSQL hook stops before the database and starts after it,
+one to a line.
+.TP
+.I /var/lib/restate/dumps/
+Where hooks put the dumps a capture keeps with the files, a directory for
+each thing paused, root's alone.
+.PP
 Otherwise
 .B restate
 keeps no files of its own: no configuration, no database, no directory of
@@ -1119,15 +1291,17 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs five programs, each for something it should not do itself:
+runs six programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
 image where it is installed),
 .BR curl (1),
-.BR gpgv (1)
+.BR gpgv (1),
+.BR gpg (1)
 and
-.BR gpg (1).
+.BR gpgconf (1)
+(to stop the agent gpg starts when it signs).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then
@@ -1150,6 +1324,16 @@ curl is held to HTTPS, redirects included, and ignores
 .IR ~/.curlrc .
 Nothing downloaded is used until its checksum has been verified against a
 signature by the pinned vendor key.
+.PP
+With
+.BR "capture \-\-quiesce" ,
+it also runs hooks, held to the same rule \- root's, file and directory,
+and writable by no one else \- with no shell of restate's own, an
+environment of
+.BR PATH " (the system's administration directories), " LC_ALL
+and the
+.B RESTATE_
+variables, and a time limit.
 .SH SEE ALSO
 .BR find (1),
 .BR cryptsetup (8),
@@ -1178,6 +1362,12 @@ recorded on Linux, where they are extended attributes, and on FreeBSD's UFS,
 where they are system attributes, but not macOS's or ZFS's NFSv4 ACLs; a
 symlink's own attributes are not recorded. The project's ROADMAP lists what
 comes next.
+.PP
+What is running is found from
+.IR /proc ,
+on Linux alone. A restore checks every file against the signed index as it
+puts it in place, and refuses one that does not match, but does not read the
+whole image first: a damaged image is restored as far as it is whole.
 .PP
 Report bugs at
 .UR https://github.com/bceverly/restate/issues

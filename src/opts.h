@@ -30,7 +30,11 @@ enum {
     OPT_EXCLUDE,
     OPT_DRY_RUN,
     OPT_NUMERIC_OWNER,
-    OPT_RULES_ONLY
+    OPT_RULES_ONLY,
+    OPT_QUIESCE,
+    OPT_SIGN_WITH,
+    OPT_TRUSTED_KEY,
+    OPT_ALLOW_UNVERIFIED
 };
 
 enum rs_command {
@@ -56,10 +60,15 @@ struct rs_options {
     const char     *target;       /* "vm" or "metal", or NULL: the same machine */
     const char    **recipients;   /* --encrypt-to: public key files */
     size_t          nrecipients;
+    const char     *sign_with;    /* --sign-with: a secret key file */
+    const char    **trusted;      /* --trusted-key: public key files */
+    size_t          ntrusted;
+    bool            allow_unverified;
     bool            all;
     bool            rules_only;     /* --rules-only */
     bool            baseline_content;
     bool            keep_local;     /* --keep-local-packages */
+    bool            quiesce;        /* --quiesce */
     const char    **debs;           /* --deb NAME=FILE, each */
     size_t          ndebs;
     const char    **excludes;       /* --exclude PATTERN, each */

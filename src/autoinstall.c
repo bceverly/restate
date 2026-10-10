@@ -1237,7 +1237,22 @@ static void late_packages(struct gen *g)
     {
         /* restate restore, from the kit -- each file checked against the
          * index before it lands -- or tar, if the kit had no restate. */
-        rs_image_restore_command(&b, img, "/target", true);
+        if (g->o->trust_keyring)
+        {
+            struct rs_buf k;
+
+            rs_buf_init(&k);
+            rs_buf_addf(&k, "echo %s | base64 -d > %s", g->o->trust_keyring,
+                        RS_AUTO_TRUSTED_KEYRING);
+            late_comment(g, "The keys the image must be signed with, for restore to check.");
+            late(g, k.data);
+            rs_buf_free(&k);
+        } else if (g->o->trust && strcmp(g->o->trust, "--allow-unverified") == 0)
+        {
+            late_comment(g, "Not checked for whom it was signed by: autoinstall was given no "
+                            "--trusted-key.");
+        }
+        rs_image_restore_command(&b, img, "/target", true, g->o->trust);
     }
     late(g, b.data);
     late(g, "curtin in-target -- update-initramfs -u -k all");

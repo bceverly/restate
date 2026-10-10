@@ -20,6 +20,9 @@ RS_CMD(CMD_DIFF,     "diff",     "OLD NEW",    2,  2,
        "compare two images or indexes: A added, D deleted, M modified, and how")
 RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
        "compare an image or index against the tree as it is now")
+RS_CMD(CMD_SIGN,     "sign",     "IMAGE",      1,  1,
+       "sign an image already written, with --sign-with: so a capture run unattended "
+       "needs no secret key on the machine")
 RS_CMD(CMD_RESTORE,  "restore",  "IMAGE",      1,  1,
        "put an image's files back under the root (--root, default /): each checked "
        "against the index before it is put in place, with its owner, mode and times")

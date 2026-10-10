@@ -40,11 +40,14 @@
  *   3  the scan finished, but some files could not be read, so the manifest
  *      is incomplete -- a backup that silently skipped files is the worst
  *      kind, so this is never folded into 0
+ *   4  the image is not signed by a key it was to be checked against, and
+ *      was not used
  */
 #define RESTATE_EXIT_OK          0
 #define RESTATE_EXIT_DIFFERENT   1
 #define RESTATE_EXIT_TROUBLE     2
 #define RESTATE_EXIT_INCOMPLETE  3
+#define RESTATE_EXIT_UNVERIFIED  4
 
 /*
  * Mark a function as taking a printf-style format, so the compiler checks the

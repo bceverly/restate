@@ -32,6 +32,9 @@ struct rs_sheet_opts {
     const char           *version;    /* restate's, for the heading */
     const struct rs_jval *packages;   /* the package inventory (packages.h), or NULL */
     bool                  old_image;  /* the image is one stream, from before 1.1 */
+    /* restore's say in whom to trust, as it goes on its command line, or
+     * NULL for the restate of an image too old to know (autoinstall.h). */
+    const char           *trust;
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

@@ -81,6 +81,8 @@ void test_sha256(void);
 void test_md5(void);
 void test_pkgdb(void);
 void test_xattr(void);
+void test_live(void);
+void test_sources(void);
 void test_glob(void);
 void test_rules(void);
 void test_json(void);

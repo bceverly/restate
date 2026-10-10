@@ -32,6 +32,10 @@
  *  10  account files, the system's and the image's, merged
  *  11  dpkg's record of the files it installed -- diversions, status,
  *      md5sums and list, between NULs -- loaded, and every path looked up
+ *  12  what /proc says of a process -- its status, an fdinfo and a mongod
+ *      configuration between NULs, then its command line -- parsed
+ *  13  OpenPGP as text: ASCII armor taken off, gpgv's status lines read, and
+ *      a Release file's Valid-Until, all from the same input
  *
  * It is reached two ways:
  *
@@ -56,11 +60,14 @@
 #include "index.h"
 #include "installer.h"
 #include "json.h"
+#include "live.h"
 #include "machine.h"
 #include "meta.h"
 #include "packages.h"
+#include "pgp.h"
 #include "pkgdb.h"
 #include "rules.h"
+#include "sources.h"
 #include "tar.h"
 #include "util.h"
 
@@ -122,6 +129,102 @@ static void fuzz_pkgdb(const char *text, size_t len)
     {
         free(parts[i]);
     }
+}
+
+/* /proc's files for one process: three between NULs, then the command line,
+ * whose own NULs separate its arguments. */
+static void fuzz_live(const char *text, size_t len)
+{
+    char         *parts[3];
+    const char   *p = text;
+    const char   *end = text + len;
+    char        **argv;
+    size_t        argc;
+    size_t        nuls = 0;
+    size_t        i;
+    unsigned long uid;
+    unsigned long flags;
+    long          ppid;
+    char         *db;
+
+    for (i = 0; i < 3; i++)
+    {
+        const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
+        size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
+
+        parts[i] = rs_xstrndup(p, n);
+        p += n + (nul ? 1 : 0);
+    }
+    if (rs_live_parse_status(parts[0], &uid, &ppid) && ppid < 0)
+    {
+        abort();
+    }
+    (void)rs_live_parse_fdflags(parts[1], &flags);
+    db = rs_live_mongo_dbpath(parts[2]);
+    if (db && (db[0] == '\0' || strchr(db, '\n')))
+    {
+        abort();
+    }
+    free(db);
+    if (p > end)
+    {
+        p = end;
+    }
+    rs_live_split_args(p, (size_t)(end - p), &argv, &argc);
+    for (i = 0; i < (size_t)(end - p); i++)
+    {
+        nuls += p[i] == '\0';
+    }
+    /* One argument per NUL, and one more if the last is not terminated. */
+    if (argc != nuls + (end > p && end[-1] != '\0' ? 1 : 0))
+    {
+        abort();
+    }
+    for (i = 0; i < argc; i++)
+    {
+        free(argv[i]);
+    }
+    free(argv);
+    for (i = 0; i < 3; i++)
+    {
+        free(parts[i]);
+    }
+}
+
+/* Armor, gpgv's verdict and a Valid-Until, each read from the same text. */
+static void fuzz_openpgp(const char *text, size_t len)
+{
+    char                *s = rs_xstrndup(text, len);
+    struct rs_buf        out;
+    struct rs_buf        why;
+    struct rs_pgp_signer signer;
+    int64_t              when;
+
+    rs_buf_init(&out);
+    if (rs_pgp_dearmor(text, len, &out) && out.len > len)
+    {
+        abort();
+    }
+    rs_buf_free(&out);
+    rs_buf_init(&why);
+    if (rs_pgp_verdict(s, &signer, &why))
+    {
+        /* Good: a fingerprint of 40 hex digits, and no reason given. */
+        if (strlen(signer.fpr) != 40 || strspn(signer.fpr, "0123456789ABCDEFabcdef") != 40 ||
+            why.len != 0 || strlen(signer.who) >= sizeof(signer.who))
+        {
+            abort();
+        }
+    } else if (why.len == 0)
+    {
+        abort();
+    }
+    rs_buf_free(&why);
+    if (rs_sources_valid_until(s, &when) && when < 0)
+    {
+        abort();
+    }
+    free(s);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -613,7 +716,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 12)
+    switch (data[0] % 14)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -648,8 +751,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 10:
         fuzz_accounts(text, size - 1);
         break;
-    default:
+    case 11:
         fuzz_pkgdb(text, size - 1);
+        break;
+    case 12:
+        fuzz_live(text, size - 1);
+        break;
+    default:
+        fuzz_openpgp(text, size - 1);
         break;
     }
     return 0;

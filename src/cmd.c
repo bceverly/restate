@@ -7,27 +7,33 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "autoinstall.h"
 #include "buildsheet.h"
 #include "diff.h"
+#include "hooks.h"
 #include "image.h"
 #include "index.h"
 #include "installer.h"
+#include "live.h"
 #include "machine.h"
 #include "meta.h"
 #include "packages.h"
+#include "pgp.h"
 #include "progress.h"
 #include "restore.h"
 #include "rules.h"
 #include "run.h"
 #include "scan.h"
+#include "sources.h"
 
 /* A machine description read on its own is refused beyond this size. */
 #define MACHINE_MAX ((size_t)16 * 1024 * 1024)
@@ -292,6 +298,286 @@ static char *self_path(void)
 }
 
 /*
+ * apt's sources checked, each one apt cannot use recorded in the inventory
+ * with why; and with `warn`, named, since a rebuild will not install from it
+ * either. The time is the real one, not SOURCE_DATE_EPOCH: an index expires
+ * by the clock.
+ */
+static void check_sources(const char *root, struct rs_jval *packages, bool warn)
+{
+    const struct rs_jval *apt;
+    const struct rs_jval *sources;
+    bool                  checked = false;
+    size_t                i;
+
+    if (rs_sources_check(root, packages, (int64_t)time(NULL), &checked) == 0 || !warn)
+    {
+        if (!checked && warn && rs_jobject_get(packages, "apt"))
+        {
+            rs_warn("gpgv is not installed: apt's sources were not checked");
+        }
+        return;
+    }
+    apt = rs_jobject_get(packages, "apt");
+    sources = apt ? rs_jobject_get(apt, "sources") : NULL;
+    for (i = 0; sources && i < sources->n; i++)
+    {
+        const char *problem = rs_jobject_str(&sources->items[i], "problem");
+        const char *file = rs_jobject_str(&sources->items[i], "file");
+
+        if (problem)
+        {
+            rs_warn("apt cannot use a source in %s -- %s; a rebuild will not install from it "
+                    "until that is put right", file ? file : "its sources", problem);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* What is running: warned about, or paused while its files are copied        */
+/* ------------------------------------------------------------------------- */
+
+struct quiesce {
+    struct rs_live       *live;     /* what was found, and matters */
+    size_t                nlive;
+    char                **hooks;    /* each one's hook, NULL for none */
+    char                **dumps;    /* each one's dump directory, or NULL */
+    struct rs_scan_group *groups;   /* one per thing with a hook */
+    size_t               *of;       /* the thing each group is */
+    size_t                ngroups;
+    const char         ***paths;    /* each group's paths */
+    bool                  paused;   /* signals are held while it is */
+    sigset_t              held;
+    sigset_t              saved;
+};
+
+/* Whether the walk would record anything of `path`. */
+static bool matters(const struct rs_rules *rules, const struct rs_options *o, const char *path)
+{
+    enum rs_class cls = rs_rules_classify(rules, path, NULL);
+
+    return cls != RS_CLASS_EPHEMERAL && (cls != RS_CLASS_EXPENDABLE || o->all);
+}
+
+/* Each live thing's name and files, as messages give them. */
+static void describe_live(const struct rs_live *l, struct rs_buf *b)
+{
+    size_t i;
+
+    rs_buf_addf(b, "%s %s (", rs_live_what(l), l->name);
+    for (i = 0; i < l->npaths; i++)
+    {
+        if (i > 0)
+        {
+            rs_buf_addstr(b, ", ");
+        }
+        rs_escape(b, l->paths[i]);
+    }
+    rs_buf_addc(b, ')');
+}
+
+/* A line for the terminal and the system log alike: a capture run from cron
+ * leaves its record of what it paused and resumed there. */
+static void tell(const struct rs_options *o, int priority, const char *fmt, ...)
+    RESTATE_PRINTF(3, 4);
+
+static void tell(const struct rs_options *o, int priority, const char *fmt, ...)
+{
+    va_list ap;
+    char   *msg;
+
+    va_start(ap, fmt);
+    msg = rs_xvasprintf(fmt, ap);
+    va_end(ap);
+    syslog(priority, "%s", msg);
+    rs_progress_clear();
+    if (priority <= LOG_WARNING)
+    {
+        rs_warn("%s", msg);
+    } else if (!o->quiet)
+    {
+        (void)fflush(stdout);
+        (void)fprintf(stderr, "restate: %s\n", msg);
+    }
+    free(msg);
+}
+
+/*
+ * The live things whose files the walk would copy: named, with the command
+ * that would stop each, when not quiescing; given a hook and a dump
+ * directory, and left to the end of the walk, when quiescing.
+ */
+static void quiesce_plan(const struct rs_options *o, const struct rs_rules *rules,
+                         const char *root, struct quiesce *q)
+{
+    struct rs_live *all = NULL;
+    size_t          n = 0;
+    size_t          i;
+    size_t          k;
+
+    memset(q, 0, sizeof(*q));
+    rs_live_detect("/proc", &all, &n);
+    q->live = rs_xcalloc(n + 1, sizeof(*q->live));
+    for (i = 0; i < n; i++)
+    {
+        bool keep = false;
+
+        for (k = 0; k < all[i].npaths; k++)
+        {
+            keep = keep || matters(rules, o, all[i].paths[k]);
+        }
+        if (keep)
+        {
+            q->live[q->nlive++] = all[i];
+        } else
+        {
+            for (k = 0; k < all[i].npaths; k++)
+            {
+                free(all[i].paths[k]);
+            }
+            free(all[i].paths);
+            free(all[i].name);
+        }
+    }
+    free(all);
+    q->hooks = rs_xcalloc(q->nlive + 1, sizeof(*q->hooks));
+    q->dumps = rs_xcalloc(q->nlive + 1, sizeof(*q->dumps));
+    q->groups = rs_xcalloc(q->nlive + 1, sizeof(*q->groups));
+    q->of = rs_xcalloc(q->nlive + 1, sizeof(*q->of));
+    q->paths = rs_xcalloc(q->nlive + 1, sizeof(*q->paths));
+    for (i = 0; i < q->nlive; i++)
+    {
+        const struct rs_live *l = &q->live[i];
+        struct rs_buf         what;
+        struct rs_buf         hint;
+        struct rs_buf         err;
+        size_t                np = 0;
+
+        rs_buf_init(&what);
+        rs_buf_init(&hint);
+        rs_buf_init(&err);
+        describe_live(l, &what);
+        rs_live_hint(l, &hint);
+        if (o->quiesce)
+        {
+            q->hooks[i] = rs_hook_find(l->kind);
+        }
+        if (!o->quiesce)
+        {
+            rs_warn("%s is running, and its files will be copied as they change: stop it "
+                    "first (%s), or capture with --quiesce", what.data, hint.data);
+        } else if (!q->hooks[i])
+        {
+            rs_warn("%s is running, and no hook pauses %s (%s/%s): its files will be copied as "
+                    "they change; stop it first (%s)", what.data, l->kind, RS_HOOKS_SITE_DIR,
+                    l->kind, hint.data);
+        } else
+        {
+            if (!rs_hook_dump_dir(root, l, &q->dumps[i], &err))
+            {
+                rs_warn("no dump directory for %s: %s", what.data, err.data);
+            }
+            q->paths[q->ngroups] = rs_xcalloc(l->npaths + 2, sizeof(char *));
+            for (k = 0; k < l->npaths; k++)
+            {
+                q->paths[q->ngroups][np++] = l->paths[k];
+            }
+            if (q->dumps[i])
+            {
+                q->paths[q->ngroups][np++] = q->dumps[i];
+            }
+            q->groups[q->ngroups].paths = q->paths[q->ngroups];
+            q->groups[q->ngroups].npaths = np;
+            q->of[q->ngroups++] = i;
+        }
+        rs_buf_free(&what);
+        rs_buf_free(&hint);
+        rs_buf_free(&err);
+    }
+}
+
+static void quiesce_free(struct quiesce *q)
+{
+    size_t i;
+
+    for (i = 0; i < q->nlive; i++)
+    {
+        free(q->hooks[i]);
+        free(q->dumps[i]);
+    }
+    for (i = 0; i < q->ngroups; i++)
+    {
+        free(q->paths[i]);
+    }
+    rs_live_free(q->live, q->nlive);
+    free(q->hooks);
+    free(q->dumps);
+    free(q->groups);
+    free(q->of);
+    free(q->paths);
+}
+
+struct around_ctx {
+    const struct rs_options *o;
+    struct quiesce          *q;
+};
+
+/*
+ * The scan's call on each side of a group: pause before, resume after.
+ * While the thing is paused the signals that would end restate are held, so
+ * nothing can stop it between the two; a Ctrl-C reaches the hook itself, and
+ * once the thing is resumed restate goes the way the signal says.
+ */
+static bool around(const void *ctx, size_t group, bool before)
+{
+    const struct around_ctx *a = ctx;
+    struct quiesce          *q = a->q;
+    size_t                   i = q->of[group];
+    const struct rs_live    *l = &q->live[i];
+    const char              *what = rs_live_what(l);
+    struct rs_buf            err;
+    bool                     go = true;
+
+    rs_buf_init(&err);
+    if (before)
+    {
+        sigset_t pending;
+
+        (void)sigemptyset(&q->held);
+        (void)sigaddset(&q->held, SIGINT);
+        (void)sigaddset(&q->held, SIGTERM);
+        (void)sigaddset(&q->held, SIGHUP);
+        (void)sigaddset(&q->held, SIGQUIT);
+        (void)sigprocmask(SIG_BLOCK, &q->held, &q->saved);
+        q->paused = true;
+        tell(a->o, LOG_NOTICE, "pausing %s %s", what, l->name);
+        if (!rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], &err))
+        {
+            tell(a->o, LOG_WARNING, "%s %s was not paused (%s): its files are copied as they "
+                 "are", what, l->name, err.data);
+        }
+        /* Interrupted while it paused: nothing more is copied. */
+        go = sigpending(&pending) != 0 ||
+             !(sigismember(&pending, SIGINT) == 1 || sigismember(&pending, SIGTERM) == 1 ||
+               sigismember(&pending, SIGHUP) == 1 || sigismember(&pending, SIGQUIT) == 1);
+    } else
+    {
+        if (!rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], &err))
+        {
+            tell(a->o, LOG_ERR, "%s %s was not resumed, and may still be stopped: %s", what,
+                 l->name, err.data);
+        } else
+        {
+            tell(a->o, LOG_NOTICE, "resumed %s %s", what, l->name);
+        }
+        q->paused = false;
+        (void)sigprocmask(SIG_SETMASK, &q->saved, NULL);
+    }
+    rs_buf_free(&err);
+    return go;
+}
+
+/*
  * `kept_from`, where given, is the inventory of an image this walk is being
  * compared with: the files it kept outside the rules (capture
  * --keep-local-packages) are walked again, so they are not reported deleted.
@@ -303,6 +589,9 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     struct rs_rules     rules;
     struct rs_pkgdb     db;
     struct rs_scan_opts so;
+    struct quiesce      q;
+    struct around_ctx   actx;
+    bool                live = false;
     struct rs_buf       err;
     const char         *os_used = NULL;
     char              **keep = NULL;
@@ -359,6 +648,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     /* What is installed is in the tree's own files, wherever it is mounted. */
     rs_packages_describe(root, &m->packages);
+    check_sources(root, &m->packages, image != NULL);
     if (o->keep_local)
     {
         struct rs_buf missing;
@@ -397,6 +687,22 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         }
     }
     m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
+    /* What is running and writing to files the image keeps: named, or with
+     * --quiesce left to the end and paused while it is copied. */
+    if (image && is_live_root(root))
+    {
+        live = true;
+        quiesce_plan(o, &rules, root, &q);
+        actx.o = o;
+        actx.q = &q;
+        if (q.ngroups > 0)
+        {
+            so.defer = q.groups;
+            so.ndefer = q.ngroups;
+            so.around = around;
+            so.around_ctx = &actx;
+        }
+    }
     if (image)
     {
         /* The kit, the part of the image a reinstall reads first: apt's
@@ -452,6 +758,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         rs_error("%s", err.data);
     }
     rs_buf_free(&err);
+    if (live)
+    {
+        quiesce_free(&q);
+    }
     rs_rules_free(&rules);
     rs_pkgdb_free(&db);
     if (image)
@@ -500,6 +810,224 @@ int rs_cmd_scan(const struct rs_options *o)
     return st.unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Signatures                                                                */
+/* ------------------------------------------------------------------------- */
+
+/* Whether an image can be signed with `keyfile` here: gpg and gpgv there,
+ * and the file readable. Says why not. Asked before a capture's walk, which
+ * is a long time to wait to find out. */
+static bool signing_possible(const char *keyfile)
+{
+    int fd;
+
+    if (!rs_program_path(RS_PROG_GPG) || !rs_program_path(RS_PROG_GPGV))
+    {
+        rs_error("--sign-with needs gpg and gpgv, and %s is not installed (or not owned by root)",
+                 !rs_program_path(RS_PROG_GPG) ? "gpg" : "gpgv");
+        return false;
+    }
+    /* Opened, not access()ed: whether this process can read it. */
+    fd = open(keyfile, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        rs_error("--sign-with %s: %s", keyfile, strerror(errno));
+        return false;
+    }
+    (void)close(fd);
+    return true;
+}
+
+static void say_signer(const char *what, const struct rs_pgp_signer *s)
+{
+    (void)fflush(stdout);
+    (void)fprintf(stderr, "restate: %s %s (%.4s %.4s %.4s %.4s %.4s  %.4s %.4s %.4s %.4s %.4s)%s%s\n",
+                  what, s->who[0] ? s->who : "a key with no user ID", s->fpr, s->fpr + 4,
+                  s->fpr + 8, s->fpr + 12, s->fpr + 16, s->fpr + 20, s->fpr + 24, s->fpr + 28,
+                  s->fpr + 32, s->fpr + 36, s->when[0] ? " on " : "", s->when);
+}
+
+/* What a check of an image's signature found, for the index read after it. */
+struct trust {
+    bool                 checked;   /* and signed by a trusted key */
+    struct rs_pgp_signer signer;
+    char                 digest[RS_SHA256_HEX_SIZE];
+};
+
+/*
+ * Whether the image at `path` may be used, checked before its index is even
+ * read: signed by one of the --trusted-key keys, or, where `required` is
+ * false, not checked at all. Returns RESTATE_EXIT_OK, or
+ * RESTATE_EXIT_UNVERIFIED having said why not -- unless --allow-unverified
+ * lets a restore through, with a warning.
+ */
+static int trust_check(const struct rs_options *o, const char *path, bool required,
+                       struct trust *tr)
+{
+    struct rs_buf why;
+    size_t        i;
+    bool          good;
+
+    memset(tr, 0, sizeof(*tr));
+    if (!required)
+    {
+        return RESTATE_EXIT_OK;
+    }
+    rs_buf_init(&why);
+    /* A key file that is not one is a mistake in the command, not a verdict
+     * on the image. */
+    for (i = 0; i < o->ntrusted; i++)
+    {
+        struct rs_buf key;
+
+        rs_buf_init(&key);
+        good = rs_pgp_key_bytes(o->trusted[i], &key, &why);
+        rs_buf_free(&key);
+        if (!good)
+        {
+            rs_error("--trusted-key %s", why.data);
+            rs_buf_free(&why);
+            return RESTATE_EXIT_TROUBLE;
+        }
+    }
+    if (!rs_program_path(RS_PROG_GPGV))
+    {
+        rs_buf_addstr(&why, "gpgv, which checks signatures, is not installed (or not owned by "
+                            "root)");
+        good = false;
+    } else
+    {
+        good = rs_image_trusted(path, o->trusted, o->ntrusted, &tr->signer, tr->digest, &why);
+    }
+    if (good)
+    {
+        tr->checked = true;
+        rs_buf_free(&why);
+        return RESTATE_EXIT_OK;
+    }
+    if (o->allow_unverified && o->command == CMD_RESTORE)
+    {
+        rs_warn("%s: %s; restoring it anyway, as --allow-unverified says", path, why.data);
+        rs_buf_free(&why);
+        return RESTATE_EXIT_OK;
+    }
+    if (o->ntrusted == 0)
+    {
+        rs_error("%s: %s, and no --trusted-key was given to check it against: not restoring it. "
+                 "Give the public key of whoever signed it (capture --sign-with) with "
+                 "--trusted-key KEYFILE, or restore it unchecked with --allow-unverified",
+                 path, why.data);
+    } else
+    {
+        rs_error("%s: %s: not %s it%s", path, why.data,
+                 o->command == CMD_RESTORE ? "restoring" : "using",
+                 o->command == CMD_RESTORE ? " (--allow-unverified would)" : "");
+    }
+    rs_buf_free(&why);
+    return RESTATE_EXIT_UNVERIFIED;
+}
+
+/*
+ * The index then read, matched with what was checked: the same bytes, not
+ * merely the same file, which could have been changed in between. Says who
+ * signed it, and when and where it was captured.
+ */
+static int trust_matches(const struct rs_options *o, const char *path, const struct trust *tr,
+                         const struct rs_index *ix)
+{
+    struct rs_buf what;
+
+    if (!tr->checked)
+    {
+        return RESTATE_EXIT_OK;
+    }
+    if (strcmp(tr->digest, ix->part_sha256) != 0)
+    {
+        rs_error("%s: it changed while it was being read: not using it", path);
+        return RESTATE_EXIT_UNVERIFIED;
+    }
+    if (!o->quiet)
+    {
+        rs_buf_init(&what);
+        rs_buf_addf(&what, "%s is signed by", path);
+        say_signer(what.data, &tr->signer);
+        (void)fprintf(stderr, "restate: captured on %s at %s, by restate %s\n",
+                      ix->host ? ix->host : "an unknown host",
+                      ix->created ? ix->created : "an unknown time",
+                      ix->version ? ix->version : "(unknown)");
+        rs_buf_free(&what);
+    }
+    return RESTATE_EXIT_OK;
+}
+
+int rs_cmd_sign(const struct rs_options *o)
+{
+    const char          *path = o->args[0];
+    struct rs_buf        index_part;
+    struct rs_buf        sig;
+    struct rs_buf        err;
+    struct rs_pgp_signer signer;
+    char                *dir;
+    char                *data = NULL;
+    bool                 ok;
+
+    if (!o->sign_with)
+    {
+        rs_error("sign: give the secret key to sign with, --sign-with KEYFILE");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!signing_possible(o->sign_with))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_init(&index_part);
+    rs_buf_init(&sig);
+    rs_buf_init(&err);
+    ok = rs_image_signed_bytes(path, &index_part, &sig, &err);
+    if (ok && sig.len > 0)
+    {
+        rs_buf_addf(&err, "%s: it is signed already", path);
+        ok = false;
+    }
+    rs_buf_reset(&sig);
+    dir = ok ? rs_pgp_home(&err) : NULL;
+    ok = ok && dir;
+    if (ok)
+    {
+        int fd;
+
+        data = rs_xasprintf("%s/index", dir);
+        fd = open(data, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        ok = fd >= 0 && write(fd, index_part.data, index_part.len) == (ssize_t)index_part.len;
+        if (fd >= 0 && close(fd) != 0)
+        {
+            ok = false;
+        }
+        if (!ok)
+        {
+            rs_buf_addf(&err, "%s: %s", data, strerror(errno));
+        }
+    }
+    ok = ok && rs_pgp_sign(o->sign_with, data, &sig, &signer, &err) &&
+         rs_image_add_signature(path, sig.data, sig.len, &err);
+    free(data);
+    rs_pgp_home_remove(dir);
+    rs_buf_free(&index_part);
+    rs_buf_free(&sig);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    if (!o->quiet)
+    {
+        say_signer("signed by", &signer);
+    }
+    return RESTATE_EXIT_OK;
+}
+
 int rs_cmd_capture(const struct rs_options *o)
 {
     struct rs_index        m;
@@ -528,6 +1056,11 @@ int rs_cmd_capture(const struct rs_options *o)
         rs_buf_free(&err);
         return RESTATE_EXIT_TROUBLE;
     }
+    if (o->sign_with && !signing_possible(o->sign_with))
+    {
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
     for (k = 0; k < o->nrecipients; k++)
     {
         /* Opened, not access()ed: the question is whether this process can
@@ -550,6 +1083,7 @@ int rs_cmd_capture(const struct rs_options *o)
     }
     image.recipients = o->recipients;
     image.nrecipients = o->nrecipients;
+    image.sign_with = o->sign_with;
     if (!run_scan(o, o->root ? o->root : "/", true, &image, &m, &st, NULL))
     {
         rs_image_abort(&image);
@@ -561,6 +1095,9 @@ int rs_cmd_capture(const struct rs_options *o)
     if (!ok)
     {
         rs_error("%s", err.data);
+    } else if (o->sign_with && !o->quiet)
+    {
+        say_signer("signed by", &image.signer);
     }
     rs_buf_free(&err);
     rs_index_free(&m);
@@ -617,12 +1154,23 @@ int rs_cmd_diff(const struct rs_options *o)
     struct rs_index      b;
     struct rs_diff_stats d;
     struct rs_buf        err;
+    struct trust         ta;
+    struct trust         tb;
     int                  status;
 
     if (strcmp(o->args[0], "-") == 0 && strcmp(o->args[1], "-") == 0)
     {
         rs_error("diff: only one of the two can be standard input");
         return RESTATE_EXIT_TROUBLE;
+    }
+    status = trust_check(o, o->args[0], o->ntrusted > 0, &ta);
+    if (status == RESTATE_EXIT_OK)
+    {
+        status = trust_check(o, o->args[1], o->ntrusted > 0, &tb);
+    }
+    if (status != RESTATE_EXIT_OK)
+    {
+        return status;
     }
     rs_index_init(&a);
     rs_index_init(&b);
@@ -633,7 +1181,15 @@ int rs_cmd_diff(const struct rs_options *o)
         status = RESTATE_EXIT_TROUBLE;
     } else
     {
-        status = write_diff(o, &a, &b, &d);
+        status = trust_matches(o, o->args[0], &ta, &a);
+        if (status == RESTATE_EXIT_OK)
+        {
+            status = trust_matches(o, o->args[1], &tb, &b);
+        }
+        if (status == RESTATE_EXIT_OK)
+        {
+            status = write_diff(o, &a, &b, &d);
+        }
     }
     rs_buf_free(&err);
     rs_index_free(&a);
@@ -648,9 +1204,15 @@ int rs_cmd_verify(const struct rs_options *o)
     struct rs_scan_stats st;
     struct rs_diff_stats d;
     struct rs_buf        err;
+    struct trust         tr;
     const char          *root;
     int                  status;
 
+    status = trust_check(o, o->args[0], o->ntrusted > 0, &tr);
+    if (status != RESTATE_EXIT_OK)
+    {
+        return status;
+    }
     rs_index_init(&recorded);
     rs_buf_init(&err);
     if (!rs_index_load(&recorded, o->args[0], &err))
@@ -661,6 +1223,12 @@ int rs_cmd_verify(const struct rs_options *o)
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
+    status = trust_matches(o, o->args[0], &tr, &recorded);
+    if (status != RESTATE_EXIT_OK)
+    {
+        rs_index_free(&recorded);
+        return status;
+    }
 
     /* The root the index was taken from, unless told otherwise: verifying an
      * index of /mnt/old against / would report every file as changed. */
@@ -688,8 +1256,17 @@ int rs_cmd_restore(const struct rs_options *o)
     struct rs_restore_opts  ro;
     struct rs_restore_stats st;
     struct rs_buf           err;
+    struct trust            tr;
+    int                     status;
     bool                    ok;
 
+    /* Before anything is written -- before the index is even read: whose
+     * image it is. */
+    status = trust_check(o, o->args[0], true, &tr);
+    if (status != RESTATE_EXIT_OK)
+    {
+        return status;
+    }
     rs_index_init(&ix);
     rs_buf_init(&err);
     if (!rs_index_load(&ix, o->args[0], &err))
@@ -700,6 +1277,13 @@ int rs_cmd_restore(const struct rs_options *o)
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_reset(&err);
+    status = trust_matches(o, o->args[0], &tr, &ix);
+    if (status != RESTATE_EXIT_OK)
+    {
+        rs_buf_free(&err);
+        rs_index_free(&ix);
+        return status;
+    }
     memset(&ro, 0, sizeof(ro));
     ro.root = o->root ? o->root : "/";
     ro.exclude = o->excludes;
@@ -855,7 +1439,7 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
  * section, or what `restate machine -o` writes.
  */
 static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages,
-                         bool *old_image)
+                         bool *old_image, bool *knows_trust)
 {
     struct rs_index ix;
     struct rs_buf   err;
@@ -876,6 +1460,10 @@ static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jv
             if (old_image)
             {
                 *old_image = !ix.in_parts;
+            }
+            if (knows_trust)
+            {
+                *knows_trust = rs_image_knows_trust(ix.version);
             }
             ok = true;
         } else
@@ -961,7 +1549,7 @@ int rs_cmd_installer(const struct rs_options *o)
     memset(&machine, 0, sizeof(machine));
     if (image)
     {
-        if (!load_machine(image, &machine, NULL, NULL))
+        if (!load_machine(image, &machine, NULL, NULL, NULL))
         {
             rs_jval_free(&machine);
             return RESTATE_EXIT_TROUBLE;
@@ -1061,9 +1649,11 @@ static enum rs_target target_of(const struct rs_options *o)
 /* The machine to describe: the one in IMAGE, or this one -- and, with
  * `packages`, what is installed on it, which an image may not record. */
 static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine,
-                        struct rs_jval *packages, bool *old_image)
+                        struct rs_jval *packages, bool *old_image, bool *knows_trust)
 {
     *old_image = false;
+    /* This machine's restate, which the restore would be: it knows. */
+    *knows_trust = true;
     memset(machine, 0, sizeof(*machine));
     if (packages)
     {
@@ -1071,7 +1661,7 @@ static bool machine_for(const struct rs_options *o, const char *image, struct rs
     }
     if (image)
     {
-        return load_machine(image, machine, packages, old_image);
+        return load_machine(image, machine, packages, old_image, knows_trust);
     }
     rs_machine_describe("/", o->root ? o->root : "/", machine);
     if (packages)
@@ -1134,12 +1724,71 @@ int rs_cmd_packages(const struct rs_options *o)
     } else
     {
         rs_packages_describe(o->root ? o->root : "/", &packages);
+        check_sources(o->root ? o->root : "/", &packages, false);
     }
     rs_buf_init(&text);
     rs_json_write(&text, &packages, 2, 0);
     rs_buf_addc(&text, '\n');
     rs_jval_free(&packages);
     return emit(o, &text);
+}
+
+/*
+ * What a build sheet or autoinstall file has restore told about whom to
+ * trust: nothing, for an image whose own restate is too old to know; with
+ * --trusted-key, those keys -- for an installer, put in the file itself, in
+ * `keyring`, base64, since the key files are not there -- and otherwise
+ * --allow-unverified, which the file then says.
+ */
+static bool trust_for(const struct rs_options *o, bool knows, bool installer, char **trust,
+                      char **keyring)
+{
+    struct rs_buf b;
+    size_t        i;
+
+    *trust = NULL;
+    *keyring = NULL;
+    if (!knows)
+    {
+        return true;
+    }
+    if (o->ntrusted == 0)
+    {
+        *trust = rs_xstrdup("--allow-unverified");
+        return true;
+    }
+    rs_buf_init(&b);
+    if (installer)
+    {
+        struct rs_buf keys;
+        struct rs_buf err;
+
+        rs_buf_init(&keys);
+        rs_buf_init(&err);
+        for (i = 0; i < o->ntrusted; i++)
+        {
+            if (!rs_pgp_key_bytes(o->trusted[i], &keys, &err))
+            {
+                rs_error("--trusted-key %s", err.data);
+                rs_buf_free(&err);
+                rs_buf_free(&keys);
+                return false;
+            }
+        }
+        rs_base64_encode(&b, keys.data, keys.len);
+        *keyring = rs_buf_detach(&b);
+        *trust = rs_xstrdup("--trusted-key " RS_AUTO_TRUSTED_KEYRING);
+        rs_buf_free(&err);
+        rs_buf_free(&keys);
+        return true;
+    }
+    for (i = 0; i < o->ntrusted; i++)
+    {
+        rs_buf_addf(&b, "%s--trusted-key ", i ? " " : "");
+        rs_shell_word(&b, o->trusted[i]);
+    }
+    *trust = rs_buf_detach(&b);
+    return true;
 }
 
 int rs_cmd_buildsheet(const struct rs_options *o)
@@ -1151,15 +1800,20 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     struct rs_sheet_opts so;
     struct rs_jval       packages;
     bool                 old_image;
+    bool                 knows;
+    char                *trust = NULL;
+    char                *keyring = NULL;
     bool                 ok;
 
-    if (!machine_for(o, image, &machine, &packages, &old_image))
+    if (!machine_for(o, image, &machine, &packages, &old_image, &knows) ||
+        !trust_for(o, knows, false, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
     memset(&so, 0, sizeof(so));
+    so.trust = trust;
     so.old_image = old_image;
     so.target = target_of(o);
     so.image = image;
@@ -1170,6 +1824,8 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     ok = rs_buildsheet(&machine, &so, &text, &err);
     rs_jval_free(&machine);
     rs_jval_free(&packages);
+    free(trust);
+    free(keyring);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -1190,15 +1846,21 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     struct rs_auto_opts ao;
     struct rs_jval      packages;
     bool                old_image;
+    bool                knows;
+    char               *trust = NULL;
+    char               *keyring = NULL;
     bool                ok;
 
-    if (!machine_for(o, image, &machine, &packages, &old_image))
+    if (!machine_for(o, image, &machine, &packages, &old_image, &knows) ||
+        !trust_for(o, knows, true, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         return RESTATE_EXIT_TROUBLE;
     }
     memset(&ao, 0, sizeof(ao));
+    ao.trust = trust;
+    ao.trust_keyring = keyring;
     ao.old_image = old_image;
     ao.target = target_of(o);
     ao.image = image;
@@ -1210,6 +1872,8 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     ok = rs_autoinstall(&machine, &ao, &text, &err);
     rs_jval_free(&machine);
     rs_jval_free(&packages);
+    free(trust);
+    free(keyring);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -1312,6 +1976,8 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_diff(o);
     case CMD_VERIFY:
         return rs_cmd_verify(o);
+    case CMD_SIGN:
+        return rs_cmd_sign(o);
     case CMD_RESTORE:
         return rs_cmd_restore(o);
     case CMD_MACHINE:

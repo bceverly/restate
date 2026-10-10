@@ -40,7 +40,17 @@ struct rs_auto_opts {
     const struct rs_jval *packages;   /* the package inventory, or NULL */
     const char           *image_at;   /* the image as the installer sees it, or NULL */
     bool                  old_image;  /* the image is one stream, from before 1.1 */
+    /* restore's say in whom to trust, as it is put on its command line
+     * ("--trusted-key /tmp/restate-trusted.gpg", "--allow-unverified"), or
+     * NULL for the restate of an image too old to know; and the keyring
+     * that --trusted-key names, in base64, written there first. */
+    const char           *trust;
+    const char           *trust_keyring;
 };
+
+/* Where the autoinstall file puts the keyring restore checks the image
+ * against, in the installer's own filesystem. */
+#define RS_AUTO_TRUSTED_KEYRING "/tmp/restate-trusted.gpg"
 
 /* Writes the autoinstall file for `machine` to `out`. */
 bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,

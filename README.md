@@ -60,6 +60,9 @@ restate: 1 added, 0 deleted, 1 modified
 - [Use cases](#use-cases)
 - [Quick start](#quick-start)
 - [Usage](#usage)
+- [Live services](#live-services)
+- [Packages](#packages)
+- [Restoring](#restoring)
 - [Images and indexes](#images-and-indexes)
 - [Classes and rules](#classes-and-rules)
 - [Installing](#installing)
@@ -92,6 +95,11 @@ restate: 1 added, 0 deleted, 1 modified
 - **Compares.** `diff` two images or indexes, or `verify` one against the
   machine as it is now, and see what was added, deleted and modified — and
   whether a modification was the content, the mode, the owner or a link target.
+- **Pauses what is running, just in time.** A database, a VM or a container
+  found writing to files the image keeps is named, and with `--quiesce`
+  paused by a hook while its own files are copied, then resumed.
+- **Signs images, and refuses unsigned ones.** `--sign-with` signs an image;
+  `restore` checks it against `--trusted-key` before reading anything else.
 - **Walks safely, as root, through directories users control.** Nothing is
   opened by a path longer than one component, no symlink is followed, and
   every file is checked against what was stat'ed a moment earlier.
@@ -200,6 +208,9 @@ Commands:
                           modified, and how
   verify IMAGE            compare an image or index against the tree as it is
                           now
+  sign IMAGE              sign an image already written, with --sign-with: so a
+                          capture run unattended needs no secret key on the
+                          machine
   restore IMAGE           put an image's files back under the root (--root,
                           default /): each checked against the index before it
                           is put in place, with its owner, mode and times
@@ -244,6 +255,17 @@ Options:
                           capture: encrypt the image to the OpenPGP public key
                           in KEYFILE (gpg --export); repeatable, for more than
                           one recipient
+      --sign-with=KEYFILE
+                          capture, sign: sign the image with the OpenPGP secret
+                          key in KEYFILE (gpg --export-secret-keys)
+      --trusted-key=KEYFILE
+                          restore, verify, diff: accept an image only if it is
+                          signed by the OpenPGP public key in KEYFILE (gpg
+                          --export); autoinstall: have the restore check that;
+                          repeatable
+      --allow-unverified  restore: restore an image that is unsigned, or not
+                          signed by a --trusted-key, warning of it; by default
+                          it is refused
       --keep-local-packages
                           capture: keep the .deb and .snap files of installed
                           packages no repository or store has, from apt's and
@@ -251,6 +273,9 @@ Options:
       --deb=NAME=FILE     capture, with --keep-local-packages: keep FILE as the
                           .deb of package NAME, which no repository has and
                           apt's cache does not hold; repeatable
+      --quiesce           capture: pause each database, VM and container found
+                          running while its own files are copied, and resume it
+                          after, with the hooks for each (see LIVE SERVICES)
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
@@ -301,6 +326,40 @@ a log through `tee` -- each phase's final line goes to the log as well. With no
 terminal (cron), it writes a plain line every ten seconds instead. Off unless
 asked for; works alongside `--quiet`.
 
+## Live services
+
+A file copied while something writes to it can come back half old and half
+new. So `capture` looks in `/proc` (on Linux) for what is running and writing
+to files the image keeps -- PostgreSQL, MySQL and MariaDB, MongoDB, Redis,
+QEMU VMs, LXD containers and Docker's containers -- and names each one, with
+the command that would stop it:
+
+```console
+$ sudo restate capture -o laptop.tar
+restate: warning: PostgreSQL 18-main (/var/lib/postgresql/18/main) is running, and its files will be copied as they change: stop it first (systemctl stop postgresql@18-main), or capture with --quiesce
+restate: warning: the VM win-msi-lab (/home/me/.local/share/libvirt/images/win-msi-lab.qcow2, ...) is running, and ...
+```
+
+With `--quiesce` it pauses each one instead, **just in time**: everything else
+is copied first, then each in turn is paused, its own files copied, and
+resumed -- down for as long as its own files take, not the whole capture.
+While one is paused a Ctrl-C waits until it is resumed again, and every
+pause and resume is logged to syslog for a capture run from cron.
+
+restate runs no administration tools itself: a **hook** does the pausing, an
+executable named for the kind of thing (`postgresql`, `mysql`, `mongodb`,
+`redis`, `libvirt`, `lxd`, `docker`), from `/etc/restate/hooks.d` or else the
+ones restate ships in `libexec/restate/hooks`, and only if it and its
+directory are root's alone. It is run as `HOOK pause NAME` and then, always,
+`HOOK resume NAME`, with `RESTATE_KIND`, `RESTATE_NAME`, `RESTATE_PID`,
+`RESTATE_UID`, `RESTATE_USER`, `RESTATE_PATHS` and `RESTATE_DUMP_DIR` in its
+environment. The shipped database hooks dump into `RESTATE_DUMP_DIR` (which
+goes into the image beside the files) and stop the service; the others
+suspend the VM, freeze the container or pause Docker's containers. The
+PostgreSQL hook stops the units listed in `/etc/restate/also.d/postgresql`
+first -- services that write to the database -- and starts them after. To
+change a hook, copy it to `/etc/restate/hooks.d` and edit the copy.
+
 ## Packages
 
 A reinstall puts back the distribution's own packages, and the image leaves
@@ -324,6 +383,18 @@ was installed since, and from where, and `restate packages` prints it:
   conda, FreeBSD's pkg and macOS receipts are noted as present, without an
   inventory yet.
 - **Alternatives** chosen by hand (`update-alternatives --set`).
+
+Every apt source is **checked**, too, as apt checks it: its index as apt last
+fetched it, against the keys the source names, with `gpgv`, and its
+`Valid-Until` against the clock. apt refuses a source whose key has gone,
+changed or expired once, in an `apt update` nobody reads, and then quietly
+uses the last index it accepted -- for months. A rebuild installs from the
+source as it is now and gets nothing from it. A source apt cannot use gets a
+`"problem"` in the inventory, and `capture` warns:
+
+```console
+restate: warning: apt cannot use a source in /etc/apt/sources.list.d/hashicorp.sources -- https://apt.releases.hashicorp.com resolute: signed by a key that is not given (ID FC9CA96ACA026560); a rebuild will not install from it until that is put right
+```
 
 `capture --keep-local-packages` also keeps what no repository or store can
 give back: the `.deb` of each version no repository has, from apt's cache, and
@@ -468,11 +539,29 @@ $ sudo restate restore --exclude /etc/fstab web01.tar
 $ sudo restate restore --root /target web01.tar       # from an installer
 ```
 
+**Only a signed image is restored**, unless told otherwise. `restore` checks
+the signature before it reads anything else, and refuses -- exit status 4 --
+an image that is unsigned, badly signed, or signed by a key not given with
+`--trusted-key`. When it accepts one it says who signed it, and when and on
+which host it was captured, so an older image signed by the same key is plain
+to see. `--allow-unverified` restores one anyway, with a warning; it is a
+command-line option and nothing else can set it. `verify` and `diff` check the
+same way when given `--trusted-key`.
+
+```console
+$ sudo restate restore --trusted-key backup-signing.pub web01.tar
+restate: web01.tar is signed by Backups <backup@example.com> (3D71 FE67 ...) on 2026-10-09
+restate: captured on web01 at 2026-10-09T02:00:00.000000000Z, by restate 1.2.0.2
+```
+
 The image's kit carries the restate that made it, so a rebuilt machine can
 restore before restate is installed; the build sheet and autoinstall file do
 just that. The autoinstall file makes the old machine's first person the
 install's own account, so the merge gives them back their password and
-groups with no installer account on their number.
+groups with no installer account on their number. Both pass restore
+`--allow-unverified`, unless made with `--trusted-key`: then the sheet's
+restore names the same key files, and the autoinstall file carries the keys
+itself.
 
 ## Images and indexes
 
@@ -574,6 +663,24 @@ the index decrypts only the index; `diff`, `verify`, `installer`, `buildsheet`
 and `autoinstall` all read it directly. While the tree is walked, the content is staged
 unencrypted in an unlinked temporary file beside the image; where that
 matters, write the image to encrypted storage or a tmpfs.
+
+### Signed images
+
+Encryption is not authentication: anyone with the public key can make an
+image that decrypts cleanly. So sign it, with an OpenPGP secret key:
+
+```console
+$ gpg --export-secret-keys -o signing.key backup@example.com
+$ sudo restate capture -o web01.tar --sign-with signing.key
+$ restate sign --sign-with signing.key web01.tar        # or later, elsewhere
+```
+
+`restate sign` adds the signature to an image already written, so a capture
+run from cron needs no secret key on the machine. The signature is the
+archive's last member, `restate/index.sig`: a detached OpenPGP signature over
+the index part exactly as stored -- compressed, and encrypted if the image is
+-- so it covers every kept file's digest, owner, mode and path, and checking
+it decrypts nothing.
 
 ## Classes and rules
 
@@ -852,7 +959,11 @@ src/            the program: one module per concern
   image.c       images: assembling and reading back
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
-  run.c         running gzip, curl and gpgv: fixed paths, posix_spawn
+  run.c         running gzip, curl, gpg and the hooks: fixed paths, posix_spawn
+  live.c        what is running, from /proc: databases, VMs, containers
+  hooks.c       finding and running the hooks that pause them
+  sources.c     whether apt can still use each of its sources
+  pgp.c         encrypting, signing and checking signatures, through gpg
   machine.c     the machine description: hardware, disks, encryption
   packages.c    the package inventory: apt, snap, flatpak, pip, npm, cargo
   installer.c   which installer rebuilds a machine, and fetching it
@@ -862,6 +973,7 @@ src/            the program: one module per concern
   diff.c        comparing two indexes
   sha256.c      FIPS 180-4
 include/        restate.h: the version, copyright and exit statuses
+hooks/          the hooks capture --quiesce runs, installed in libexec/restate/hooks
 tests/          unit tests; cli/ end-to-end; fuzz/ the fuzz target
 scripts/        everything make runs
 man/restate.8   generated from --help; do not edit

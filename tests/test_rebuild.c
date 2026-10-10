@@ -585,7 +585,7 @@ static void sheet_cases(void)
 
     TEST_CASE("buildsheet: what it cannot do");
     {
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false, NULL };
         struct rs_buf        out;
         struct rs_buf        err;
 
@@ -1001,7 +1001,7 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 

@@ -1,0 +1,53 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: a libvirt VM, for capture --quiesce.
+#
+#   pause NAME    suspend the VM: its CPUs stop, so its disks stop changing
+#   resume NAME   resume it -- unless it was already paused before
+#
+# A VM of a user's own (qemu:///session, which virt-manager and GNOME Boxes
+# use) is suspended as that user, through their own libvirt; one of the
+# system's through qemu:///system. A suspended VM's disks are as they would be
+# after a sudden power cut: a journaling filesystem inside recovers.
+#
+# To change what this does, copy it to /etc/restate/hooks.d/libvirt (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+name=$2
+state=/run/restate/hooks
+(umask 077 && mkdir -p "$state")
+mark="$state/libvirt-${RESTATE_UID:-0}-$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+
+virsh_as() {
+  if [ "${RESTATE_UID:-0}" = 0 ]; then
+    virsh -q -c qemu:///system "$@"
+  else
+    runuser -u "$RESTATE_USER" -- env XDG_RUNTIME_DIR="/run/user/$RESTATE_UID" \
+      virsh -q -c qemu:///session "$@"
+  fi
+}
+
+case "$action" in
+pause)
+  rm -f "$mark"
+  if [ "$(virsh_as domstate "$name")" = running ]; then
+    virsh_as suspend "$name" > /dev/null
+    : > "$mark"
+  fi
+  ;;
+resume)
+  if [ -e "$mark" ]; then
+    virsh_as resume "$name" > /dev/null
+    rm -f "$mark"
+  fi
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: Docker's containers, for capture --quiesce.
+#
+#   pause NAME    pause every running container, so their volumes stop
+#                 changing
+#   resume NAME   unpause the ones it paused
+#
+# To change what this does, copy it to /etc/restate/hooks.d/docker (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+state=/run/restate/hooks
+(umask 077 && mkdir -p "$state")
+paused="$state/docker"
+
+case "$1" in
+pause)
+  docker ps --quiet --filter status=running > "$paused"
+  if [ -s "$paused" ]; then
+    # One id to a line: word splitting is what is wanted here.
+    # shellcheck disable=SC2046
+    docker pause $(cat "$paused") > /dev/null
+  fi
+  ;;
+resume)
+  if [ -s "$paused" ]; then
+    # shellcheck disable=SC2046
+    docker unpause $(cat "$paused") > /dev/null
+  fi
+  rm -f "$paused"
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

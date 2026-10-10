@@ -131,6 +131,40 @@ void test_image(void)
     rs_buf_init(&content);
     rs_buf_init(&err);
 
+    TEST_CASE("image: which restate knows restore's --trusted-key");
+    CHECK(rs_image_knows_trust("1.2.0.2"));
+    CHECK(rs_image_knows_trust("1.2.0.2-dev"));
+    CHECK(rs_image_knows_trust("1.3.0.0"));
+    CHECK(rs_image_knows_trust("2.0.0.0"));
+    CHECK(rs_image_knows_trust("x"));
+    CHECK(!rs_image_knows_trust("1.2.0.1"));
+    CHECK(!rs_image_knows_trust("1.1.9.9"));
+    CHECK(!rs_image_knows_trust("0.9"));
+    CHECK(!rs_image_knows_trust("1.2"));
+    CHECK(!rs_image_knows_trust(""));
+    CHECK(!rs_image_knows_trust(NULL));
+
+    TEST_CASE("image: only an image in parts has room for a signature");
+    {
+        struct rs_buf part;
+        struct rs_buf sig;
+        char         *bare = rs_xasprintf("%s/bare.json", dir);
+
+        rs_test_write(dir, "bare.json", "{\"format\": \"restate-index\"}", 0644);
+        rs_buf_init(&part);
+        rs_buf_init(&sig);
+        CHECK(!rs_image_signed_bytes(bare, &part, &sig, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "not an image in parts");
+        rs_buf_reset(&err);
+        CHECK(!rs_image_add_signature(bare, "x", 1, &err));
+        rs_buf_reset(&err);
+        CHECK(!rs_image_signed_bytes("/nonexistent/x.tar", &part, &sig, &err));
+        rs_buf_reset(&err);
+        rs_buf_free(&part);
+        rs_buf_free(&sig);
+        free(bare);
+    }
+
     TEST_CASE("tar: pax record lengths count themselves");
     {
         struct rs_buf r;

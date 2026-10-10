@@ -341,9 +341,9 @@ section "American spelling"
 # and quoted material keeps the spelling it was written in. Add an exemption
 # for either by putting "spelling: ok" on the same line.
 BRITISH='colours?|coloured|behaviours?|favourites?|honours?|labours?|neighbours?|licences?|initialis(e|ed|es|ing|ation)|organis(e|ed|es|ing|ation|ations)|recognis(e|ed|es|ing)|analys(e|ed|es|ing)|serialis(e|ed|es|ing|ation)|normalis(e|ed|es|ing|ation)|optimis(e|ed|es|ing|ation)|summaris(e|ed|es|ing)|prioritis(e|ed|es|ing)|customis(e|ed|es|ing|ation)|centre[sd]?|fibre|metres?|catalogue[sd]?|dialogue|judgement|travell(ed|ing|er|ers)|modell(ed|ing)|labell(ed|ing)|cancell(ed|ing)|defence|greys?|programme[sd]?|enquir(y|ies)|aluminium|artefacts?|whilst|amongst|cheque'
-SPELL_FILES="$(find src include tests scripts .githooks .github man docs \
+SPELL_FILES="$(find src include tests scripts .githooks .github man docs hooks \
                     -type f \( -name '*.c' -o -name '*.h' -o -name '*.def' -o -name '*.sh' \
-                    -o -name '*.yml' -o -name '*.8' -o -name '*.md' -o -path '.githooks/*' \) \
+                    -o -name '*.yml' -o -name '*.8' -o -name '*.md' -o -path '.githooks/*' -o -path 'hooks/*' \) \
                     2>/dev/null; ls ./*.md Makefile .gitignore 2>/dev/null)"
 # shellcheck disable=SC2086  # the file list is deliberately split
 SPELL_HITS="$(grep -nEiw "$BRITISH" $SPELL_FILES 2>/dev/null | grep -v 'spelling: ok' \
@@ -394,7 +394,7 @@ done < <(
     # kind of file (a suppressions list, an awk program, a hook with no
     # extension at all) is source the moment it is added, and an extension
     # list would let it in without a header.
-    find src include tests scripts .githooks -type f 2>/dev/null
+    find src include tests scripts .githooks hooks -type f 2>/dev/null
     # And the code outside them: the build, the CI and the repository's own
     # configuration. Prose (the Markdown) and data (VERSION, the generated
     # badge) are not code and carry no header.
@@ -434,7 +434,7 @@ fi
 # ---------------------------------------------------------------------------
 section "shellcheck"
 if command -v shellcheck > /dev/null 2>&1; then
-  if shellcheck --severity=style scripts/*.sh tests/cli/*.sh .githooks/* \
+  if shellcheck --severity=style scripts/*.sh tests/cli/*.sh .githooks/* hooks/* \
        > "$WORK/shellcheck.log" 2>&1; then
     ok "every script is clean"
   else

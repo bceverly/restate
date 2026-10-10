@@ -207,6 +207,7 @@ void test_pgp(void)
             (void)mkdir(into, 0755);
             o.command = CMD_RESTORE;
             o.root = into;
+            o.allow_unverified = true;
             CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_OK);
             CHECK(access(key, F_OK) == 0);
             free(out);

@@ -235,6 +235,10 @@ contains "$OUT" '"name": "hello"' "packages lists what dpkg installed"
 contains "$OUT" '"http://deb.example.com/debian stable/main"' "and where it came from"
 contains "$OUT" '"unavailable": "local"' "and what no repository has"
 contains "$OUT" '"path": "/etc/apt/k.gpg"' "and the key the repository is signed with"
+if command -v gpgv > /dev/null 2>&1; then
+  contains "$OUT" '"problem": "http://deb.example.com/debian stable: apt has no index of it' \
+    "and that apt cannot use it"
+fi
 if command -v python3 > /dev/null 2>&1; then
   check "the inventory is valid JSON" \
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["apt"]["count"] == 2' < out.txt
@@ -257,6 +261,14 @@ expect 0 "capture --keep-local-packages" -- \
   "$BIN" capture --root pkgtree --keep-local-packages -o kept.tar
 contains "$ERR" "vanished 2.0 is not in /var/cache/apt/archives" "a package not in apt's cache is warned of"
 contains "$ERR" "dpkg-repack vanished" "with how to rebuild it"
+# Its one source has no index apt fetched, and a key that is not one: apt
+# cannot use it, which capture says -- or says it could not check, where
+# gpgv is not installed.
+case "$ERR" in
+  *"gpgv is not installed: apt's sources were not checked"*) ok ;;
+  *) contains "$ERR" "apt cannot use a source in /etc/apt/sources.list -- http://deb.example.com/debian stable: apt has no index of it" \
+       "a source apt cannot use is warned of" ;;
+esac
 check "the kept .deb is in the image, though /var/cache is left out" \
   eval 'part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
 check "and nothing else of /var/cache" \
@@ -483,7 +495,7 @@ ln rtree/var/lib/x/one rtree/var/lib/x/two
 expect 0 "capture for restore" -- "$BIN" capture -r rtree --os=linux -q -o rimg.tar
 
 mkdir -p rout
-expect 0 "restore" -- "$BIN" restore --root rout rimg.tar
+expect 0 "restore" -- "$BIN" restore --allow-unverified --root rout rimg.tar
 contains "$ERR" "put back 5 files" "restore says what it put back"
 check "the content is back" cmp rtree/etc/app/key rout/etc/app/key
 check "and its mode" test "$(file_mode rout/etc/app/key)" = "600"
@@ -496,12 +508,12 @@ expect 0 "verify finds the restored tree the same" -- "$BIN" verify --root rout 
 contains "$ERR" "0 added, 0 deleted, 0 modified" "nothing differs"
 
 mkdir -p rdry
-expect 0 "restore --dry-run" -- "$BIN" restore --dry-run --root rdry rimg.tar
+expect 0 "restore --dry-run" -- "$BIN" restore --allow-unverified --dry-run --root rdry rimg.tar
 contains "$OUT" "would restore /etc/app/key" "a dry run says what it would do"
 check "and writes nothing" test -z "$(ls -A rdry)"
 
 mkdir -p rex
-expect 0 "restore --exclude" -- "$BIN" restore --root rex --exclude /etc/app rimg.tar
+expect 0 "restore --exclude" -- "$BIN" restore --allow-unverified --root rex --exclude /etc/app rimg.tar
 check "leaves the excluded path out" test ! -e rex/etc/app
 check "and everything beneath it" test ! -e rex/etc/app/key
 check "but restores the rest" test -f rex/etc/hosts
@@ -510,7 +522,7 @@ contains "$ERR" "left out 2 paths" "and says what it left out"
 # A symlink where a directory should be is replaced, not followed.
 mkdir -p rtrap elsewhere
 ln -s "$WORK/elsewhere" rtrap/etc
-expect 0 "restore over a planted symlink" -- "$BIN" restore --root rtrap rimg.tar
+expect 0 "restore over a planted symlink" -- "$BIN" restore --allow-unverified --root rtrap rimg.tar
 check "the symlink did not lead out" test -z "$(ls -A elsewhere)"
 check "a directory is there instead" test -d rtrap/etc -a ! -L rtrap/etc
 
@@ -519,7 +531,7 @@ mkdir -p tamper && ( cd tamper && tar -xf ../rimg.tar && gzip -dc restate/files.
   sed 's/secret/SECRET/' files.tar > tampered.tar && gzip -c tampered.tar > restate/files.tar.gz &&
   tar -cf ../rbad.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
 mkdir -p rbad
-expect 3 "restore a tampered image" -- "$BIN" restore --root rbad rbad.tar
+expect 3 "restore a tampered image" -- "$BIN" restore --allow-unverified --root rbad rbad.tar
 contains "$ERR" "/etc/app/key: its content is not what the index says it is; not put back" \
   "a file that does not match its digest is refused"
 check "and never lands" test ! -e rbad/etc/app/key
@@ -532,7 +544,7 @@ mkdir -p padded && ( cd padded && tar -xf ../rimg.tar && gzip -dc restate/files.
   gzip -c files.tar > restate/files.tar.gz &&
   tar -cf ../rpad.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
 mkdir -p rpad
-expect 0 "restore an image padded past its end" -- "$BIN" restore --root rpad rpad.tar
+expect 0 "restore an image padded past its end" -- "$BIN" restore --allow-unverified --root rpad rpad.tar
 check "puts its files back" cmp rtree/etc/app/key rpad/etc/app/key
 
 # A member the index does not list.
@@ -543,7 +555,7 @@ mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil
   tar -cf ../rextra.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
 mkdir -p rextra
 expect 3 "restore an image with a member the index does not list" -- \
-  "$BIN" restore --root rextra rextra.tar
+  "$BIN" restore --allow-unverified --root rextra rextra.tar
 contains "$ERR" "/etc/evil: in the image, but not as the index records it; refused" \
   "a member the index does not list is refused"
 check "and not written" test ! -e rextra/etc/evil
@@ -571,7 +583,7 @@ if set_xattr xtree/etc/f 2> /dev/null; then
   expect 0 "capture a file with an extended attribute" -- "$BIN" capture -q --root xtree -o x.tar
   contains "$(part x.tar index.json.gz | gzip -dc | grep '"/etc/f"')" '"name": "user.color", "value": "Ymx1ZQ=="' \
     "the index records it"
-  expect 0 "restore it" -- "$BIN" restore --root xout x.tar
+  expect 0 "restore it" -- "$BIN" restore --allow-unverified --root xout x.tar
   expect 0 "verify finds the attribute put back" -- "$BIN" verify --root xout x.tar
   contains "$ERR" "0 added, 0 deleted, 0 modified" "and nothing differs"
   printf 'y' > xtree/etc/g
@@ -588,16 +600,95 @@ if [ "$(id -u)" = 0 ] && command -v setcap > /dev/null 2>&1 && command -v getcap
   if setcap cap_net_raw+ep ctree/usr/local/bin/ping-ish 2> /dev/null; then
     chown 1:1 ctree/usr/local/bin/ping-ish && setcap cap_net_raw+ep ctree/usr/local/bin/ping-ish
     expect 0 "capture a file with a capability" -- "$BIN" capture -q --root ctree -o c.tar
-    expect 0 "restore it" -- "$BIN" restore --root cout c.tar
+    expect 0 "restore it" -- "$BIN" restore --allow-unverified --root cout c.tar
     contains "$(getcap cout/usr/local/bin/ping-ish)" "cap_net_raw" "the capability is put back, after the owner"
   fi
+fi
+
+# Signed images: capture --sign-with, restate sign, and restore, verify and
+# diff --trusted-key. A throwaway key, in a GnuPG home of the test's own.
+if command -v gpg > /dev/null 2>&1 && command -v gpgv > /dev/null 2>&1; then
+  mkdir -m 700 gnupg
+  gk() { GNUPGHOME="$WORK/gnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
+  gk --quick-gen-key 'restate test <signer@example.invalid>' ed25519 sign never 2> /dev/null
+  gk --quick-gen-key 'someone else <other@example.invalid>' ed25519 sign never 2> /dev/null
+  gk --export-secret-keys --armor signer@example.invalid > signer.sec 2> /dev/null
+  gk --export signer@example.invalid > signer.pub 2> /dev/null
+  gk --export --armor signer@example.invalid > signer.asc 2> /dev/null
+  gk --export other@example.invalid > other.pub 2> /dev/null
+
+  expect 0 "capture --sign-with" -- "$BIN" capture -r rtree --os=linux --sign-with signer.sec -o simg.tar
+  contains "$ERR" "signed by restate test <signer@example.invalid>" "capture says who signed it"
+  check "the image carries the signature, last" eval 'tar -tf simg.tar | tail -1 | grep -qx restate/index.sig'
+  mkdir -p sout
+  expect 0 "restore --trusted-key" -- "$BIN" restore --trusted-key signer.pub --root sout simg.tar
+  contains "$ERR" "simg.tar is signed by restate test <signer@example.invalid>" "restore says who signed it"
+  contains "$ERR" "captured on" "and where and when it was captured"
+  check "and puts the files back" cmp rtree/etc/app/key sout/etc/app/key
+  expect 0 "restore --trusted-key, the key armored" -- \
+    "$BIN" restore --dry-run --trusted-key signer.asc --root sout simg.tar
+  expect 4 "restore with no --trusted-key" -- "$BIN" restore --root sout simg.tar
+  contains "$ERR" "no --trusted-key was given to check it against: not restoring it" "is refused"
+  expect 4 "restore --trusted-key someone else's" -- \
+    "$BIN" restore --trusted-key other.pub --root sout simg.tar
+  contains "$ERR" "signed by a key that is not given" "is refused, naming the key"
+  expect 0 "restore --allow-unverified, someone else's key" -- \
+    "$BIN" restore --allow-unverified --trusted-key other.pub --dry-run --root sout simg.tar
+  contains "$ERR" "restoring it anyway, as --allow-unverified says" "warns, and restores"
+  expect 4 "restore an unsigned image --trusted-key" -- \
+    "$BIN" restore --trusted-key signer.pub --root sout rimg.tar
+  contains "$ERR" "it is not signed" "is refused"
+  expect 2 "restore --trusted-key a file that is not a key" -- \
+    "$BIN" restore --trusted-key rtree/etc/hosts --root sout simg.tar
+  expect 0 "verify --trusted-key" -- "$BIN" verify --trusted-key signer.pub --root rtree simg.tar
+  expect 4 "verify --trusted-key someone else's" -- "$BIN" verify --trusted-key other.pub --root rtree simg.tar
+  expect 0 "verify, nothing checked" -- "$BIN" verify --root rtree simg.tar
+  expect 0 "diff --trusted-key" -- "$BIN" diff --trusted-key signer.pub simg.tar simg.tar
+  expect 4 "diff --trusted-key, one unsigned" -- "$BIN" diff --trusted-key signer.pub simg.tar rimg.tar
+
+  # Signed afterwards, in place.
+  cp rimg.tar later.tar
+  expect 0 "sign" -- "$BIN" sign --sign-with signer.sec later.tar
+  contains "$ERR" "signed by restate test" "says who signed it"
+  expect 0 "and the signature holds" -- "$BIN" restore --dry-run --trusted-key signer.pub --root sout later.tar
+  expect 2 "sign it again" -- "$BIN" sign --sign-with signer.sec later.tar
+  contains "$ERR" "it is signed already" "is refused"
+  expect 2 "sign with no key" -- "$BIN" sign later.tar
+  expect 2 "sign a bare index" -- "$BIN" sign --sign-with signer.sec rindex.json
+  expect 2 "capture --sign-with a key that is not there" -- \
+    "$BIN" capture -r rtree --sign-with no-such.key -o x.tar
+
+  # The index changed after it was signed.
+  cp simg.tar forged.tar
+  printf 'X' | dd of=forged.tar bs=1 seek=1600 conv=notrunc 2> /dev/null
+  expect 4 "restore an image whose index changed" -- \
+    "$BIN" restore --trusted-key signer.pub --root sout forged.tar
+  contains "$ERR" "a bad signature" "is refused as a bad signature"
+
+  # A rebuild: the restore is told what to trust. Of this machine's own root,
+  # which has the description a rebuild is made from -- an Ubuntu one.
+  if [ "$(uname -s)" = Linux ] && grep -qx 'ID=ubuntu' /etc/os-release 2> /dev/null; then
+    echo "ephemeral /*" > signed-nothing.rules
+    expect 0 "capture of / --sign-with" -- \
+      "$BIN" capture -N -R signed-nothing.rules -q --sign-with signer.sec -o sroot.tar
+    expect 0 "autoinstall --trusted-key" -- \
+      "$BIN" autoinstall --trusted-key signer.pub --image-at /restate/sroot.tar sroot.tar
+    contains "$OUT" "base64 -d > /tmp/restate-trusted.gpg" "the key goes into the installer"
+    contains "$OUT" "--exclude /etc/crypttab --trusted-key /tmp/restate-trusted.gpg /restate/sroot.tar" \
+      "and restore checks the image against it"
+    expect 0 "autoinstall, no --trusted-key" -- "$BIN" autoinstall --image-at /restate/sroot.tar sroot.tar
+    contains "$OUT" "--exclude /etc/crypttab --allow-unverified /restate/sroot.tar" "restore is told not to check"
+    expect 0 "buildsheet --trusted-key" -- "$BIN" buildsheet --trusted-key signer.pub sroot.tar
+    contains "$OUT" "--trusted-key signer.pub sroot.tar" "the sheet's restore checks too"
+  fi
+  GNUPGHOME="$WORK/gnupg" gpgconf --kill gpg-agent 2> /dev/null || true
 fi
 
 # An image from before 1.1: one gzip'd stream, index.json first.
 mkdir -p old && ( cd old && tar -xf ../rimg.tar && gzip -dc restate/index.json.gz > restate/index.json &&
   tar -xzf restate/files.tar.gz && tar -czf ../rold.tgz restate/index.json restate/files )
 mkdir -p rold
-expect 0 "restore an image from before 1.1" -- "$BIN" restore --root rold rold.tgz
+expect 0 "restore an image from before 1.1" -- "$BIN" restore --allow-unverified --root rold rold.tgz
 check "puts its files back" cmp rtree/etc/app/key rold/etc/app/key
 
 # The kit carries the restate that made the image, so a new system can run
@@ -611,6 +702,67 @@ if [ "$(uname -s)" = Linux ] && [ -r /proc/self/exe ]; then
   # shellcheck disable=SC2317,SC2329
   kit_holds() { part self.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files$1"; }
   check "the kit holds the restate binary" kit_holds "$(readlink -f "$BIN")"
+fi
+
+# What is live: a process that looks like a database to /proc is named by
+# capture, and with --quiesce its hook pauses it while its files are copied.
+# A copy of sleep called redis-server, running in its data directory, is
+# Redis as far as /proc can tell. Root's, Linux's, and only on a machine with
+# no /etc/restate of its own: the test puts a hook there and takes it away.
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ -d /proc/self ] && [ ! -e /etc/restate ] &&
+   [ ! -e /srv/restate-redis ] && [ ! -e /var/lib/restate ]; then
+  mkdir -p /srv/restate-redis /etc/restate/hooks.d
+  echo data > /srv/restate-redis/dump.rdb
+  cp "$(command -v sleep)" "$WORK/redis-server"
+  ( cd /srv/restate-redis && exec "$WORK/redis-server" 600 ) &
+  live_pid=$!
+  printf '%s\n' 'ephemeral /*' 'state /srv' 'state /var' 'ephemeral /var/*' 'state /var/lib' \
+    'ephemeral /var/lib/*' 'state /var/lib/restate' > live.rules
+  sleep 1
+
+  expect 0 "capture names what is running" -- "$BIN" capture -N -R live.rules -o live.tar
+  contains "$ERR" "Redis redis-server (/srv/restate-redis) is running" "and what it is, and where"
+  contains "$ERR" "systemctl stop redis-server" "and how to stop it"
+  contains "$ERR" "--quiesce" "and that capture can pause it"
+
+  expect 0 "with --quiesce and no hook for it" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
+  contains "$ERR" "no hook pauses redis (/etc/restate/hooks.d/redis)" "it says there is no hook"
+
+  cat > /etc/restate/hooks.d/redis <<HOOK
+#!/bin/sh
+{ echo "\$1 \$2 uid=\$RESTATE_UID"; echo "\$RESTATE_PATHS"; echo "dump=\$RESTATE_DUMP_DIR"; } >> "$WORK/hook.log"
+[ "\$1" = pause ] && echo dumped > "\$RESTATE_DUMP_DIR/dump.txt"
+exit 0
+HOOK
+  chmod 0755 /etc/restate/hooks.d/redis
+  expect 0 "with --quiesce, through its hook" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
+  contains "$ERR" "pausing Redis redis-server" "it says it is pausing it"
+  contains "$ERR" "resumed Redis redis-server" "and that it resumed it"
+  hook_log="$(cat "$WORK/hook.log" 2> /dev/null)"
+  contains "$hook_log" "pause redis-server uid=0" "the hook is told what to pause"
+  contains "$hook_log" "resume redis-server" "and then to resume it"
+  contains "$hook_log" "/srv/restate-redis" "and which files are about to be copied"
+  contains "$hook_log" "dump=/var/lib/restate/dumps/redis-redis-server" "and where a dump goes"
+  live_files="$(part live.tar files.tar.gz | gzip -dc | tar -tf -)"
+  contains "$live_files" "restate/files/srv/restate-redis/dump.rdb" "the files are in the image"
+  contains "$live_files" "restate/files/var/lib/restate/dumps/redis-redis-server/dump.txt" \
+    "and the dump with them"
+  check "the dump directory is root's alone" test "$(file_mode /var/lib/restate/dumps/redis-redis-server)" = 700
+
+  # A script, written as it is: nothing to expand here.
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\n[ "$1" = pause ] && exit 3\nexit 0\n' > /etc/restate/hooks.d/redis
+  expect 0 "a hook that cannot pause" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
+  contains "$ERR" "was not paused" "is warned about"
+  contains "$ERR" "resumed Redis redis-server" "and resume is run anyway"
+
+  chmod 0777 /etc/restate/hooks.d/redis
+  expect 0 "a hook anyone could change" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
+  contains "$ERR" "no hook pauses redis" "is not run"
+
+  kill "$live_pid" 2> /dev/null
+  wait "$live_pid" 2> /dev/null
+  rm -rf /srv/restate-redis /etc/restate /var/lib/restate
 fi
 
 # Owners by name: the image's accounts merged with the system's own.
@@ -632,7 +784,7 @@ check "the kit holds the accounts" \
 mkdir -p aout/etc
 printf '%s:x:%s:%s:Installer:/home/me:/bin/sh\n' "$me" "$myuid" "$mygid" > aout/etc/passwd
 printf '%s:x:%s:\n' "$mygroup" "$mygid" > aout/etc/group
-expect 0 "restore onto a system with accounts of its own" -- "$BIN" restore --root aout aimg.tar
+expect 0 "restore onto a system with accounts of its own" -- "$BIN" restore --allow-unverified --root aout aimg.tar
 contains "$ERR" "owners mapped by name" "restore maps owners by name"
 contains "$(cat aout/etc/passwd)" "$me:x:$myuid:$mygid:Me:/home/me:/bin/zsh" \
   "a person both have: the system's number, the image's name, home and shell"
@@ -640,12 +792,12 @@ contains "$(cat aout/etc/passwd)" "old:x:1500:1500::/home/old:/bin/sh" \
   "a user only the image had, at its own number"
 contains "$(cat aout/etc/shadow)" "$me:\$6\$oldhash:" "the image's password"
 mkdir -p anum
-expect 0 "restore --numeric-owner" -- "$BIN" restore --numeric-owner --root anum aimg.tar
+expect 0 "restore --numeric-owner" -- "$BIN" restore --allow-unverified --numeric-owner --root anum aimg.tar
 lacks "$ERR" "owners mapped by name" "--numeric-owner does not merge"
 check "and lays down the image's account files as they are" cmp atree/etc/passwd anum/etc/passwd
 
-expect 2 "restore a missing image" -- "$BIN" restore --root rout no-such.tar
-expect 2 "restore into a missing root" -- "$BIN" restore --root no-such-dir rimg.tar
+expect 2 "restore a missing image" -- "$BIN" restore --allow-unverified --root rout no-such.tar
+expect 2 "restore into a missing root" -- "$BIN" restore --allow-unverified --root no-such-dir rimg.tar
 
 # ---------------------------------------------------------------------------
 # diff

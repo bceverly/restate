@@ -158,6 +158,7 @@ jobs:
           test -x staged/usr/local/sbin/restate
           test "$(stat -c '%a' staged/usr/local/sbin/restate)" = 755
           test "$(stat -c '%a' staged/usr/local/share/man/man8/restate.8)" = 644
+          test "$(stat -c '%a' staged/usr/local/libexec/restate/hooks/postgresql)" = 755
           rm -rf staged
           make install
           /usr/local/sbin/restate --version
@@ -169,6 +170,7 @@ jobs:
           /usr/local/sbin/restate classify /etc/passwd /usr/bin/ls /var/cache/apt
           make uninstall
           test ! -e /usr/local/sbin/restate
+          test ! -e /usr/local/libexec/restate
 
   # ==========================================================================
   # aarch64: plain char is unsigned there and the ABI differs. Native runners,

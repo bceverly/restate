@@ -14,6 +14,7 @@
 #include "opts.h"
 
 int rs_cmd_capture(const struct rs_options *o);
+int rs_cmd_sign(const struct rs_options *o);
 int rs_cmd_scan(const struct rs_options *o);
 int rs_cmd_diff(const struct rs_options *o);
 int rs_cmd_verify(const struct rs_options *o);

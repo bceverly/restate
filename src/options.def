@@ -39,12 +39,24 @@ RS_OPT('B', "baseline-content", no_argument,       NULL,
 RS_OPT(OPT_ENCRYPT_TO, "encrypt-to", required_argument, "KEYFILE",
        "capture: encrypt the image to the OpenPGP public key in KEYFILE "
        "(gpg --export); repeatable, for more than one recipient")
+RS_OPT(OPT_SIGN_WITH, "sign-with", required_argument, "KEYFILE",
+       "capture, sign: sign the image with the OpenPGP secret key in KEYFILE "
+       "(gpg --export-secret-keys)")
+RS_OPT(OPT_TRUSTED_KEY, "trusted-key", required_argument, "KEYFILE",
+       "restore, verify, diff: accept an image only if it is signed by the OpenPGP public "
+       "key in KEYFILE (gpg --export); autoinstall: have the restore check that; repeatable")
+RS_OPT(OPT_ALLOW_UNVERIFIED, "allow-unverified", no_argument, NULL,
+       "restore: restore an image that is unsigned, or not signed by a --trusted-key, "
+       "warning of it; by default it is refused")
 RS_OPT(OPT_KEEP_LOCAL, "keep-local-packages", no_argument, NULL,
        "capture: keep the .deb and .snap files of installed packages no repository "
        "or store has, from apt's and snapd's caches, so a rebuild can install them")
 RS_OPT(OPT_DEB, "deb",              required_argument, "NAME=FILE",
        "capture, with --keep-local-packages: keep FILE as the .deb of package NAME, "
        "which no repository has and apt's cache does not hold; repeatable")
+RS_OPT(OPT_QUIESCE, "quiesce",       no_argument,       NULL,
+       "capture: pause each database, VM and container found running while its own "
+       "files are copied, and resume it after, with the hooks for each (see LIVE SERVICES)")
 RS_OPT('x', "one-file-system",  no_argument,       NULL,
        "record mount points but do not descend into other filesystems")
 RS_OPT('n', "no-hash",          no_argument,       NULL,

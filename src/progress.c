@@ -314,6 +314,16 @@ void rs_progress_found(uint64_t n)
     }
 }
 
+void rs_progress_clear(void)
+{
+    if (on && active && out_tty && drawn)
+    {
+        (void)fputs("\r\033[2K\033[1A\r\033[2K", out);
+        (void)fflush(out);
+        drawn = false;
+    }
+}
+
 void rs_progress_done(void)
 {
     if (!on || !active)

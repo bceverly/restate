@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: MySQL and MariaDB, for capture --quiesce.
+#
+#   pause NAME    dump every database into $RESTATE_DUMP_DIR (mysqldump
+#                 --single-transaction, gzipped), then stop the server
+#   resume NAME   start it again
+#
+# NAME is "mysql" or "mariadb", which is also the unit's name. The dump uses
+# root's own login to the server, as Debian and Ubuntu set it up (the socket).
+#
+# To change what this does, copy it to /etc/restate/hooks.d/mysql (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+name=$2
+
+case "$action" in
+pause)
+  if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
+    out="$RESTATE_DUMP_DIR/mysqldump.sql"
+    dump=mysqldump
+    command -v mariadb-dump > /dev/null 2>&1 && dump=mariadb-dump
+    "$dump" --all-databases --single-transaction --routines --events --triggers > "$out.tmp"
+    gzip -f "$out.tmp"
+    mv -f "$out.tmp.gz" "$out.gz"
+  fi
+  systemctl stop "$name"
+  ;;
+resume)
+  systemctl start "$name"
+  ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

@@ -63,6 +63,22 @@ static struct rs_rules test_rules_set(void)
     return rs;
 }
 
+/* Each call of the scan's `around`, in order, and how many entries the index
+ * had when it came: "b0:N" before group 0, "a0:N" after. */
+struct around_log {
+    const struct rs_index *ix;
+    struct rs_buf         *calls;
+    bool                   stop;
+};
+
+static bool log_around(const void *ctx, size_t group, bool before)
+{
+    const struct around_log *l = ctx;
+
+    rs_buf_addf(l->calls, "%s%zu:%zu ", before ? "b" : "a", group, l->ix->count);
+    return !(before && l->stop);
+}
+
 static int quiet_scan(const void *arg)
 {
     const struct rs_scan_opts *o = arg;
@@ -249,6 +265,80 @@ void test_scan(void)
         CHECK(rmdir(dir) == 0);
         free(ln);
         free(dir);
+    }
+
+    TEST_CASE("scan: deferred paths walked last, each group between its two calls");
+    {
+        const char *const          g0[] = { "/etc/hosts", "/usr", "/etc/missing" };
+        const char *const          g1[] = { "/var/cache/blob", "/tmp/junk" };
+        const struct rs_scan_group groups[] = { { g0, 3 }, { g1, 2 } };
+        struct around_log          log;
+        struct rs_buf              calls;
+        size_t                     before;
+
+        rs_index_init(&m);
+        log.ix = &m;
+        log.stop = false;
+        rs_buf_init(&calls);
+        log.calls = &calls;
+        o.defer = groups;
+        o.ndefer = 2;
+        o.around = log_around;
+        o.around_ctx = &log;
+        CHECK(rs_scan(&o, &m, &st, &err));
+        /* The rest first; then /etc/hosts, /usr and /usr/tool; then nothing,
+         * since the walk would not have gone into /var/cache or /tmp. */
+        before = m.count - 3;
+        {
+            char *want = rs_xasprintf("b0:%zu a0:%zu b1:%zu a1:%zu ", before, before + 3,
+                                      before + 3, before + 3);
+
+            CHECK_STR(calls.data, want);
+            free(want);
+        }
+        e = rs_index_find(&m, "/usr/tool");
+        CHECK(e && e->cls == RS_CLASS_BASELINE);
+        CHECK(rs_index_find(&m, "/etc/hosts") != NULL);
+        CHECK(rs_index_find(&m, "/var/cache/blob") == NULL);
+        CHECK(rs_index_find(&m, "/tmp/junk") == NULL);
+        rs_index_free(&m);
+
+        /* With --all the expendable one is reached too. */
+        o.all = true;
+        rs_index_init(&m);
+        rs_buf_reset(&calls);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/var/cache/blob") != NULL);
+        rs_index_free(&m);
+        o.all = false;
+
+        /* Stopped before a group: it is resumed anyway, and nothing after. */
+        rs_index_init(&m);
+        rs_buf_reset(&calls);
+        log.stop = true;
+        CHECK(!rs_scan(&o, &m, &st, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "interrupted");
+        CHECK(strncmp(calls.data ? calls.data : "", "b0:", 3) == 0);
+        CHECK(strstr(calls.data ? calls.data : "", " a0:") != NULL);
+        CHECK(strstr(calls.data ? calls.data : "", "b1:") == NULL);
+        CHECK(rs_index_find(&m, "/etc/hosts") == NULL);
+        rs_index_free(&m);
+        rs_buf_reset(&err);
+
+        /* Counting walks everything in place: there is nothing to pause, and
+         * `around` is not called, stop or not. */
+        o.count_only = true;
+        rs_index_init(&m);
+        rs_buf_reset(&calls);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(calls.data == NULL || calls.len == 0);
+        rs_index_free(&m);
+        o.count_only = false;
+
+        o.defer = NULL;
+        o.ndefer = 0;
+        o.around = NULL;
+        rs_buf_free(&calls);
     }
 
     TEST_CASE("scan: --one-file-system on a single filesystem changes nothing");

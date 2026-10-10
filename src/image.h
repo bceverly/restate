@@ -54,6 +54,11 @@
 #define RS_IMAGE_KIT_PART   "restate/kit.tar.gz"
 #define RS_IMAGE_FILES_PART "restate/files.tar.gz"
 #define RS_IMAGE_FILES_DIR  "restate/files"
+/* A detached OpenPGP signature over the index part's bytes as stored -- the
+ * gzip, or the ciphertext of an encrypted image -- so it is checked, and an
+ * image signed, without decrypting anything. The last member, where `restate
+ * sign` can add it to an image already written. */
+#define RS_IMAGE_SIG_PART   "restate/index.sig"
 
 /*
  * The kit carries the image's account files for restore to merge with the
@@ -83,6 +88,8 @@ struct rs_image_writer {
         uint64_t length;
     }                   *spans;
     size_t               nspans;
+    const char          *sign_with;    /* a secret key file, or NULL; see pgp.h */
+    struct rs_pgp_signer signer;       /* who signed it, once it is */
 };
 
 /* Creates the temporary content file beside `dest`. */
@@ -146,11 +153,48 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
  * tar, as rs_image_part_command does it, without restore's checks or its
  * merging of the accounts, and saying so. `fstab` leaves
  * /etc/fstab and /etc/crypttab out, for an installer that formatted the
- * volumes itself. An incomplete restore (some files refused, exit 3) is
- * said, not taken as failure; anything worse fails the command.
+ * volumes itself. `trust`, where given, goes on restore's command line as it
+ * is: "--trusted-key /tmp/key.gpg", or "--allow-unverified". An incomplete
+ * restore (some files refused, exit 3) is said, not taken as failure;
+ * anything worse fails the command.
  */
 void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
-                              bool fstab);
+                              bool fstab, const char *trust);
+
+/*
+ * The index part of the image at `path` as stored, into `index_part`, and its
+ * signature, into `sig` -- left empty if it has none. False, with the reason
+ * in `err`, if it is not an image in parts (a bare index, an image from
+ * before 1.1), which cannot be signed.
+ */
+bool rs_image_signed_bytes(const char *path, struct rs_buf *index_part, struct rs_buf *sig,
+                           struct rs_buf *err);
+
+/* Adds the signature `sig` to the image at `path`, in place, as its last
+ * member. Refused if it has one already. */
+bool rs_image_add_signature(const char *path, const void *sig, size_t len, struct rs_buf *err);
+
+/*
+ * Whether the image at `path` is signed by one of the keys in the files
+ * `trusted` (gpg --export, armored or not). True, with who signed it in
+ * `signer`, if it is; otherwise false, and why not in `why`: "it is not
+ * signed", "signed by a key that is not given (ID ...)", "a bad signature".
+ * With no keys at all, a signed image is said to be signed by a key not
+ * given, which names it. The SHA-256 of the index part it checked goes into
+ * `digest`, to be matched with the index read (rs_index.part_sha256): the
+ * same bytes, not the same file, are what was checked.
+ */
+bool rs_image_trusted(const char *path, const char *const *trusted, size_t n,
+                      struct rs_pgp_signer *signer, char digest[RS_SHA256_HEX_SIZE],
+                      struct rs_buf *why);
+
+/*
+ * Whether the restate that wrote an index of version `version` knows
+ * restore's --allow-unverified and --trusted-key: a restore command for
+ * its image, run by the restate in its kit, must not pass them to one that
+ * does not.
+ */
+bool rs_image_knows_trust(const char *version);
 
 /*
  * Reads an index from `path`: an image -- in parts, or from before 1.1 one

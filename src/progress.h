@@ -57,6 +57,9 @@ void rs_progress_path(const char *path);
 void rs_progress_found(uint64_t n);
 /* Ends the phase with a last, final line. */
 void rs_progress_done(void);
+/* Takes the bar off the terminal, so a message can be printed where it was;
+ * it is drawn again at the next update. */
+void rs_progress_clear(void);
 
 /* One progress line for `s` at time `now_ns`, at most `width` characters. */
 void rs_progress_format(const struct rs_progress_state *s, uint64_t now_ns, size_t width,

@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: Redis, for capture --quiesce.
+#
+#   pause NAME    stop redis-server, which saves its data as it stops
+#   resume NAME   start it again
+#
+# To change what this does, copy it to /etc/restate/hooks.d/redis (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+case "$1" in
+pause) systemctl stop redis-server ;;
+resume) systemctl start redis-server ;;
+*)
+  echo "usage: $0 pause|resume NAME" >&2
+  exit 2
+  ;;
+esac
