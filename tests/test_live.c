@@ -135,9 +135,27 @@ static int run_env(const void *arg)
     return ok ? code : -1;
 }
 
+/*
+ * The test directory as realpath() gives it, since that is how detection
+ * reports paths: on macOS the temporary directory is under /var, a link to
+ * /private/var, and $TMPDIR ends in a slash.
+ */
+static char *real_tmpdir(void)
+{
+    char *dir = rs_test_tmpdir();
+    char *real = realpath(dir, NULL);
+
+    if (real == NULL)
+    {
+        return dir;
+    }
+    free(dir);
+    return real;
+}
+
 void test_live(void)
 {
-    char           *dir = rs_test_tmpdir();
+    char           *dir = real_tmpdir();
     char           *proc = rs_xasprintf("%s/proc", dir);
     struct rs_live *l = NULL;
     size_t          n = 0;
@@ -475,6 +493,11 @@ void test_live(void)
         rs_buf_reset(&err);
         /* Anyone's file is not run, however executable. */
         rs_test_write(dir, "mine", "#!/bin/sh\nexit 0\n", 0755);
+        /* Run as root, as on the BSD runners, the file would be root's. */
+        if (geteuid() == 0)
+        {
+            CHECK(chown(mine, 1, (gid_t)-1) == 0);
+        }
         CHECK(!rs_hook_run(mine, "pause", &one, NULL, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "not run");
         rs_buf_reset(&err);

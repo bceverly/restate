@@ -20,8 +20,9 @@
 #      and asks you to confirm it.
 #   2. Writes it into VERSION, rebuilds, regenerates the manpage and the
 #      README's Usage block, and checks the manpage names the new version.
-#   3. Commits and pushes that change.
-#   4. Creates an annotated tag and pushes the tag.
+#   3. Runs the tests (`make test`), so a failure leaves nothing committed.
+#   4. Commits and pushes that change.
+#   5. Creates an annotated tag and pushes the tag.
 #
 # Pushing the tag is what triggers the release build, so the confirmation in
 # step 1 is the point of no return — answer "n" and nothing is released (VERSION
@@ -240,6 +241,18 @@ fi
 git remote get-url origin > /dev/null 2>&1 \
   || die "No 'origin' remote configured; nothing to push to."
 
+# The tests run here, before anything is committed or pushed, rather than in
+# the pre-push hook. git connects to the remote before it runs that hook, and
+# the suite -- both suites, the sanitizers, valgrind and the coverage gate --
+# takes long enough that GitHub drops the idle connection, so a release whose
+# tests all passed then failed to push. Run here, nothing is open while they
+# run, and a failure leaves nothing committed. Standard input is /dev/null for
+# the same reason the hook gives it: `restate diff -` reads it.
+bold "Testing"
+make --no-print-directory test < /dev/null \
+  || die "The tests failed; nothing was committed or pushed."
+ok "Tests, sanitizers, valgrind and the coverage gate all passed."
+
 git add VERSION man/restate.8 README.md || die "Could not stage the version files."
 
 # An empty diff means the files already carried this version, which is fine on
@@ -252,26 +265,23 @@ else
 fi
 
 info "Pushing $BRANCH to origin…"
-git push origin "$BRANCH" || die "Push failed; the tag was not created."
+RESTATE_SKIP_HOOK=1 git push origin "$BRANCH" || die "Push failed; the tag was not created."
 ok "Pushed $BRANCH."
 
 info "Tagging $TAG…"
 git tag -a "$TAG" -m "Release $TAG" || die "Could not create tag $TAG."
 ok "Created tag $TAG."
 
-# RESTATE_SKIP_HOOK=1, and this is the one place it is honest.
+# RESTATE_SKIP_HOOK=1 on both pushes, and this is the one place it is honest.
 #
-# A release does two pushes -- the branch, then the tag -- and git runs the
-# pre-push hook on each. That hook runs the whole test suite: both suites, the
-# sanitizers, valgrind and the coverage gate, which re-runs both suites again.
-# The branch push above just did all of it. The tag points at the commit that
-# push published, nothing has been touched since, and the hook tests the working
-# tree rather than the ref being pushed -- so the second run reads the same
-# bytes and can only reach the same answer, several minutes later.
+# The pre-push hook runs the same `make test` that ran under "Testing" above,
+# on this tree. Nothing has been touched since but the commit of the files that
+# were tested, and the hook tests the working tree rather than the ref being
+# pushed -- so running it again reads the same bytes and can only reach the
+# same answer, several minutes later and with the connection held open.
 #
 # Skipping it is not skipping the check; the check ran, on this tree, moments
-# ago. If the branch push had failed its hook, the die above means execution
-# never got here.
+# ago. If it had failed, the die above means execution never got here.
 info "Pushing tag $TAG…"
 if ! RESTATE_SKIP_HOOK=1 git push origin "$TAG"; then
   # Leave the local tag in place so it can be retried or inspected.
