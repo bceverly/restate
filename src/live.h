@@ -36,7 +36,8 @@ struct rs_live {
     const char    *kind;    /* "postgresql": also the name of its hook */
     char          *name;    /* "18-main", a VM's or a container's name */
     long           pid;
-    unsigned long  uid;     /* whose it is: a VM may be a user's own */
+    unsigned long  uid;     /* whose it is: a VM may be a user's own; a VM
+                             * the system's libvirt runs is root's */
     char         **paths;   /* sorted, none beneath another */
     size_t         npaths;
 };

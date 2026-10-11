@@ -311,6 +311,25 @@ void test_live(void)
             free(vars);
             free(disk);
         }
+        /* A VM of the system's libvirt, whose QEMU runs as libvirt-qemu:
+         * root's, because libvirt keeps its pid in /run/libvirt/qemu. A
+         * stale pid file for vm1 names some other process. */
+        process(proc, 502, 1, 64055, "qemu-system-x86",
+                ARGS("/usr/bin/qemu-system-x86_64\0-name\0guest=sys1,debug-threads=on\0-S"));
+        mkdirs(proc, "502/fd");
+        mkdirs(proc, "502/fdinfo");
+        {
+            char *disk = rs_xasprintf("%s/sys1.qcow2", dir);
+
+            rs_test_write(dir, "sys1.qcow2", "", 0644);
+            link_to(proc, "502/fd/3", disk);
+            rs_test_write(proc, "502/fdinfo/3", "pos:\t0\nflags:\t02100002\n", 0644);
+            free(disk);
+        }
+        mkdirs(dir, "run/libvirt/qemu");
+        rs_test_write(dir, "run/libvirt/qemu/sys1.pid", "502\n", 0644);
+        rs_test_write(dir, "run/libvirt/qemu/vm1.pid", "999\n", 0644);
+
         /* A QEMU with no name is not one libvirt could pause. */
         process(proc, 501, 1, 0, "qemu-system-x86", ARGS("/usr/bin/qemu-system-x86_64\0-S"));
 
@@ -339,7 +358,7 @@ void test_live(void)
     mkdirs(proc, "self");
 
     rs_live_detect(proc, &l, &n);
-    CHECK_INT(n, 8);
+    CHECK_INT(n, 9);
     {
         const struct rs_live *pg = find(l, n, "postgresql", "main");
         const struct rs_live *my = find(l, n, "mysql", "mysql");
@@ -353,8 +372,8 @@ void test_live(void)
         char                 *hint;
 
         CHECK(pg && my && ma && mo && re && vm && ct && dk);
-        CHECK_STR(n == 8 ? l[0].kind : "", "docker");
-        CHECK_STR(n == 8 ? l[7].kind : "", "redis");
+        CHECK_STR(n == 9 ? l[0].kind : "", "docker");
+        CHECK_STR(n == 9 ? l[8].kind : "", "redis");
         if (pg)
         {
             CHECK_INT(pg->pid, 100);
@@ -382,6 +401,19 @@ void test_live(void)
             CHECK_STR(hint, "virsh -c qemu:///session suspend vm1");
             free(hint);
             CHECK_STR(rs_live_what(vm), "the VM");
+        }
+        {
+            const struct rs_live *sys = find(l, n, "libvirt", "sys1");
+
+            CHECK(sys != NULL);
+            if (sys)
+            {
+                CHECK_INT(sys->uid, 0);
+                CHECK_INT(sys->pid, 502);
+                hint = hint_of(sys);
+                CHECK_STR(hint, "virsh suspend sys1");
+                free(hint);
+            }
         }
         if (ct)
         {

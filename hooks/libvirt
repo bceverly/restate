@@ -10,7 +10,8 @@
 #
 # A VM of a user's own (qemu:///session, which virt-manager and GNOME Boxes
 # use) is suspended as that user, through their own libvirt; one of the
-# system's through qemu:///system. A suspended VM's disks are as they would be
+# system's through qemu:///system -- RESTATE_UID is 0 for one of those,
+# though its QEMU runs as libvirt-qemu or qemu. A suspended VM's disks are as they would be
 # after a sudden power cut: a journaling filesystem inside recovers.
 #
 # To change what this does, copy it to /etc/restate/hooks.d/libvirt (root's,
@@ -35,7 +36,10 @@ virsh_as() {
 case "$action" in
 pause)
   rm -f "$mark"
-  if [ "$(virsh_as domstate "$name")" = running ]; then
+  # Apart, so that virsh failing fails this, rather than looking like a VM
+  # that is not running.
+  now=$(virsh_as domstate "$name")
+  if [ "$now" = running ]; then
     virsh_as suspend "$name" > /dev/null
     : > "$mark"
   fi

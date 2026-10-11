@@ -579,7 +579,39 @@ static bool vm_file(const char *path)
     return strstr(path, " (deleted)") == NULL && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static void qemu(const struct proc *p, struct found *f)
+/*
+ * Whether libvirt's system instance runs the VM `name`, as the QEMU `pid`.
+ * It keeps each VM's pid in /run/libvirt/qemu/NAME.pid -- found beside
+ * `proc`, so the tests can make one -- and a user's own libvirt keeps its
+ * under their runtime directory instead. Such a VM's QEMU runs as a user of
+ * libvirt's (libvirt-qemu, qemu), but the VM is the system's, suspended
+ * through qemu:///system.
+ */
+static bool system_vm(const char *proc, const char *name, long pid)
+{
+    const char *slash = strrchr(proc, '/');
+    char       *path;
+    char       *text;
+    char       *end = NULL;
+    bool        yes = false;
+
+    if (strchr(name, '/') || name[0] == '.')
+    {
+        return false;
+    }
+    path = rs_xasprintf("%.*s/run/libvirt/qemu/%s.pid", slash ? (int)(slash - proc) : 1,
+                        slash ? proc : ".", name);
+    text = slurp(path, 32, NULL);
+    if (text)
+    {
+        yes = strtol(text, &end, 10) == pid && end != text && (*end == '\0' || *end == '\n');
+    }
+    free(text);
+    free(path);
+    return yes;
+}
+
+static void qemu(const char *proc, const struct proc *p, struct found *f)
 {
     const char     *n = arg_value(p, "-name");
     char           *name;
@@ -604,6 +636,10 @@ static void qemu(const struct proc *p, struct found *f)
         return;
     }
     l = add(f, "libvirt", name, p);
+    if (system_vm(proc, name, p->pid))
+    {
+        l->uid = 0;
+    }
     free(name);
     fds = rs_xasprintf("%s/fd", p->dir);
     dir = opendir(fds);
@@ -746,7 +782,7 @@ void rs_live_detect(const char *proc, struct rs_live **out, size_t *n)
             redis(&p, &f);
         } else if (rs_starts_with(p.comm, "qemu-system") || strcmp(p.comm, "qemu-kvm") == 0)
         {
-            qemu(&p, &f);
+            qemu(proc, &p, &f);
         } else if (p.argc > 0 && rs_starts_with(p.argv[0], "[lxc monitor] "))
         {
             lxd(&p, &f);
