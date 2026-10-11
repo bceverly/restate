@@ -1350,7 +1350,7 @@ static void reinstall_apt(struct sheet *s, const struct rs_jval *apt)
         struct rs_buf script;
 
         rs_buf_init(&script);
-        rs_packages_apt_script(s->o->packages, skip, &script);
+        rs_packages_apt_script(s->o->packages, skip, s->o->snapshot, &script);
         rs_buf_addstr(s->out, script.data);
         rs_buf_free(&script);
     }

@@ -356,65 +356,17 @@ static void open_default_cache(const struct rs_installer *in)
     free(release);
 }
 
-/*
- * curl, HTTPS only (or file:, for a mirror that is a local directory). Without
- * a progress bar its complaints are captured, and a failure's go in `why`
- * rather than onto the terminal ahead of restate's own message.
- */
+/* curl for an installer: HTTPS only, or file: for a mirror that is a local
+ * directory; see rs_curl. */
 static bool curl(const char *url, const char *dest, bool resume, bool progress, int *code,
                  struct rs_buf *why, struct rs_buf *err)
 {
-    struct rs_buf errtext;
-    bool          local = rs_starts_with(url, "file://");
-    char         *argv[24];
-    int           n = 0;
-    int           i;
-    bool          ok;
+    struct rs_curl_opts co;
 
-    argv[n++] = rs_xstrdup("curl");
-    argv[n++] = rs_xstrdup("-q");   /* first: ignore ~/.curlrc */
-    argv[n++] = rs_xstrdup("--fail");
-    argv[n++] = rs_xstrdup("--location");
-    argv[n++] = rs_xstrdup("--show-error");
-    argv[n++] = rs_xstrdup("--proto");
-    argv[n++] = rs_xstrdup(local ? "=file" : "=https");
-    argv[n++] = rs_xstrdup("--proto-redir");
-    argv[n++] = rs_xstrdup(local ? "=file" : "=https");
-    if (!local)
-    {
-        argv[n++] = rs_xstrdup("--tlsv1.2");
-        argv[n++] = rs_xstrdup("--retry");
-        argv[n++] = rs_xstrdup("3");
-    }
-    argv[n++] = rs_xstrdup(progress ? "--progress-bar" : "--silent");
-    if (resume)
-    {
-        argv[n++] = rs_xstrdup("--continue-at");
-        argv[n++] = rs_xstrdup("-");
-    }
-    argv[n++] = rs_xstrdup("--output");
-    argv[n++] = rs_xstrdup(dest);
-    argv[n++] = rs_xstrdup(url);
-    argv[n] = NULL;
-    rs_buf_init(&errtext);
-    ok = rs_run(RS_PROG_CURL, argv, NULL, progress ? NULL : &errtext, code, err);
-    for (i = 0; i < n; i++)
-    {
-        free(argv[i]);
-    }
-    if (ok && *code != 0)
-    {
-        while (errtext.len > 0 && (errtext.data[errtext.len - 1] == '\n' ||
-                                   errtext.data[errtext.len - 1] == '\r'))
-        {
-            errtext.data[--errtext.len] = '\0';
-        }
-        rs_buf_reset(why);
-        rs_buf_addf(why, "curl exit %d%s%s", *code, errtext.len ? ": " : "",
-                    errtext.len ? errtext.data : "");
-    }
-    rs_buf_free(&errtext);
-    return ok;
+    memset(&co, 0, sizeof(co));
+    co.resume = resume;
+    co.progress = progress;
+    return rs_curl(url, dest, &co, code, why, err);
 }
 
 static bool hash_file(const char *path, char hex[RS_SHA256_HEX_SIZE])

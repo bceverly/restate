@@ -1145,7 +1145,7 @@ static void late_packages(struct gen *g)
         /* Each package looked up first, so one that cannot be had -- a
          * version gone, a repository refused -- does not sink the others. */
         rs_buf_reset(&b);
-        rs_packages_apt_script(pk, skip, &b);
+        rs_packages_apt_script(pk, skip, g->o->snapshot, &b);
         late_file(g, "/var/tmp/restate-packages.sh", b.data, "0700");
         late(g, "curtin in-target -- sh /var/tmp/restate-packages.sh; "
                 "rm -f /target/var/tmp/restate-packages.sh");

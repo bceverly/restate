@@ -97,4 +97,22 @@ bool rs_hook_usable(const char *path);
 bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsigned timeout,
                  int *code, struct rs_buf *err);
 
+/* How rs_curl fetches. */
+struct rs_curl_opts {
+    bool     resume;       /* carry on from what `dest` holds already */
+    bool     progress;     /* a progress bar on the terminal, not a quiet run */
+    bool     plain_http;   /* http:// too, for what is checked by its signature */
+    unsigned max_time;     /* seconds before giving up, or 0 for no limit */
+};
+
+/*
+ * curl, fetching `url` into `dest`: HTTPS only -- or file:, for a mirror that
+ * is a local directory -- unless co->plain_http, redirects held to the same,
+ * ~/.curlrc ignored. Without a progress bar its complaints are captured, and
+ * a failure's go in `why` rather than onto the terminal ahead of restate's
+ * own message. False only if it could not be run; *code says how it went.
+ */
+bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, int *code,
+             struct rs_buf *why, struct rs_buf *err);
+
 #endif /* RESTATE_RUN_H */

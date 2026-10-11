@@ -66,7 +66,9 @@
 #include "packages.h"
 #include "pgp.h"
 #include "pkgdb.h"
+#include "repo.h"
 #include "rules.h"
+#include "sha256.h"
 #include "sources.h"
 #include "tar.h"
 #include "util.h"
@@ -225,6 +227,66 @@ static void fuzz_openpgp(const char *text, size_t len)
         abort();
     }
     free(s);
+}
+
+/* A pack's .idx, and the names prune chooses between, from the same text. */
+static void fuzz_repo(const char *text, size_t len)
+{
+    struct rs_repo_member *m = NULL;
+    struct rs_repo_keep    keep;
+    char                 **names = NULL;
+    bool                  *kept;
+    char                  *copy = rs_xstrndup(text, len);
+    char                  *line;
+    char                  *next;
+    size_t                 n = 0;
+    size_t                 i;
+
+    if (rs_repo_parse_idx(text, len, &m, &n))
+    {
+        for (i = 0; i < n; i++)
+        {
+            if ((i > 0 && m[i].member <= m[i - 1].member) ||
+                (m[i].live && !rs_sha256_valid_hex(m[i].hash)))
+            {
+                abort();
+            }
+        }
+    } else if (m || n)
+    {
+        abort();
+    }
+    free(m);
+    n = 0;
+    for (line = copy; line; line = next)
+    {
+        next = strchr(line, '\n');
+        if (next)
+        {
+            *next++ = '\0';
+        }
+        names = rs_xreallocarray(names, n + 1, sizeof(*names));
+        names[n++] = line;
+    }
+    kept = rs_xcalloc(n + 1, sizeof(*kept));
+    memset(&keep, 0, sizeof(keep));
+    keep.daily = (unsigned)(len % 5);
+    keep.weekly = (unsigned)(len % 3);
+    keep.monthly = 1;
+    keep.last = (unsigned)(len % 2);
+    rs_repo_choose(names, n, &keep, kept);
+    for (i = 0; i < n; i++)
+    {
+        /* What is not a time is never dropped. */
+        if (!kept[i] && strlen(names[i]) < 9)
+        {
+            abort();
+        }
+        (void)rs_repo_name_valid(names[i]);
+    }
+    free(kept);
+    free(names);
+    free(copy);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -716,7 +778,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 14)
+    switch (data[0] % 15)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -756,6 +818,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         break;
     case 12:
         fuzz_live(text, size - 1);
+        break;
+    case 13:
+        fuzz_repo(text, size - 1);
         break;
     default:
         fuzz_openpgp(text, size - 1);

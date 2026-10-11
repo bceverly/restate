@@ -21,7 +21,9 @@ RS_OPT('r', "root",             required_argument, "DIR",
        "treat DIR as the root of the tree to scan, verify, or list the packages of "
        "(default /)")
 RS_OPT('o', "output",           required_argument, "FILE",
-       "write to FILE instead of standard output; created mode 0600, replaced atomically")
+       "write to FILE instead of standard output; created mode 0600, replaced atomically. "
+       "capture: FILE may be a repository (restate init), which the capture adds a "
+       "snapshot to")
 RS_OPT('R', "rules",            required_argument, "FILE",
        "read more rules from FILE, applied after the built-in ones; repeatable")
 RS_OPT('N', "no-default-rules", no_argument,       NULL,
@@ -37,14 +39,15 @@ RS_OPT('a', "all",              no_argument,       NULL,
 RS_OPT('B', "baseline-content", no_argument,       NULL,
        "capture: keep the content of baseline files too, not only their digests")
 RS_OPT(OPT_ENCRYPT_TO, "encrypt-to", required_argument, "KEYFILE",
-       "capture: encrypt the image to the OpenPGP public key in KEYFILE "
+       "capture, export: encrypt the image to the OpenPGP public key in KEYFILE "
        "(gpg --export); repeatable, for more than one recipient")
 RS_OPT(OPT_SIGN_WITH, "sign-with", required_argument, "KEYFILE",
-       "capture, sign: sign the image with the OpenPGP secret key in KEYFILE "
-       "(gpg --export-secret-keys)")
+       "capture, sign, export: sign the image or snapshot with the OpenPGP secret key in "
+       "KEYFILE (gpg --export-secret-keys)")
 RS_OPT(OPT_TRUSTED_KEY, "trusted-key", required_argument, "KEYFILE",
-       "restore, verify, diff: accept an image only if it is signed by the OpenPGP public "
-       "key in KEYFILE (gpg --export); autoinstall: have the restore check that; repeatable")
+       "restore, verify, diff, status, export: accept an image or snapshot only if it is "
+       "signed by the OpenPGP public key in KEYFILE (gpg --export); autoinstall: have the "
+       "restore check that; repeatable")
 RS_OPT(OPT_ALLOW_UNVERIFIED, "allow-unverified", no_argument, NULL,
        "restore: restore an image that is unsigned, or not signed by a --trusted-key, "
        "warning of it; by default it is refused")
@@ -57,6 +60,12 @@ RS_OPT(OPT_DEB, "deb",              required_argument, "NAME=FILE",
 RS_OPT(OPT_QUIESCE, "quiesce",       no_argument,       NULL,
        "capture: pause each database, VM and container found running while its own "
        "files are copied, and resume it after, with the hooks for each (see LIVE SERVICES)")
+RS_OPT(OPT_SYSLOG, "syslog",        no_argument,       NULL,
+       "capture, prune: say how the run ended in the system log too, as one line of "
+       "key=value pairs a monitoring system can match on")
+RS_OPT(OPT_FETCH_SOURCES, "fetch-sources", no_argument, NULL,
+       "capture, packages: also fetch each apt source's index as its repository serves "
+       "it now (with curl), and check that against the source's keys")
 RS_OPT('x', "one-file-system",  no_argument,       NULL,
        "record mount points but do not descend into other filesystems")
 RS_OPT('n', "no-hash",          no_argument,       NULL,
@@ -69,6 +78,10 @@ RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
 RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
        "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
        "hardware (metal) rather than the same machine")
+RS_OPT(OPT_EXACT_VERSIONS, "exact-versions", no_argument, NULL,
+       "buildsheet, autoinstall: install each package at the version recorded, from "
+       "snapshot.ubuntu.com as of the capture where the archive has a newer one now, "
+       "rather than the newer one")
 RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
        "autoinstall: where the installer will find the image (a mounted disk or "
        "share); the file then installs the packages and restores the files from it")
@@ -79,7 +92,16 @@ RS_OPT(OPT_NUMERIC_OWNER, "numeric-owner", no_argument,     NULL,
        "restore: owners by the numbers the index records, and the image's own account "
        "files, rather than by name through the image's accounts merged with the system's")
 RS_OPT(OPT_DRY_RUN, "dry-run",        no_argument,       NULL,
-       "restore: check the image and say what would be put back, writing nothing")
+       "restore: check the image and say what would be put back, writing nothing; "
+       "prune: say which snapshots would be dropped, dropping none")
+RS_OPT(OPT_KEEP_LAST, "keep-last",    required_argument, "N",
+       "prune: keep the newest N snapshots")
+RS_OPT(OPT_KEEP_DAILY, "keep-daily",  required_argument, "N",
+       "prune: keep the newest snapshot of each of the last N days that have one")
+RS_OPT(OPT_KEEP_WEEKLY, "keep-weekly", required_argument, "N",
+       "prune: keep the newest snapshot of each of the last N weeks that have one")
+RS_OPT(OPT_KEEP_MONTHLY, "keep-monthly", required_argument, "N",
+       "prune: keep the newest snapshot of each of the last N months that have one")
 RS_OPT('P', "progress",         no_argument,       NULL,
        "show progress on standard error: paths and bytes so far while walking, "
        "a percentage and time left while writing an image or downloading")

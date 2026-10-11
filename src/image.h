@@ -99,6 +99,27 @@ bool rs_image_begin(struct rs_image_writer *iw, const char *dest, struct rs_buf 
 bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
                     struct rs_buf *err);
 
+/* Whether `path` is one of `list`, or beneath one of them that ends in a
+ * slash: how the kit is chosen. */
+bool rs_image_in_list(const char *path, const char *const *list, size_t n);
+
+/* "/etc/hosts" -> "restate/files/etc/hosts"; "/" -> "restate/files". */
+char *rs_image_member_name(const char *path);
+
+/* The tar member for `e`, named `name`, with `size` bytes of data if it is a
+ * regular file; false for a device node, which an image does not archive. */
+bool rs_image_member(const struct rs_entry *e, const char *name, uint64_t size,
+                     struct rs_tar_member *m);
+
+/*
+ * Copies exactly `size` bytes of `fd` into `tar` -- the tar header has
+ * already promised that many -- hashing exactly what is stored into e->hash.
+ * A file that grows while it is read is kept as it was when the copy began;
+ * one that shrinks, or whose read fails, is padded with zeros and its digest
+ * marked unreadable. False only if `tar` could not be written.
+ */
+bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, uint64_t size);
+
 /* Writes the image: the index, then the content. Discards everything on
  * failure, and in every case releases the writer. */
 bool rs_image_finish(struct rs_image_writer *iw, const struct rs_index *ix,
@@ -112,6 +133,9 @@ void rs_image_abort(struct rs_image_writer *iw);
  * it -- and from an image made before 1.1, the one stream, index.json first.
  * No process but gzip and gpg: the part is fed from the reading loop itself.
  */
+struct rs_repo;
+struct rs_repo_stream;
+
 struct rs_image_stream {
     int            fd;         /* gzip's output: the tar stream */
     int            image_fd;
@@ -125,6 +149,10 @@ struct rs_image_stream {
     unsigned char  chunk[65536];
     size_t         chunk_len;
     size_t         chunk_pos;
+    /* A snapshot in a repository (repo.h), read instead of an image. */
+    struct rs_repo        *repo;
+    struct rs_repo_stream *snapshot;
+    struct rs_index       *snapshot_ix;
 };
 
 bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_buf *err);
@@ -197,9 +225,20 @@ bool rs_image_trusted(const char *path, const char *const *trusted, size_t n,
 bool rs_image_knows_trust(const char *version);
 
 /*
+ * Writes the snapshot `ref` ("REPO::NAME", repo.h), whose index is `ix`, as
+ * an image through `iw` -- begun with rs_image_begin, its recipients and its
+ * signing key set as for a capture -- with the kit the snapshot had. Each
+ * file is checked against its digest on the way, and the export fails if
+ * one does not match or is not there: an image is only as good as the
+ * repository it came from. Releases the writer whatever happens.
+ */
+bool rs_image_export(const char *ref, struct rs_index *ix, struct rs_image_writer *iw,
+                     struct rs_buf *err);
+
+/*
  * Reads an index from `path`: an image -- in parts, or from before 1.1 one
- * gzip'd stream -- or a bare index.json, and sets ix->in_parts for an image
- * in parts. "-" is standard input, which must be a bare index -- a stream
+ * gzip'd stream -- a snapshot in a repository (repo.h), or a bare index.json,
+ * and sets ix->in_parts for an image in parts or a snapshot. "-" is standard input, which must be a bare index -- a stream
  * cannot be handed to gzip after its first bytes are read.
  */
 bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err);

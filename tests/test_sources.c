@@ -168,6 +168,138 @@ static void pieces(void)
 
 /* A Release, signed inline as InRelease by `who`, into the tree's lists. */
 static void signed_release(const char *home, const char *lists, const char *name, const char *who,
+                           const char *extra, const char *when);
+
+/* The name apt's lists give the index of `uri`'s `suite`. */
+static char *list_name(const char *uri, const char *suite)
+{
+    struct rs_buf full;
+    struct rs_buf name;
+
+    rs_buf_init(&full);
+    rs_buf_init(&name);
+    rs_buf_addf(&full, "%s/dists/%s/", uri, suite);
+    rs_apt_uri_file(&name, full.data);
+    rs_buf_free(&full);
+    return name.data ? rs_buf_detach(&name) : rs_xstrdup("");
+}
+
+/*
+ * Each source checked as its repository serves it now, from a web server of
+ * the test's own (python3's): one that still serves what apt has, one whose
+ * vendor has moved to a key the source does not name, one that has gone,
+ * and one with a Release and its signature beside it. Only where curl is one
+ * restate will run, and python3 is there to serve.
+ */
+static void online(const char *dir, const char *home)
+{
+    char          *root = rs_xasprintf("%s/online", dir);
+    char          *lists = rs_xasprintf("%s/online/var/lib/apt/lists", dir);
+    char          *web = rs_xasprintf("%s/web", dir);
+    char          *pidfile = rs_xasprintf("%s/web.pid", dir);
+    char          *base = rs_xasprintf("http://127.0.0.1:%d", 40000 + (int)(getpid() % 20000));
+    char          *good = rs_xasprintf("%s/good", base);
+    char          *moved = rs_xasprintf("%s/moved", base);
+    char          *gone = rs_xasprintf("%s/gone", base);
+    char          *legacy = rs_xasprintf("%s/legacy", base);
+    char          *cmd;
+    char          *name;
+    struct rs_jval p;
+    bool           checked = false;
+    int            tries;
+
+    if (!rs_program_path(RS_PROG_CURL) || quiet("command -v python3") != 0)
+    {
+        (void)printf("  (online source checks skipped: they need curl and python3)\n");
+        goto done;
+    }
+    TEST_CASE("sources: as each repository serves it now");
+    mkdirs(dir, "online/var/lib/apt/lists");
+    mkdirs(dir, "online/var/lib/dpkg");
+    mkdirs(dir, "online/etc/apt/sources.list.d");
+    mkdirs(dir, "online/usr/share/keyrings");
+    mkdirs(dir, "web/good/dists/stable");
+    mkdirs(dir, "web/moved/dists/stable");
+    mkdirs(dir, "web/legacy/dists/stable");
+    rs_test_write(root, "var/lib/dpkg/status",
+                  "Package: hello\nStatus: install ok installed\nArchitecture: amd64\n"
+                  "Version: 1\n", 0644);
+    cmd = rs_xasprintf("cp '%s/root/usr/share/keyrings/a.gpg' '%s/usr/share/keyrings/'", dir,
+                       root);
+    CHECK(quiet(cmd) == 0);
+    free(cmd);
+    /* What apt has: each signed by the key the source names. */
+    name = list_name(good, "stable");
+    signed_release(home, lists, name, "a@example.invalid", NULL, NULL);
+    cmd = rs_xasprintf("cp '%s/%sInRelease' '%s/good/dists/stable/InRelease'", lists, name, web);
+    CHECK(quiet(cmd) == 0);
+    free(cmd);
+    free(name);
+    name = list_name(moved, "stable");
+    signed_release(home, lists, name, "a@example.invalid", NULL, NULL);
+    free(name);
+    signed_release(home, web, "moved/dists/stable/", "b@example.invalid", NULL, NULL);
+    name = list_name(gone, "stable");
+    signed_release(home, lists, name, "a@example.invalid", NULL, NULL);
+    free(name);
+    name = list_name(legacy, "stable");
+    signed_release(home, lists, name, "a@example.invalid", NULL, NULL);
+    free(name);
+    cmd = rs_xasprintf("cd '%s/legacy/dists/stable' && printf 'Origin: legacy\\n' > Release && "
+                       "GNUPGHOME='%s' gpg --batch --yes -u a@example.invalid --detach-sign "
+                       "-o Release.gpg Release", web, home);
+    CHECK(quiet(cmd) == 0);
+    free(cmd);
+    cmd = rs_xasprintf("Types: deb\nURIs: %s %s %s %s\nSuites: stable\nComponents: main\n"
+                       "Signed-By: /usr/share/keyrings/a.gpg\n", good, moved, gone, legacy);
+    rs_test_write(root, "etc/apt/sources.list.d/online.sources", cmd, 0644);
+    free(cmd);
+    cmd = rs_xasprintf("cd '%s' && { python3 -m http.server %s --bind 127.0.0.1 > /dev/null "
+                       "2>&1 & echo $! > '%s'; }", web, strrchr(base, ':') + 1, pidfile);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    /* Until it answers, for at most ten seconds. */
+    cmd = rs_xasprintf("curl -s -o /dev/null --fail '%s/good/dists/stable/InRelease'", base);
+    for (tries = 0; tries < 100 && quiet(cmd) != 0; tries++)
+    {
+        struct timespec nap = { 0, 100L * 1000 * 1000 };
+
+        (void)nanosleep(&nap, NULL);
+    }
+    free(cmd);
+
+    memset(&p, 0, sizeof(p));
+    rs_jval_set_object(&p);
+    rs_packages_describe(root, &p);
+    CHECK_INT(rs_sources_check(root, &p, (int64_t)time(NULL), false, &checked), 0);
+    CHECK_INT(rs_sources_check(root, &p, (int64_t)time(NULL), true, &checked), 1);
+    {
+        const char *why = problem_of(&p, "/etc/apt/sources.list.d/online.sources");
+
+        CHECK(strstr(why, good) == NULL && strstr(why, legacy) == NULL);
+        CHECK_CONTAINS(why, "/moved stable: as its repository serves it now, signed by a key "
+                            "that is not given");
+        CHECK_CONTAINS(why, "/gone stable: its repository does not serve an index for it now "
+                            "(curl exit 22");
+    }
+    rs_jval_free(&p);
+
+    cmd = rs_xasprintf("kill \"$(cat '%s')\"", pidfile);
+    (void)quiet(cmd);
+    free(cmd);
+done:
+    free(root);
+    free(lists);
+    free(web);
+    free(pidfile);
+    free(base);
+    free(good);
+    free(moved);
+    free(gone);
+    free(legacy);
+}
+
+static void signed_release(const char *home, const char *lists, const char *name, const char *who,
                            const char *extra, const char *when)
 {
     char *release = rs_xasprintf("%s/%sRelease.txt", lists, name);
@@ -320,7 +452,7 @@ void test_sources(void)
     memset(&p, 0, sizeof(p));
     rs_jval_set_object(&p);
     rs_packages_describe(root, &p);
-    n = rs_sources_check(root, &p, (int64_t)time(NULL), &checked);
+    n = rs_sources_check(root, &p, (int64_t)time(NULL), false, &checked);
     CHECK(checked);
     CHECK_INT(n, 5);
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/test.sources"), "ok");
@@ -346,6 +478,8 @@ void test_sources(void)
                    "apt has no index of it");
     rs_jval_free(&p);
 
+    online(dir, home);
+
     TEST_CASE("sources: nothing to check without apt, or without gpgv");
     {
         static const char *const none[] = { "/nonexistent/gpgv" };
@@ -353,14 +487,14 @@ void test_sources(void)
 
         memset(&empty, 0, sizeof(empty));
         rs_jval_set_object(&empty);
-        CHECK_INT(rs_sources_check(root, &empty, 0, &checked), 0);
+        CHECK_INT(rs_sources_check(root, &empty, 0, false, &checked), 0);
         CHECK(!checked);
         rs_jval_free(&empty);
         memset(&p, 0, sizeof(p));
         rs_jval_set_object(&p);
         rs_packages_describe(root, &p);
         rs_program_set_paths(RS_PROG_GPGV, none, 1);
-        CHECK_INT(rs_sources_check(root, &p, (int64_t)time(NULL), &checked), 0);
+        CHECK_INT(rs_sources_check(root, &p, (int64_t)time(NULL), false, &checked), 0);
         CHECK(!checked);
         rs_program_set_paths(RS_PROG_GPGV, NULL, 0);
         rs_jval_free(&p);

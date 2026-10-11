@@ -46,6 +46,9 @@ struct rs_auto_opts {
      * that --trusted-key names, in base64, written there first. */
     const char           *trust;
     const char           *trust_keyring;
+    /* With --exact-versions, the apt snapshot ID to take versions the
+     * archive has moved on from from (packages.h), or NULL. */
+    const char           *snapshot;
 };
 
 /* Where the autoinstall file puts the keyring restore checks the image

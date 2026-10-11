@@ -17,6 +17,7 @@
 #include "gzip.h"
 #include "pgp.h"
 #include "progress.h"
+#include "repo.h"
 #include "sha256.h"
 
 static bool write_all(int fd, const void *data, size_t n)
@@ -96,18 +97,16 @@ void rs_image_abort(struct rs_image_writer *iw)
     iw->nspans = 0;
 }
 
-/* Whether `path` goes into the kit too: one of iw->kit, or beneath one that
- * ends in a slash. */
-static bool in_kit(const struct rs_image_writer *iw, const char *path)
+bool rs_image_in_list(const char *path, const char *const *list, size_t n)
 {
     size_t i;
 
-    for (i = 0; i < iw->nkit; i++)
+    for (i = 0; i < n; i++)
     {
-        const char *k = iw->kit[i];
-        size_t      n = strlen(k);
+        const char *k = list[i];
+        size_t      len = strlen(k);
 
-        if (n > 0 && k[n - 1] == '/' ? strncmp(path, k, n) == 0 : strcmp(path, k) == 0)
+        if (len > 0 && k[len - 1] == '/' ? strncmp(path, k, len) == 0 : strcmp(path, k) == 0)
         {
             return true;
         }
@@ -115,8 +114,7 @@ static bool in_kit(const struct rs_image_writer *iw, const char *path)
     return false;
 }
 
-/* "/etc/hosts" -> "restate/files/etc/hosts"; "/" -> "restate/files". */
-static char *member_name(const char *path)
+char *rs_image_member_name(const char *path)
 {
     if (path[0] == '/' && path[1] == '\0')
     {
@@ -137,7 +135,7 @@ static char *member_name(const char *path)
  * zeros to the promised size and its digest marked unreadable, because what
  * is stored then is not the file.
  */
-static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, uint64_t size)
+bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, uint64_t size)
 {
     static const unsigned char zero[4096];
     unsigned char              chunk[65536];
@@ -175,7 +173,7 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
             break;
         }
         rs_sha256_update(&ctx, chunk, (size_t)n);
-        if (!rs_tar_data(&iw->tar, chunk, (size_t)n))
+        if (!rs_tar_data(tar, chunk, (size_t)n))
         {
             return false;
         }
@@ -189,7 +187,7 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
     {
         size_t take = size - copied < sizeof(zero) ? (size_t)(size - copied) : sizeof(zero);
 
-        if (!rs_tar_data(&iw->tar, zero, take))
+        if (!rs_tar_data(tar, zero, take))
         {
             return false;
         }
@@ -198,64 +196,79 @@ static bool copy_file(struct rs_image_writer *iw, struct rs_entry *e, int fd, ui
     rs_sha256_final(&ctx, e->hash);
     e->hash_state = (e->copy == RS_COPY_OK || e->copy == RS_COPY_GREW) ? RS_HASH_PRESENT
                                                                        : RS_HASH_UNREADABLE;
-    return rs_tar_pad(&iw->tar);
+    return rs_tar_pad(tar);
 }
 
-bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
-                    struct rs_buf *err)
+bool rs_image_member(const struct rs_entry *e, const char *name, uint64_t size,
+                     struct rs_tar_member *m)
 {
-    struct rs_image_writer *iw = ctx;
-    struct rs_tar_member    m;
-    char                   *name;
-    uint64_t                start;
-    bool                    ok;
-
-    memset(&m, 0, sizeof(m));
+    memset(m, 0, sizeof(*m));
     switch (e->type)
     {
     case 'f':
-        m.typeflag = '0';
-        m.size = (uint64_t)st->st_size;
+        m->typeflag = '0';
+        m->size = size;
         break;
     case 'd':
-        m.typeflag = '5';
+        m->typeflag = '5';
         break;
     case 'l':
-        m.typeflag = '2';
-        m.linkname = e->target;
+        m->typeflag = '2';
+        m->linkname = e->target;
         break;
     case 'p':
-        m.typeflag = '6';
+        m->typeflag = '6';
         break;
     default:
         /* Device nodes are recorded in the index and recreated from it, not
          * archived: a tar device member is not portable between systems. */
+        return false;
+    }
+    m->name = name;
+    m->mode = e->mode;
+    m->uid = e->uid;
+    m->gid = e->gid;
+    m->uname = e->user;
+    m->gname = e->group;
+    m->mtime = e->mtime;
+    m->atime = e->atime;
+    return true;
+}
+
+/* A member's header, then its data from `copy` (NULL: none), then where the
+ * kit has it; e->stored is set once it is all written. */
+static bool store_member(struct rs_image_writer *iw, struct rs_entry *e, uint64_t size,
+                         bool (*copy)(struct rs_image_writer *iw, struct rs_entry *e,
+                                      uint64_t size, const void *ctx),
+                         const void *ctx, struct rs_buf *err)
+{
+    struct rs_tar_member m;
+    char                *name = rs_image_member_name(e->path);
+    uint64_t             start = iw->tar.offset;
+    bool                 ok;
+
+    if (!rs_image_member(e, name, size, &m))
+    {
+        free(name);
         return true;
     }
-    name = member_name(e->path);
-    m.name = name;
-    start = iw->tar.offset;
-    m.mode = e->mode;
-    m.uid = e->uid;
-    m.gid = e->gid;
-    m.uname = e->user;
-    m.gname = e->group;
-    m.mtime = e->mtime;
-    m.atime = e->atime;
-
     ok = rs_tar_header(&iw->tar, &m);
     if (ok && e->type == 'f')
     {
-        ok = copy_file(iw, e, fd, m.size);
+        ok = copy(iw, e, size, ctx);
     }
     if (!ok)
     {
-        rs_buf_addf(err, "writing the image beside %s: %s", iw->dest, strerror(errno));
+        if (err->len == 0)
+        {
+            rs_buf_addf(err, "writing the image beside %s: %s", iw->dest, strerror(errno));
+        }
         free(name);
         return false;
     }
+    free(e->stored);
     e->stored = name;
-    if (in_kit(iw, e->path))
+    if (rs_image_in_list(e->path, iw->kit, iw->nkit))
     {
         iw->spans = rs_xreallocarray(iw->spans, iw->nspans + 1, sizeof(*iw->spans));
         iw->spans[iw->nspans].offset = start;
@@ -263,6 +276,19 @@ bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st
         iw->nspans++;
     }
     return true;
+}
+
+static bool copy_from_fd(struct rs_image_writer *iw, struct rs_entry *e, uint64_t size,
+                         const void *ctx)
+{
+    return rs_image_copy_file(&iw->tar, e, *(const int *)ctx, size);
+}
+
+bool rs_image_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
+                    struct rs_buf *err)
+{
+    return store_member(ctx, e, e->type == 'f' ? (uint64_t)st->st_size : 0, copy_from_fd, &fd,
+                        err);
 }
 
 /* The index, rendered into memory. */
@@ -948,6 +974,70 @@ static bool index_from_parts(int fd, const char *path, struct rs_buf *text,
     return ok;
 }
 
+/*
+ * A snapshot in a repository, opened as an image's part is: its files, or
+ * only its kit. 1 if it is open, 0 if `path` names no snapshot, -1 if it
+ * does and it could not be opened. The repository is held open, shared,
+ * until the stream is closed, so a prune does not remove what it reads.
+ */
+static int open_snapshot(const char *path, const char *part, struct rs_image_stream *s,
+                         struct rs_buf *err)
+{
+    char  *dir;
+    char  *name;
+    char  *found = NULL;
+    char **kit = NULL;
+    size_t nkit = 0;
+    bool   kit_only = strcmp(part, RS_IMAGE_KIT_PART) == 0;
+    bool   busy;
+    bool   ok;
+
+    if (!rs_repo_ref(path, &dir, &name))
+    {
+        return 0;
+    }
+    memset(s, 0, sizeof(*s));
+    s->fd = -1;
+    s->image_fd = -1;
+    s->feed = -1;
+    s->pg.fd = -1;
+    s->repo = rs_repo_open(dir, RS_REPO_READ, &busy, err);
+    ok = s->repo != NULL;
+    if (ok)
+    {
+        found = rs_repo_resolve(s->repo, name, err);
+        ok = found != NULL;
+    }
+    if (ok)
+    {
+        s->snapshot_ix = rs_xcalloc(1, sizeof(*s->snapshot_ix));
+        rs_index_init(s->snapshot_ix);
+        ok = rs_repo_load_index(s->repo, found, s->snapshot_ix, err);
+    }
+    if (ok && kit_only)
+    {
+        ok = rs_repo_kit(s->repo, found, &kit, &nkit, err);
+    }
+    if (ok)
+    {
+        s->snapshot = rs_repo_stream_open(s->repo, s->snapshot_ix,
+                                          kit_only ? (const char *const *)(kit ? kit : &found)
+                                                   : NULL,
+                                          nkit, err);
+        ok = s->snapshot != NULL;
+    }
+    rs_repo_free_names(kit, nkit);
+    free(found);
+    free(dir);
+    free(name);
+    if (!ok)
+    {
+        (void)rs_image_close_files(s, true, err);
+        return -1;
+    }
+    return 1;
+}
+
 /* One part of an image in parts, `part` (RS_IMAGE_KIT_PART or
  * RS_IMAGE_FILES_PART); for an image from before 1.1, which has no parts,
  * the files are the one stream and there is no kit. */
@@ -957,7 +1047,12 @@ static bool open_part(const char *path, const char *part, struct rs_image_stream
     unsigned char magic[RS_TAR_BLOCK];
     ssize_t       got;
     int           in = -1;
+    int           snapshot = open_snapshot(path, part, s, err);
 
+    if (snapshot != 0)
+    {
+        return snapshot > 0;
+    }
     memset(s, 0, sizeof(*s));
     s->fd = -1;
     s->pg.fd = -1;
@@ -1139,6 +1234,10 @@ bool rs_image_open_kit(const char *path, struct rs_image_stream *s, struct rs_bu
 
 ssize_t rs_image_read_files(struct rs_image_stream *s, void *buf, size_t n)
 {
+    if (s->snapshot)
+    {
+        return rs_repo_stream_read(s->snapshot, buf, n);
+    }
     for (;;)
     {
         struct pollfd fds[2];
@@ -1182,6 +1281,21 @@ ssize_t rs_image_read_files(struct rs_image_stream *s, void *buf, size_t n)
 bool rs_image_close_files(struct rs_image_stream *s, bool abandon, struct rs_buf *err)
 {
     bool ok = true;
+
+    if (s->repo)
+    {
+        ok = rs_repo_stream_close(s->snapshot, err);
+        if (s->snapshot_ix)
+        {
+            rs_index_free(s->snapshot_ix);
+            free(s->snapshot_ix);
+        }
+        rs_repo_close(s->repo);
+        s->repo = NULL;
+        s->snapshot = NULL;
+        s->snapshot_ix = NULL;
+        return ok;
+    }
 
     if (!abandon && s->fd >= 0)
     {
@@ -1229,14 +1343,59 @@ bool rs_image_close_files(struct rs_image_stream *s, bool abandon, struct rs_buf
     return ok;
 }
 
+/* The repository and snapshot `path` names, opened to look at: 1 if it is
+ * one, 0 if it is not, -1 with the reason in `err` if it is and it cannot
+ * be opened or has no such snapshot. */
+static int open_ref(const char *path, struct rs_repo **r, char **found, struct rs_buf *err)
+{
+    char *dir;
+    char *name;
+    bool  busy;
+
+    *r = NULL;
+    *found = NULL;
+    if (!rs_repo_ref(path, &dir, &name))
+    {
+        return 0;
+    }
+    *r = rs_repo_open(dir, RS_REPO_LOOK, &busy, err);
+    if (*r)
+    {
+        *found = rs_repo_resolve(*r, name, err);
+    }
+    free(dir);
+    free(name);
+    if (!*found)
+    {
+        rs_repo_close(*r);
+        *r = NULL;
+        return -1;
+    }
+    return 1;
+}
+
 bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err)
 {
-    struct rs_buf text;
-    bool          is_stdin = strcmp(path, "-") == 0;
-    const char   *name = is_stdin ? "(standard input)" : path;
-    int           fd;
-    bool          ok;
+    struct rs_buf   text;
+    bool            is_stdin = strcmp(path, "-") == 0;
+    const char     *name = is_stdin ? "(standard input)" : path;
+    struct rs_repo *repo;
+    char           *found;
+    int             fd;
+    bool            ok;
 
+    if (!is_stdin)
+    {
+        int snapshot = open_ref(path, &repo, &found, err);
+
+        if (snapshot != 0)
+        {
+            ok = snapshot > 0 && rs_repo_load_index(repo, found, ix, err);
+            free(found);
+            rs_repo_close(repo);
+            return ok;
+        }
+    }
     rs_buf_init(&text);
     fd = is_stdin ? STDIN_FILENO : open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
@@ -1396,10 +1555,21 @@ static bool walk_parts(int fd, const char *path, struct rs_buf *index_part, stru
 bool rs_image_signed_bytes(const char *path, struct rs_buf *index_part, struct rs_buf *sig,
                            struct rs_buf *err)
 {
-    int   fd = open(path, O_RDONLY | O_CLOEXEC);
-    off_t end;
-    bool  ok;
+    struct rs_repo *repo;
+    char           *found;
+    int             snapshot = open_ref(path, &repo, &found, err);
+    int             fd;
+    off_t           end;
+    bool            ok;
 
+    if (snapshot != 0)
+    {
+        ok = snapshot > 0 && rs_repo_index_bytes(repo, found, index_part, sig, err);
+        free(found);
+        rs_repo_close(repo);
+        return ok;
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
     {
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
@@ -1412,13 +1582,24 @@ bool rs_image_signed_bytes(const char *path, struct rs_buf *index_part, struct r
 
 bool rs_image_add_signature(const char *path, const void *sig, size_t len, struct rs_buf *err)
 {
-    struct rs_buf  index_part;
-    struct rs_buf  old;
-    struct rs_time mtime;
-    off_t          end = 0;
-    int            fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    bool           ok;
+    struct rs_buf   index_part;
+    struct rs_buf   old;
+    struct rs_time  mtime;
+    struct rs_repo *repo;
+    char           *found;
+    off_t           end = 0;
+    int             snapshot = open_ref(path, &repo, &found, err);
+    int             fd;
+    bool            ok;
 
+    if (snapshot != 0)
+    {
+        ok = snapshot > 0 && rs_repo_add_signature(repo, found, sig, len, err);
+        free(found);
+        rs_repo_close(repo);
+        return ok;
+    }
+    fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
     {
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
@@ -1561,4 +1742,169 @@ bool rs_image_knows_trust(const char *version)
         p = end + (*end == '.' ? 1 : 0);
     }
     return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Exporting a snapshot                                                      */
+/* ------------------------------------------------------------------------- */
+
+static ssize_t read_stream(void *ctx, void *data, size_t n)
+{
+    return rs_image_read_files(ctx, data, n);
+}
+
+struct from_tar {
+    struct rs_tar_reader *r;
+    struct rs_buf        *err;
+};
+
+/* A member's data, from the snapshot's stream into the image, checked against
+ * the index's digest on the way. */
+static bool copy_from_tar(struct rs_image_writer *iw, struct rs_entry *e, uint64_t size,
+                          const void *ctx)
+{
+    const struct from_tar *ft = ctx;
+    unsigned char          chunk[65536];
+    struct rs_sha256       sha;
+    char                   hex[RS_SHA256_HEX_SIZE];
+    uint64_t               copied = 0;
+    ssize_t                n;
+
+    rs_sha256_init(&sha);
+    while ((n = rs_tar_read(ft->r, chunk, sizeof(chunk), ft->err)) > 0)
+    {
+        rs_sha256_update(&sha, chunk, (size_t)n);
+        rs_progress_bytes((uint64_t)n);
+        if (!rs_tar_data(&iw->tar, chunk, (size_t)n))
+        {
+            rs_buf_addf(ft->err, "writing the image beside %s: %s", iw->dest, strerror(errno));
+            return false;
+        }
+        copied += (uint64_t)n;
+    }
+    rs_sha256_final(&sha, hex);
+    if (n < 0 || copied != size)
+    {
+        if (ft->err->len == 0)
+        {
+            rs_buf_addf(ft->err, "%s: the repository's copy of it is cut short", e->path);
+        }
+        return false;
+    }
+    if (e->hash_state == RS_HASH_PRESENT && strcmp(hex, e->hash) != 0)
+    {
+        rs_buf_addf(ft->err, "%s: its content in the repository is not what the index says it is",
+                    e->path);
+        return false;
+    }
+    return rs_tar_pad(&iw->tar);
+}
+
+bool rs_image_export(const char *ref, struct rs_index *ix, struct rs_image_writer *iw,
+                     struct rs_buf *err)
+{
+    static const char      prefix[] = RS_IMAGE_FILES_DIR "/";
+    struct rs_image_stream s;
+    struct rs_tar_reader   r;
+    struct rs_tar_entry    m;
+    struct from_tar        ft;
+    struct rs_repo        *repo;
+    char                  *found;
+    char                 **kit = NULL;
+    size_t                 nkit = 0;
+    size_t                 missing = 0;
+    size_t                 i;
+    bool                  *seen;
+    int                    more = 0;
+    bool                   ok;
+
+    if (open_ref(ref, &repo, &found, err) <= 0)
+    {
+        if (err->len == 0)
+        {
+            rs_buf_addf(err, "%s: not a snapshot in a repository", ref);
+        }
+        rs_image_abort(iw);
+        return false;
+    }
+    ok = rs_repo_kit(repo, found, &kit, &nkit, err);
+    free(found);
+    rs_repo_close(repo);
+    if (!ok || !rs_image_open_files(ref, &s, err))
+    {
+        rs_repo_free_names(kit, nkit);
+        rs_image_abort(iw);
+        return false;
+    }
+    iw->kit = (const char *const *)kit;
+    iw->nkit = nkit;
+    seen = rs_xcalloc(ix->count + 1, sizeof(*seen));
+    ft.r = &r;
+    ft.err = err;
+    rs_tar_reader_init(&r, read_stream, &s);
+    rs_tar_entry_init(&m);
+    while (ok && (more = rs_tar_next(&r, &m, err)) == 1)
+    {
+        const char            *path = NULL;
+        const struct rs_entry *e;
+
+        while (m.name.len > 1 && m.name.data[m.name.len - 1] == '/')
+        {
+            m.name.data[--m.name.len] = '\0';
+        }
+        if (strcmp(m.name.data, RS_IMAGE_FILES_DIR) == 0)
+        {
+            path = "/";
+        } else if (strncmp(m.name.data, prefix, sizeof(prefix) - 1) == 0)
+        {
+            path = m.name.data + sizeof(prefix) - 2;
+        }
+        e = path && rs_path_is_clean(path) ? rs_index_find(ix, path) : NULL;
+        if (!e || !e->stored || strcmp(e->stored, m.name.data) != 0)
+        {
+            rs_buf_addf(err, "%s: the snapshot changed while it was being exported", ref);
+            ok = false;
+            break;
+        }
+        i = (size_t)(e - ix->entries);
+        if (!seen[i])
+        {
+            seen[i] = true;
+            ok = store_member(iw, &ix->entries[i], m.size, copy_from_tar, &ft, err);
+        }
+    }
+    if (ok && more < 0)
+    {
+        ok = false;
+    }
+    rs_tar_entry_free(&m);
+    if (!rs_image_close_files(&s, !ok, err))
+    {
+        ok = false;
+    }
+    for (i = 0; ok && i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+
+        if (e->stored && e->type != 'c' && e->type != 'b' && !seen[i])
+        {
+            missing++;
+        }
+    }
+    if (missing > 0)
+    {
+        rs_buf_addf(err, "%s: %zu files the snapshot keeps are not in the repository", ref,
+                    missing);
+        ok = false;
+    }
+    free(seen);
+    if (ok)
+    {
+        ok = rs_image_finish(iw, ix, err);
+    } else
+    {
+        rs_image_abort(iw);
+    }
+    rs_repo_free_names(kit, nkit);
+    return ok;
 }

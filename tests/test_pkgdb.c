@@ -206,6 +206,20 @@ static bool counting_store(void *ctx, struct rs_entry *e, int fd, const struct s
     return true;
 }
 
+static bool have_all(const void *ctx, const char hash[RS_SHA256_HEX_SIZE])
+{
+    (void)ctx;
+    (void)hash;
+    return true;
+}
+
+static bool have_none(const void *ctx, const char hash[RS_SHA256_HEX_SIZE])
+{
+    (void)ctx;
+    (void)hash;
+    return false;
+}
+
 void test_pkgdb(void)
 {
     char                    *root = rs_test_tmpdir();
@@ -353,6 +367,74 @@ void test_pkgdb(void)
     CHECK(e && !e->stored);
     rs_index_free(&m);
     o.store = NULL;
+
+    TEST_CASE("scan: an incremental run takes what is unchanged from the last one");
+    {
+        struct rs_index  prev;
+        struct rs_entry *was;
+
+        rs_index_init(&prev);
+        o.store = NULL;
+        CHECK(rs_scan(&o, &prev, &st, &err));
+        o.prev = &prev;
+        o.store = counting_store;
+        o.have = have_all;
+        stored_count = 0;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        /* Nothing read: what is kept the store has, and the rest is as it was. */
+        CHECK_INT(stored_count, 0);
+        CHECK_INT(st.bytes_hashed, 0);
+        CHECK(st.reused >= 14);
+        e = find(&m, "/usr/bin/ls");
+        CHECK(e && e->cls == RS_CLASS_BASELINE && !e->modified && e->hash_state == RS_HASH_PRESENT);
+        CHECK_STR(e && e->package ? e->package : "", "coreutils");
+        e = find(&m, "/usr/bin/changed");
+        CHECK(e && e->cls == RS_CLASS_STATE && e->modified && e->stored);
+        e = find(&m, "/usr/bin/nomd5");
+        CHECK(e && e->cls == RS_CLASS_BASELINE && e->package && !e->modified);
+        e = find(&m, "/usr/bin/handmade");
+        CHECK(e && e->cls == RS_CLASS_STATE && !e->package && e->stored);
+        CHECK_INT(st.pkg_unmodified, 5);
+        CHECK_INT(st.pkg_modified, 2);
+        CHECK_INT(st.unpackaged, 2);
+        rs_index_free(&m);
+
+        /* A store without the content: what is kept is read after all. */
+        o.have = have_none;
+        stored_count = 0;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(stored_count > 0);
+        rs_index_free(&m);
+
+        /* Owned by a package now and not then: read, to be checked. */
+        was = (struct rs_entry *)rs_index_find(&prev, "/usr/bin/ls");
+        free(was ? was->package : NULL);
+        if (was)
+        {
+            was->package = NULL;
+        }
+        o.store = NULL;
+        o.have = NULL;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        e = find(&m, "/usr/bin/ls");
+        CHECK_STR(e && e->package ? e->package : "", "coreutils");
+        CHECK(st.bytes_hashed == 9);
+        rs_index_free(&m);
+
+        /* A file changed since is read; the count leaves out what is not. */
+        rs_test_write(root, "etc/hosts", "127.0.0.1 localhost host\n", 0644);
+        o.count_only = true;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK_INT(st.bytes_hashed, 25);
+        rs_index_free(&m);
+        o.count_only = false;
+        o.prev = NULL;
+        rs_index_free(&prev);
+    }
 
     TEST_CASE("scan: without hashing, packaged files are still read to compare");
     o.hash = false;

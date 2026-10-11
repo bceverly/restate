@@ -34,7 +34,14 @@ enum {
     OPT_QUIESCE,
     OPT_SIGN_WITH,
     OPT_TRUSTED_KEY,
-    OPT_ALLOW_UNVERIFIED
+    OPT_ALLOW_UNVERIFIED,
+    OPT_KEEP_LAST,
+    OPT_KEEP_DAILY,
+    OPT_KEEP_WEEKLY,
+    OPT_KEEP_MONTHLY,
+    OPT_SYSLOG,
+    OPT_EXACT_VERSIONS,
+    OPT_FETCH_SOURCES
 };
 
 enum rs_command {
@@ -69,6 +76,13 @@ struct rs_options {
     bool            baseline_content;
     bool            keep_local;     /* --keep-local-packages */
     bool            quiesce;        /* --quiesce */
+    unsigned        keep_last;      /* prune --keep-last N, and the rest */
+    unsigned        keep_daily;
+    unsigned        keep_weekly;
+    unsigned        keep_monthly;
+    bool            log_outcome;    /* --syslog */
+    bool            exact_versions; /* --exact-versions */
+    bool            fetch_sources;  /* --fetch-sources */
     const char    **debs;           /* --deb NAME=FILE, each */
     size_t          ndebs;
     const char    **excludes;       /* --exclude PATTERN, each */

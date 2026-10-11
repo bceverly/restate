@@ -1854,12 +1854,59 @@ static bool debian_word(const char *word)
                                   "0123456789.+~:-") == strlen(eq + 1));
 }
 
+/* Whether `id` is a snapshot ID as apt takes one: "20261011T030000Z". */
+static bool snapshot_id(const char *id)
+{
+    size_t i;
+
+    if (!id || strlen(id) != 16 || id[8] != 'T' || id[15] != 'Z')
+    {
+        return false;
+    }
+    for (i = 0; i < 15; i++)
+    {
+        if (i != 8 && (id[i] < '0' || id[i] > '9'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* How the script decides on one package, `$want`: as recorded, or by name
+ * at the version there is now -- or, with a snapshot, later from it -- or
+ * not at all, into `$fail`'s list. `extra` goes before it in the simulated
+ * install. */
+static void decide(struct rs_buf *out, const char *indent, const char *extra, const char *fail,
+                   bool snapshot)
+{
+    rs_buf_addf(out, "%s  name=${want%%%%=*}\n", indent);
+    rs_buf_addf(out, "%s  if apt-get -s install %s\"$want\" > /dev/null 2>&1; then\n", indent,
+                extra);
+    rs_buf_addf(out, "%s    ok=\"$ok $want\"\n", indent);
+    rs_buf_addf(out, "%s  elif apt-get -s install %s\"$name\" > /dev/null 2>&1; then\n", indent,
+                extra);
+    if (snapshot)
+    {
+        rs_buf_addf(out, "%s    older=\"$older $want\"\n", indent);
+    } else
+    {
+        rs_buf_addf(out, "%s    ok=\"$ok $name\"\n", indent);
+        rs_buf_addf(out, "%s    newer=\"$newer $name\"\n", indent);
+    }
+    rs_buf_addf(out, "%s  else\n", indent);
+    rs_buf_addf(out, "%s    %s=\"$%s %s\"\n", indent, fail, fail,
+                strcmp(fail, "gone") == 0 ? "$name" : "$want");
+    rs_buf_addf(out, "%s  fi\n", indent);
+}
+
 void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval *skip,
-                            struct rs_buf *out)
+                            const char *snapshot, struct rs_buf *out)
 {
     size_t n;
     size_t i;
     size_t left_out = 0;
+    bool   snap = snapshot_id(snapshot);
     char **words = rs_packages_apt_words(packages, skip, true, &n);
 
     rs_buf_addstr(out,
@@ -1872,21 +1919,22 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "ok=''\n"
                   "newer=''\n"
                   "gone=''\n"
-                  "retry=''\n"
+                  "retry=''\n");
+    if (snap)
+    {
+        rs_buf_addf(out,
+                    "# A version the archive has moved on from comes from its snapshot as of\n"
+                    "# the capture, where apt can reach one (--exact-versions).\n"
+                    "snap='%s'\n"
+                    "older=''\n", snapshot);
+    }
+    rs_buf_addstr(out,
                   "# A simulated install, not apt-cache show, which finds a package by name\n"
                   "# whatever version is asked for: this checks the version, and that what\n"
                   "# it needs can be had too.\n"
-                  "while read -r want; do\n"
-                  "  name=${want%%=*}\n"
-                  "  if apt-get -s install \"$want\" > /dev/null 2>&1; then\n"
-                  "    ok=\"$ok $want\"\n"
-                  "  elif apt-get -s install \"$name\" > /dev/null 2>&1; then\n"
-                  "    ok=\"$ok $name\"\n"
-                  "    newer=\"$newer $name\"\n"
-                  "  else\n"
-                  "    retry=\"$retry $want\"\n"
-                  "  fi\n"
-                  "done <<'PACKAGES'\n");
+                  "while read -r want; do\n");
+    decide(out, "", "", "retry", snap);
+    rs_buf_addstr(out, "done <<'PACKAGES'\n");
     for (i = 0; i < n; i++)
     {
         if (debian_word(words[i]))
@@ -1906,20 +1954,10 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "# an apt pin on NodeSource's would otherwise pick, and NodeSource's\n"
                   "# conflicts with npm. So each that failed is tried again with the rest.\n"
                   "# shellcheck disable=SC2086\n"
-                  "for want in $retry; do\n"
-                  "  name=${want%%=*}\n"
-                  "  if apt-get -s install $ok \"$want\" > /dev/null 2>&1; then\n"
-                  "    ok=\"$ok $want\"\n"
-                  "  elif apt-get -s install $ok \"$name\" > /dev/null 2>&1; then\n"
-                  "    ok=\"$ok $name\"\n"
-                  "    newer=\"$newer $name\"\n"
-                  "  else\n"
-                  "    gone=\"$gone $name\"\n"
-                  "  fi\n"
+                  "for want in $retry; do\n");
+    decide(out, "", "$ok ", "gone", snap);
+    rs_buf_addstr(out,
                   "done\n"
-                  "if [ -n \"$newer\" ]; then\n"
-                  "  echo \"restate: the version recorded has gone; the current one instead:$newer\" >&2\n"
-                  "fi\n"
                   "if [ -n \"$gone\" ]; then\n"
                   "  echo \"restate: apt cannot install these (no repository has them, or what\" \\\n"
                   "       \"they need):$gone\" >&2\n"
@@ -1930,6 +1968,58 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "  for p in $ok; do\n"
                   "    apt-get install -y \"$p\" || true\n"
                   "  done\n"
+                  "fi\n");
+    if (snap)
+    {
+        rs_buf_addstr(out,
+                      "# The versions the archive has moved on from, from its snapshot; any\n"
+                      "# it does not have, at the version there is now. Then the archive's\n"
+                      "# lists as they are now again, for whatever runs next.\n"
+                      "if [ -n \"$older\" ]; then\n"
+                      "  exact=''\n"
+                      "  if apt-get update --snapshot \"$snap\" > /dev/null 2>&1; then\n"
+                      "    for want in $older; do\n"
+                      "      if apt-get -s install --snapshot \"$snap\" \"$want\" > /dev/null 2>&1; "
+                      "then\n"
+                      "        exact=\"$exact $want\"\n"
+                      "      else\n"
+                      "        newer=\"$newer ${want%%=*}\"\n"
+                      "      fi\n"
+                      "    done\n"
+                      "  else\n"
+                      "    echo \"restate: apt could not use the archive's snapshot as of $snap;\" \\\n"
+                      "         \"the versions there are now instead\" >&2\n"
+                      "    for want in $older; do\n"
+                      "      newer=\"$newer ${want%%=*}\"\n"
+                      "    done\n"
+                      "  fi\n"
+                      "  if [ -n \"$exact\" ]; then\n"
+                      "    echo \"restate: from the archive's snapshot as of $snap, at the versions\" "
+                      "\\\n"
+                      "         \"recorded:$exact\" >&2\n"
+                      "    # shellcheck disable=SC2086\n"
+                      "    if ! apt-get install -y --allow-downgrades --snapshot \"$snap\" $exact; "
+                      "then\n"
+                      "      for p in $exact; do\n"
+                      "        apt-get install -y --allow-downgrades --snapshot \"$snap\" \"$p\" || "
+                      "true\n"
+                      "      done\n"
+                      "    fi\n"
+                      "  fi\n"
+                      "  apt-get update > /dev/null 2>&1 || true\n"
+                      "  later=\"$newer\"\n"
+                      "  # shellcheck disable=SC2086\n"
+                      "  if [ -n \"$later\" ] && ! apt-get install -y $later; then\n"
+                      "    for p in $later; do\n"
+                      "      apt-get install -y \"$p\" || true\n"
+                      "    done\n"
+                      "  fi\n"
+                      "  ok=\"$ok $exact $later\"\n"
+                      "fi\n");
+    }
+    rs_buf_addstr(out,
+                  "if [ -n \"$newer\" ]; then\n"
+                  "  echo \"restate: the version recorded has gone; the current one instead:$newer\" >&2\n"
                   "fi\n"
                   "# What dpkg says is installed, not what apt-get exited with: one package\n"
                   "# that will not configure makes every later apt-get fail, whatever it did.\n"

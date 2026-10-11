@@ -118,8 +118,12 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       each installed version no repository has, from apt's cache (warning,
       with the `dpkg-repack` that puts one there, of each it cannot), and the
       `.snap` of each snap installed from a file
-- [ ] Superseded versions from snapshot.ubuntu.com, where a pinned version
-      has left the archive
+- [x] **Versions the archive has moved on from**, from its snapshot as of
+      the capture (`--exact-versions`: `apt-get --snapshot`, which reaches
+      snapshot.ubuntu.com and snapshot.debian.org), where apt can; the newer
+      version otherwise, and by default, as a security update would
+- [ ] Versions that had already left the archive when they were captured
+      (`"superseded"`), from the snapshot of a time they were in it
 - [x] **Repositories apt can no longer use:** each source's index as apt
       last fetched it (InRelease, or Release and Release.gpg) checked with
       gpgv against the keys the source names -- armored ones too -- and its
@@ -127,8 +131,10 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       "problem" in the inventory, and capture warns -- the second rebuild
       found HashiCorp and NordLayer refused, as they had been on the laptop
       for months, unnoticed
-- [ ] The same against what each source serves today (curl), for a vendor
-      that changed keys since the last `apt update`
+- [x] **The same against what each source serves today** (`--fetch-sources`,
+      with curl): each source that passes is fetched again and checked the
+      same way, so a vendor that changed keys since the last `apt update` is
+      caught before the rebuild
 - [x] **The image in parts:** the index, a kit (/etc/apt and the kept
       packages) and the files, each compressed (and encrypted) on its own in
       an uncompressed tar, so a rebuild has the kit in seconds rather than
@@ -251,7 +257,8 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       an ACL's users and groups mapped by name; hard links as links; users
       and groups the image's owners depend on
 - [ ] ACLs that are not extended attributes: macOS's, and NFSv4 ACLs on ZFS
-- [ ] `status`: what has changed since the last capture, quickly
+- [x] `status`: what has changed since the last capture, quickly -- verify's
+      comparison, reading only what size, times and inode say changed
 
 ## Then — captures on a schedule
 
@@ -281,22 +288,28 @@ night without the disk filling up.
       Ctrl-C reaches the hook, and stops what is left), and every pause and
       resume is said and logged to syslog for a cron job's benefit
 - [ ] Hooks for other platforms' services, and detection beyond Linux
-- [ ] **A repository** instead of a growing pile of `.tgz` files: a
-      directory where file content is stored once, by SHA-256, in compressed
-      packs, and each capture adds a snapshot -- an index pointing into it
-- [ ] **Incremental runs**: a file whose size, mtime, ctime and inode match
+- [x] **A repository** instead of a growing pile of `.tgz` files
+      (`restate init`; `capture -o REPO`): file content stored once, by
+      SHA-256, in gzip'd packs, and each capture a snapshot -- an index
+      pointing into them, signed like an image's
+- [x] **Incremental runs**: a file whose size, mtime, ctime and inode match
       the last snapshot is not read again, its recorded digest is trusted (as
       `git status` and rsync do), so the first capture takes as long as today
       and later ones only as long as what changed
-- [ ] `restate snapshots`; `restate prune --keep-daily N --keep-weekly N
-      --keep-monthly N`, which drops old snapshots and the content no
-      remaining one refers to; `restate export SNAPSHOT -o FILE.tgz` for the
-      portable single file; `diff`, `verify`, `buildsheet`, `autoinstall` and
-      restore reading a snapshot as they read an image today
+- [x] `restate snapshots`; `restate prune --keep-last N --keep-daily N
+      --keep-weekly N --keep-monthly N`, which drops old snapshots and the
+      content no remaining one refers to; `restate export SNAPSHOT -o FILE.tar`
+      for the portable single file, and the one the build files are made
+      from; `REPO::NAME` read wherever an image is -- `restore`, `diff`,
+      `verify`, `status`, `packages`, `installer`, `sign`
+- [ ] Content-defined chunking, so a large file that changes a little -- a VM's
+      disk -- is stored as the pieces that changed rather than whole again
 - [ ] Encryption per pack with the same `--encrypt-to` keys, so a
       repository can sit on untrusted storage
-- [ ] A lock, so two scheduled runs never overlap, and exit statuses and
-      log lines a monitoring system can act on
+- [x] **Locks**: one capture or prune on a repository at a time, one
+      `capture --quiesce` on a machine at a time, and exit status 5 for a run
+      that found the lock taken; `--syslog` for one key=value line a
+      monitoring system can match on as each capture and prune ends
 
 ## Then — stamping out copies
 

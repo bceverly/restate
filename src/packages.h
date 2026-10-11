@@ -103,9 +103,16 @@ char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jva
  * if apt refuses even that, one at a time, each failure said. Names and
  * versions that are not what Debian allows them to be are left out, so the
  * script runs nothing the captured tree wrote.
+ *
+ * With `snapshot`, an apt snapshot ID ("20261011T030000Z", the time of the
+ * capture), a version the archive has moved on from is installed from the
+ * archive's snapshot as of then (apt-get --snapshot: snapshot.ubuntu.com,
+ * snapshot.debian.org) rather than the newer one; any that cannot be had
+ * there at the newer one after all. NULL, or anything that is not an ID,
+ * installs the newer one, as a security update would.
  */
 void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval *skip,
-                            struct rs_buf *out);
+                            const char *snapshot, struct rs_buf *out);
 
 /*
  * apt's name for the files it keeps a repository's indexes in, as

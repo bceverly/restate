@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -464,4 +465,68 @@ bool rs_run(enum rs_program p, char *const argv[], struct rs_buf *out, struct rs
         rs_buf_add(errtext, "", 0);
     }
     return rs_wait(pid, code, err);
+}
+
+bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, int *code,
+             struct rs_buf *why, struct rs_buf *err)
+{
+    struct rs_buf errtext;
+    bool          local = rs_starts_with(url, "file://");
+    const char   *protos = local ? "=file" : co->plain_http ? "=http,https" : "=https";
+    char         *argv[32];
+    char          limit[24];
+    int           n = 0;
+    int           i;
+    bool          ok;
+
+    argv[n++] = rs_xstrdup("curl");
+    argv[n++] = rs_xstrdup("-q");   /* first: ignore ~/.curlrc */
+    argv[n++] = rs_xstrdup("--fail");
+    argv[n++] = rs_xstrdup("--location");
+    argv[n++] = rs_xstrdup("--show-error");
+    argv[n++] = rs_xstrdup("--proto");
+    argv[n++] = rs_xstrdup(protos);
+    argv[n++] = rs_xstrdup("--proto-redir");
+    argv[n++] = rs_xstrdup(protos);
+    if (!local)
+    {
+        argv[n++] = rs_xstrdup("--tlsv1.2");
+        argv[n++] = rs_xstrdup("--retry");
+        argv[n++] = rs_xstrdup("3");
+    }
+    if (co->max_time > 0)
+    {
+        (void)snprintf(limit, sizeof(limit), "%u", co->max_time);
+        argv[n++] = rs_xstrdup("--max-time");
+        argv[n++] = rs_xstrdup(limit);
+    }
+    argv[n++] = rs_xstrdup(co->progress ? "--progress-bar" : "--silent");
+    if (co->resume)
+    {
+        argv[n++] = rs_xstrdup("--continue-at");
+        argv[n++] = rs_xstrdup("-");
+    }
+    argv[n++] = rs_xstrdup("--output");
+    argv[n++] = rs_xstrdup(dest);
+    argv[n++] = rs_xstrdup(url);
+    argv[n] = NULL;
+    rs_buf_init(&errtext);
+    ok = rs_run(RS_PROG_CURL, argv, NULL, co->progress ? NULL : &errtext, code, err);
+    for (i = 0; i < n; i++)
+    {
+        free(argv[i]);
+    }
+    if (ok && *code != 0)
+    {
+        while (errtext.len > 0 && (errtext.data[errtext.len - 1] == '\n' ||
+                                   errtext.data[errtext.len - 1] == '\r'))
+        {
+            errtext.data[--errtext.len] = '\0';
+        }
+        rs_buf_reset(why);
+        rs_buf_addf(why, "curl exit %d%s%s", *code, errtext.len ? ": " : "",
+                    errtext.len ? errtext.data : "");
+    }
+    rs_buf_free(&errtext);
+    return ok;
 }

@@ -850,7 +850,7 @@ static void test_apt_words(void)
         CHECK(rs_json_value(&jp, &pk));
         rs_buf_free(&err);
         rs_buf_init(&script);
-        rs_packages_apt_script(&pk, NULL, &script);
+        rs_packages_apt_script(&pk, NULL, NULL, &script);
         CHECK_CONTAINS(script.data, "<<'PACKAGES'\nok-pkg=1:2.0~rc1+b1\nnoversion\nPACKAGES\n");
         CHECK_CONTAINS(script.data, "restate: 5 packages were left out");
         CHECK(strstr(script.data, "Upper") == NULL);
@@ -861,7 +861,7 @@ static void test_apt_words(void)
         memset(&pk, 0, sizeof(pk));
         rs_jval_set_object(&pk);
         rs_buf_init(&script);
-        rs_packages_apt_script(&pk, NULL, &script);
+        rs_packages_apt_script(&pk, NULL, NULL, &script);
         CHECK_CONTAINS(script.data, "<<'PACKAGES'\nPACKAGES\n");
         CHECK(strstr(script.data, "left out") == NULL);
         rs_buf_free(&script);
@@ -894,7 +894,7 @@ static void test_apt_words(void)
         CHECK(rs_json_value(&jp, &pk));
         rs_buf_free(&err);
         rs_buf_init(&script);
-        rs_packages_apt_script(&pk, NULL, &script);
+        rs_packages_apt_script(&pk, NULL, NULL, &script);
         rs_test_write(t, "install.sh", script.data, 0755);
         rs_test_write(t, "apt-get",
                       "#!/bin/sh\n"
@@ -918,6 +918,87 @@ static void test_apt_words(void)
         CHECK(strstr(got.data ? got.data : "", "npm\n") == NULL);
         rs_buf_free(&got);
         free(log);
+        free(cmd);
+        rs_buf_free(&script);
+        rs_jval_free(&pk);
+        rs_test_rmtree(t);
+        free(t);
+    }
+
+    TEST_CASE("packages: --exact-versions, from the archive's snapshot");
+    {
+        /* openssh-server's version has gone from the archive, and is in the
+         * snapshot; later's is in neither, so it comes at the version there
+         * is now; vim's is still there. */
+        static const char list[] =
+            "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+            "{\"name\": \"openssh-server\", \"architecture\": \"amd64\", \"version\": \"1.0\","
+            " \"manual\": true},"
+            "{\"name\": \"later\", \"architecture\": \"amd64\", \"version\": \"2\","
+            " \"manual\": true},"
+            "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"9\","
+            " \"manual\": true}]}}";
+        static const char apt[] =
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "  *' update --snapshot '*) [ -e \"$NOSNAP\" ] && exit 100 ;;\n"
+            "  *' --snapshot '*' openssh-server=1.0 '*) ;;\n"
+            "  *' --snapshot '*) exit 100 ;;\n"
+            "  *' openssh-server=1.0 '* | *' later=2 '*) exit 100 ;;\n"
+            "esac\n"
+            "[ \"$1\" = -s ] || echo \"$*\" >> \"$LOG\"\n";
+        char          *t = rs_test_tmpdir();
+        char          *cmd;
+        struct rs_buf  script;
+        struct rs_buf  got;
+
+        memset(&pk, 0, sizeof(pk));
+        rs_buf_init(&err);
+        rs_json_init(&jp, list, sizeof(list) - 1, &err);
+        CHECK(rs_json_value(&jp, &pk));
+        rs_buf_free(&err);
+        rs_buf_init(&script);
+        rs_packages_apt_script(&pk, NULL, "20261010T191440Z", &script);
+        CHECK_CONTAINS(script.data, "snap='20261010T191440Z'");
+        rs_test_write(t, "install.sh", script.data, 0755);
+        rs_test_write(t, "apt-get", apt, 0755);
+        rs_test_write(t, "dpkg-query", "#!/bin/sh\nprintf installed\n", 0755);
+        cmd = rs_xasprintf("cd '%s' && LOG=log NOSNAP=nosnap PATH='%s':/usr/bin:/bin "
+                           "sh install.sh > out 2>&1", t, t);
+        CHECK(system(cmd) == 0);
+        CHECK(rs_read_beneath(t, "/log", 4096, &got));
+        CHECK_STR(got.data ? got.data : "",
+                  "install -y vim=9\n"
+                  "update --snapshot 20261010T191440Z\n"
+                  "install -y --allow-downgrades --snapshot 20261010T191440Z openssh-server=1.0\n"
+                  "update\n"
+                  "install -y later\n");
+        rs_buf_free(&got);
+        CHECK(rs_read_beneath(t, "/out", 4096, &got));
+        CHECK_CONTAINS(got.data ? got.data : "", "from the archive's snapshot as of "
+                       "20261010T191440Z, at the versions recorded: openssh-server=1.0");
+        CHECK_CONTAINS(got.data ? got.data : "", "the current one instead: later");
+        rs_buf_free(&got);
+
+        /* No snapshot to be had: both at the versions there are now. */
+        rs_test_write(t, "nosnap", "", 0644);
+        rs_test_write(t, "log", "", 0644);
+        CHECK(system(cmd) == 0);
+        CHECK(rs_read_beneath(t, "/log", 4096, &got));
+        CHECK_STR(got.data ? got.data : "",
+                  "install -y vim=9\nupdate\ninstall -y openssh-server later\n");
+        rs_buf_free(&got);
+        CHECK(rs_read_beneath(t, "/out", 4096, &got));
+        CHECK_CONTAINS(got.data ? got.data : "", "apt could not use the archive's snapshot");
+        rs_buf_free(&got);
+
+        /* Anything but an ID is no snapshot at all. */
+        rs_buf_reset(&script);
+        rs_packages_apt_script(&pk, NULL, "20261010T1914'0Z", &script);
+        CHECK(strstr(script.data, "snap=") == NULL);
+        rs_buf_reset(&script);
+        rs_packages_apt_script(&pk, NULL, "x", &script);
+        CHECK(strstr(script.data, "snap=") == NULL);
         free(cmd);
         rs_buf_free(&script);
         rs_jval_free(&pk);

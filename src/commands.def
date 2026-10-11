@@ -20,9 +20,24 @@ RS_CMD(CMD_DIFF,     "diff",     "OLD NEW",    2,  2,
        "compare two images or indexes: A added, D deleted, M modified, and how")
 RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
        "compare an image or index against the tree as it is now")
+RS_CMD(CMD_STATUS,   "status",   "IMAGE",      1,  1,
+       "what has changed since a capture, quickly: as verify, but a file whose size, "
+       "times and inode are unchanged is not read")
 RS_CMD(CMD_SIGN,     "sign",     "IMAGE",      1,  1,
        "sign an image already written, with --sign-with: so a capture run unattended "
        "needs no secret key on the machine")
+RS_CMD(CMD_INIT,     "init",     "DIR",        1,  1,
+       "make an empty repository at DIR: captures into it (-o DIR) are kept as snapshots, "
+       "each file's content stored once, and only what changed is read")
+RS_CMD(CMD_SNAPSHOTS, "snapshots", "REPO",     1,  1,
+       "list the snapshots in a repository, oldest first; REPO::NAME names one wherever "
+       "an image can be named, and REPO alone its newest")
+RS_CMD(CMD_PRUNE,    "prune",    "REPO",       1,  1,
+       "drop the snapshots --keep-last, --keep-daily, --keep-weekly and --keep-monthly do "
+       "not keep, and the content nothing left refers to")
+RS_CMD(CMD_EXPORT,   "export",   "SNAPSHOT",   1,  1,
+       "write a snapshot as an image (-o FILE.tar) to take elsewhere, encrypted and "
+       "signed if asked")
 RS_CMD(CMD_RESTORE,  "restore",  "IMAGE",      1,  1,
        "put an image's files back under the root (--root, default /): each checked "
        "against the index before it is put in place, with its owner, mode and times")

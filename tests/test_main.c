@@ -220,6 +220,7 @@ int main(void)
     test_xattr();
     test_live();
     test_sources();
+    test_repo();
     test_diff();
     test_opts();
     test_cmd();

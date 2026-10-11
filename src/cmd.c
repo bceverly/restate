@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <syslog.h>
 #include <time.h>
@@ -29,6 +30,7 @@
 #include "packages.h"
 #include "pgp.h"
 #include "progress.h"
+#include "repo.h"
 #include "restore.h"
 #include "rules.h"
 #include "run.h"
@@ -303,14 +305,22 @@ static char *self_path(void)
  * either. The time is the real one, not SOURCE_DATE_EPOCH: an index expires
  * by the clock.
  */
-static void check_sources(const char *root, struct rs_jval *packages, bool warn)
+static void check_sources(const struct rs_options *o, const char *root, struct rs_jval *packages,
+                          bool warn)
 {
     const struct rs_jval *apt;
     const struct rs_jval *sources;
     bool                  checked = false;
+    bool                  online = o->fetch_sources;
     size_t                i;
 
-    if (rs_sources_check(root, packages, (int64_t)time(NULL), &checked) == 0 || !warn)
+    if (online && !rs_program_path(RS_PROG_CURL))
+    {
+        rs_warn("--fetch-sources needs curl, which is not installed (or not owned by root): "
+                "apt's sources are checked as apt last fetched them only");
+        online = false;
+    }
+    if (rs_sources_check(root, packages, (int64_t)time(NULL), online, &checked) == 0 || !warn)
     {
         if (!checked && warn && rs_jobject_get(packages, "apt"))
         {
@@ -577,28 +587,40 @@ static bool around(const void *ctx, size_t group, bool before)
     return go;
 }
 
+/* Where a walk's kept content goes: an image, or a new snapshot in a
+ * repository; and, for an incremental run, the index of the last one. */
+struct sink {
+    struct rs_image_writer *image;
+    struct rs_repo_writer  *repo;
+    const struct rs_index  *prev;
+};
+
 /*
- * `kept_from`, where given, is the inventory of an image this walk is being
- * compared with: the files it kept outside the rules (capture
+ * `sink` NULL, or with neither an image nor a repository, makes an index
+ * alone. `kept_from`, where given, is the inventory of an image this walk is
+ * being compared with: the files it kept outside the rules (capture
  * --keep-local-packages) are walked again, so they are not reported deleted.
  */
 static bool run_scan(const struct rs_options *o, const char *root, bool hash,
-                     struct rs_image_writer *image, struct rs_index *m,
+                     const struct sink *sink, struct rs_index *m,
                      struct rs_scan_stats *st, const struct rs_jval *kept_from)
 {
-    struct rs_rules     rules;
-    struct rs_pkgdb     db;
-    struct rs_scan_opts so;
-    struct quiesce      q;
-    struct around_ctx   actx;
-    bool                live = false;
-    struct rs_buf       err;
-    const char         *os_used = NULL;
-    char              **keep = NULL;
-    size_t              nkeep = 0;
-    const char        **kit = NULL;
-    size_t              i;
-    bool                ok;
+    struct rs_image_writer *image = sink ? sink->image : NULL;
+    struct rs_repo_writer  *repo = sink ? sink->repo : NULL;
+    bool                    storing = image || repo;
+    struct rs_rules         rules;
+    struct rs_pkgdb         db;
+    struct rs_scan_opts     so;
+    struct quiesce          q;
+    struct around_ctx       actx;
+    bool                    live = false;
+    struct rs_buf           err;
+    const char             *os_used = NULL;
+    char                  **keep = NULL;
+    size_t                  nkeep = 0;
+    const char            **kit = NULL;
+    size_t                  i;
+    bool                    ok;
 
     /* Initialized before anything can fail, because every caller frees the
      * index and the stats are read whatever happened. */
@@ -624,8 +646,14 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     {
         so.store = rs_image_store;
         so.store_ctx = image;
-        so.store_baseline = o->baseline_content;
+    } else if (repo)
+    {
+        so.store = rs_repo_store;
+        so.store_ctx = repo;
+        so.have = rs_repo_have;
     }
+    so.store_baseline = storing && o->baseline_content;
+    so.prev = sink ? sink->prev : NULL;
 
     /* Recorded absolute, so `verify` run from another directory -- or another
      * day -- finds the same tree. Kept as given if it cannot be resolved; the
@@ -640,7 +668,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     m->os = rs_xstrdup(os_used ? os_used : "unknown");
     m->host = host_name();
     m->created = created_now();
-    m->hashed = hash || image != NULL;
+    m->hashed = hash || storing;
     m->version = rs_xstrdup(RESTATE_VERSION);
     if (is_live_root(root))
     {
@@ -648,7 +676,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
     /* What is installed is in the tree's own files, wherever it is mounted. */
     rs_packages_describe(root, &m->packages);
-    check_sources(root, &m->packages, image != NULL);
+    check_sources(o, root, &m->packages, storing);
     if (o->keep_local)
     {
         struct rs_buf missing;
@@ -672,7 +700,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         so.keep = (const char *const *)keep;
         so.nkeep = nkeep;
     }
-    if (image && is_live_root(root))
+    if (storing && is_live_root(root))
     {
         /* The restate making the image, kept in its kit: a new system can
          * run `restate restore` before restate is installed on it. */
@@ -686,10 +714,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
             so.nkeep = nkeep;
         }
     }
-    m->content = rs_xstrdup(!image ? "none" : o->baseline_content ? "state+baseline" : "state");
+    m->content = rs_xstrdup(!storing ? "none" : o->baseline_content ? "state+baseline" : "state");
     /* What is running and writing to files the image keeps: named, or with
      * --quiesce left to the end and paused while it is copied. */
-    if (image && is_live_root(root))
+    if (storing && is_live_root(root))
     {
         live = true;
         quiesce_plan(o, &rules, root, &q);
@@ -703,7 +731,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
             so.around_ctx = &actx;
         }
     }
-    if (image)
+    if (storing)
     {
         /* The kit, the part of the image a reinstall reads first: apt's
          * sources and keys, the packages no repository has, and the accounts
@@ -721,8 +749,14 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         {
             kit[i + nfixed] = keep[i];
         }
-        image->kit = kit;
-        image->nkit = nkeep + nfixed;
+        if (image)
+        {
+            image->kit = kit;
+            image->nkit = nkeep + nfixed;
+        } else
+        {
+            rs_repo_writer_kit(repo, kit, nkeep + nfixed);
+        }
     }
 
     rs_buf_init(&err);
@@ -1028,53 +1062,135 @@ int rs_cmd_sign(const struct rs_options *o)
     return RESTATE_EXIT_OK;
 }
 
-int rs_cmd_capture(const struct rs_options *o)
+/* ------------------------------------------------------------------------- */
+/* Running unattended                                                        */
+/* ------------------------------------------------------------------------- */
+
+/* Where --quiesce's lock is: one capture at a time on a machine, since two
+ * would pause and resume the same databases under each other. */
+#define QUIESCE_LOCK_DIR  "/run/restate"
+#define QUIESCE_LOCK_FILE QUIESCE_LOCK_DIR "/capture.lock"
+
+/*
+ * Takes the machine's capture lock, without waiting: the descriptor, which
+ * holds it until it is closed; -1 with *busy set if another capture has it;
+ * -1 without, if there is nowhere to keep one (no /run, or not root), in
+ * which case the capture goes ahead -- the lock guards the hooks, and they
+ * need root to run anyway.
+ */
+static int quiesce_lock(bool *busy)
+{
+    int fd;
+
+    *busy = false;
+    if (mkdir(QUIESCE_LOCK_DIR, 0700) != 0 && errno != EEXIST)
+    {
+        return -1;
+    }
+    fd = open(QUIESCE_LOCK_FILE, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0)
+    {
+        *busy = errno == EWOULDBLOCK;
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static const char *status_word(int status)
+{
+    switch (status)
+    {
+    case RESTATE_EXIT_OK:
+        return "ok";
+    case RESTATE_EXIT_DIFFERENT:
+        return "different";
+    case RESTATE_EXIT_INCOMPLETE:
+        return "incomplete";
+    case RESTATE_EXIT_UNVERIFIED:
+        return "unverified";
+    case RESTATE_EXIT_BUSY:
+        return "busy";
+    default:
+        return "failed";
+    }
+}
+
+/*
+ * With --syslog, how the run ended, as one line in the system log a
+ * monitoring system can match on: "restate capture: status=ok exit=0 ...",
+ * then `fmt`'s counts as more key=value pairs. A warning for an incomplete
+ * run, an error for one that failed.
+ */
+static void log_outcome(const struct rs_options *o, int status, time_t began, const char *fmt,
+                        ...) RESTATE_PRINTF(4, 5);
+
+static void log_outcome(const struct rs_options *o, int status, time_t began, const char *fmt,
+                        ...)
+{
+    va_list ap;
+    char   *rest;
+    int     priority = LOG_ERR;
+
+    if (!o->log_outcome)
+    {
+        return;
+    }
+    va_start(ap, fmt);
+    rest = rs_xvasprintf(fmt, ap);
+    va_end(ap);
+    if (status == RESTATE_EXIT_OK || status == RESTATE_EXIT_DIFFERENT)
+    {
+        priority = LOG_INFO;
+    } else if (status == RESTATE_EXIT_INCOMPLETE || status == RESTATE_EXIT_BUSY)
+    {
+        priority = LOG_WARNING;
+    }
+    syslog(priority, "restate %s: status=%s exit=%d seconds=%lld%s%s",
+           rs_command_name(o->command), status_word(status), status,
+           (long long)(time(NULL) - began), rest[0] ? " " : "", rest);
+    free(rest);
+}
+
+/* A size as people read it: "1.4 GiB". */
+static void human_size(struct rs_buf *b, uint64_t bytes)
+{
+    static const char *const units[] = { "bytes", "KiB", "MiB", "GiB", "TiB", "PiB" };
+    double                   v = (double)bytes;
+    size_t                   u = 0;
+
+    while (v >= 1024.0 && u + 1 < sizeof(units) / sizeof(units[0]))
+    {
+        v /= 1024.0;
+        u++;
+    }
+    if (u == 0)
+    {
+        rs_buf_addf(b, "%" PRIu64 " bytes", bytes);
+    } else
+    {
+        rs_buf_addf(b, "%.1f %s", v, units[u]);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Capturing                                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* A capture into an image file. */
+static int capture_image(const struct rs_options *o, struct rs_scan_stats *st)
 {
     struct rs_index        m;
-    struct rs_scan_stats   st;
     struct rs_image_writer image;
+    struct sink            sink;
     struct rs_buf          err;
-    size_t                 k;
     bool                   ok;
 
-    if (!o->output || strcmp(o->output, "-") == 0)
-    {
-        rs_error("capture writes an image to a file: give one with -o FILE.tar");
-        return RESTATE_EXIT_TROUBLE;
-    }
-    if (o->no_hash)
-    {
-        /* Every kept file is read to store it, so its digest costs nothing
-         * more, and an image whose content cannot be checked is worse. */
-        rs_warn("--no-hash is ignored by capture: kept files are always hashed");
-    }
     rs_buf_init(&err);
-    /* Before the scan, which can take a long time to find out at the end. */
-    if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
-    {
-        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
-        rs_buf_free(&err);
-        return RESTATE_EXIT_TROUBLE;
-    }
-    if (o->sign_with && !signing_possible(o->sign_with))
-    {
-        rs_buf_free(&err);
-        return RESTATE_EXIT_TROUBLE;
-    }
-    for (k = 0; k < o->nrecipients; k++)
-    {
-        /* Opened, not access()ed: the question is whether this process can
-         * read it, which only opening it answers. gpg opens it again later. */
-        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
-
-        if (fd < 0)
-        {
-            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
-            rs_buf_free(&err);
-            return RESTATE_EXIT_TROUBLE;
-        }
-        (void)close(fd);
-    }
     if (!rs_image_begin(&image, o->output, &err))
     {
         rs_error("%s", err.data);
@@ -1084,7 +1200,9 @@ int rs_cmd_capture(const struct rs_options *o)
     image.recipients = o->recipients;
     image.nrecipients = o->nrecipients;
     image.sign_with = o->sign_with;
-    if (!run_scan(o, o->root ? o->root : "/", true, &image, &m, &st, NULL))
+    memset(&sink, 0, sizeof(sink));
+    sink.image = &image;
+    if (!run_scan(o, o->root ? o->root : "/", true, &sink, &m, st, NULL))
     {
         rs_image_abort(&image);
         rs_index_free(&m);
@@ -1105,8 +1223,361 @@ int rs_cmd_capture(const struct rs_options *o)
     {
         return RESTATE_EXIT_TROUBLE;
     }
-    scan_summary(o, &st);
-    return st.unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    scan_summary(o, st);
+    return st->unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+}
+
+/*
+ * The newest snapshot's index, for an incremental run, if it is of the same
+ * tree: a file at the same path under another root is another file, however
+ * alike its size and times.
+ */
+static bool last_capture(const struct rs_options *o, struct rs_repo *r, const char *root,
+                         struct rs_index *prev)
+{
+    struct rs_buf err;
+    char         *last;
+    char         *here = realpath(root, NULL); /* Flawfinder: ignore */
+    bool          ok;
+
+    rs_index_init(prev);
+    rs_buf_init(&err);
+    last = rs_repo_resolve(r, NULL, &err);
+    rs_buf_reset(&err);
+    ok = last && rs_repo_load_index(r, last, prev, &err);
+    if (last && !ok)
+    {
+        rs_warn("%s; every file is read again", err.data);
+    }
+    ok = ok && here && prev->root && strcmp(prev->root, here) == 0;
+    if (ok && o->verbose)
+    {
+        rs_warn("files unchanged since %s" RS_REPO_SEP "%s are not read again",
+                rs_repo_dir(r), last);
+    }
+    if (!ok)
+    {
+        rs_index_free(prev);
+        rs_index_init(prev);
+    }
+    free(last);
+    free(here);
+    rs_buf_free(&err);
+    return ok;
+}
+
+/* A capture into a repository: a new snapshot, with only what is new
+ * stored, and what has not changed since the last one not read at all. */
+static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, char **where)
+{
+    const char            *root = o->root ? o->root : "/";
+    struct rs_repo        *r;
+    struct rs_repo_writer *w;
+    struct rs_repo_written done;
+    struct rs_index        m;
+    struct rs_index        prev;
+    struct sink            sink;
+    struct rs_buf          err;
+    bool                   busy;
+    bool                   ok;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(o->output, RS_REPO_WRITE, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    }
+    memset(&sink, 0, sizeof(sink));
+    sink.prev = last_capture(o, r, root, &prev) ? &prev : NULL;
+    w = rs_repo_writer_begin(r, &err);
+    sink.repo = w;
+    ok = run_scan(o, root, true, &sink, &m, st, NULL);
+    if (!ok)
+    {
+        rs_repo_writer_abort(w);
+    } else
+    {
+        ok = rs_repo_writer_finish(w, &m, o->sign_with, &done, &err);
+        if (!ok)
+        {
+            rs_error("%s", err.data);
+        }
+    }
+    rs_index_free(&prev);
+    rs_index_free(&m);
+    if (ok)
+    {
+        *where = rs_xasprintf("%s" RS_REPO_SEP "%s", o->output, done.name);
+        if (!o->quiet)
+        {
+            struct rs_buf size;
+
+            rs_buf_init(&size);
+            human_size(&size, done.bytes);
+            (void)fflush(stdout);
+            (void)fprintf(stderr, "restate: snapshot %s: %" PRIu64 " files' content new to the "
+                          "repository (%s); %" PRIu64 " files unchanged since the last snapshot "
+                          "were not read\n", *where, done.objects, size.data, st->reused);
+            rs_buf_free(&size);
+            if (o->sign_with)
+            {
+                say_signer("signed by", &done.signer);
+            }
+        }
+        free(done.name);
+    }
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    if (!ok)
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    scan_summary(o, st);
+    return st->unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+}
+
+int rs_cmd_capture(const struct rs_options *o)
+{
+    struct rs_scan_stats st;
+    time_t               began = time(NULL);
+    char                *where = NULL;
+    size_t               k;
+    int                  lock = -1;
+    int                  status;
+    bool                 busy = false;
+
+    memset(&st, 0, sizeof(st));
+    if (!o->output || strcmp(o->output, "-") == 0)
+    {
+        rs_error("capture writes an image to a file, or a snapshot to a repository: give one "
+                 "with -o FILE.tar or -o REPOSITORY");
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "%s", "");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (o->no_hash)
+    {
+        /* Every kept file is read to store it, so its digest costs nothing
+         * more, and an image whose content cannot be checked is worse. */
+        rs_warn("--no-hash is ignored by capture: kept files are always hashed");
+    }
+    /* Before the scan, which can take a long time to find out at the end. */
+    status = RESTATE_EXIT_OK;
+    if (o->nrecipients > 0 && rs_repo_is(o->output))
+    {
+        rs_error("--encrypt-to: a repository is not encrypted; keep it somewhere private, and "
+                 "export a snapshot with --encrypt-to to take a copy elsewhere");
+        status = RESTATE_EXIT_TROUBLE;
+    } else if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
+    {
+        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
+        status = RESTATE_EXIT_TROUBLE;
+    }
+    if (status == RESTATE_EXIT_OK && o->sign_with && !signing_possible(o->sign_with))
+    {
+        status = RESTATE_EXIT_TROUBLE;
+    }
+    for (k = 0; status == RESTATE_EXIT_OK && k < o->nrecipients; k++)
+    {
+        /* Opened, not access()ed: the question is whether this process can
+         * read it, which only opening it answers. gpg opens it again later. */
+        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
+            status = RESTATE_EXIT_TROUBLE;
+        } else
+        {
+            (void)close(fd);
+        }
+    }
+    if (status == RESTATE_EXIT_OK && o->quiesce)
+    {
+        lock = quiesce_lock(&busy);
+        if (busy)
+        {
+            rs_error("another capture with --quiesce is running on this machine (%s); try again "
+                     "when it is done", QUIESCE_LOCK_FILE);
+            status = RESTATE_EXIT_BUSY;
+        }
+    }
+    if (status == RESTATE_EXIT_OK)
+    {
+        status = rs_repo_is(o->output) ? capture_repo(o, &st, &where) : capture_image(o, &st);
+    }
+    if (lock >= 0)
+    {
+        (void)close(lock);
+    }
+    log_outcome(o, status, began, "output=%s paths=%" PRIu64 " kept=%" PRIu64 " read=%" PRIu64
+                " reused=%" PRIu64 " unreadable=%" PRIu64, where ? where : o->output,
+                st.recorded, st.stored, st.bytes_hashed, st.reused, st.unreadable);
+    free(where);
+    return status;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Repositories                                                              */
+/* ------------------------------------------------------------------------- */
+
+int rs_cmd_init(const struct rs_options *o)
+{
+    struct rs_buf err;
+
+    rs_buf_init(&err);
+    if (!rs_repo_init(o->args[0], &err))
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    if (!o->quiet)
+    {
+        (void)fprintf(stderr, "restate: made the repository %s; capture into it with "
+                      "restate capture -o %s\n", o->args[0], o->args[0]);
+    }
+    return RESTATE_EXIT_OK;
+}
+
+int rs_cmd_snapshots(const struct rs_options *o)
+{
+    struct rs_repo *r;
+    struct rs_buf   err;
+    struct rs_buf   text;
+    struct output   out;
+    char          **names;
+    size_t          n;
+    size_t          i;
+    bool            busy;
+    bool            ok;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(o->args[0], RS_REPO_LOOK, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    names = rs_repo_snapshots(r, &n);
+    rs_buf_init(&text);
+    for (i = 0; i < n; i++)
+    {
+        struct rs_jval        info;
+        struct rs_buf         sig;
+        struct rs_buf         gz;
+        uint64_t              files = 0;
+        uint64_t              bytes = 0;
+        uint64_t              fresh = 0;
+
+        rs_buf_reset(&err);
+        rs_buf_init(&sig);
+        rs_buf_init(&gz);
+        (void)rs_repo_index_bytes(r, names[i], &gz, &sig, &err);
+        rs_buf_reset(&err);
+        if (rs_repo_info(r, names[i], &info, &err))
+        {
+            const struct rs_jval *v;
+
+            (void)((v = rs_jobject_get(&info, "files")) && rs_jval_u64(v, &files));
+            (void)((v = rs_jobject_get(&info, "bytes")) && rs_jval_u64(v, &bytes));
+            (void)((v = rs_jobject_get(&info, "new_bytes")) && rs_jval_u64(v, &fresh));
+            rs_buf_addf(&text, "%s  %s  %" PRIu64 " files, ", names[i],
+                        rs_jobject_str(&info, "host") ? rs_jobject_str(&info, "host") : "?",
+                        files);
+            human_size(&text, bytes);
+            rs_buf_addstr(&text, "; ");
+            human_size(&text, fresh);
+            rs_buf_addf(&text, " new%s\n", sig.len > 0 ? "; signed" : "");
+            rs_jval_free(&info);
+        } else
+        {
+            rs_buf_addf(&text, "%s  (no summary: %s)\n", names[i], err.data);
+        }
+        rs_buf_free(&sig);
+        rs_buf_free(&gz);
+    }
+    rs_repo_free_names(names, n);
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = text.len == 0 || fwrite(text.data, 1, text.len, out.fp) == text.len;
+    if (!ok)
+    {
+        rs_error("%s: %s", out.tmp ? out.tmp : "standard output", strerror(errno));
+    }
+    ok = output_close(&out, ok);
+    rs_buf_free(&text);
+    return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+}
+
+int rs_cmd_prune(const struct rs_options *o)
+{
+    struct rs_repo_keep   keep;
+    struct rs_repo_pruned pruned;
+    struct rs_repo       *r;
+    struct rs_buf         err;
+    time_t                began = time(NULL);
+    size_t                i;
+    bool                  busy;
+    bool                  ok;
+
+    keep.last = o->keep_last;
+    keep.daily = o->keep_daily;
+    keep.weekly = o->keep_weekly;
+    keep.monthly = o->keep_monthly;
+    if (keep.last + keep.daily + keep.weekly + keep.monthly == 0)
+    {
+        rs_error("prune: say what to keep, with --keep-last, --keep-daily, --keep-weekly or "
+                 "--keep-monthly");
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_init(&err);
+    r = rs_repo_open(o->args[0], o->dry_run ? RS_REPO_LOOK : RS_REPO_PRUNE, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        log_outcome(o, busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE, began, "repository=%s",
+                    o->args[0]);
+        return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    }
+    ok = rs_repo_prune(r, &keep, o->dry_run, &pruned, &err);
+    rs_repo_close(r);
+    for (i = 0; !o->quiet && i < pruned.ndropped; i++)
+    {
+        (void)printf("%s %s\n", o->dry_run ? "would drop" : "dropped", pruned.dropped[i]);
+    }
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+    } else if (!o->quiet && !o->dry_run)
+    {
+        struct rs_buf size;
+
+        rs_buf_init(&size);
+        human_size(&size, pruned.bytes_freed);
+        (void)fflush(stdout);
+        (void)fprintf(stderr, "restate: dropped %zu snapshots; removed %zu packs and rewrote %zu, "
+                      "freeing %s\n", pruned.ndropped, pruned.packs_removed,
+                      pruned.packs_rewritten, size.data);
+        rs_buf_free(&size);
+    }
+    log_outcome(o, ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE, began,
+                "repository=%s dropped=%zu packs_removed=%zu packs_rewritten=%zu "
+                "bytes_freed=%" PRIu64, o->args[0], pruned.ndropped, pruned.packs_removed,
+                pruned.packs_rewritten, pruned.bytes_freed);
+    rs_repo_pruned_free(&pruned);
+    rs_buf_free(&err);
+    return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1247,6 +1718,141 @@ int rs_cmd_verify(const struct rs_options *o)
     }
     rs_index_free(&live);
     rs_index_free(&recorded);
+    return status;
+}
+
+/*
+ * What has changed since a capture, quickly: the walk verify makes, but
+ * incremental -- a file whose size, times and inode are what the capture
+ * recorded is taken to be unchanged and not read -- so it takes as long as
+ * reading what did change.
+ */
+int rs_cmd_status(const struct rs_options *o)
+{
+    struct rs_index      recorded;
+    struct rs_index      live;
+    struct rs_scan_stats st;
+    struct rs_diff_stats d;
+    struct rs_buf        err;
+    struct trust         tr;
+    struct sink          sink;
+    const char          *root;
+    int                  status;
+
+    status = trust_check(o, o->args[0], o->ntrusted > 0, &tr);
+    if (status != RESTATE_EXIT_OK)
+    {
+        return status;
+    }
+    rs_index_init(&recorded);
+    rs_buf_init(&err);
+    if (!rs_index_load(&recorded, o->args[0], &err))
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_index_free(&recorded);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    status = trust_matches(o, o->args[0], &tr, &recorded);
+    if (status != RESTATE_EXIT_OK)
+    {
+        rs_index_free(&recorded);
+        return status;
+    }
+    root = o->root ? o->root : (recorded.root ? recorded.root : "/");
+    memset(&sink, 0, sizeof(sink));
+    sink.prev = &recorded;
+    if (!run_scan(o, root, recorded.hashed && !o->no_hash, &sink, &live, &st,
+                  &recorded.packages))
+    {
+        rs_index_free(&live);
+        rs_index_free(&recorded);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    status = write_diff(o, &recorded, &live, &d);
+    if (status == RESTATE_EXIT_OK && st.unreadable > 0)
+    {
+        status = RESTATE_EXIT_INCOMPLETE;
+    }
+    rs_index_free(&live);
+    rs_index_free(&recorded);
+    return status;
+}
+
+int rs_cmd_export(const struct rs_options *o)
+{
+    struct rs_index        ix;
+    struct rs_image_writer iw;
+    struct rs_buf          err;
+    struct trust           tr;
+    size_t                 k;
+    int                    status;
+    bool                   ok;
+
+    if (!o->output || strcmp(o->output, "-") == 0)
+    {
+        rs_error("export writes an image to a file: give one with -o FILE.tar");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if ((o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG)) ||
+        (o->sign_with && !signing_possible(o->sign_with)))
+    {
+        if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
+        {
+            rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
+        }
+        return RESTATE_EXIT_TROUBLE;
+    }
+    for (k = 0; k < o->nrecipients; k++)
+    {
+        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
+            return RESTATE_EXIT_TROUBLE;
+        }
+        (void)close(fd);
+    }
+    status = trust_check(o, o->args[0], o->ntrusted > 0, &tr);
+    if (status != RESTATE_EXIT_OK)
+    {
+        return status;
+    }
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    ok = rs_index_load(&ix, o->args[0], &err);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+        status = RESTATE_EXIT_TROUBLE;
+    } else
+    {
+        status = trust_matches(o, o->args[0], &tr, &ix);
+    }
+    if (status == RESTATE_EXIT_OK)
+    {
+        rs_buf_reset(&err);
+        ok = rs_image_begin(&iw, o->output, &err);
+        if (ok)
+        {
+            iw.recipients = o->recipients;
+            iw.nrecipients = o->nrecipients;
+            iw.sign_with = o->sign_with;
+            ok = rs_image_export(o->args[0], &ix, &iw, &err);
+        }
+        if (!ok)
+        {
+            rs_error("%s", err.data);
+            status = RESTATE_EXIT_TROUBLE;
+        } else if (o->sign_with && !o->quiet)
+        {
+            say_signer("signed by", &iw.signer);
+        }
+    }
+    rs_buf_free(&err);
+    rs_index_free(&ix);
     return status;
 }
 
@@ -1439,7 +2045,7 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
  * section, or what `restate machine -o` writes.
  */
 static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages,
-                         bool *old_image, bool *knows_trust)
+                         bool *old_image, bool *knows_trust, char **created)
 {
     struct rs_index ix;
     struct rs_buf   err;
@@ -1460,6 +2066,10 @@ static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jv
             if (old_image)
             {
                 *old_image = !ix.in_parts;
+            }
+            if (created && ix.created)
+            {
+                *created = rs_xstrdup(ix.created);
             }
             if (knows_trust)
             {
@@ -1549,7 +2159,7 @@ int rs_cmd_installer(const struct rs_options *o)
     memset(&machine, 0, sizeof(machine));
     if (image)
     {
-        if (!load_machine(image, &machine, NULL, NULL, NULL))
+        if (!load_machine(image, &machine, NULL, NULL, NULL, NULL))
         {
             rs_jval_free(&machine);
             return RESTATE_EXIT_TROUBLE;
@@ -1632,6 +2242,28 @@ int rs_cmd_installer(const struct rs_options *o)
     return status;
 }
 
+/*
+ * Whether the build files can be made from `image`: not from a snapshot in a
+ * repository, which is no file their commands could unpack -- it is exported
+ * as an image first, and they are made from that.
+ */
+static bool from_a_file(const char *image)
+{
+    char *dir;
+    char *name;
+
+    if (!image || !rs_repo_ref(image, &dir, &name))
+    {
+        return true;
+    }
+    rs_error("%s is a snapshot in a repository, and the commands a build sheet or autoinstall "
+             "file writes unpack an image's file: export it first (restate export %s -o "
+             "FILE.tar), and make them from that", image, image);
+    free(dir);
+    free(name);
+    return false;
+}
+
 /* The --target option as the layout spells it. */
 static enum rs_target target_of(const struct rs_options *o)
 {
@@ -1649,7 +2281,8 @@ static enum rs_target target_of(const struct rs_options *o)
 /* The machine to describe: the one in IMAGE, or this one -- and, with
  * `packages`, what is installed on it, which an image may not record. */
 static bool machine_for(const struct rs_options *o, const char *image, struct rs_jval *machine,
-                        struct rs_jval *packages, bool *old_image, bool *knows_trust)
+                        struct rs_jval *packages, bool *old_image, bool *knows_trust,
+                        char **created)
 {
     *old_image = false;
     /* This machine's restate, which the restore would be: it knows. */
@@ -1661,7 +2294,7 @@ static bool machine_for(const struct rs_options *o, const char *image, struct rs
     }
     if (image)
     {
-        return load_machine(image, machine, packages, old_image, knows_trust);
+        return load_machine(image, machine, packages, old_image, knows_trust, created);
     }
     rs_machine_describe("/", o->root ? o->root : "/", machine);
     if (packages)
@@ -1724,7 +2357,7 @@ int rs_cmd_packages(const struct rs_options *o)
     } else
     {
         rs_packages_describe(o->root ? o->root : "/", &packages);
-        check_sources(o->root ? o->root : "/", &packages, false);
+        check_sources(o, o->root ? o->root : "/", &packages, false);
     }
     rs_buf_init(&text);
     rs_json_write(&text, &packages, 2, 0);
@@ -1803,16 +2436,25 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     bool                 knows;
     char                *trust = NULL;
     char                *keyring = NULL;
+    char                *created = NULL;
+    char                *snapshot;
     bool                 ok;
 
-    if (!machine_for(o, image, &machine, &packages, &old_image, &knows) ||
+    if (!from_a_file(image))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
         !trust_for(o, knows, false, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
+        free(created);
         return RESTATE_EXIT_TROUBLE;
     }
+    snapshot = o->exact_versions ? rs_repo_snapshot_name(created) : NULL;
     memset(&so, 0, sizeof(so));
+    so.snapshot = snapshot;
     so.trust = trust;
     so.old_image = old_image;
     so.target = target_of(o);
@@ -1826,6 +2468,8 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     rs_jval_free(&packages);
     free(trust);
     free(keyring);
+    free(created);
+    free(snapshot);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -1849,16 +2493,25 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     bool                knows;
     char               *trust = NULL;
     char               *keyring = NULL;
+    char               *created = NULL;
+    char               *snapshot;
     bool                ok;
 
-    if (!machine_for(o, image, &machine, &packages, &old_image, &knows) ||
+    if (!from_a_file(image))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
         !trust_for(o, knows, true, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
+        free(created);
         return RESTATE_EXIT_TROUBLE;
     }
+    snapshot = o->exact_versions ? rs_repo_snapshot_name(created) : NULL;
     memset(&ao, 0, sizeof(ao));
+    ao.snapshot = snapshot;
     ao.trust = trust;
     ao.trust_keyring = keyring;
     ao.old_image = old_image;
@@ -1874,6 +2527,8 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     rs_jval_free(&packages);
     free(trust);
     free(keyring);
+    free(created);
+    free(snapshot);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -1994,6 +2649,16 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_classify(o);
     case CMD_RULES:
         return rs_cmd_rules(o);
+    case CMD_INIT:
+        return rs_cmd_init(o);
+    case CMD_SNAPSHOTS:
+        return rs_cmd_snapshots(o);
+    case CMD_PRUNE:
+        return rs_cmd_prune(o);
+    case CMD_EXPORT:
+        return rs_cmd_export(o);
+    case CMD_STATUS:
+        return rs_cmd_status(o);
     case CMD_NONE:
     case CMD_COUNT:
     default:

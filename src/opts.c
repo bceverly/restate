@@ -162,6 +162,35 @@ void rs_options_free(struct rs_options *o)
     o->nexcludes = 0;
 }
 
+/* The most of anything prune is told to keep: far more than anyone means. */
+#define COUNT_MAX 100000u
+
+/* A count: decimal digits alone, at most COUNT_MAX. */
+static bool count_arg(const char *s, unsigned *out)
+{
+    unsigned long v = 0;
+    size_t        i;
+
+    if (s[0] == '\0' || strlen(s) > 6)
+    {
+        return false;
+    }
+    for (i = 0; s[i]; i++)
+    {
+        if (s[i] < '0' || s[i] > '9')
+        {
+            return false;
+        }
+        v = v * 10 + (unsigned long)(s[i] - '0');
+    }
+    if (v > COUNT_MAX)
+    {
+        return false;
+    }
+    *out = (unsigned)v;
+    return true;
+}
+
 bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf *err)
 {
     char                       shortopts[2 * COUNT(option_help) + 2];
@@ -256,6 +285,33 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_QUIESCE:
             o->quiesce = true;
+            break;
+        case OPT_KEEP_LAST:
+        case OPT_KEEP_DAILY:
+        case OPT_KEEP_WEEKLY:
+        case OPT_KEEP_MONTHLY:
+        {
+            unsigned *to = c == OPT_KEEP_LAST    ? &o->keep_last
+                           : c == OPT_KEEP_DAILY ? &o->keep_daily
+                           : c == OPT_KEEP_WEEKLY ? &o->keep_weekly
+                                                  : &o->keep_monthly;
+
+            if (!count_arg(optarg, to))
+            {
+                rs_buf_addf(err, "%s: \"%s\" is not a number from 0 to %u", offending(argv, c),
+                            optarg, COUNT_MAX);
+                return false;
+            }
+            break;
+        }
+        case OPT_SYSLOG:
+            o->log_outcome = true;
+            break;
+        case OPT_EXACT_VERSIONS:
+            o->exact_versions = true;
+            break;
+        case OPT_FETCH_SOURCES:
+            o->fetch_sources = true;
             break;
         case OPT_DEB:
             o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));
@@ -441,6 +497,7 @@ void rs_print_help(FILE *out)
                        "  2  trouble: a usage error, a bad image, index or rules file, an I/O error\n"
                        "  3  the scan finished, but some files could not be read\n"
                        "  4  the image is not signed by a --trusted-key, and was not used\n"
+                       "  5  busy: another capture or prune is running, and nothing was done\n"
                        "\n"
                        "Examples:\n"
                        "  restate capture -o /var/backups/web01.tar\n"
@@ -448,6 +505,8 @@ void rs_print_help(FILE *out)
                        "  restate scan -o web01.json\n"
                        "  restate diff monday.tar tuesday.tar\n"
                        "  restate verify /var/backups/web01.tar\n"
+                       "  restate init /var/backups/repo && restate capture -o /var/backups/repo\n"
+                       "  restate prune --keep-daily 7 --keep-weekly 4 /var/backups/repo\n"
                        "  restate classify /etc/passwd /var/cache/apt /usr/bin/ls\n"
                        "  restate rules > site.rules && restate -N -R site.rules scan\n"
                        "\n"

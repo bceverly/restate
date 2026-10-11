@@ -63,6 +63,7 @@ restate: 1 added, 0 deleted, 1 modified
 - [Live services](#live-services)
 - [Packages](#packages)
 - [Restoring](#restoring)
+- [Repositories](#repositories)
 - [Images and indexes](#images-and-indexes)
 - [Classes and rules](#classes-and-rules)
 - [Installing](#installing)
@@ -95,6 +96,10 @@ restate: 1 added, 0 deleted, 1 modified
 - **Compares.** `diff` two images or indexes, or `verify` one against the
   machine as it is now, and see what was added, deleted and modified — and
   whether a modification was the content, the mode, the owner or a link target.
+  `status` does the same in seconds, reading only what changed.
+- **Keeps captures in a repository**, each file's content stored once: a
+  nightly capture reads and stores only what changed since the last one, and
+  `prune` keeps the daily, weekly and monthly snapshots you ask for.
 - **Pauses what is running, just in time.** A database, a VM or a container
   found writing to files the image keeps is named, and with `--quiesce`
   paused by a hook while its own files are copied, then resumed.
@@ -114,6 +119,15 @@ target — without the noise of timestamps:
 restate capture -o /var/backups/web01-$(date +%F).tar
 restate verify /var/backups/web01-2026-09-28.tar          # against the server as it is now
 restate diff web01-2026-09-28.tar web01-2026-10-05.tar    # between two captures
+```
+
+Or into a [repository](#repositories), which stores only what changed each
+night and keeps as many snapshots as you ask it to:
+
+```bash
+restate capture --quiesce --syslog -o /var/backups/web01     # from cron, nightly
+restate prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6 /var/backups/web01
+restate status /var/backups/web01                            # what changed since last night
 ```
 
 **Why does this one behave differently?** Diff two servers that are supposed
@@ -208,9 +222,23 @@ Commands:
                           modified, and how
   verify IMAGE            compare an image or index against the tree as it is
                           now
+  status IMAGE            what has changed since a capture, quickly: as verify,
+                          but a file whose size, times and inode are unchanged
+                          is not read
   sign IMAGE              sign an image already written, with --sign-with: so a
                           capture run unattended needs no secret key on the
                           machine
+  init DIR                make an empty repository at DIR: captures into it (-o
+                          DIR) are kept as snapshots, each file's content
+                          stored once, and only what changed is read
+  snapshots REPO          list the snapshots in a repository, oldest first;
+                          REPO::NAME names one wherever an image can be named,
+                          and REPO alone its newest
+  prune REPO              drop the snapshots --keep-last, --keep-daily,
+                          --keep-weekly and --keep-monthly do not keep, and the
+                          content nothing left refers to
+  export SNAPSHOT         write a snapshot as an image (-o FILE.tar) to take
+                          elsewhere, encrypted and signed if asked
   restore IMAGE           put an image's files back under the root (--root,
                           default /): each checked against the index before it
                           is put in place, with its owner, mode and times
@@ -238,7 +266,9 @@ Options:
   -r, --root=DIR          treat DIR as the root of the tree to scan, verify, or
                           list the packages of (default /)
   -o, --output=FILE       write to FILE instead of standard output; created
-                          mode 0600, replaced atomically
+                          mode 0600, replaced atomically. capture: FILE may be
+                          a repository (restate init), which the capture adds a
+                          snapshot to
   -R, --rules=FILE        read more rules from FILE, applied after the built-in
                           ones; repeatable
   -N, --no-default-rules  start from no rules at all rather than the built-in
@@ -252,17 +282,18 @@ Options:
   -B, --baseline-content  capture: keep the content of baseline files too, not
                           only their digests
       --encrypt-to=KEYFILE
-                          capture: encrypt the image to the OpenPGP public key
-                          in KEYFILE (gpg --export); repeatable, for more than
-                          one recipient
+                          capture, export: encrypt the image to the OpenPGP
+                          public key in KEYFILE (gpg --export); repeatable, for
+                          more than one recipient
       --sign-with=KEYFILE
-                          capture, sign: sign the image with the OpenPGP secret
-                          key in KEYFILE (gpg --export-secret-keys)
+                          capture, sign, export: sign the image or snapshot
+                          with the OpenPGP secret key in KEYFILE (gpg
+                          --export-secret-keys)
       --trusted-key=KEYFILE
-                          restore, verify, diff: accept an image only if it is
-                          signed by the OpenPGP public key in KEYFILE (gpg
-                          --export); autoinstall: have the restore check that;
-                          repeatable
+                          restore, verify, diff, status, export: accept an
+                          image or snapshot only if it is signed by the OpenPGP
+                          public key in KEYFILE (gpg --export); autoinstall:
+                          have the restore check that; repeatable
       --allow-unverified  restore: restore an image that is unsigned, or not
                           signed by a --trusted-key, warning of it; by default
                           it is refused
@@ -276,6 +307,12 @@ Options:
       --quiesce           capture: pause each database, VM and container found
                           running while its own files are copied, and resume it
                           after, with the hooks for each (see LIVE SERVICES)
+      --syslog            capture, prune: say how the run ended in the system
+                          log too, as one line of key=value pairs a monitoring
+                          system can match on
+      --fetch-sources     capture, packages: also fetch each apt source's index
+                          as its repository serves it now (with curl), and
+                          check that against the source's keys
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
@@ -287,6 +324,10 @@ Options:
       --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
                           (vm) or on other hardware (metal) rather than the
                           same machine
+      --exact-versions    buildsheet, autoinstall: install each package at the
+                          version recorded, from snapshot.ubuntu.com as of the
+                          capture where the archive has a newer one now, rather
+                          than the newer one
       --image-at=PATH     autoinstall: where the installer will find the image
                           (a mounted disk or share); the file then installs the
                           packages and restores the files from it
@@ -296,7 +337,15 @@ Options:
                           the image's own account files, rather than by name
                           through the image's accounts merged with the system's
       --dry-run           restore: check the image and say what would be put
-                          back, writing nothing
+                          back, writing nothing; prune: say which snapshots
+                          would be dropped, dropping none
+      --keep-last=N       prune: keep the newest N snapshots
+      --keep-daily=N      prune: keep the newest snapshot of each of the last N
+                          days that have one
+      --keep-weekly=N     prune: keep the newest snapshot of each of the last N
+                          weeks that have one
+      --keep-monthly=N    prune: keep the newest snapshot of each of the last N
+                          months that have one
   -P, --progress          show progress on standard error: paths and bytes so
                           far while walking, a percentage and time left while
                           writing an image or downloading
@@ -396,6 +445,17 @@ source as it is now and gets nothing from it. A source apt cannot use gets a
 restate: warning: apt cannot use a source in /etc/apt/sources.list.d/hashicorp.sources -- https://apt.releases.hashicorp.com resolute: signed by a key that is not given (ID FC9CA96ACA026560); a rebuild will not install from it until that is put right
 ```
 
+That is the index apt has. With `--fetch-sources`, each source that passes is
+fetched again as its repository serves it now (`curl`; plain http too, since
+what is fetched is checked by its signature, not its transport) and checked
+the same way -- so a vendor that moved to a new key since the last
+`apt update`, or a repository that has gone, is caught before a rebuild finds
+out:
+
+```console
+restate: warning: apt cannot use a source in /etc/apt/sources.list.d/vendor.sources -- https://apt.example.com/deb stable: as its repository serves it now, signed by a key that is not given (ID 4A3B...)
+```
+
 `capture --keep-local-packages` also keeps what no repository or store can
 give back: the `.deb` of each version no repository has, from apt's cache, and
 the `.snap` of each snap installed from a file. A package installed from a
@@ -471,7 +531,11 @@ the installer chose for the new machine. A script looks each package up first,
 so one that cannot be had (a vendor that keeps only its newest version, a
 repository whose key has expired) does not stop all the others: the recorded
 version where it is still there, the current one where not, and a word about
-any no repository has. Then the kept `.deb` files, the snaps by
+any no repository has. With `--exact-versions`, a version the archive has
+moved on from comes from the archive's snapshot as of the capture instead
+(`apt-get --snapshot`: snapshot.ubuntu.com and snapshot.debian.org), where
+apt can reach one -- the machine as it was, rather than with the security
+updates since, which is why it is not the default. Then the kept `.deb` files, the snaps by
 channel, the flatpak apps, what pip, npm, pipx, cargo and gem installed, and
 the alternatives chosen by hand. The packages no repository has are listed
 with what to do about them.
@@ -562,6 +626,73 @@ groups with no installer account on their number. Both pass restore
 `--allow-unverified`, unless made with `--trusted-key`: then the sheet's
 restore names the same key files, and the autoinstall file carries the keys
 itself.
+
+## Repositories
+
+An image holds everything it keeps, so a capture every night writes the whole
+machine every night. A repository keeps captures as snapshots instead, each
+file's content stored once:
+
+```console
+$ sudo restate init /var/backups/web01
+$ sudo restate capture -o /var/backups/web01
+restate: snapshot /var/backups/web01::20261011T030000Z: 455634 files' content new to the repository (156.2 GiB); 0 files unchanged since the last snapshot were not read
+$ sudo restate capture -o /var/backups/web01
+restate: snapshot /var/backups/web01::20261012T030000Z: 1203 files' content new to the repository (2.1 GiB); 454431 files unchanged since the last snapshot were not read
+$ restate snapshots /var/backups/web01
+20261011T030000Z  web01  455634 files, 156.2 GiB; 156.2 GiB new
+20261012T030000Z  web01  455640 files, 156.3 GiB; 2.1 GiB new
+```
+
+**Only what changed is read.** A file whose size, modification time,
+change time and inode are what the last snapshot recorded is taken to be
+unchanged, as `git status` and `rsync` take it, and is not read at all; its
+digest comes from the last snapshot. So the first capture takes as long as an
+image does and the ones after it as long as what changed. A file whose content
+the repository has already -- a copy, or one that changed and changed back --
+is stored no second time.
+
+**A snapshot is named `REPO::NAME`**, or `REPO` alone for the newest, and
+everything that reads an image reads one: `restore`, `verify`, `diff`,
+`status`, `packages`, `installer` and `sign`. `export` writes one out as an
+image, to take elsewhere -- encrypted with `--encrypt-to`, which a repository
+is not, and signed with `--sign-with` -- and to make a build sheet or an
+autoinstall file from, since the commands they write unpack an image's file:
+
+```console
+$ sudo restate restore --trusted-key backup-signing.pub --root /target /var/backups/web01
+$ restate diff /var/backups/web01::20261011T030000Z /var/backups/web01
+$ restate export --encrypt-to offsite.pub /var/backups/web01 -o web01-20261012.tar
+```
+
+**`status`** says what has changed since a snapshot (or an image), quickly:
+`verify`'s comparison, but reading only the files whose size, times or inode
+say they changed.
+
+**`prune`** drops the snapshots it is not told to keep -- the newest
+`--keep-last N`, and the newest of each of the last `--keep-daily N` days,
+`--keep-weekly N` ISO weeks and `--keep-monthly N` months that have one --
+then the content no snapshot left refers to. `--dry-run` says which it would
+drop.
+
+**Run from cron.** One capture or prune runs on a repository at a time, and
+one `--quiesce` capture on a machine at a time: another that finds the lock
+taken does nothing and exits with status 5, a reason to try later rather than
+an alarm. `--syslog` puts one line in the system log as the run ends, for a
+monitoring system to match on:
+
+```console
+restate[48211]: restate capture: status=ok exit=0 seconds=812 output=/var/backups/web01::20261012T030000Z paths=821158 kept=455640 read=2254857216 reused=454431 unreadable=0
+```
+
+On disk a repository is plain files: `packs/` holds the content, in gzip'd
+tar files of about 256 MiB each beside an index of what is in them, and each
+of `snapshots/` holds a capture's index, its kit's list, a summary and, if it
+is signed, the signature. Everything is written beside its final name and
+renamed into place, the snapshot last, so an interrupted capture leaves
+nothing that looks finished; `prune` clears what it left. Content is stored
+per file, so a large file that changes every night -- a VM's disk -- is stored
+whole every night.
 
 ## Images and indexes
 
@@ -956,7 +1087,8 @@ src/            the program: one module per concern
   glob.c        path patterns, linear-time
   scan.c        the walk
   index.c       the index, to and from JSON
-  image.c       images: assembling and reading back
+  image.c       images: assembling and reading back, and exporting snapshots
+  repo.c        repositories: packs, snapshots, the content stream, prune
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
   run.c         running gzip, curl, gpg and the hooks: fixed paths, posix_spawn

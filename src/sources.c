@@ -373,30 +373,24 @@ static void add_date(struct rs_buf *b, int64_t when)
     rs_buf_add(b, buf, 10);
 }
 
-/* One URI and suite: why apt cannot use it, into `why`; nothing if it can. */
-static void check_one(const char *root, const char *home, const struct rs_jval *apt,
-                      const char *signed_by, const char *uri, const char *suite, bool flat,
-                      int64_t now, struct rs_buf *why)
+/* Whether the index at `release` -- InRelease, or Release with its detached
+ * signature in `detached` -- is one apt accepts: signed by the source's keys,
+ * and not expired by `now`. Why not, into `why`. */
+static void verify_release(const char *home, const struct rs_jval *apt, const char *signed_by,
+                           const char *release, const char *detached, int64_t now,
+                           struct rs_buf *why)
 {
     char               **rings = NULL;
     size_t               nrings = 0;
-    char                *detached = NULL;
-    char                *release = release_copy(root, home, uri, suite, flat, &detached);
     struct rs_buf        status;
     struct rs_buf        err;
     struct rs_pgp_signer signer;
-    bool                 ok = true;
+    bool                 ok;
 
     rs_buf_init(&status);
     rs_buf_init(&err);
     /* Each step says why it failed, into `why`, and the next is not taken. */
-    if (!release)
-    {
-        rs_buf_addstr(why, "apt has no index of it: it has never been updated, or apt could "
-                           "not fetch it");
-        ok = false;
-    }
-    ok = ok && keyrings(home, apt, signed_by, &rings, &nrings, why);
+    ok = keyrings(home, apt, signed_by, &rings, &nrings, why);
     if (ok && !rs_pgp_gpgv(home, (const char *const *)rings, nrings, detached ? detached : release,
                            detached ? release : NULL, &status, &err))
     {
@@ -420,22 +414,128 @@ static void check_one(const char *root, const char *home, const struct rs_jval *
             rs_buf_free(&text);
         }
     }
-    if (release)
-    {
-        (void)unlink(release);
-    }
-    if (detached)
-    {
-        (void)unlink(detached);
-    }
-    free(release);
-    free(detached);
     free_rings(rings, nrings);
     rs_buf_free(&status);
     rs_buf_free(&err);
 }
 
-size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now, bool *checked)
+static void unlink_free(char *path)
+{
+    if (path)
+    {
+        (void)unlink(path);
+    }
+    free(path);
+}
+
+/* One URI and suite, as apt last fetched it: why apt cannot use it, into
+ * `why`; nothing if it can. */
+static void check_one(const char *root, const char *home, const struct rs_jval *apt,
+                      const char *signed_by, const char *uri, const char *suite, bool flat,
+                      int64_t now, struct rs_buf *why)
+{
+    char *detached = NULL;
+    char *release = release_copy(root, home, uri, suite, flat, &detached);
+
+    if (!release)
+    {
+        rs_buf_addstr(why, "apt has no index of it: it has never been updated, or apt could "
+                           "not fetch it");
+    } else
+    {
+        verify_release(home, apt, signed_by, release, detached, now, why);
+    }
+    unlink_free(release);
+    unlink_free(detached);
+}
+
+/* Fetches `base` + `name` into `home`/`name`: its path there, or NULL with
+ * curl's complaint in `why`. */
+static char *fetch(const char *home, const char *base, const char *name, struct rs_buf *why)
+{
+    struct rs_curl_opts co;
+    struct rs_buf       err;
+    char               *url = rs_xasprintf("%s%s", base, name);
+    char               *dest = rs_xasprintf("%s/%s", home, name);
+    int                 code = -1;
+    bool                ok;
+
+    memset(&co, 0, sizeof(co));
+    /* What is fetched is checked by its signature, so plain http is as good
+     * as apt finds it; a repository that does not answer is given a minute. */
+    co.plain_http = true;
+    co.max_time = 60;
+    rs_buf_init(&err);
+    ok = rs_curl(url, dest, &co, &code, why, &err) && code == 0;
+    if (!ok)
+    {
+        if (err.len > 0)
+        {
+            rs_buf_reset(why);
+            rs_buf_addstr(why, err.data);
+        }
+        (void)unlink(dest);
+        free(dest);
+        dest = NULL;
+    }
+    rs_buf_free(&err);
+    free(url);
+    return dest;
+}
+
+/* One URI and suite as its repository serves it now: why apt will not be
+ * able to use it, into `why`; nothing if it will, or it is not http(s). */
+static void fetch_one(const char *home, const struct rs_jval *apt, const char *signed_by,
+                      const char *uri, const char *suite, bool flat, int64_t now,
+                      struct rs_buf *why)
+{
+    struct rs_buf base;
+    struct rs_buf curl_why;
+    char         *release;
+    char         *detached = NULL;
+    bool          slash = uri[0] != '\0' && uri[strlen(uri) - 1] == '/';
+
+    if (!rs_starts_with(uri, "https://") && !rs_starts_with(uri, "http://"))
+    {
+        return;
+    }
+    rs_buf_init(&base);
+    rs_buf_init(&curl_why);
+    rs_buf_addf(&base, "%s%s%s%s", uri, slash ? "" : "/", flat ? "" : "dists/", suite);
+    if (base.len > 0 && base.data[base.len - 1] != '/')
+    {
+        rs_buf_addc(&base, '/');
+    }
+    release = fetch(home, base.data, "InRelease", &curl_why);
+    if (!release)
+    {
+        release = fetch(home, base.data, "Release", &curl_why);
+        detached = release ? fetch(home, base.data, "Release.gpg", &curl_why) : NULL;
+    }
+    if (!release)
+    {
+        rs_buf_addf(why, "its repository does not serve an index for it now (%s)",
+                    curl_why.len ? curl_why.data : "curl failed");
+    } else
+    {
+        struct rs_buf now_why;
+
+        rs_buf_init(&now_why);
+        verify_release(home, apt, signed_by, release, detached, now, &now_why);
+        if (now_why.len > 0)
+        {
+            rs_buf_addf(why, "as its repository serves it now, %s", now_why.data);
+        }
+        rs_buf_free(&now_why);
+    }
+    unlink_free(release);
+    unlink_free(detached);
+    rs_buf_free(&base);
+    rs_buf_free(&curl_why);
+}
+
+size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now, bool online,
+                        bool *checked)
 {
     struct rs_jval *apt = member(packages, "apt");
     struct rs_jval *sources = member(apt, "sources");
@@ -491,6 +591,12 @@ size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now,
                 rs_buf_init(&one);
                 check_one(root, home, apt, signed_by && *signed_by ? signed_by : NULL,
                           uris->items[u].s, suites->items[s].s, flat, now, &one);
+                /* What apt has is fine; what it will fetch next may not be. */
+                if (one.len == 0 && online)
+                {
+                    fetch_one(home, apt, signed_by && *signed_by ? signed_by : NULL,
+                              uris->items[u].s, suites->items[s].s, flat, now, &one);
+                }
                 if (one.len > 0)
                 {
                     rs_buf_addf(&why, "%s%s %s: %s", why.len ? "; " : "", uris->items[u].s,

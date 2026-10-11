@@ -35,6 +35,8 @@ struct rs_sheet_opts {
     /* restore's say in whom to trust, as it goes on its command line, or
      * NULL for the restate of an image too old to know (autoinstall.h). */
     const char           *trust;
+    /* As rs_auto_opts.snapshot. */
+    const char           *snapshot;
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

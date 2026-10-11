@@ -42,12 +42,16 @@
  *      kind, so this is never folded into 0
  *   4  the image is not signed by a key it was to be checked against, and
  *      was not used
+ *   5  busy: another capture or prune holds the lock this one needs, and
+ *      nothing was done -- for a scheduled run, a reason to try later, not
+ *      an alarm
  */
 #define RESTATE_EXIT_OK          0
 #define RESTATE_EXIT_DIFFERENT   1
 #define RESTATE_EXIT_TROUBLE     2
 #define RESTATE_EXIT_INCOMPLETE  3
 #define RESTATE_EXIT_UNVERIFIED  4
+#define RESTATE_EXIT_BUSY        5
 
 /*
  * Mark a function as taking a printf-style format, so the compiler checks the

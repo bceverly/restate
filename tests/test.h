@@ -83,6 +83,7 @@ void test_pkgdb(void);
 void test_xattr(void);
 void test_live(void);
 void test_sources(void);
+void test_repo(void);
 void test_glob(void);
 void test_rules(void);
 void test_json(void);

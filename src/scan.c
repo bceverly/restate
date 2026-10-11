@@ -611,6 +611,113 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
     return true;
 }
 
+/* The last capture's entry for this regular file, if it is unchanged since:
+ * the same size, inode, mtime and ctime, and a digest recorded. */
+static const struct rs_entry *unchanged(const struct walk *w, const char *path,
+                                        const struct stat *st)
+{
+    const struct rs_entry *was;
+    struct rs_time         a;
+    struct rs_time         m;
+    struct rs_time         c;
+
+    if (!w->opts->prev || !S_ISREG(st->st_mode))
+    {
+        return NULL;
+    }
+    was = rs_index_find(w->opts->prev, path);
+    if (!was || was->type != 'f' || was->hash_state != RS_HASH_PRESENT ||
+        was->size != (uint64_t)st->st_size || was->ino != (uint64_t)st->st_ino)
+    {
+        return NULL;
+    }
+    rs_stat_times(st, &a, &m, &c);
+    return rs_time_equal(&was->mtime, &m) && rs_time_equal(&was->ctime, &c) ? was : NULL;
+}
+
+/* Whether the store holds the content `was` recorded. */
+static bool held(const struct walk *w, const struct rs_entry *was)
+{
+    return w->opts->have && w->opts->have(w->opts->store_ctx, was->hash);
+}
+
+/*
+ * A file unchanged since the last capture, `was`: classified and given its
+ * digest from there, without reading it. False, with nothing changed, if it
+ * has to be read after all -- its content is kept and the store does not
+ * have it, or its package has to be checked afresh. *failed if the store
+ * gave up.
+ */
+static bool reuse(struct walk *w, struct rs_entry *e, const struct rs_entry *was,
+                  const struct stat *st, bool *failed)
+{
+    enum rs_class            cls = e->cls;
+    const struct rs_pkgfile *owner = NULL;
+    bool                     unpackaged = false;
+    bool                     as_was = false;
+    bool                     keep;
+
+    if (package_checked(w, 'f', cls))
+    {
+        const struct rs_pkgfile *f;
+        size_t                   n = rs_pkgdb_lookup(w->opts->pkgdb, e->path, &f);
+
+        if (n == 0)
+        {
+            unpackaged = cls == RS_CLASS_BASELINE;
+            cls = unpackaged ? RS_CLASS_STATE : cls;
+        } else if (!with_digest(f, n))
+        {
+            owner = f;
+        } else if (!was->package)
+        {
+            return false;
+        } else
+        {
+            cls = was->modified ? RS_CLASS_STATE : RS_CLASS_BASELINE;
+            as_was = true;
+        }
+    }
+    keep = w->opts->store && (cls != RS_CLASS_BASELINE || w->opts->store_baseline);
+    if (keep && !held(w, was))
+    {
+        return false;
+    }
+    e->cls = cls;
+    if (unpackaged)
+    {
+        w->stats->unpackaged++;
+    } else if (owner)
+    {
+        name_package(w, e, owner);
+    } else if (as_was)
+    {
+        e->package = rs_xstrdup(was->package);
+        e->modified = was->modified;
+        if (e->modified)
+        {
+            w->stats->pkg_modified++;
+        } else
+        {
+            w->stats->pkg_unmodified++;
+        }
+    }
+    memcpy(e->hash, was->hash, sizeof(e->hash));
+    e->hash_state = RS_HASH_PRESENT;
+    if (keep)
+    {
+        if (!w->opts->store(w->opts->store_ctx, e, -1, st, w->err))
+        {
+            *failed = true;
+            return true;
+        }
+        w->stats->stored++;
+    }
+    w->stats->reused++;
+    w->stats->bytes_reused += e->size;
+    return true;
+}
+
 static void walk_dir(struct walk *w, int dirfd, const char *tree_path, unsigned depth);
 
 /*
@@ -674,8 +781,14 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         }
         if (type == 'f' && (w->opts->hash || kept))
         {
-            w->stats->bytes_hashed += (uint64_t)st.st_size;
-            rs_progress_found((uint64_t)st.st_size);
+            const struct rs_entry *was = unchanged(w, tree_path, &st);
+
+            /* What an incremental run will not read is not in the total. */
+            if (!was || (kept && !held(w, was)))
+            {
+                w->stats->bytes_hashed += (uint64_t)st.st_size;
+                rs_progress_found((uint64_t)st.st_size);
+            }
         }
         w->stats->recorded++;
         rs_progress_path(tree_path);
@@ -700,9 +813,20 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         }
         if (type == 'f')
         {
-            /* Read and classified against its package, or else read here. */
-            bool checked = package_checked(w, type, cls) && check_package(w, dirfd, name, &st, &e);
+            const struct rs_entry *was = unchanged(w, tree_path, &st);
+            bool                   failed = false;
+            /* Unchanged since the last capture; or read and classified
+             * against its package; or else read here. */
+            bool                   checked = was && reuse(w, &e, was, &st, &failed);
 
+            if (failed)
+            {
+                w->failed = true;
+                rs_entry_free(&e);
+                return;
+            }
+            checked = checked ||
+                      (package_checked(w, type, cls) && check_package(w, dirfd, name, &st, &e));
             if (!checked && !file_content(w, dirfd, name, &st, &e))
             {
                 w->failed = true;

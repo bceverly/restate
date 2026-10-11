@@ -26,6 +26,11 @@ int rs_cmd_buildsheet(const struct rs_options *o);
 int rs_cmd_autoinstall(const struct rs_options *o);
 int rs_cmd_classify(const struct rs_options *o);
 int rs_cmd_rules(const struct rs_options *o);
+int rs_cmd_init(const struct rs_options *o);
+int rs_cmd_snapshots(const struct rs_options *o);
+int rs_cmd_prune(const struct rs_options *o);
+int rs_cmd_export(const struct rs_options *o);
+int rs_cmd_status(const struct rs_options *o);
 
 /* Dispatches on o->command. */
 int rs_cmd_run(const struct rs_options *o);

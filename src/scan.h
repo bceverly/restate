@@ -102,6 +102,18 @@ struct rs_scan_opts {
     size_t                      ndefer;
     bool                        (*around)(const void *ctx, size_t group, bool before);
     const void                 *around_ctx;
+    /*
+     * An incremental run: the index of the last capture, sorted. A regular
+     * file whose size, mtime, ctime and inode are what it records is taken to
+     * be what it was -- as `git status` and rsync take it -- and not read:
+     * its digest and what the package check made of it come from there. One
+     * whose content is kept is read anyway unless have(store_ctx, digest)
+     * says the store holds that content already; the store is then called
+     * with no descriptor. A file the package manager owns now and did not
+     * then is read, to be checked.
+     */
+    const struct rs_index      *prev;
+    bool                        (*have)(const void *ctx, const char hash[RS_SHA256_HEX_SIZE]);
 };
 
 struct rs_scan_stats {
@@ -118,6 +130,8 @@ struct rs_scan_stats {
     uint64_t unpackaged;      /* files in a baseline tree no package installed */
     uint64_t bytes_hashed;
     uint64_t stored;
+    uint64_t reused;          /* files not read: unchanged since the last capture */
+    uint64_t bytes_reused;
 };
 
 /*

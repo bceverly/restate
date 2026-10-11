@@ -254,6 +254,7 @@ if command -v python3 > /dev/null 2>&1; then
   check "the inventory is valid JSON" \
     python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["apt"]["count"] == 2' < out.txt
 fi
+expect 0 "packages --fetch-sources" -- "$BIN" packages --fetch-sources --root pkgtree
 expect 0 "packages -o" -- "$BIN" packages --root pkgtree -o packages.json
 check "packages -o writes the file" test -s packages.json
 expect 0 "scan records the inventory" -- "$BIN" scan --root pkgtree -o pkgindex.json
@@ -406,6 +407,17 @@ JSON
 expect 0 "buildsheet --target=vm from an index" -- "$BIN" buildsheet --target=vm captured.json
 contains "$OUT" "vda1 : size=7168MiB" "a VM volume is sized from what the index records"
 contains "$OUT" "--disk size=8," "and so is the VM's disk"
+# --exact-versions: the packages' versions from the archive's snapshot as of
+# the capture, where the archive has moved on.
+sed -e 's/"content": "none",/"content": "none", "created": "2026-10-10T19:14:40.031046870Z",/' \
+    -e 's/^ "entries": \[/ "packages": {"apt": {"architectures": ["amd64"], "packages": [{"name": "vim", "architecture": "amd64", "version": "2:9.1", "manual": true}]}}, "entries": [/' \
+    captured.json > captured-apt.json
+expect 0 "buildsheet --exact-versions" -- "$BIN" buildsheet --exact-versions captured-apt.json
+contains "$OUT" "snap='20261010T191440Z'" "takes versions from the snapshot as of the capture"
+expect 0 "buildsheet, the versions there are now" -- "$BIN" buildsheet captured-apt.json
+lacks "$OUT" "snap=" "unless asked"
+expect 0 "autoinstall --exact-versions" -- \
+  "$BIN" autoinstall --exact-versions --image-at /restate/x.tar captured-apt.json
 
 expect 2 "--target must be vm or metal" -- "$BIN" buildsheet --target=cloud layout.json
 contains "$ERR" "--target: \"cloud\" is not vm or metal" "--target says what it takes"
@@ -558,6 +570,76 @@ mkdir -p rpad
 expect 0 "restore an image padded past its end" -- "$BIN" restore --allow-unverified --root rpad rpad.tar
 check "puts its files back" cmp rtree/etc/app/key rpad/etc/app/key
 
+# A repository: snapshots, each file's content stored once, and what has not
+# changed since the last not read again.
+expect 0 "init" -- "$BIN" init repo
+contains "$ERR" "made the repository repo" "init says what it made"
+check "a repository is its owner's alone" test "$(file_mode repo)" = 700
+expect 2 "init it again" -- "$BIN" init repo
+contains "$ERR" "it is a repository already" "is refused"
+expect 2 "init over a file" -- "$BIN" init rimg.tar
+expect 0 "capture into a repository" -- \
+  env SOURCE_DATE_EPOCH=1767225600 "$BIN" capture -r rtree --os=linux -o repo
+contains "$ERR" "snapshot repo::20260101T000000Z:" "capture names the snapshot"
+echo "changed" > rtree/etc/hosts
+expect 0 "capture into it again" -- \
+  env SOURCE_DATE_EPOCH=1767312000 "$BIN" capture -r rtree --os=linux --syslog -o repo
+contains "$ERR" "snapshot repo::20260102T000000Z: 1 files' content new" "only what changed is new"
+contains "$ERR" "4 files unchanged since the last snapshot were not read" "and the rest is not read"
+expect 0 "snapshots" -- "$BIN" snapshots repo
+contains "$OUT" "20260101T000000Z" "lists the first"
+contains "$OUT" "20260102T000000Z" "and the second"
+expect 2 "snapshots of what is not a repository" -- "$BIN" snapshots rtree
+expect 0 "status, nothing changed since" -- "$BIN" status repo
+contains "$ERR" "0 added, 0 deleted, 0 modified" "status finds nothing changed"
+echo "doc, edited" > "rtree/home/u/with space"
+expect 1 "status, a file changed since" -- "$BIN" status repo
+contains "$OUT" "/home/u/with space" "status names it"
+expect 1 "diff two snapshots" -- "$BIN" diff repo::20260101T000000Z repo
+contains "$OUT" "/etc/hosts" "diff names what changed between them"
+expect 2 "a snapshot that is not there" -- "$BIN" diff repo::19990101T000000Z repo
+contains "$ERR" "no snapshot \"19990101T000000Z\"" "is named"
+expect 0 "verify a snapshot" -- "$BIN" verify --root rout repo::20260101T000000Z
+mkdir -p repout
+expect 4 "restore a snapshot, unsigned" -- "$BIN" restore --root repout repo
+expect 0 "restore a snapshot" -- "$BIN" restore --allow-unverified --root repout repo
+contains "$ERR" "put back 5 files" "restore puts its files back"
+check "its content" test "$(cat repout/etc/hosts)" = changed
+check "with its mode" test "$(file_mode repout/etc/app/key)" = "600"
+check "a symlink" test "$(readlink repout/home/u/link)" = "../../etc/hosts"
+check "and a hard link" test "$(inode repout/var/lib/x/one)" = "$(inode repout/var/lib/x/two)"
+expect 0 "export a snapshot" -- "$BIN" export repo::20260101T000000Z -o exported.tar
+mkdir -p expout
+expect 0 "restore what was exported" -- "$BIN" restore --allow-unverified --root expout exported.tar
+check "it is the snapshot's" test "$(cat expout/etc/hosts)" = "127.0.0.1 localhost"
+check "and keeps the kit" eval 'tar -tf exported.tar | grep -qx restate/kit.tar.gz'
+expect 2 "buildsheet from a snapshot" -- "$BIN" buildsheet repo
+contains "$ERR" "export it first" "says to export it"
+expect 2 "autoinstall from a snapshot" -- "$BIN" autoinstall repo::20260101T000000Z
+expect 0 "packages from a snapshot" -- "$BIN" packages repo
+expect 2 "export with nowhere to write" -- "$BIN" export repo
+expect 2 "export an image" -- "$BIN" export rimg.tar -o x.tar
+expect 2 "capture --encrypt-to into a repository" -- \
+  "$BIN" capture -r rtree --encrypt-to rtree/etc/hosts -o repo
+contains "$ERR" "a repository is not encrypted" "is refused, saying why"
+expect 2 "prune, keeping nothing named" -- "$BIN" prune repo
+expect 0 "prune --dry-run" -- "$BIN" prune --dry-run --keep-last 1 repo
+contains "$OUT" "would drop 20260101T000000Z" "says what it would drop"
+expect 2 "--keep-last is a number" -- "$BIN" prune --keep-last=x repo
+if command -v flock > /dev/null 2>&1; then
+  flock repo/lock sleep 3 &
+  locker=$!
+  sleep 1
+  expect 5 "capture while another holds the repository" -- "$BIN" capture -r rtree -o repo
+  contains "$ERR" "another capture or prune is using it" "says why"
+  expect 5 "prune while another holds it" -- "$BIN" prune --keep-last 1 repo
+  wait "$locker"
+fi
+expect 0 "prune" -- "$BIN" prune --keep-last 1 --syslog repo
+contains "$OUT" "dropped 20260101T000000Z" "drops the older"
+expect 0 "the one kept is whole" -- "$BIN" restore --allow-unverified --dry-run --root repout repo
+expect 2 "a snapshot dropped" -- "$BIN" status repo::20260101T000000Z
+
 # A member the index does not list.
 mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil
 ( cd tamper && gzip -dc ../tamper/restate/files.tar.gz > /dev/null; tar -xf ../rimg.tar &&
@@ -692,6 +774,28 @@ if usable gpg && usable gpgv && usable gpgconf; then
     expect 0 "buildsheet --trusted-key" -- "$BIN" buildsheet --trusted-key signer.pub sroot.tar
     contains "$OUT" "--trusted-key signer.pub sroot.tar" "the sheet's restore checks too"
   fi
+  # Snapshots, signed as they are taken or afterwards, and checked as images are.
+  expect 0 "init a repository to sign in" -- "$BIN" init srepo
+  expect 0 "capture --sign-with into a repository" -- \
+    "$BIN" capture -r rtree --os=linux --sign-with signer.sec -o srepo
+  contains "$ERR" "signed by restate test <signer@example.invalid>" "says who signed it"
+  mkdir -p srout
+  expect 0 "restore a signed snapshot --trusted-key" -- \
+    "$BIN" restore --trusted-key signer.pub --root srout srepo
+  contains "$ERR" "is signed by restate test" "says who signed it"
+  expect 4 "restore it --trusted-key someone else's" -- \
+    "$BIN" restore --trusted-key other.pub --root srout srepo
+  expect 0 "export it, signed and checked" -- \
+    "$BIN" export --trusted-key signer.pub --sign-with signer.sec srepo -o sexport.tar
+  expect 0 "and the export's own signature holds" -- \
+    "$BIN" restore --dry-run --trusted-key signer.pub --root srout sexport.tar
+  expect 0 "status --trusted-key" -- "$BIN" status --trusted-key signer.pub srepo
+  expect 0 "capture into it unsigned" -- "$BIN" capture -r rtree --os=linux -q -o srepo
+  expect 4 "is not trusted" -- "$BIN" restore --trusted-key signer.pub --root srout srepo
+  expect 0 "sign the snapshot afterwards" -- "$BIN" sign --sign-with signer.sec srepo
+  expect 0 "and it is trusted" -- "$BIN" restore --dry-run --trusted-key signer.pub --root srout srepo
+  expect 2 "sign it again" -- "$BIN" sign --sign-with signer.sec srepo
+  contains "$ERR" "it is signed already" "is refused"
   GNUPGHOME="$WORK/gnupg" gpgconf --kill gpg-agent 2> /dev/null || true
 fi
 
@@ -772,6 +876,17 @@ HOOK
   chmod 0777 /etc/restate/hooks.d/redis
   expect 0 "a hook anyone could change" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
   contains "$ERR" "no hook pauses redis" "is not run"
+
+  # One capture --quiesce at a time on a machine.
+  if command -v flock > /dev/null 2>&1; then
+    flock /run/restate/capture.lock sleep 3 &
+    locker=$!
+    sleep 1
+    expect 5 "capture --quiesce while another runs" -- \
+      "$BIN" capture -N -R live.rules --quiesce -o live.tar
+    contains "$ERR" "another capture with --quiesce is running on this machine" "says why"
+    wait "$locker"
+  fi
 
   kill "$live_pid" 2> /dev/null
   wait "$live_pid" 2> /dev/null

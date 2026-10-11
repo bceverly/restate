@@ -469,8 +469,18 @@ source apt cannot use has a
 .B """problem"""
 saying why, and
 .B capture
-warns of each one. It checks what apt last fetched, not what the source
-serves today.
+warns of each one.
+.PP
+That is what apt last fetched. With
+.BR \-\-fetch\-sources ,
+each source that passes is fetched again as its repository serves it now,
+with
+.BR curl (1)
+\- plain http as well as https, since what is fetched is checked by its
+signature rather than its transport \- and checked the same way, so a vendor
+that has moved to a new key since the last
+.BR "apt update" ,
+or a repository that has gone, is caught before a rebuild finds out.
 .PP
 For snap it records each snap's revision, channel and confinement, from
 snapd's state, which only root can read; otherwise the revisions alone, from
@@ -724,7 +734,14 @@ expired \- would otherwise stop a single
 .B apt\-get install
 of them all and install none: the version recorded where a repository still
 has it, the current one where not, and a word about any none has; those
-found together, or one at a time if apt refuses them together. Then the held
+found together, or one at a time if apt refuses them together. With
+.BR \-\-exact\-versions ,
+a version the archive has moved on from comes instead from the archive's
+snapshot as of the capture
+.RB ( "apt\-get \-\-snapshot" ;
+snapshot.ubuntu.com, snapshot.debian.org), where apt can reach one: the
+machine as it was, rather than with the security updates since, which is why
+it is not the default. Then the held
 ones held again;
 the ones the image keeps, installed from it; the ones no repository has any
 more, or ever had, listed with what to do about them; then the snaps by
@@ -972,6 +989,84 @@ to it, unless they are made with
 then the build sheet's restore names the same key files, and the autoinstall
 file carries the keys itself, for the installer's restore to check the image
 against.
+.SH REPOSITORIES
+An image holds everything it keeps, so a capture every night writes the whole
+machine every night. A repository, made by
+.BR "restate init" ,
+keeps captures as snapshots instead, each file's content stored once;
+.B capture \-o
+adds one to it.
+.PP
+A file whose size, modification time, change time and inode are what the
+last snapshot recorded is taken to be unchanged, as
+.BR git (1)
+and
+.BR rsync (1)
+take it, and is not read at all: its digest comes from the last snapshot. The
+first capture takes as long as an image does, and the ones after it as long
+as what changed. A file whose content the repository has already is not
+stored again.
+.PP
+A snapshot is named
+.IR REPO :: NAME ,
+or
+.I REPO
+alone for the newest, and everything that reads an image reads one:
+.BR restore ,
+.BR verify ,
+.BR diff ,
+.BR status ,
+.BR packages ,
+.B installer
+and
+.BR sign .
+.B export
+writes one out as an image to take elsewhere, encrypted with
+.B \-\-encrypt\-to
+\- a repository itself is not \- and signed with
+.BR \-\-sign\-with ;
+and to make a build sheet or an autoinstall file from, since the commands
+they write unpack an image's file.
+.B status
+says what has changed since a snapshot or an image, quickly: the comparison
+.B verify
+makes, reading only the files whose size, times or inode say they changed.
+.PP
+.B prune
+drops the snapshots it is not told to keep \- the newest
+.BR "\-\-keep\-last " N ,
+and the newest of each of the last
+.BR "\-\-keep\-daily " N
+days,
+.BR "\-\-keep\-weekly " N
+ISO weeks and
+.BR "\-\-keep\-monthly " N
+months that have one \- then the content no snapshot left refers to.
+.PP
+One capture or prune runs on a repository at a time, and one
+.B capture \-\-quiesce
+on a machine at a time; one that finds the lock taken does nothing, and exits
+with status 5. With
+.BR \-\-syslog ,
+capture and prune put one line in the system log as they end \- the command,
+.BR status= ,
+.BR exit= ,
+.B seconds=
+and the counts, as
+.I key=value
+pairs \- for a monitoring system to match on.
+.PP
+On disk a repository is plain files:
+.I packs/
+holds the content, in gzip'd tar files of about 256 MiB beside an index of
+what is in them, and each directory of
+.I snapshots/
+a capture's index, its kit's list, a summary and, if it is signed, the
+signature. Everything is written beside its final name and renamed into
+place, the snapshot last, so an interrupted capture leaves nothing that looks
+finished, and
+.B prune
+clears what it left.
 .SH IMAGES AND INDEXES
 An image is an ordinary POSIX tar archive of three parts, each compressed on
 its own:
@@ -1267,13 +1362,18 @@ one to a line.
 .I /var/lib/restate/dumps/
 Where hooks put the dumps a capture keeps with the files, a directory for
 each thing paused, root's alone.
+.TP
+.I /run/restate/capture.lock
+Held by a
+.BR "capture \-\-quiesce" ,
+so that only one runs on a machine at a time.
 .PP
 Otherwise
 .B restate
 keeps no files of its own: no configuration, no database, no directory of
 images. It writes only what
 .B \-\-output
-names, and reads only the tree it is given and the files named on its
+names \- an image, or a snapshot in a repository it is given \- and reads only the tree it is given and the files named on its
 command line. A site's rules live wherever the administrator keeps them and
 are passed with
 .BR \-\-rules .
@@ -1323,7 +1423,19 @@ restate itself opens no network connection;
 curl is held to HTTPS, redirects included, and ignores
 .IR ~/.curlrc .
 Nothing downloaded is used until its checksum has been verified against a
-signature by the pinned vendor key.
+signature by the pinned vendor key. The one exception to HTTPS is
+.BR \-\-fetch\-sources ,
+which fetches apt's indexes the way apt does, plain http included, and
+believes them only once
+.B gpgv
+has checked their signatures.
+.PP
+A repository is not encrypted: it is made 0700, and everything in it 0600,
+and it belongs somewhere only root reads.
+.B export \-\-encrypt\-to
+makes an encrypted copy of a snapshot to keep anywhere else. A snapshot's
+signature covers its index, and its index every file's digest; each file is
+checked against its digest as it is restored or exported.
 .PP
 With
 .BR "capture \-\-quiesce" ,
@@ -1368,6 +1480,13 @@ What is running is found from
 on Linux alone. A restore checks every file against the signed index as it
 puts it in place, and refuses one that does not match, but does not read the
 whole image first: a damaged image is restored as far as it is whole.
+.PP
+A repository stores each file's content whole, so a large file that changes
+a little every night \- a virtual machine's disk \- is stored again every
+night; nothing yet splits a file into pieces to store only those that
+changed. Its locks are
+.BR flock (2)
+locks, which some network filesystems do not honor.
 .PP
 Report bugs at
 .UR https://github.com/bceverly/restate/issues

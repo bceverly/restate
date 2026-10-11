@@ -19,9 +19,10 @@
  * its Valid-Until against the time now. What fails is recorded in the
  * inventory, as the source's "problem", and capture warns of it.
  *
- * It checks what apt last fetched, not what the repository serves today: a
- * vendor that changed keys since then is caught at the next `apt update`,
- * not before.
+ * That is what apt last fetched. Online, each source that passes is fetched
+ * again as its repository serves it now (curl), and checked the same way,
+ * so a vendor that moved to a new key since the last `apt update` is caught
+ * before the rebuild finds out.
  */
 #ifndef RESTATE_SOURCES_H
 #define RESTATE_SOURCES_H
@@ -34,12 +35,14 @@
 
 /*
  * Checks every enabled source in `packages` (rs_packages_describe's
- * inventory of the tree at `root`), as of `now` (seconds since the epoch).
- * Each one apt cannot use gets a "problem" member saying why. Returns how
- * many; none, and nothing recorded, when gpgv is not installed (*checked is
- * then false) or there is no apt.
+ * inventory of the tree at `root`), as of `now` (seconds since the epoch),
+ * and with `online` as its repository serves it now too. Each one apt cannot
+ * use gets a "problem" member saying why. Returns how many; none, and
+ * nothing recorded, when gpgv is not installed (*checked is then false) or
+ * there is no apt.
  */
-size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now, bool *checked);
+size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now, bool online,
+                        bool *checked);
 
 /*
  * A Release file's Valid-Until ("Sat, 17 Oct 2026 08:12:29 UTC"), in seconds

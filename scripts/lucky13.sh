@@ -161,15 +161,17 @@ fi
 
 # ---------------------------------------------------------------------------
 section "4. remote file inclusion (CWE-98)"
-# restate loads no code and opens no connection itself. The one download --
-# `restate installer fetch` -- is curl's, HTTPS only, and nothing it fetches
-# is used until its signature has been checked against a pinned key.
+# restate loads no code and opens no connection itself. Its downloads are
+# curl's (run.c's rs_curl): `restate installer fetch`, HTTPS only, nothing it
+# fetches used until its signature has been checked against a pinned key; and
+# --fetch-sources, apt's indexes the way apt fetches them, plain http too,
+# believed only once gpgv has checked their signatures.
 HITS="$(grep_source '\b(dlopen|dlsym|socket|connect|getaddrinfo|curl_)[[:space:]]*\(')"
 no_hits "no dynamic loading and no networking in the source" \
   "dynamic loading or networking found" "$HITS"
-if grep -q '"=https"' src/installer.c && grep -q '"--proto-redir"' src/installer.c \
-   && grep -q '"-q"' src/installer.c; then
-  ok "curl is held to HTTPS, redirects included, and ignores ~/.curlrc"
+if grep -q '"=https"' src/run.c && grep -q '"--proto-redir"' src/run.c \
+   && grep -q '"-q"' src/run.c && ! grep -q 'plain_http = true' src/installer.c; then
+  ok "curl is held to HTTPS for installers, redirects included, and ignores ~/.curlrc"
 else
   bad "curl is no longer held to HTTPS with ~/.curlrc ignored"
 fi
