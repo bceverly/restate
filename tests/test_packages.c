@@ -867,6 +867,63 @@ static void test_apt_words(void)
         rs_buf_free(&script);
         rs_jval_free(&pk);
     }
+
+    TEST_CASE("packages: the install script, run against an apt that pins nodejs elsewhere");
+    {
+        /* As on a machine that pins NodeSource's nodejs, which conflicts with
+         * npm, but has Ubuntu's installed: npm can be had only beside the
+         * nodejs the list names. apt-get logs each real install; dpkg-query
+         * says each of those is installed. */
+        static const char list[] =
+            "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+            "{\"name\": \"npm\", \"architecture\": \"all\", \"version\": \"9.2.0\","
+            " \"manual\": true},"
+            "{\"name\": \"nodejs\", \"architecture\": \"amd64\", \"version\": \"22.1\","
+            " \"manual\": true},"
+            "{\"name\": \"vanished\", \"architecture\": \"amd64\", \"version\": \"1\","
+            " \"manual\": true}]}}";
+        char          *t = rs_test_tmpdir();
+        char          *cmd;
+        char          *log;
+        struct rs_buf  script;
+        struct rs_buf  got;
+
+        memset(&pk, 0, sizeof(pk));
+        rs_buf_init(&err);
+        rs_json_init(&jp, list, sizeof(list) - 1, &err);
+        CHECK(rs_json_value(&jp, &pk));
+        rs_buf_free(&err);
+        rs_buf_init(&script);
+        rs_packages_apt_script(&pk, NULL, &script);
+        rs_test_write(t, "install.sh", script.data, 0755);
+        rs_test_write(t, "apt-get",
+                      "#!/bin/sh\n"
+                      "case \" $* \" in\n"
+                      "  *vanished*) exit 100 ;;\n"
+                      "  *' npm'*' nodejs=22.1'* | *' nodejs=22.1'*' npm'*) ;;\n"
+                      "  *' npm'*) exit 100 ;;\n"
+                      "esac\n"
+                      "[ \"$1\" = -s ] || echo \"$*\" >> \"$LOG\"\n", 0755);
+        rs_test_write(t, "dpkg-query", "#!/bin/sh\nprintf installed\n", 0755);
+        log = rs_xasprintf("%s/log", t);
+        cmd = rs_xasprintf("cd '%s' && LOG='%s' PATH='%s':/usr/bin:/bin sh install.sh "
+                           "> out 2>&1", t, log, t);
+        CHECK(system(cmd) == 0);
+        CHECK(rs_read_beneath(t, "/log", 4096, &got));
+        CHECK_STR(got.data ? got.data : "", "install -y nodejs=22.1 npm=9.2.0\n");
+        rs_buf_free(&got);
+        CHECK(rs_read_beneath(t, "/out", 4096, &got));
+        CHECK_CONTAINS(got.data ? got.data : "", "apt cannot install these (no repository has them, "
+                       "or what they need): vanished");
+        CHECK(strstr(got.data ? got.data : "", "npm\n") == NULL);
+        rs_buf_free(&got);
+        free(log);
+        free(cmd);
+        rs_buf_free(&script);
+        rs_jval_free(&pk);
+        rs_test_rmtree(t);
+        free(t);
+    }
 }
 
 static void test_empty(void)
