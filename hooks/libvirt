@@ -6,7 +6,8 @@
 # restate hook: a libvirt VM, for capture --quiesce.
 #
 #   pause NAME    suspend the VM: its CPUs stop, so its disks stop changing
-#   resume NAME   resume it -- unless it was already paused before
+#   resume NAME   resume it -- unless it was already paused before, or
+#                 something else has resumed it since
 #
 # A VM of a user's own (qemu:///session, which virt-manager and GNOME Boxes
 # use) is suspended as that user, through their own libvirt; one of the
@@ -46,8 +47,16 @@ pause)
   ;;
 resume)
   if [ -e "$mark" ]; then
-    virsh_as resume "$name" > /dev/null
     rm -f "$mark"
+    # Something else -- virt-manager, vagrant up -- may have resumed it
+    # already, while its disks were being copied.
+    now=$(virsh_as domstate "$name")
+    if [ "$now" = paused ]; then
+      virsh_as resume "$name" > /dev/null
+    else
+      echo "restate: the VM $name was $now before restate resumed it: something" \
+        "else resumed it while its disks were copied, so they may not be consistent" >&2
+    fi
   fi
   ;;
 *)
