@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "October 11, 2026" "restate 1.3.0.1" "System Manager's Manual"
+.TH RESTATE 8 "October 12, 2026" "restate 1.3.0.2" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -128,7 +128,7 @@ record expendable paths too: caches, logs, downloaded packages
 capture: keep the content of baseline files too, not only their digests
 .TP
 \-\-encrypt\-to=KEYFILE
-capture, export: encrypt the image to the OpenPGP public key in KEYFILE (gpg \-\-export); repeatable, for more than one recipient
+capture, export: encrypt the image to the OpenPGP public key in KEYFILE (gpg \-\-export); repeatable, for more than one recipient. init: make the repository an encrypted one; capture and prune then need the keys again, each time
 .TP
 \-\-sign\-with=KEYFILE
 capture, sign, export: sign the image or snapshot with the OpenPGP secret key in KEYFILE (gpg \-\-export\-secret\-keys)
@@ -180,6 +180,9 @@ restore: leave out PATTERN (written as in a rules file, everything beneath it to
 .TP
 \-\-numeric\-owner
 restore: owners by the numbers the index records, and the image's own account files, rather than by name through the image's accounts merged with the system's
+.TP
+\-\-check\-first
+restore: read the whole image first, checking every file against the index and writing nothing, and put it back only if all of it is whole
 .TP
 \-\-dry\-run
 restore: check the image and say what would be put back, writing nothing; prune: say which snapshots would be dropped, dropping none
@@ -943,6 +946,13 @@ never lands. Every path is reached from the root one directory at a time,
 never through a symbolic link: a link where a directory belongs is replaced,
 not followed.
 .PP
+By itself that leaves a damaged image restored as far as it is whole. With
+.BR \-\-check\-first ,
+restore reads the whole image once before writing anything, checking every
+file against the index, and refuses it \- exit status 2, nothing written \-
+if any file is not what the index says or is missing; then it reads it again
+to put it back.
+.PP
 Owners, modes and times (to the nanosecond) come from the index, a
 directory's only once everything in it is in; hard links are made links
 again, and device nodes, which the index records but the image does not
@@ -1037,7 +1047,7 @@ against.
 An image holds everything it keeps, so a capture every night writes the whole
 machine every night. A repository, made by
 .BR "restate init" ,
-keeps captures as snapshots instead, each file's content stored once;
+keeps captures as snapshots instead, each piece of content stored once;
 .B capture \-o
 adds one to it.
 .PP
@@ -1048,8 +1058,14 @@ and
 .BR rsync (1)
 take it, and is not read at all: its digest comes from the last snapshot. The
 first capture takes as long as an image does, and the ones after it as long
-as what changed. A file whose content the repository has already is not
-stored again.
+as what changed.
+.PP
+Files are cut into chunks where their content says to \- a rolling hash over
+the bytes, cut where it meets a pattern, so that chunks average a mebibyte
+and an insertion moves only the cuts near it \- and a chunk is stored only if
+the repository does not have it already. A disk image that changed a few
+blocks costs the chunks around them, not the whole image again; a copy of a
+file costs nothing. A file smaller than a quarter of a mebibyte is one chunk.
 .PP
 A snapshot is named
 .IR REPO :: NAME ,
@@ -1067,7 +1083,7 @@ and
 .B export
 writes one out as an image to take elsewhere, encrypted with
 .B \-\-encrypt\-to
-\- a repository itself is not \- and signed with
+and signed with
 .BR \-\-sign\-with ;
 and to make a build sheet or an autoinstall file from, since the commands
 they write unpack an image's file.
@@ -1085,7 +1101,27 @@ days,
 .BR "\-\-keep\-weekly " N
 ISO weeks and
 .BR "\-\-keep\-monthly " N
-months that have one \- then the content no snapshot left refers to.
+months that have one \- then the chunks no snapshot left needs, rewriting a
+pack that is a quarter or more dead.
+.PP
+.B "restate init \-\-encrypt\-to"
+.I KEYFILE
+makes an encrypted repository: its chunks, the indexes of what is in its
+packs and every snapshot's files are encrypted to the OpenPGP public keys
+given, gpg after gzip, so that it can be kept on storage that is not trusted.
+The keys are given again with
+.B \-\-encrypt\-to
+on every capture and prune, and never read from the repository, where whoever
+holds the storage could put their own. A capture needs no secret key: what it
+must know of what the repository holds \- which chunks, and what the last
+snapshot recorded \- it keeps in its own copy of what it wrote, under
+.IR /var/cache/restate/repositories/ ,
+and what it does not have it decrypts if the secret key is there, or else
+stores again rather than guess. Restoring, verifying and exporting a snapshot
+need the secret key. Without
+.BR \-\-encrypt\-to ,
+.B prune
+cannot rewrite a pack, and removes only those nothing needs at all.
 .PP
 One capture or prune runs on a repository at a time, and one
 .B capture \-\-quiesce
@@ -1102,7 +1138,7 @@ pairs \- for a monitoring system to match on.
 .PP
 On disk a repository is plain files:
 .I packs/
-holds the content, in gzip'd tar files of about 256 MiB beside an index of
+holds the chunks, in gzip'd tar files of about 32 MiB beside an index of
 what is in them, and each directory of
 .I snapshots/
 a capture's index, its kit's list, a summary and, if it is signed, the
@@ -1110,7 +1146,9 @@ signature. Everything is written beside its final name and renamed into
 place, the snapshot last, so an interrupted capture leaves nothing that looks
 finished, and
 .B prune
-clears what it left.
+clears what it left. A repository made by restate 1.3.0, whose packs hold
+whole files, is read as it is, and the first capture or prune into it makes
+it the current kind.
 .SH IMAGES AND INDEXES
 An image is an ordinary POSIX tar archive of three parts, each compressed on
 its own:
@@ -1460,6 +1498,17 @@ one to a line.
 Where hooks put the dumps a capture keeps with the files, a directory for
 each thing paused, root's alone.
 .TP
+.I /var/cache/restate/repositories/ID/
+This machine's copy of what it wrote into the encrypted repository whose
+marker names it
+.IR ID :
+its packs' indexes, and its snapshots' indexes, in plain text
+.RI ( /Library/Caches/restate/repositories
+on macOS; a user's own cache directory, when not run as root). It lets a
+capture into the repository need no secret key. Anything here can be
+deleted; a capture without it decrypts what it needs if it can, and stores
+again what it cannot.
+.TP
 .I /run/restate/capture.lock
 Held by a
 .BR "capture \-\-quiesce" ,
@@ -1527,12 +1576,18 @@ believes them only once
 .B gpgv
 has checked their signatures.
 .PP
-A repository is not encrypted: it is made 0700, and everything in it 0600,
-and it belongs somewhere only root reads.
+A repository is made 0700, and everything in it 0600. One that is not
+encrypted belongs somewhere only root reads; one made with
+.B init \-\-encrypt\-to
+can be kept anywhere, and so can what
 .B export \-\-encrypt\-to
-makes an encrypted copy of a snapshot to keep anywhere else. A snapshot's
-signature covers its index, and its index every file's digest; each file is
-checked against its digest as it is restored or exported.
+makes of a snapshot. The capturing machine's copy of what it wrote into an
+encrypted repository, under
+.IR /var/cache/restate/repositories/ ,
+is plain text, root's alone, and describes only that machine's own files.
+Encryption is not authentication: a snapshot's signature covers its index,
+and its index every file's digest; each file is checked against its digest
+as it is restored or exported.
 .PP
 With
 .BR "capture \-\-quiesce" ,

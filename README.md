@@ -97,9 +97,12 @@ restate: 1 added, 0 deleted, 1 modified
   machine as it is now, and see what was added, deleted and modified — and
   whether a modification was the content, the mode, the owner or a link target.
   `status` does the same in seconds, reading only what changed.
-- **Keeps captures in a repository**, each file's content stored once: a
-  nightly capture reads and stores only what changed since the last one, and
-  `prune` keeps the daily, weekly and monthly snapshots you ask for.
+- **Keeps captures in a repository**, each piece of content stored once: a
+  nightly capture reads only the files that changed since the last one and
+  stores only the parts of them that changed -- a VM's disk costs the few
+  megabytes it changed, not its size again -- and `prune` keeps the daily,
+  weekly and monthly snapshots you ask for. A repository can be encrypted, to
+  sit on storage you do not trust.
 - **Pauses what is running, just in time.** A database, a VM or a container
   found writing to files the image keeps is named, and with `--quiesce`
   paused by a hook while its own files are copied, then resumed.
@@ -284,7 +287,9 @@ Options:
       --encrypt-to=KEYFILE
                           capture, export: encrypt the image to the OpenPGP
                           public key in KEYFILE (gpg --export); repeatable, for
-                          more than one recipient
+                          more than one recipient. init: make the repository an
+                          encrypted one; capture and prune then need the keys
+                          again, each time
       --sign-with=KEYFILE
                           capture, sign, export: sign the image or snapshot
                           with the OpenPGP secret key in KEYFILE (gpg
@@ -336,6 +341,9 @@ Options:
       --numeric-owner     restore: owners by the numbers the index records, and
                           the image's own account files, rather than by name
                           through the image's accounts merged with the system's
+      --check-first       restore: read the whole image first, checking every
+                          file against the index and writing nothing, and put
+                          it back only if all of it is whole
       --dry-run           restore: check the image and say what would be put
                           back, writing nothing; prune: say which snapshots
                           would be dropped, dropping none
@@ -599,9 +607,17 @@ instead.
 
 ```console
 $ sudo restate restore --dry-run web01.tar            # check it all, write nothing
+$ sudo restate restore --check-first web01.tar        # check it all, then put it back
 $ sudo restate restore --exclude /etc/fstab web01.tar
 $ sudo restate restore --root /target web01.tar       # from an installer
 ```
+
+A file that does not match its digest is never put in place, but by itself
+that leaves a damaged image restored as far as it is whole. `--check-first`
+reads the whole image once before writing anything, checking every file, and
+refuses it -- exit status 2, nothing written -- if any file is not what the
+index says or is missing; then it reads it again to put it back. It costs a
+second read, so it is not the default.
 
 **Only a signed image is restored**, unless told otherwise. `restore` checks
 the signature before it reads anything else, and refuses -- exit status 4 --
@@ -631,33 +647,40 @@ itself.
 
 An image holds everything it keeps, so a capture every night writes the whole
 machine every night. A repository keeps captures as snapshots instead, each
-file's content stored once:
+piece of content stored once:
 
 ```console
 $ sudo restate init /var/backups/web01
 $ sudo restate capture -o /var/backups/web01
-restate: snapshot /var/backups/web01::20261011T030000Z: 455634 files' content new to the repository (156.2 GiB); 0 files unchanged since the last snapshot were not read
+restate: snapshot /var/backups/web01::20261011T030000Z: 156.2 GiB new to the repository, from 455634 files; 0 files unchanged since the last snapshot were not read
 $ sudo restate capture -o /var/backups/web01
-restate: snapshot /var/backups/web01::20261012T030000Z: 1203 files' content new to the repository (2.1 GiB); 454431 files unchanged since the last snapshot were not read
+restate: snapshot /var/backups/web01::20261012T030000Z: 412.0 MiB new to the repository, from 1203 files; 454431 files unchanged since the last snapshot were not read
 $ restate snapshots /var/backups/web01
 20261011T030000Z  web01  455634 files, 156.2 GiB; 156.2 GiB new
-20261012T030000Z  web01  455640 files, 156.3 GiB; 2.1 GiB new
+20261012T030000Z  web01  455640 files, 156.3 GiB; 412.0 MiB new
 ```
 
 **Only what changed is read.** A file whose size, modification time,
 change time and inode are what the last snapshot recorded is taken to be
 unchanged, as `git status` and `rsync` take it, and is not read at all; its
 digest comes from the last snapshot. So the first capture takes as long as an
-image does and the ones after it as long as what changed. A file whose content
-the repository has already -- a copy, or one that changed and changed back --
-is stored no second time.
+image does and the ones after it as long as what changed.
+
+**Only what changed is stored.** Files are cut into chunks where their
+content says to -- a rolling hash over the bytes, cut where it meets a
+pattern, so chunks average a mebibyte and an insertion moves only the cuts
+near it -- and a chunk is stored only if the repository does not have it
+already. A VM's disk that changed a few blocks overnight costs the chunks
+around them, not the whole disk again; a copy of a file, or one that changed
+and changed back, costs nothing. A file smaller than a quarter of a mebibyte
+is one chunk.
 
 **A snapshot is named `REPO::NAME`**, or `REPO` alone for the newest, and
 everything that reads an image reads one: `restore`, `verify`, `diff`,
 `status`, `packages`, `installer` and `sign`. `export` writes one out as an
-image, to take elsewhere -- encrypted with `--encrypt-to`, which a repository
-is not, and signed with `--sign-with` -- and to make a build sheet or an
-autoinstall file from, since the commands they write unpack an image's file:
+image, to take elsewhere -- encrypted with `--encrypt-to` and signed with
+`--sign-with` -- and to make a build sheet or an autoinstall file from, since
+the commands they write unpack an image's file:
 
 ```console
 $ sudo restate restore --trusted-key backup-signing.pub --root /target /var/backups/web01
@@ -672,8 +695,8 @@ say they changed.
 **`prune`** drops the snapshots it is not told to keep -- the newest
 `--keep-last N`, and the newest of each of the last `--keep-daily N` days,
 `--keep-weekly N` ISO weeks and `--keep-monthly N` months that have one --
-then the content no snapshot left refers to. `--dry-run` says which it would
-drop.
+then the chunks no snapshot left needs, rewriting a pack that is a quarter or
+more dead. `--dry-run` says which it would drop.
 
 **Run from cron.** One capture or prune runs on a repository at a time, and
 one `--quiesce` capture on a machine at a time: another that finds the lock
@@ -685,14 +708,43 @@ monitoring system to match on:
 restate[48211]: restate capture: status=ok exit=0 seconds=812 output=/var/backups/web01::20261012T030000Z paths=821158 kept=455640 read=2254857216 reused=454431 unreadable=0
 ```
 
-On disk a repository is plain files: `packs/` holds the content, in gzip'd
-tar files of about 256 MiB each beside an index of what is in them, and each
-of `snapshots/` holds a capture's index, its kit's list, a summary and, if it
-is signed, the signature. Everything is written beside its final name and
+### Encrypted repositories
+
+`restate init --encrypt-to KEYFILE` makes a repository whose content, the
+indexes of what is in it and every snapshot's files are encrypted to the
+OpenPGP public keys given -- gpg after gzip, as an encrypted image's parts
+are -- so it can live on a NAS, a USB drive or a server you do not trust.
+The keys are given again on every capture and prune, and never read from the
+repository, where whoever holds the storage could put their own:
+
+```console
+$ sudo restate init --encrypt-to backup.pub /mnt/nas/web01
+$ sudo restate capture --encrypt-to backup.pub -o /mnt/nas/web01     # from cron
+$ sudo restate restore --trusted-key backup-signing.pub /mnt/nas/web01   # needs the secret key
+```
+
+A capture needs no secret key, so one run from cron has none to give away. To
+know what the repository holds already -- which chunks, and what the last
+snapshot recorded, for an incremental run -- it keeps its own copy of what it
+wrote in `/var/cache/restate/repositories/` (root's, mode 0700): plain text,
+on the machine whose files it describes. A machine without that copy, or a
+capture after another machine's, decrypts what it is missing if the secret
+key is there, and otherwise stores again what it cannot see, rather than
+guess. Restoring, verifying or exporting a snapshot needs the secret key, as
+an encrypted image does. `prune` works from the same copy; rewriting a pack
+needs the keys to encrypt to, so without `--encrypt-to` it only removes packs
+nothing needs at all, and says how many it left. Encryption is not
+authentication -- anyone with the public key can write a snapshot that
+decrypts -- so sign snapshots, and restore with `--trusted-key`.
+
+On disk a repository is plain files: `packs/` holds the chunks, in gzip'd tar
+files of about 32 MiB each beside an index of what is in them, and each of
+`snapshots/` holds a capture's index, its kit's list, a summary and, if it is
+signed, the signature. Everything is written beside its final name and
 renamed into place, the snapshot last, so an interrupted capture leaves
-nothing that looks finished; `prune` clears what it left. Content is stored
-per file, so a large file that changes every night -- a VM's disk -- is stored
-whole every night.
+nothing that looks finished; `prune` clears what it left. A repository made
+by restate 1.3.0, whose packs hold whole files, is read as it is, and the
+first capture or prune into it makes it the current kind.
 
 ## Images and indexes
 
