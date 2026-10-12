@@ -56,7 +56,7 @@ static bool excluded(const struct ctx *c, const char *path)
 
 static void said(const struct ctx *c, const char *what, const char *path)
 {
-    if (c->o->verbose || c->o->dry_run)
+    if (!c->o->quiet && (c->o->verbose || c->o->dry_run))
     {
         struct rs_buf b;
 

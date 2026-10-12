@@ -1244,7 +1244,7 @@ static bool last_capture(const struct rs_options *o, struct rs_repo *r, const ch
     rs_buf_init(&err);
     last = rs_repo_resolve(r, NULL, &err);
     rs_buf_reset(&err);
-    ok = last && rs_repo_load_index(r, last, prev, &err);
+    ok = last && rs_repo_load_index_cached(r, last, prev, &err);
     if (last && !ok)
     {
         rs_warn("%s; every file is read again", err.data);
@@ -1289,9 +1289,17 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
         rs_buf_free(&err);
         return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
     }
+    rs_repo_set_recipients(r, o->recipients, o->nrecipients);
+    w = rs_repo_writer_begin(r, &err);
+    if (!w)
+    {
+        rs_error("%s", err.data);
+        rs_repo_close(r);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
     memset(&sink, 0, sizeof(sink));
     sink.prev = last_capture(o, r, root, &prev) ? &prev : NULL;
-    w = rs_repo_writer_begin(r, &err);
     sink.repo = w;
     ok = run_scan(o, root, true, &sink, &m, st, NULL);
     if (!ok)
@@ -1317,9 +1325,9 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
             rs_buf_init(&size);
             human_size(&size, done.bytes);
             (void)fflush(stdout);
-            (void)fprintf(stderr, "restate: snapshot %s: %" PRIu64 " files' content new to the "
-                          "repository (%s); %" PRIu64 " files unchanged since the last snapshot "
-                          "were not read\n", *where, done.objects, size.data, st->reused);
+            (void)fprintf(stderr, "restate: snapshot %s: %s new to the repository, from %"
+                          PRIu64 " files; %" PRIu64 " files unchanged since the last snapshot "
+                          "were not read\n", *where, size.data, done.objects, st->reused);
             rs_buf_free(&size);
             if (o->sign_with)
             {
@@ -1364,10 +1372,15 @@ int rs_cmd_capture(const struct rs_options *o)
     }
     /* Before the scan, which can take a long time to find out at the end. */
     status = RESTATE_EXIT_OK;
-    if (o->nrecipients > 0 && rs_repo_is(o->output))
+    if (o->nrecipients == 0 && rs_repo_is(o->output) && rs_repo_dir_encrypted(o->output))
     {
-        rs_error("--encrypt-to: a repository is not encrypted; keep it somewhere private, and "
-                 "export a snapshot with --encrypt-to to take a copy elsewhere");
+        rs_error("%s is an encrypted repository: give the public keys to encrypt to with "
+                 "--encrypt-to", o->output);
+        status = RESTATE_EXIT_TROUBLE;
+    } else if (o->nrecipients > 0 && rs_repo_is(o->output) && !rs_repo_dir_encrypted(o->output))
+    {
+        rs_error("--encrypt-to: %s is a repository that is not encrypted; make an encrypted one "
+                 "with restate init --encrypt-to KEYFILE DIR", o->output);
         status = RESTATE_EXIT_TROUBLE;
     } else if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
     {
@@ -1422,19 +1435,52 @@ int rs_cmd_capture(const struct rs_options *o)
 /* Repositories                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* The keys to encrypt to can be read, and gpg is there to use them. */
+static bool recipients_usable(const struct rs_options *o)
+{
+    size_t k;
+
+    if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
+    {
+        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
+        return false;
+    }
+    for (k = 0; k < o->nrecipients; k++)
+    {
+        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
+            return false;
+        }
+        (void)close(fd);
+    }
+    return true;
+}
+
 int rs_cmd_init(const struct rs_options *o)
 {
     struct rs_buf err;
 
+    if (!recipients_usable(o))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
     rs_buf_init(&err);
-    if (!rs_repo_init(o->args[0], &err))
+    if (!rs_repo_init(o->args[0], o->nrecipients > 0, &err))
     {
         rs_error("%s", err.data);
         rs_buf_free(&err);
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
-    if (!o->quiet)
+    if (!o->quiet && o->nrecipients > 0)
+    {
+        (void)fprintf(stderr, "restate: made the encrypted repository %s; capture into it with "
+                      "restate capture -o %s --encrypt-to KEYFILE, giving the keys each time\n",
+                      o->args[0], o->args[0]);
+    } else if (!o->quiet)
     {
         (void)fprintf(stderr, "restate: made the repository %s; capture into it with "
                       "restate capture -o %s\n", o->args[0], o->args[0]);
@@ -1540,6 +1586,17 @@ int rs_cmd_prune(const struct rs_options *o)
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
         return RESTATE_EXIT_TROUBLE;
     }
+    if (o->nrecipients > 0 && rs_repo_is(o->args[0]) && !rs_repo_dir_encrypted(o->args[0]))
+    {
+        rs_error("--encrypt-to: %s is a repository that is not encrypted", o->args[0]);
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!recipients_usable(o))
+    {
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
     rs_buf_init(&err);
     r = rs_repo_open(o->args[0], o->dry_run ? RS_REPO_LOOK : RS_REPO_PRUNE, &busy, &err);
     if (!r)
@@ -1550,6 +1607,7 @@ int rs_cmd_prune(const struct rs_options *o)
                     o->args[0]);
         return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
     }
+    rs_repo_set_recipients(r, o->recipients, o->nrecipients);
     ok = rs_repo_prune(r, &keep, o->dry_run, &pruned, &err);
     rs_repo_close(r);
     for (i = 0; !o->quiet && i < pruned.ndropped; i++)
@@ -1569,6 +1627,12 @@ int rs_cmd_prune(const struct rs_options *o)
         (void)fprintf(stderr, "restate: dropped %zu snapshots; removed %zu packs and rewrote %zu, "
                       "freeing %s\n", pruned.ndropped, pruned.packs_removed,
                       pruned.packs_rewritten, size.data);
+        if (pruned.packs_left > 0)
+        {
+            (void)fprintf(stderr, "restate: %zu packs that are mostly content nothing needs were "
+                          "left as they are: rewriting them needs the keys to encrypt to "
+                          "(--encrypt-to)\n", pruned.packs_left);
+        }
         rs_buf_free(&size);
     }
     log_outcome(o, ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE, began,
@@ -1894,9 +1958,37 @@ int rs_cmd_restore(const struct rs_options *o)
     ro.root = o->root ? o->root : "/";
     ro.exclude = o->excludes;
     ro.nexclude = o->nexcludes;
-    ro.dry_run = o->dry_run;
     ro.verbose = o->verbose;
     ro.numeric_owner = o->numeric_owner;
+    if (o->check_first && !o->dry_run)
+    {
+        /* Read through once, checking everything and writing nothing, so a
+         * damaged image is refused whole rather than put back as far as it
+         * is whole. */
+        ro.dry_run = true;
+        ro.quiet = true;
+        ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
+        if (ok && st.refused + st.missing > 0)
+        {
+            rs_buf_addf(&err, "%s: %" PRIu64 " files are not what its index says and %" PRIu64
+                        " are missing from it", o->args[0], st.refused, st.missing);
+            ok = false;
+        }
+        if (!ok)
+        {
+            rs_error("%s; nothing was written (--check-first)", err.data);
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        if (!o->quiet)
+        {
+            (void)fprintf(stderr, "restate: %s checked: every file is what its index says; "
+                          "putting it back\n", o->args[0]);
+        }
+        ro.quiet = false;
+    }
+    ro.dry_run = o->dry_run;
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     rs_index_free(&ix);
     if (!ok)

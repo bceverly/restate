@@ -274,6 +274,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->excludes = rs_xreallocarray(o->excludes, o->nexcludes + 1, sizeof(*o->excludes));
             o->excludes[o->nexcludes++] = optarg;
             break;
+        case OPT_CHECK_FIRST:
+            o->check_first = true;
+            break;
         case OPT_DRY_RUN:
             o->dry_run = true;
             break;

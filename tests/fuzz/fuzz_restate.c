@@ -232,7 +232,7 @@ static void fuzz_openpgp(const char *text, size_t len)
 /* A pack's .idx, and the names prune chooses between, from the same text. */
 static void fuzz_repo(const char *text, size_t len)
 {
-    struct rs_repo_member *m = NULL;
+    struct rs_repo_idx     x;
     struct rs_repo_keep    keep;
     char                 **names = NULL;
     bool                  *kept;
@@ -241,10 +241,16 @@ static void fuzz_repo(const char *text, size_t len)
     char                  *next;
     size_t                 n = 0;
     size_t                 i;
+    size_t                 cut;
+    int                    version;
+    bool                   encrypted;
+    bool                   newer;
 
-    if (rs_repo_parse_idx(text, len, &m, &n))
+    if (rs_repo_parse_idx(text, len, &x))
     {
-        for (i = 0; i < n; i++)
+        const struct rs_repo_member *m = x.members;
+
+        for (i = 0; i < x.nmembers; i++)
         {
             if ((i > 0 && m[i].member <= m[i - 1].member) ||
                 (m[i].live && !rs_sha256_valid_hex(m[i].hash)))
@@ -252,11 +258,45 @@ static void fuzz_repo(const char *text, size_t len)
                 abort();
             }
         }
-    } else if (m || n)
+        for (i = 0; i < x.nlists; i++)
+        {
+            size_t c;
+
+            if (x.lists[i].n < 2 || x.lists[i].first + x.lists[i].n > x.nchunks ||
+                !rs_sha256_valid_hex(x.lists[i].hash))
+            {
+                abort();
+            }
+            for (c = 0; c < x.lists[i].n; c++)
+            {
+                if (!rs_sha256_valid_hex(x.chunks[x.lists[i].first + c]))
+                {
+                    abort();
+                }
+            }
+        }
+    } else if (x.members || x.nmembers || x.lists || x.nlists || x.chunks || x.nchunks)
     {
         abort();
     }
-    free(m);
+    rs_repo_idx_free(&x);
+    /* A chunk ends inside what it was given, and no later than its maximum. */
+    cut = rs_repo_chunk_cut((const unsigned char *)text, len);
+    if (cut > len || cut > RS_REPO_CHUNK_MAX || (len > 0 && cut == 0) ||
+        (len <= RS_REPO_CHUNK_MIN && cut != len))
+    {
+        abort();
+    }
+    if (rs_repo_parse_marker(copy, &version, &encrypted, &newer))
+    {
+        if ((version != 1 && version != 2) || newer || (version == 1 && encrypted))
+        {
+            abort();
+        }
+    } else if (version != 0 || encrypted)
+    {
+        abort();
+    }
     n = 0;
     for (line = copy; line; line = next)
     {

@@ -559,6 +559,15 @@ contains "$ERR" "/etc/app/key: its content is not what the index says it is; not
   "a file that does not match its digest is refused"
 check "and never lands" test ! -e rbad/etc/app/key
 check "while the rest is put back" test -f rbad/etc/hosts
+mkdir -p rcheck
+expect 2 "restore --check-first a tampered image" -- \
+  "$BIN" restore --allow-unverified --check-first --root rcheck rbad.tar
+contains "$ERR" "nothing was written (--check-first)" "is refused whole"
+check "and writes nothing" test ! -e rcheck/etc/hosts
+expect 0 "restore --check-first a whole one" -- \
+  "$BIN" restore --allow-unverified --check-first --root rcheck rimg.tar
+contains "$ERR" "checked: every file is what its index says" "checks it first"
+check "then puts it back" cmp rtree/etc/app/key rcheck/etc/app/key
 
 # A files part that runs on past its end-of-archive blocks, as some tars
 # pad it -- more than a pipe holds: read to its end, not gzip killed.
@@ -584,7 +593,7 @@ contains "$ERR" "snapshot repo::20260101T000000Z:" "capture names the snapshot"
 echo "changed" > rtree/etc/hosts
 expect 0 "capture into it again" -- \
   env SOURCE_DATE_EPOCH=1767312000 "$BIN" capture -r rtree --os=linux --syslog -o repo
-contains "$ERR" "snapshot repo::20260102T000000Z: 1 files' content new" "only what changed is new"
+contains "$ERR" "new to the repository, from 1 files" "only what changed is new"
 contains "$ERR" "4 files unchanged since the last snapshot were not read" "and the rest is not read"
 expect 0 "snapshots" -- "$BIN" snapshots repo
 contains "$OUT" "20260101T000000Z" "lists the first"
@@ -621,7 +630,9 @@ expect 2 "export with nowhere to write" -- "$BIN" export repo
 expect 2 "export an image" -- "$BIN" export rimg.tar -o x.tar
 expect 2 "capture --encrypt-to into a repository" -- \
   "$BIN" capture -r rtree --encrypt-to rtree/etc/hosts -o repo
-contains "$ERR" "a repository is not encrypted" "is refused, saying why"
+contains "$ERR" "is a repository that is not encrypted" "is refused, saying why"
+expect 2 "prune --encrypt-to a repository that is not encrypted" -- \
+  "$BIN" prune --keep-last 1 --encrypt-to rtree/etc/hosts repo
 expect 2 "prune, keeping nothing named" -- "$BIN" prune repo
 expect 0 "prune --dry-run" -- "$BIN" prune --dry-run --keep-last 1 repo
 contains "$OUT" "would drop 20260101T000000Z" "says what it would drop"
@@ -796,6 +807,42 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "and it is trusted" -- "$BIN" restore --dry-run --trusted-key signer.pub --root srout srepo
   expect 2 "sign it again" -- "$BIN" sign --sign-with signer.sec srepo
   contains "$ERR" "it is signed already" "is refused"
+
+  # An encrypted repository: the keys given each time, a capture needing no
+  # secret key, and a restore needing it.
+  gk --quick-gen-key 'restate enc <enc@example.invalid>' default default never 2> /dev/null
+  gk --export enc@example.invalid > enc.pub 2> /dev/null
+  mkdir -m 700 nokey
+  expect 0 "init an encrypted repository" -- "$BIN" init --encrypt-to enc.pub erepo
+  contains "$ERR" "made the encrypted repository erepo" "says it is encrypted"
+  expect 2 "init --encrypt-to a key that is not there" -- "$BIN" init --encrypt-to no-such.pub erepo2
+  expect 2 "capture into it with no keys" -- "$BIN" capture -r rtree --os=linux -o erepo
+  contains "$ERR" "is an encrypted repository: give the public keys" "is refused, saying why"
+  expect 0 "capture into it" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo
+  check "its packs' indexes are encrypted" sh -c '! cat erepo/packs/*.idx | grep -q restate-pack'
+  check "and its snapshots' indexes" sh -c '! gzip -t erepo/snapshots/*/index.json.gz 2> /dev/null'
+  expect 0 "capture into it again, with no secret key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo
+  contains "$ERR" "unchanged since the last snapshot were not read" "reads only what changed"
+  mkdir -p erout
+  expect 2 "restore it without the secret key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" restore --allow-unverified --root erout erepo
+  contains "$ERR" "could not be decrypted" "says why"
+  expect 0 "restore it with the secret key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" \
+    "$BIN" restore --allow-unverified --root erout erepo
+  check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+  expect 0 "snapshots, with the secret key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" "$BIN" snapshots erepo
+  contains "$OUT" "files," "lists them with their summaries"
+  expect 0 "prune it" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" \
+    "$BIN" prune --keep-last 1 --encrypt-to enc.pub erepo
+  contains "$OUT" "dropped" "drops the older"
   GNUPGHOME="$WORK/gnupg" gpgconf --kill gpg-agent 2> /dev/null || true
 fi
 

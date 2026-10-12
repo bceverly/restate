@@ -29,6 +29,7 @@ enum {
     OPT_DEB,
     OPT_EXCLUDE,
     OPT_DRY_RUN,
+    OPT_CHECK_FIRST,
     OPT_NUMERIC_OWNER,
     OPT_RULES_ONLY,
     OPT_QUIESCE,
@@ -88,6 +89,7 @@ struct rs_options {
     const char    **excludes;       /* --exclude PATTERN, each */
     size_t          nexcludes;
     bool            dry_run;
+    bool            check_first;    /* restore: read it all first */
     bool            numeric_owner;
     const char     *image_at;       /* --image-at */
     bool            one_fs;

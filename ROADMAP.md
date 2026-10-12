@@ -249,9 +249,9 @@ Then the 156 were installed by name, in that VM, from the restored sources:
   - The build sheet and autoinstall file pass restore `--allow-unverified`,
     or with `--trusted-key` the same keys -- the autoinstall file carries
     them itself.
-- [ ] A restore that reads the whole image before writing anything, so a
+- [x] A restore that reads the whole image before writing anything, so a
       damaged one is refused whole rather than restored as far as it is
-      whole
+      whole: `restore --check-first`, which reads it twice
 - [x] Extended attributes, POSIX ACLs and file capabilities (Linux xattrs,
       macOS xattrs, FreeBSD and NetBSD extattrs), set after the owner, with
       an ACL's users and groups mapped by name; hard links as links; users
@@ -302,10 +302,21 @@ night without the disk filling up.
       for the portable single file, and the one the build files are made
       from; `REPO::NAME` read wherever an image is -- `restore`, `diff`,
       `verify`, `status`, `packages`, `installer`, `sign`
-- [ ] Content-defined chunking, so a large file that changes a little -- a VM's
-      disk -- is stored as the pieces that changed rather than whole again
-- [ ] Encryption per pack with the same `--encrypt-to` keys, so a
-      repository can sit on untrusted storage
+- [x] Content-defined chunking, so a large file that changes a little -- a VM's
+      disk -- is stored as the pieces that changed rather than whole again:
+      FastCDC, chunks of a quarter to four mebibytes averaging one, in 32 MiB
+      packs read a few at a time, each forward; a 1.3.0 repository's whole-file
+      packs read as one-chunk files
+- [x] Encryption per pack with the same `--encrypt-to` keys, so a
+      repository can sit on untrusted storage: `init --encrypt-to`; packs,
+      their indexes and snapshots' files encrypted, gpg after gzip; the keys
+      given on each capture and prune, never read from the repository; a
+      capture needing no secret key, from the machine's own cache of what it
+      wrote
+- [ ] Chunk boundaries that depend on a key of the repository's, as restic's
+      do, so that the sizes of the chunks in an encrypted repository say
+      nothing about known files -- moot while a pack is encrypted whole, which
+      hides them, and wanted if packs are ever split up
 - [x] **Locks**: one capture or prune on a repository at a time, one
       `capture --quiesce` on a machine at a time, and exit status 5 for a run
       that found the lock taken; `--syslog` for one key=value line a
