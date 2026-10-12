@@ -324,8 +324,13 @@ expect 0 "capture after an upgrade" -- \
 expect 1 "diff --packages" -- "$BIN" diff --packages kept.tar kept2.tar
 contains "$OUT" "$(printf 'U\tapt:hello\t2.10-3 -> 2.11-1')" "names the package upgraded"
 contains "$ERR" "1 packages changed" "and counts it"
-expect 0 "diff without --packages" -- "$BIN" diff kept.tar kept2.tar
-lacks "$OUT" "apt:hello" "lists files alone, and dpkg's own files are not kept"
+# dpkg's status file changed too: on Linux its rules leave it out, and
+# elsewhere it is an ordinary file kept and listed, so either status will do.
+"$BIN" diff kept.tar kept2.tar > out.txt 2> err.txt < /dev/null
+status=$?
+OUT="$(cat out.txt)"
+check "diff without --packages ends normally" test "$status" -le 1
+lacks "$OUT" "apt:hello" "diff without --packages lists files alone"
 expect 2 "--firmware without --target" -- "$BIN" buildsheet --firmware uefi kept.tar
 contains "$ERR" "--firmware needs --target" "is refused"
 expect 2 "--firmware of an unknown kind" -- "$BIN" buildsheet --target vm --firmware efi kept.tar
