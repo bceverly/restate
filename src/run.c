@@ -479,7 +479,7 @@ bool rs_curl_many(const char *const *urls, const char *const *dests, size_t coun
     struct rs_buf errtext;
     bool          local = count > 0 && rs_starts_with(urls[0], "file://");
     const char   *protos = local ? "=file" : co->plain_http ? "=http,https" : "=https";
-    char        **argv = rs_xcalloc(24 + 3 * count, sizeof(*argv));
+    char        **argv = rs_xcalloc(26 + 3 * count, sizeof(*argv));
     char          limit[24];
     size_t        n = 0;
     size_t        i;
@@ -505,6 +505,11 @@ bool rs_curl_many(const char *const *urls, const char *const *dests, size_t coun
         (void)snprintf(limit, sizeof(limit), "%u", co->max_time);
         argv[n++] = rs_xstrdup("--max-time");
         argv[n++] = rs_xstrdup(limit);
+    }
+    if (co->netrc)
+    {
+        argv[n++] = rs_xstrdup("--netrc-file");
+        argv[n++] = rs_xstrdup(co->netrc);
     }
     argv[n++] = rs_xstrdup(co->progress ? "--progress-bar" : "--silent");
     if (co->resume)

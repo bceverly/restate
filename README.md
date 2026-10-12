@@ -575,6 +575,12 @@ signed by a `--trusted-key`, or the fetch given `--allow-unverified`, since
 what it fetches is installed as root. Run again, a fetch checks what the
 cache has and downloads only what is missing or does not match.
 
+A repository that wants a login -- Ubuntu Pro's, `esm.ubuntu.com` -- gets the
+one apt has, from `/etc/apt/auth.conf` and `auth.conf.d`, so the fetch has to
+run as root. curl is given only the entries for hosts the sources reach over
+HTTPS and never over plain HTTP, in a file of its own that is gone when the
+fetch is.
+
 ## Installers
 
 `restate installer` names the installation image a machine is rebuilt from:

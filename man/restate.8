@@ -717,6 +717,15 @@ held to restore's rule: the image has to be signed by a
 .BR \-\-trusted\-key ,
 or the fetch given
 .BR \-\-allow\-unverified .
+A repository that wants a login, as Ubuntu Pro's does, is given the one apt
+has, from
+.I /etc/apt/auth.conf
+and
+.IR /etc/apt/auth.conf.d ,
+so for those the fetch runs as root:
+.BR curl (1)
+is handed only the entries for hosts the sources reach over HTTPS and never
+over plain HTTP, in a file of its own removed when the fetch ends.
 Exit status 3 if any could not be had. What was installed from a
 .I .deb
 no repository has, only an image can keep

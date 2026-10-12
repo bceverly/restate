@@ -186,6 +186,46 @@ static void pure(void)
         CHECK(b.len == 0);
     }
 
+    TEST_CASE("baseline: apt's credentials, for curl, and only over https");
+    {
+        static const char sources[] =
+            "{\"sources\": ["
+            " {\"uris\": [\"https://esm.ubuntu.com/apps/ubuntu\"]},"
+            " {\"uris\": [\"https://both.example\", \"http://both.example/x\"]},"
+            " {\"uris\": [\"http://plain.example/debian\"]},"
+            " {\"uris\": [\"https://port.example:8443/apt/\"]},"
+            " {\"uris\": 7}, {\"uris\": [7]}]}";
+        static const char auth[] =
+            "machine esm.ubuntu.com/apps/ubuntu/ login bearer password s3cret\n"
+            "machine https://port.example/apt login u\n password p\n"
+            "machine both.example login u password p\n"
+            "machine plain.example login u password p\n"
+            "machine http://esm.ubuntu.com login u password leak\n"
+            "machine nowhere.example login u password p\n"
+            "machine esm.ubuntu.com login\n"
+            "machine bad\"host login u password p\n"
+            "default login x password y\n"
+            "password";
+        struct rs_jval        apt;
+        struct rs_json_parser jp;
+        struct rs_buf         jerr;
+
+        memset(&apt, 0, sizeof(apt));
+        rs_buf_init(&jerr);
+        rs_json_init(&jp, sources, sizeof(sources) - 1, &jerr);
+        CHECK(rs_json_value(&jp, &apt));
+        rs_buf_free(&jerr);
+        rs_buf_reset(&b);
+        CHECK(rs_baseline_netrc(auth, &apt, &b));
+        CHECK_STR(b.data, "machine esm.ubuntu.com login bearer password s3cret\n"
+                          "machine port.example login u password p\n");
+        rs_buf_reset(&b);
+        CHECK(!rs_baseline_netrc("", &apt, &b));
+        CHECK(!rs_baseline_netrc(NULL, &apt, &b));
+        CHECK(!rs_baseline_netrc(auth, NULL, &b));
+        rs_jval_free(&apt);
+    }
+
     TEST_CASE("sources: the text an InRelease file's signature covers");
     {
         static const char good[] =
@@ -252,6 +292,8 @@ static void make_repo(const char *dir, const char *home, const char *who)
     char             *list_sha;
     char             *gz_sha;
     char             *release;
+    char             *all;
+    char             *all_sha;
     size_t            list_len;
 
     list = rs_xasprintf("Package: hello\nVersion: 1.0\nArchitecture: amd64\n"
@@ -264,12 +306,17 @@ static void make_repo(const char *dir, const char *home, const char *who)
                         "Package: sneaky\nVersion: 1\nArchitecture: amd64\n"
                         "Filename: ../../etc/passwd\nSize: 3\nSHA256: %s\n",
                         sizeof(deb) - 1, hello_sha, sizeof(deb) - 1, hello_sha, hello_sha);
+    /* A package of Architecture: all listed apart, as Tailscale's are. */
+    all = rs_xasprintf("Package: keyring\nVersion: 2\nArchitecture: all\n"
+                       "Filename: pool/main/h/hello_1.0_amd64.deb\nSize: %zu\nSHA256: %s\n",
+                       sizeof(deb) - 1, hello_sha);
     list_len = strlen(list);
-    cmd = rs_xasprintf("mkdir -p '%s/repo/dists/stable/main/binary-amd64' "
+    cmd = rs_xasprintf("mkdir -p '%s/repo/dists/stable/main/binary-all' '%s/repo/dists/stable/main/binary-amd64' "
                        "'%s/repo/pool/main/h' '%s/repo/pool/main/t' '%s/repo/pool/main/b'",
-                       dir, dir, dir, dir);
+                       dir, dir, dir, dir, dir);
     CHECK(quiet(cmd) == 0);
     free(cmd);
+    rs_test_write(dir, "repo/dists/stable/main/binary-all/Packages", all, 0644);
     rs_test_write(dir, "repo/pool/main/h/hello_1.0_amd64.deb", deb, 0644);
     rs_test_write(dir, "repo/pool/main/t/tzdata_2026a_all.deb", deb, 0644);
     rs_test_write(dir, "repo/pool/main/b/broken_1_amd64.deb", "bad", 0644);
@@ -297,9 +344,11 @@ static void make_repo(const char *dir, const char *home, const char *who)
     }
     list_sha = sha_of(list, list_len);
     gz_sha = sha_of(gz.data ? gz.data : "", gz.len);
+    all_sha = sha_of(all, strlen(all));
     release = rs_xasprintf("Origin: test\nSuite: stable\nSHA256:\n %s %zu main/binary-amd64/Packages\n"
-                           " %s %zu main/binary-amd64/Packages.gz\n",
-                           list_sha, list_len, gz_sha, gz.len);
+                           " %s %zu main/binary-amd64/Packages.gz\n"
+                           " %s %zu main/binary-all/Packages\n",
+                           list_sha, list_len, gz_sha, gz.len, all_sha, strlen(all));
     rs_test_write(dir, "repo/dists/stable/Release.txt", release, 0644);
     cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --yes -u '%s' --clearsign "
                        "-o '%s/repo/dists/stable/InRelease' '%s/repo/dists/stable/Release.txt'",
@@ -309,6 +358,8 @@ static void make_repo(const char *dir, const char *home, const char *who)
     rs_buf_free(&gz);
     free(list_sha);
     free(gz_sha);
+    free(all_sha);
+    free(all);
     free(release);
     free(list);
     free(hello_sha);
@@ -373,9 +424,11 @@ static void fetching(void)
         "   \"origins\": [\"file://%s/repo stable/main\"]},"
         "  {\"name\": \"elsewhere\", \"architecture\": \"amd64\", \"version\": \"1\","
         "   \"origins\": [\"file://%s/nowhere stable/main\"]},"
+        "  {\"name\": \"keyring\", \"architecture\": \"all\", \"version\": \"2\","
+        "   \"origins\": [\"file://%s/repo stable/main\"]},"
         "  {\"name\": \"zoom\", \"architecture\": \"amd64\", \"version\": \"6\","
         "   \"unavailable\": \"local\"}]}}",
-        dir, b64.data ? b64.data : "", dir, dir, dir, dir, dir);
+        dir, b64.data ? b64.data : "", dir, dir, dir, dir, dir, dir);
     memset(&pk, 0, sizeof(pk));
     rs_buf_init(&err);
     rs_json_init(&jp, json, strlen(json), &err);
@@ -384,8 +437,8 @@ static void fetching(void)
     o.cache = cache;
     o.quiet = true;
     CHECK(rs_baseline_fetch(&pk, &o, &st, &err));
-    CHECK_INT(st.wanted, 5);
-    CHECK_INT(st.fetched, 2);
+    CHECK_INT(st.wanted, 6);
+    CHECK_INT(st.fetched, 3);
     CHECK_INT(st.cached, 0);
     CHECK_INT(st.missing, 3);
     CHECK_INT(st.local, 1);
@@ -400,11 +453,11 @@ static void fetching(void)
 
     TEST_CASE("baseline fetch: again, from the cache; and one changed there, fetched again");
     CHECK(rs_baseline_fetch(&pk, &o, &st, &err));
-    CHECK_INT(st.cached, 2);
+    CHECK_INT(st.cached, 3);
     CHECK_INT(st.fetched, 0);
     rs_test_write(cache, "hello_1.0_amd64.deb", "tampered", 0644);
     CHECK(rs_baseline_fetch(&pk, &o, &st, &err));
-    CHECK_INT(st.cached, 1);
+    CHECK_INT(st.cached, 2);
     CHECK_INT(st.fetched, 1);
 
     TEST_CASE("baseline: what would be fetched");
@@ -413,8 +466,8 @@ static void fetching(void)
     CHECK_CONTAINS(text.data, "hello 1.0 amd64\tcached\n");
     CHECK_CONTAINS(text.data, "broken 1 amd64\tto fetch\n");
     CHECK_CONTAINS(text.data, "zoom 6 amd64\tinstalled from a .deb no repository has\n");
-    CHECK_INT(st.wanted, 5);
-    CHECK_INT(st.cached, 2);
+    CHECK_INT(st.wanted, 6);
+    CHECK_INT(st.cached, 3);
     CHECK_INT(st.local, 1);
     rs_buf_free(&text);
 
@@ -423,7 +476,7 @@ static void fetching(void)
     make_repo(dir, home, "b@example.invalid");
     CHECK(rs_baseline_fetch(&pk, &o, &st, &err));
     CHECK_INT(st.fetched, 0);
-    CHECK_INT(st.missing, 5);
+    CHECK_INT(st.missing, 6);
 
     TEST_CASE("baseline fetch: nothing to fetch with");
     {

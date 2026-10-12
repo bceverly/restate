@@ -105,6 +105,9 @@ struct rs_curl_opts {
     bool     progress;     /* a progress bar on the terminal, not a quiet run */
     bool     plain_http;   /* http:// too, for what is checked by its signature */
     unsigned max_time;     /* seconds before giving up, or 0 for no limit */
+    /* A netrc file of credentials for the hosts that need them (curl
+     * --netrc-file), or NULL: apt's, for a repository that wants a login. */
+    const char *netrc;
 };
 
 /*

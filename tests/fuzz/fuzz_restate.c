@@ -41,7 +41,8 @@
  *  15  an apt repository as baseline fetch reads it -- an InRelease file, a
  *      Packages list, an origin and a URI, between NULs -- the signed text
  *      split out, the list's entries read, the origin split and the URI
- *      mapped to the archive's snapshot
+ *      mapped to the archive's snapshot; the origin read as apt's
+ *      credentials too
  *
  * It is reached two ways:
  *
@@ -309,6 +310,42 @@ static void fuzz_apt(const char *text, size_t len)
         abort();
     }
     rs_buf_free(&out);
+    /* The origin's text read as apt's credentials, against sources that
+     * reach two hosts over https and one over http: whatever comes out is
+     * whole "machine ... login ... password ..." lines. */
+    {
+        static const char      sources[] = "{\"sources\": [{\"uris\": [\"https://a.example/x\", "
+                                           "\"https://esm.ubuntu.com/apps/ubuntu\", "
+                                           "\"http://b.example\"]}]}";
+        struct rs_jval         apt;
+        struct rs_json_parser  jp;
+        struct rs_buf          jerr;
+        const char            *line;
+
+        memset(&apt, 0, sizeof(apt));
+        rs_buf_init(&jerr);
+        rs_json_init(&jp, sources, sizeof(sources) - 1, &jerr);
+        if (!rs_json_value(&jp, &apt))
+        {
+            abort();
+        }
+        rs_buf_free(&jerr);
+        rs_buf_init(&out);
+        if (rs_baseline_netrc(copy[2], &apt, &out) != (out.len > 0))
+        {
+            abort();
+        }
+        for (line = out.data; line && *line; line = strchr(line, '\n') + 1)
+        {
+            if (!rs_starts_with(line, "machine a.example login ") &&
+                !rs_starts_with(line, "machine esm.ubuntu.com login "))
+            {
+                abort();
+            }
+        }
+        rs_buf_free(&out);
+        rs_jval_free(&apt);
+    }
     deb = rs_baseline_deb_name(copy[2], copy[3], "amd64");
     if (deb && (strchr(deb, '/') || strlen(deb) < 5 || strcmp(deb + strlen(deb) - 4, ".deb") != 0))
     {

@@ -103,6 +103,15 @@ void rs_baseline_parse_packages(const char *text, size_t len, rs_baseline_fn fn,
  * for a flat repository, whose *component is then "" -- split. */
 bool rs_baseline_label(const char *label, char **uri, char **suite, char **component);
 
+/*
+ * apt's credentials (`auth`: the text of /etc/apt/auth.conf and the files in
+ * auth.conf.d, netrc's format, "machine HOST[/PATH] login L password P") as
+ * curl takes them, into `out`: a "machine HOST login L password P" line for
+ * each host that `apt`'s sources reach over https and none over plain http,
+ * so a password never goes out in the clear. True if there is any.
+ */
+bool rs_baseline_netrc(const char *auth, const struct rs_jval *apt, struct rs_buf *out);
+
 /* The archive's snapshot as of `id`, for an archive that has one -- Ubuntu's
  * and Debian's -- as the URI to use in place of `uri`; false otherwise. */
 bool rs_baseline_snapshot_uri(const char *uri, const char *id, struct rs_buf *out);

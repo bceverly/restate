@@ -4,6 +4,7 @@
  */
 #include "baseline.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 
 #include "gzip.h"
+#include "packages.h"
 #include "pgp.h"
 #include "run.h"
 #include "sources.h"
@@ -171,6 +173,251 @@ bool rs_baseline_snapshot_uri(const char *uri, const char *id, struct rs_buf *ou
     free(host);
     free(path);
     return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* apt's credentials                                                          */
+/* ------------------------------------------------------------------------- */
+
+/* The host of `uri`, scheme and path and port dropped, into `host` (at most
+ * `max` bytes); whether it was https in *tls. False if it has no scheme when
+ * `need_scheme`, another scheme, or no host. */
+static bool host_of(const char *uri, bool need_scheme, bool *tls, char *host, size_t max)
+{
+    const char *p = uri;
+    size_t      n;
+
+    *tls = true;
+    if (rs_starts_with(p, "https://"))
+    {
+        p += 8;
+    } else if (rs_starts_with(p, "http://"))
+    {
+        p += 7;
+        *tls = false;
+    } else if (need_scheme || strstr(p, "://"))
+    {
+        return false;
+    }
+    n = strcspn(p, "/:");
+    if (n == 0 || n >= max)
+    {
+        return false;
+    }
+    memcpy(host, p, n);
+    host[n] = '\0';
+    return strspn(host, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") == n;
+}
+
+/* Whether `apt`'s sources reach `host`: over https at all, and over http. */
+static void reached(const struct rs_jval *apt, const char *host, bool *https, bool *http)
+{
+    const struct rs_jval *sources = rs_jobject_get(apt, "sources");
+    size_t                i;
+    size_t                k;
+
+    *https = false;
+    *http = false;
+    for (i = 0; sources && sources->type == RS_JARRAY && i < sources->n; i++)
+    {
+        const struct rs_jval *uris = rs_jobject_get(&sources->items[i], "uris");
+
+        for (k = 0; uris && uris->type == RS_JARRAY && k < uris->n; k++)
+        {
+            char h[256];
+            bool tls;
+
+            if (uris->items[k].type == RS_JSTRING &&
+                host_of(uris->items[k].s, true, &tls, h, sizeof(h)) && strcmp(h, host) == 0)
+            {
+                *https = *https || tls;
+                *http = *http || !tls;
+            }
+        }
+    }
+}
+
+/* The next whitespace-separated word at *p into `word` (at most `max` - 1
+ * bytes; one longer is read past and left empty), or false at the end. */
+static bool next_word(const char **p, char *word, size_t max)
+{
+    size_t n;
+
+    *p += strspn(*p, " \t\r\n");
+    n = strcspn(*p, " \t\r\n");
+    if (n == 0)
+    {
+        return false;
+    }
+    if (n >= max)
+    {
+        word[0] = '\0';
+    } else
+    {
+        memcpy(word, *p, n);
+        word[n] = '\0';
+    }
+    *p += n;
+    return true;
+}
+
+static bool is_keyword(const char *word)
+{
+    return strcmp(word, "machine") == 0 || strcmp(word, "default") == 0 ||
+           strcmp(word, "login") == 0 || strcmp(word, "password") == 0;
+}
+
+static void flush_machine(const struct rs_jval *apt, const char *machine, const char *login,
+                          const char *password, struct rs_buf *out, bool *any)
+{
+    char host[256];
+    bool tls;
+    bool https;
+    bool http;
+
+    if (!machine[0] || !login[0] || !password[0] ||
+        !host_of(machine, false, &tls, host, sizeof(host)) || !tls)
+    {
+        return;
+    }
+    reached(apt, host, &https, &http);
+    if (https && !http)
+    {
+        rs_buf_addf(out, "machine %s login %s password %s\n", host, login, password);
+        *any = true;
+    }
+}
+
+bool rs_baseline_netrc(const char *auth, const struct rs_jval *apt, struct rs_buf *out)
+{
+    const char *p = auth ? auth : "";
+    char        word[1024];
+    char        machine[512] = "";
+    char        login[512] = "";
+    char        password[1024] = "";
+    bool        any = false;
+
+    while (next_word(&p, word, sizeof(word)))
+    {
+        char       *into = NULL;
+        size_t      max = 0;
+        const char *before;
+
+        if (strcmp(word, "machine") == 0 || strcmp(word, "default") == 0)
+        {
+            /* "default" is any host at all: never one to send a password to. */
+            flush_machine(apt, machine, login, password, out, &any);
+            machine[0] = '\0';
+            login[0] = '\0';
+            password[0] = '\0';
+            into = strcmp(word, "machine") == 0 ? machine : NULL;
+            max = sizeof(machine);
+        } else if (strcmp(word, "login") == 0)
+        {
+            into = login;
+            max = sizeof(login);
+        } else if (strcmp(word, "password") == 0)
+        {
+            into = password;
+            max = sizeof(password);
+        }
+        /* A value, unless what follows is the next keyword. */
+        before = p;
+        if (into && next_word(&p, word, sizeof(word)))
+        {
+            if (is_keyword(word))
+            {
+                p = before;
+            } else if (strlen(word) < max)
+            {
+                memcpy(into, word, strlen(word) + 1);
+            }
+        }
+    }
+    flush_machine(apt, machine, login, password, out, &any);
+    return any;
+}
+
+/* Clears what held a password before it is freed. */
+static void wipe_buf(struct rs_buf *b)
+{
+    volatile char *v = b->data;
+    size_t         n = b->len;
+
+    while (v && n-- > 0)
+    {
+        *v++ = 0;
+    }
+    rs_buf_free(b);
+}
+
+/* apt's credentials on this system, as curl takes them, in `home`/netrc: its
+ * path, or NULL if there are none (or they are not ours to read: root's). */
+static char *netrc_file(const struct rs_jval *apt, const char *home)
+{
+    struct rs_buf auth;
+    struct rs_buf one;
+    struct rs_buf out;
+    DIR          *d;
+    char         *path = NULL;
+
+    rs_buf_init(&auth);
+    rs_buf_init(&out);
+    if (rs_read_beneath("/", "/etc/apt/auth.conf", 65536, &one))
+    {
+        rs_buf_add(&auth, one.data ? one.data : "", one.len);
+        rs_buf_addc(&auth, '\n');
+        wipe_buf(&one);
+    }
+    d = opendir("/etc/apt/auth.conf.d");
+    while (d)
+    {
+        struct dirent *e = readdir(d);
+        char          *rel;
+        size_t         n;
+
+        if (!e)
+        {
+            break;
+        }
+        n = strlen(e->d_name);
+        if (e->d_name[0] == '.' || n < 6 || strcmp(e->d_name + n - 5, ".conf") != 0)
+        {
+            continue;
+        }
+        rel = rs_xasprintf("/etc/apt/auth.conf.d/%s", e->d_name);
+        if (rs_read_beneath("/", rel, 65536, &one))
+        {
+            rs_buf_add(&auth, one.data ? one.data : "", one.len);
+            rs_buf_addc(&auth, '\n');
+            wipe_buf(&one);
+        }
+        free(rel);
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    rs_buf_add(&auth, "", 0);
+    if (rs_baseline_netrc(auth.data, apt, &out))
+    {
+        int fd;
+
+        path = rs_xasprintf("%s/netrc", home);
+        fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0 || write(fd, out.data, out.len) != (ssize_t)out.len)
+        {
+            free(path);
+            path = NULL;
+        }
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+    }
+    wipe_buf(&auth);
+    wipe_buf(&out);
+    return path;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -412,6 +659,7 @@ struct run {
     struct rs_baseline_stats      *st;
     const char                    *cache;
     char                          *home;       /* gpgv's, and where lists are fetched to */
+    char                          *netrc;      /* apt's credentials, for curl, or NULL */
     const char                    *native;
     struct want                   *w;
     size_t                         nw;
@@ -627,6 +875,13 @@ static void plan_label(struct run *r, const struct want *w, const char *label, c
 
         add_part(g, part);
         free(part);
+        /* A repository may list its Architecture: all packages apart. */
+        if (comp[0] && strcmp(w->arch, "all") == 0)
+        {
+            part = rs_xasprintf("%s/binary-all/", comp);
+            add_part(g, part);
+            free(part);
+        }
     }
     rs_buf_free(&snap);
     free(uri);
@@ -832,6 +1087,7 @@ static void read_list(struct run *r, const struct group *g, const char *base, co
         memset(&co, 0, sizeof(co));
         co.plain_http = true;   /* checked by its digest, from the signed index */
         co.max_time = 1800;
+        co.netrc = r->netrc;
         rs_buf_init(&why);
         rs_buf_init(&err);
         rs_buf_init(&text);
@@ -863,7 +1119,11 @@ static void read_list(struct run *r, const struct group *g, const char *base, co
         free(dest);
         return;
     }
-    say(r, "%s %s: its signed index lists no %sPackages", g->root, g->suite, part);
+    /* A list of Architecture: all packages apart is looked for, not needed. */
+    if (!ends_with(part, "binary-all/"))
+    {
+        say(r, "%s %s: its signed index lists no %sPackages", g->root, g->suite, part);
+    }
 }
 
 static void read_groups(struct run *r)
@@ -966,6 +1226,7 @@ static void download(struct run *r)
         }
         memset(&co, 0, sizeof(co));
         co.plain_http = true;   /* checked by its digest, from the signed list */
+        co.netrc = r->netrc;
         rs_buf_init(&why);
         rs_buf_init(&err);
         if (!rs_curl_many(urls, dests, n, &co, &code, &why, &err))
@@ -985,10 +1246,22 @@ static void download(struct run *r)
                 r->st->bytes += w->size;
             } else
             {
+                struct stat st;
+                bool        got = lstat(parts[k], &st) == 0 && st.st_size > 0;
+
                 (void)unlink(parts[k]);
-                say(r, "%s %s (%s): %s did not download as its list says it is%s%s%s", w->name,
-                    w->version, w->arch, w->url, why.len ? " (" : "", why.len ? why.data : "",
-                    why.len ? ")" : "");
+                if (got)
+                {
+                    say(r, "%s %s (%s): %s is not what its list says it is", w->name,
+                        w->version, w->arch, w->url);
+                } else
+                {
+                    say(r, "%s %s (%s): %s could not be downloaded%s", w->name, w->version,
+                        w->arch, w->url,
+                        r->netrc ? "" : " (a repository that needs a login, as Ubuntu Pro's "
+                                        "does, needs restate run as root, to read apt's "
+                                        "credentials)");
+                }
             }
             free(final);
             free(parts[k]);
@@ -1125,6 +1398,7 @@ bool rs_baseline_fetch(const struct rs_jval *packages, const struct rs_baseline_
     {
         return false;
     }
+    r.netrc = netrc_file(r.apt, r.home);
     wants(&r, rs_jobject_get(r.apt, "packages"));
     /* The repositories as they are now, then their snapshots for what they
      * no longer have. */
@@ -1156,7 +1430,8 @@ bool rs_baseline_fetch(const struct rs_jval *packages, const struct rs_baseline_
     {
         say(&r, "and %zu more", st->missing - shown);
     }
-    rs_pgp_home_remove(r.home);
+    rs_pgp_home_remove(r.home);   /* and the credentials with it */
+    free(r.netrc);
     free_wants(&r);
     return true;
 }
