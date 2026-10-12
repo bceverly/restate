@@ -62,6 +62,7 @@ restate: 1 added, 0 deleted, 1 modified
 - [Usage](#usage)
 - [Live services](#live-services)
 - [Packages](#packages)
+- [The package baseline](#the-package-baseline)
 - [Restoring](#restoring)
 - [Repositories](#repositories)
 - [Images and indexes](#images-and-indexes)
@@ -96,13 +97,22 @@ restate: 1 added, 0 deleted, 1 modified
 - **Compares.** `diff` two images or indexes, or `verify` one against the
   machine as it is now, and see what was added, deleted and modified — and
   whether a modification was the content, the mode, the owner or a link target.
-  `status` does the same in seconds, reading only what changed.
+  `status` does the same in seconds, reading only what changed, and `diff
+  --packages` reports an upgrade as the package that changed rather than as
+  the hundreds of files it touched.
 - **Keeps captures in a repository**, each piece of content stored once: a
   nightly capture reads only the files that changed since the last one and
   stores only the parts of them that changed -- a VM's disk costs the few
   megabytes it changed, not its size again -- and `prune` keeps the daily,
   weekly and monthly snapshots you ask for. A repository can be encrypted, to
   sit on storage you do not trust.
+- **Puts a machine back.** `restore --packages` reinstalls a fresh system's
+  packages as the old one had them -- its repositories and keys, each package
+  at its version, held or installed as a dependency as it was, and what the
+  old machine did not have taken away -- then restores the files. `baseline
+  fetch` downloads those exact packages ahead of time, each checked against
+  its repository's signed index, so versions the archive drops later are
+  still at hand.
 - **Pauses what is running, just in time.** A database, a VM or a container
   found writing to files the image keeps is named, and with `--quiesce`
   paused by a hook while its own files are copied, then resumed.
@@ -152,24 +162,42 @@ layout, encryption, LVM, RAID and mounts, and an index lists every file with
 its owner, mode, times and SHA-256.
 
 **A safety net before an upgrade.** Capture before a release upgrade, keep the
-image, and diff afterwards to see what the upgrade changed.
+image, and diff afterwards to see what the upgrade changed -- by package, with
+the files each one changed folded into its line:
+
+```console
+$ restate diff --packages before.tar after.tar
+U	apt:openssl	3.5.0-1ubuntu1 -> 3.5.0-1ubuntu2, 14 files
+I	apt:htop	3.3.0-4, 12 files
+R	snap:hello	29
+M	/etc/ssl/openssl.cnf	content
+restate: 3 packages changed, accounting for 26 files; otherwise 0 added, 0 deleted, 1 modified
+```
+
+**The disk died.** Rebuild the machine from its [build sheet or an unattended
+autoinstall file](#rebuilding), then put its packages and files back:
+
+```bash
+sudo restate restore --packages --trusted-key backup-signing.pub web01.tar
+```
+
+**A new laptop, set up like the old one.** Install the distribution, then
+restore the old laptop's image with `--packages`: the same repositories, the
+same packages at the same versions, the same files.
+
+**A hardware refresh, or bare metal to a virtual machine and back.** `--target
+vm` or `--target metal` rebuild a machine elsewhere, with what changes
+accounted for: the storage and network drivers in the initramfs, device and
+interface names, a disk sized to the data rather than the old drive, hardware
+tools swapped for guest agents (or the reverse), an encrypted volume that was
+unlocked by the old machine's TPM -- and, with `--firmware`, UEFI where it
+booted by BIOS, or the other way. For a VM, a ready-to-run definition of the
+virtual machine itself.
 
 ### Coming
 
-These need the pieces still on the [roadmap](ROADMAP.md) — reinstalling the
-package inventory, package-aware capture, and `restore`:
+These need the pieces still on the [roadmap](ROADMAP.md):
 
-- **Bare-metal disaster recovery.** The disk dies: rebuild the machine from
-  its build sheet or an unattended autoinstall file, and restore the image.
-- **A hardware refresh.** Move a machine onto new hardware, disks of a
-  different size included.
-- **Bare metal to a virtual machine, and back.** Move a physical server into
-  a VM — or a VM onto hardware — with what changes accounted for: the storage
-  and network drivers in the initramfs, UEFI or BIOS, device and interface
-  names, a disk sized to the data rather than the old drive, hardware tools
-  swapped for guest agents (or the reverse), and an encrypted volume that
-  was unlocked by the old machine's TPM. For a VM, a ready-to-run definition
-  of the virtual machine itself.
 - **Stamping out copies.** Build one machine that does the thing — a load
   generator, a lab workstation — and rebuild it as many machines, each with
   its own host name, address, machine-id and SSH host keys, so no two come up
@@ -177,8 +205,8 @@ package inventory, package-aware capture, and `restore`:
 - **Turning a hand-built server into code.** The package inventory and the
   autoinstall file are a starting point for automating a machine that was
   only ever configured by hand.
-- **Air-gapped rebuilds**, from a downloaded installer and kept packages.
-- **A new laptop, set up like the old one**, in one unattended install.
+- **Air-gapped rebuilds**, from a downloaded installer, the baseline and kept
+  packages, with no network at all.
 
 ## Quick start
 
@@ -254,6 +282,12 @@ Commands:
                           show the installer that rebuilds this machine, or the
                           one IMAGE was taken from; with fetch, download it and
                           check its signature
+  baseline [fetch] [IMAGE]
+                          list the exact packages this machine, or the one
+                          IMAGE was taken from, had installed; with fetch,
+                          download each at its version, checked against its
+                          repository's signed index, into a cache that restore
+                          --packages installs from
   buildsheet [IMAGE]      write a plain-text runbook to rebuild this machine,
                           or the one IMAGE was taken from: disks, encryption,
                           LVM, filesystems, installer, restore
@@ -322,17 +356,23 @@ Options:
                           filesystems
   -n, --no-hash           record metadata only; much faster, but content is
                           then judged by size and mtime
-      --cache=DIR         installer fetch: keep installers in DIR rather than
-                          the system's cache
+      --cache=DIR         installer fetch, baseline fetch: keep what is
+                          downloaded in DIR rather than the system's cache;
+                          restore --packages: take packages from there
       --mirror=URL        installer fetch: download from the directory at URL
                           (https:// or file://) rather than the vendor's
       --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
                           (vm) or on other hardware (metal) rather than the
                           same machine
-      --exact-versions    buildsheet, autoinstall: install each package at the
-                          version recorded, from snapshot.ubuntu.com as of the
-                          capture where the archive has a newer one now, rather
-                          than the newer one
+      --firmware=MODE     buildsheet, autoinstall, with --target: boot the
+                          rebuilt machine by UEFI (uefi) or BIOS (bios) rather
+                          than as the old one did, with the partition that
+                          needs
+      --exact-versions    buildsheet, autoinstall, restore --packages: each
+                          package at the version recorded, from the archive's
+                          snapshot (snapshot.ubuntu.com, snapshot.debian.org)
+                          where the archive has moved on, rather than the newer
+                          one
       --image-at=PATH     autoinstall: where the installer will find the image
                           (a mounted disk or share); the file then installs the
                           packages and restores the files from it
@@ -341,6 +381,14 @@ Options:
       --numeric-owner     restore: owners by the numbers the index records, and
                           the image's own account files, rather than by name
                           through the image's accounts merged with the system's
+      --packages          diff: say which packages were installed, removed and
+                          upgraded, and leave out the file changes they account
+                          for. restore: put the image's packages back first --
+                          its repositories and keys, its packages at their
+                          versions (from the baseline cache where fetched),
+                          what was installed by hand and what as a dependency
+                          -- and remove what it did not have; root only, onto
+                          the running system
       --check-first       restore: read the whole image first, checking every
                           file against the index and writing nothing, and put
                           it back only if all of it is whole
@@ -429,8 +477,9 @@ was installed since, and from where, and `restate packages` prints it:
   key in `/usr/share/keyrings` is not in the image and apt refuses a
   repository without it. And which repository each installed version can be
   had from again; for the ones none can, `"unavailable": "superseded"` (a
-  newer version replaced it) or `"local"` (installed from a `.deb`, and only
-  that file puts it back).
+  newer version replaced it -- with where the newer one is, and when this one
+  was installed, which is when the archive's snapshot has it) or `"local"`
+  (installed from a `.deb`, and only that file puts it back).
 - **snap:** revision, channel and confinement (channels need root); snaps
   installed from a file are marked `"local"`.
 - **flatpak:** remotes and apps, system-wide and per user.
@@ -443,7 +492,8 @@ was installed since, and from where, and `restate packages` prints it:
 
 Every apt source is **checked**, too, as apt checks it: its index as apt last
 fetched it, against the keys the source names, with `gpgv`, and its
-`Valid-Until` against the clock. apt refuses a source whose key has gone,
+`Valid-Until` against the clock -- a PPA whose key is written into its own
+`.sources` file included. apt refuses a source whose key has gone,
 changed or expired once, in an `apt update` nobody reads, and then quietly
 uses the last index it accepted -- for months. A rebuild installs from the
 source as it is now and gets nothing from it. A source apt cannot use gets a
@@ -479,7 +529,8 @@ $ sudo restate capture --keep-local-packages \
 
 A superseded version -- one a repository has a newer version of -- is kept
 if it is in the cache and passed over quietly if not: the rebuild installs
-the newer one.
+the newer one, or, with `--exact-versions`, this one from the archive's
+snapshot as of when it was installed.
 
 ```console
 $ restate packages | jq -c '.apt | {count, manual, superseded, local}'
@@ -491,6 +542,38 @@ otelcol-contrib
 veracrypt
 zoom
 ```
+
+## The package baseline
+
+A rebuild months from now finds many of today's versions gone: the archive
+moves on, and a vendor that keeps only its newest release drops the rest.
+`restate baseline` lists the exact packages a machine has -- or the one an
+image was taken from -- and `restate baseline fetch` downloads each at its
+version, as a `.deb`, into `/var/cache/restate/baseline`, where `restore
+--packages` installs from:
+
+```console
+$ sudo restate baseline fetch --trusted-key backup-signing.pub web01.tar
+restate: checking https://archive.ubuntu.com/ubuntu/dists/resolute-updates/
+restate: checking https://dl.google.com/linux/chrome-stable/deb/dists/stable/
+restate: checking https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/dists/resolute-updates/
+restate: 3180 packages in the baseline: 3180 fetched (2914238105 bytes, 25 of them from an archive's snapshot), 0 already in /var/cache/restate/baseline; 0 could not be had
+restate: 5 were installed from .deb files no repository has: only an image can keep those (capture --keep-local-packages)
+```
+
+Nothing fetched is taken on trust, and nothing comes from a cache that is not
+root's alone. Each repository's index -- `InRelease`, or `Release` and
+`Release.gpg` -- is checked with `gpgv` against the keys its source names, as
+apt checks it, and only the part the signature covers is read; each
+`Packages` list against the index's SHA-256 for it; each `.deb` against the
+list's SHA-256 for it, before it is renamed into the cache. A version the
+archive no longer has is looked for in its snapshot -- as of the capture, or,
+for one the archive had already moved on from, as of when it was installed --
+on snapshot.ubuntu.com and snapshot.debian.org, signed by the same keys.
+Fetching an image's packages is held to restore's rule: the image has to be
+signed by a `--trusted-key`, or the fetch given `--allow-unverified`, since
+what it fetches is installed as root. Run again, a fetch checks what the
+cache has and downloads only what is missing or does not match.
 
 ## Installers
 
@@ -557,6 +640,13 @@ Another operating system's partitions -- Windows, BitLocker, macOS, VeraCrypt
 -- are never formatted. For the same machine, both keep them, and the EFI
 partition they boot from, in place.
 
+`--firmware uefi` or `--firmware bios`, with either target, changes how the
+rebuilt machine boots: the partition the new mode needs replaces the old
+one's on the disk it boots from -- an EFI system partition (512 MiB, mounted
+at `/boot/efi`) in place of GRUB's BIOS boot partition, or added in front on
+an MBR disk; or a BIOS boot partition in place of the ESP, which an MBR disk
+does without -- and the installer puts in the boot loader for that mode.
+
 `--target vm` rebuilds as a virtual machine instead: Linux volumes only, each
 sized to what the image holds plus room to grow, a ready `virt-install`
 command with a modest share of a host (at most 8 GiB and 4 CPUs, never more
@@ -569,6 +659,7 @@ hibernation resume device.
 ```console
 $ restate buildsheet web01.tar -o web01-rebuild.txt
 $ restate autoinstall --target vm web01.tar -o user-data
+$ restate buildsheet --target metal --firmware uefi old-bios-box.tar -o new-box.txt
 ```
 
 Given `--image-at PATH` -- where the installer will find the image -- the
@@ -618,6 +709,26 @@ reads the whole image once before writing anything, checking every file, and
 refuses it -- exit status 2, nothing written -- if any file is not what the
 index says or is missing; then it reads it again to put it back. It costs a
 second read, so it is not the default.
+
+**The packages too.** On a fresh install, `restore --packages` puts the old
+machine's packages back before its files, as root, onto the running system:
+the image's `/etc/apt` -- its repositories, and the keys kept there -- and the
+keys kept elsewhere; every package installed by hand, at its version where a
+repository still has it (from the archive's snapshot, with
+`--exact-versions`), and from the [baseline](#the-package-baseline) where
+none does; the `.deb` files the image kept; the holds; each package marked
+installed by hand or as a dependency, as it was. What the old machine did not
+have is marked a dependency, so `apt-get autoremove` takes away what nothing
+it had needs -- never the kernel, the boot loader, firmware or microcode,
+which follow the hardware. Then the snaps, flatpaks, the Python, npm and Ruby
+packages installed system-wide, and the alternatives chosen by hand. It is
+all done by a shell script, as a person would do it; `--dry-run` writes the
+script out instead of running it, to read first:
+
+```console
+$ sudo restate restore --packages --dry-run -o packages.sh --trusted-key backup.pub web01.tar
+$ sudo restate restore --packages --trusted-key backup.pub web01.tar
+```
 
 **Only a signed image is restored**, unless told otherwise. `restore` checks
 the signature before it reads anything else, and refuses -- exit status 4 --
@@ -736,6 +847,14 @@ needs the keys to encrypt to, so without `--encrypt-to` it only removes packs
 nothing needs at all, and says how many it left. Encryption is not
 authentication -- anyone with the public key can write a snapshot that
 decrypts -- so sign snapshots, and restore with `--trusted-key`.
+
+The one thing an encrypted chunk still shows is its size, and with the
+boundaries any repository uses, chunk sizes would say which known files a
+repository holds. So an encrypted repository cuts its chunks where a key of
+its own says: made at the first capture, kept in the repository encrypted to
+its keys, and in the machine's cache, where a capture reads it without the
+secret key. A machine with neither makes a key of its own, and stores its
+large files whole once more.
 
 On disk a repository is plain files: `packs/` holds the chunks, in gzip'd tar
 files of about 32 MiB each beside an index of what is in them, and each of
@@ -1143,10 +1262,12 @@ src/            the program: one module per concern
   repo.c        repositories: packs, snapshots, the content stream, prune
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
-  run.c         running gzip, curl, gpg and the hooks: fixed paths, posix_spawn
+  run.c         running gzip, curl, gpg, sh and the hooks: fixed paths, posix_spawn
   live.c        what is running, from /proc: databases, VMs, containers
   hooks.c       finding and running the hooks that pause them
-  sources.c     whether apt can still use each of its sources
+  sources.c     whether apt can still use each of its sources, and fetching an index
+  baseline.c    the package baseline: each package at its version, fetched and checked
+  reinstall.c   the script restore --packages runs
   pgp.c         encrypting, signing and checking signatures, through gpg
   machine.c     the machine description: hardware, disks, encryption
   packages.c    the package inventory: apt, snap, flatpak, pip, npm, cargo

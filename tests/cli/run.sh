@@ -298,6 +298,37 @@ contains "$ERR" "not an absolute path" "--image-at has to be absolute"
 printf '{"format": "restate-index", "version": 1, "entries": []}' > old-index.json
 expect 2 "packages of an old index" -- "$BIN" packages old-index.json
 contains "$ERR" "has no package inventory" "an index from before the inventory says so"
+
+# The baseline, restore --packages and diff --packages
+expect 0 "baseline" -- "$BIN" baseline kept.tar
+contains "$OUT" "$(printf 'hello 2.10-3 amd64\tto fetch')" "baseline lists each package, and whether it is cached"
+contains "$OUT" "$(printf 'by-hand 1.0 amd64\tinstalled from a .deb the image keeps')" \
+  "and what only the image has"
+expect 4 "baseline fetch of an unsigned image" -- "$BIN" baseline fetch kept.tar
+contains "$ERR" "not fetching its packages" "is refused, as restore refuses it"
+expect 2 "baseline with two arguments and no fetch" -- "$BIN" baseline kept.tar kept.tar
+mkdir -p rp
+expect 0 "restore --packages --dry-run" -- \
+  "$BIN" restore --packages --dry-run --allow-unverified --root rp kept.tar
+contains "$OUT" "apt-get update" "writes the script that would put the packages back"
+contains "$OUT" "hello=2.10-3" "with what was installed by hand, at its version"
+contains "$OUT" "[ -f /var/cache/apt/archives/by-hand_1.0_amd64.deb ]" "and the .deb the image kept"
+check "the script is sh" sh -n out.txt
+expect 2 "restore --packages onto another root" -- \
+  "$BIN" restore --packages --allow-unverified --root rp kept.tar
+contains "$ERR" "installs onto the running system" "is refused: it installs onto this one"
+sed 's/^Version: 2.10-3$/Version: 2.11-1/' pkgtree/var/lib/dpkg/status > status.new &&
+  mv status.new pkgtree/var/lib/dpkg/status
+expect 0 "capture after an upgrade" -- \
+  "$BIN" capture --root pkgtree --keep-local-packages -o kept2.tar
+expect 1 "diff --packages" -- "$BIN" diff --packages kept.tar kept2.tar
+contains "$OUT" "$(printf 'U\tapt:hello\t2.10-3 -> 2.11-1')" "names the package upgraded"
+contains "$ERR" "1 packages changed" "and counts it"
+expect 0 "diff without --packages" -- "$BIN" diff kept.tar kept2.tar
+lacks "$OUT" "apt:hello" "lists files alone, and dpkg's own files are not kept"
+expect 2 "--firmware without --target" -- "$BIN" buildsheet --firmware uefi kept.tar
+contains "$ERR" "--firmware needs --target" "is refused"
+expect 2 "--firmware of an unknown kind" -- "$BIN" buildsheet --target vm --firmware efi kept.tar
 expect 2 "packages of a missing file" -- "$BIN" packages no-such-index.json
 
 # Files checked against the packages that installed them: dpkg's digests.

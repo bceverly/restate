@@ -49,6 +49,7 @@ struct rs_auto_opts {
     /* With --exact-versions, the apt snapshot ID to take versions the
      * archive has moved on from from (packages.h), or NULL. */
     const char           *snapshot;
+    const char           *firmware;   /* "uefi" or "bios" to boot by, or NULL: as it did */
 };
 
 /* Where the autoinstall file puts the keyring restore checks the image

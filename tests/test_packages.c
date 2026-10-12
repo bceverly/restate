@@ -216,6 +216,7 @@ static void make_apt(const char *t)
         "Types: deb\n"
         "Components: main\n");
     put(t, "etc/apt/sources.list.d/old.list.bak", "deb http://bak.example.com stable main\n");
+    put(t, "var/lib/dpkg/info/oldie.list", "/usr/bin/oldie\n");
     /* Keys in the shapes apt reads: binary, with an old-format or a
      * new-format public-key packet first, and armored. */
     put(t, "usr/share/keyrings/archive.gpg", "\x99\x01\x0dkey");
@@ -310,6 +311,12 @@ static void test_apt(void)
     CHECK_STR(rs_jobject_str(p, "unavailable"), "local");
     p = find(pkgs, "name", "oldie");
     CHECK_STR(rs_jobject_str(p, "unavailable"), "superseded");
+    /* Where another version is now, and when this one was installed: what
+     * the archive's snapshot is searched by. */
+    CHECK(any_contains(rs_jobject_get(p, "superseded_in"),
+                       "http://archive.example.com/ubuntu stable/main"));
+    CHECK(rs_jobject_str(p, "installed") != NULL);
+    CHECK(rs_jobject_str(find(pkgs, "name", "zoom"), "installed") == NULL);
     CHECK_INT(count_of(apt, "local"), 1);
     CHECK_INT(count_of(apt, "superseded"), 1);
     CHECK_INT(count_of(apt, "manual"), 5);
@@ -326,6 +333,17 @@ static void test_apt(void)
     CHECK_INT(rs_jobject_get(p, "components")->n, 2);
     CHECK(any_contains(rs_jobject_get(&src->items[3], "uris"), "ppa.example.com"));
     CHECK_STR(rs_jobject_str(&src->items[3], "signed_by"), "the key in this file");
+    /* The key itself, as it is in the file. */
+    {
+        struct rs_buf key;
+        const char   *b64 = rs_jobject_str(&src->items[3], "key");
+
+        rs_buf_init(&key);
+        CHECK(b64 && rs_base64_decode(b64, strlen(b64), &key));
+        CHECK(key.data && rs_starts_with(key.data, "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+                                                   "mQINBGT\n-----END"));
+        rs_buf_free(&key);
+    }
     CHECK(rs_jobject_get(&src->items[4], "enabled") != NULL);
 
     keys = rs_jobject_get(apt, "keys");
@@ -992,6 +1010,64 @@ static void test_apt_words(void)
         CHECK_CONTAINS(got.data ? got.data : "", "apt could not use the archive's snapshot");
         rs_buf_free(&got);
 
+        /* A version the archive had moved on from before the capture: from
+         * its snapshot as of when it was installed, where it was. */
+        {
+            static const char dated[] =
+                "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+                "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"9\","
+                " \"manual\": true},"
+                "{\"name\": \"oldie\", \"architecture\": \"amd64\", \"version\": \"1.0\","
+                " \"manual\": true, \"unavailable\": \"superseded\","
+                " \"installed\": \"2026-01-02T03:04:05.000000000Z\"},"
+                "{\"name\": \"older\", \"architecture\": \"amd64\", \"version\": \"0.9\","
+                " \"manual\": true, \"unavailable\": \"superseded\","
+                " \"installed\": \"2026-01-02T03:04:05.000000000Z\"},"
+                "{\"name\": \"undated\", \"architecture\": \"amd64\", \"version\": \"3\","
+                " \"manual\": true, \"unavailable\": \"superseded\"}]}}";
+            static const char apt2[] =
+                "#!/bin/sh\n"
+                "case \" $* \" in\n"
+                "  *' --snapshot 20260102T030405Z older=0.9 '*) exit 100 ;;\n"
+                "  *' --snapshot '*) ;;\n"
+                "esac\n"
+                "[ \"$1\" = -s ] || echo \"$*\" >> \"$LOG\"\n";
+            struct rs_jval dpk;
+
+            memset(&dpk, 0, sizeof(dpk));
+            rs_buf_init(&err);
+            rs_json_init(&jp, dated, sizeof(dated) - 1, &err);
+            CHECK(rs_json_value(&jp, &dpk));
+            rs_buf_free(&err);
+            rs_buf_reset(&script);
+            rs_packages_apt_script(&dpk, NULL, "20261010T191440Z", &script);
+            CHECK_CONTAINS(script.data, "<<'DATED'\n20260102T030405Z older=0.9\n"
+                                        "20260102T030405Z oldie=1.0\nDATED\n");
+            rs_test_write(t, "install.sh", script.data, 0755);
+            rs_test_write(t, "apt-get", apt2, 0755);
+            rs_test_write(t, "log", "", 0644);
+            {
+                char *ns = rs_xasprintf("%s/nosnap", t);
+
+                (void)unlink(ns);
+                free(ns);
+            }
+            CHECK(system(cmd) == 0);
+            CHECK(rs_read_beneath(t, "/log", 4096, &got));
+            /* older is not in that snapshot: at the version there is now. */
+            CHECK_CONTAINS(got.data ? got.data : "",
+                           "update --snapshot 20260102T030405Z\n"
+                           "install -y --allow-downgrades --snapshot 20260102T030405Z oldie=1.0\n"
+                           "update\ninstall -y older\n");
+            rs_buf_free(&got);
+            /* Without --exact-versions, all three at the versions there are now. */
+            rs_buf_reset(&script);
+            rs_packages_apt_script(&dpk, NULL, NULL, &script);
+            CHECK(strstr(script.data, "DATED") == NULL);
+            CHECK_CONTAINS(script.data, "\noldie\n");
+            rs_jval_free(&dpk);
+        }
+
         /* Anything but an ID is no snapshot at all. */
         rs_buf_reset(&script);
         rs_packages_apt_script(&pk, NULL, "20261010T1914'0Z", &script);
@@ -1005,6 +1081,35 @@ static void test_apt_words(void)
         rs_test_rmtree(t);
         free(t);
     }
+}
+
+static void test_fresh(void)
+{
+    char                 *t = rs_test_tmpdir();
+    struct rs_jval        out;
+    const struct rs_jval *apt;
+    const struct rs_jval *archs;
+
+    TEST_CASE("a fresh system: one architecture, and apt's lists not read");
+    put(t, "var/lib/dpkg/status",
+        "Package: dpkg\nStatus: install ok installed\nArchitecture: arm64\nVersion: 1.22\n\n"
+        "Package: jq\nStatus: install ok installed\nArchitecture: arm64\nVersion: 1.7\n");
+    put(t, "var/lib/apt/lists/x.example.com_dists_s_main_binary-arm64_Packages.lz4", "");
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+    apt = rs_jobject_get(&out, "apt");
+    archs = rs_jobject_get(apt, "architectures");
+    /* No /var/lib/dpkg/arch until a second architecture is added: dpkg's. */
+    CHECK(archs && archs->n == 1 && archs->items[0].type == RS_JSTRING &&
+          strcmp(archs->items[0].s, "arm64") == 0);
+    /* Not "local": where they came from is not known, which is not the same. */
+    CHECK(rs_jobject_get(find(rs_jobject_get(apt, "packages"), "name", "jq"), "unavailable") ==
+          NULL);
+    CHECK_INT(count_of(apt, "local"), 0);
+    CHECK(any_contains(rs_jobject_get(&out, "notes"), "compressed"));
+    rs_jval_free(&out);
+    rs_test_rmtree(t);
+    free(t);
 }
 
 static void test_empty(void)
@@ -1104,6 +1209,7 @@ void test_packages(void)
     test_alternatives();
     test_keep();
     test_apt_words();
+    test_fresh();
     test_empty();
     test_in_index();
 }

@@ -37,6 +37,7 @@ struct rs_sheet_opts {
     const char           *trust;
     /* As rs_auto_opts.snapshot. */
     const char           *snapshot;
+    const char           *firmware;   /* "uefi" or "bios" to boot by, or NULL: as it did */
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

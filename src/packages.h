@@ -92,6 +92,10 @@ char **rs_packages_kept(const struct rs_jval *packages, size_t *n);
 char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
                              bool pinned, size_t *n);
 
+/* Whether `name` is one the installer chooses for the machine it installs
+ * onto -- the kernel, the boot loader -- rather than one to install again. */
+bool rs_packages_installers_choice(const char *name);
+
 /*
  * A POSIX sh script that installs the apt packages installed by hand (as
  * rs_packages_apt_words chooses them) as nearly as it can, because one

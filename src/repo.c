@@ -631,6 +631,9 @@ struct rs_repo {
     size_t             nchunks;
     size_t             unreadable; /* packs whose .idx could not be read */
     bool               loaded;
+    /* An encrypted repository's chunk boundaries follow a key of its own
+     * (see chunk_key); NULL for the fixed table everyone shares. */
+    uint64_t          *gear;
 };
 
 bool rs_repo_name_valid(const char *name)
@@ -1287,6 +1290,7 @@ void rs_repo_close(struct rs_repo *r)
         (void)close(r->readers_fd);
     }
     rs_repo_free_names(r->packs, r->npacks);
+    free(r->gear);
     map_free(&r->objects);
     map_free(&r->listed);
     free(r->lists);
@@ -2156,7 +2160,54 @@ static void make_gear(void)
     gear_made = true;
 }
 
+static size_t cut_with(const uint64_t *table, const unsigned char *p, size_t n);
+
 size_t rs_repo_chunk_cut(const unsigned char *p, size_t n)
+{
+    if (!gear_made)
+    {
+        make_gear();
+    }
+    return cut_with(gear, p, n);
+}
+
+/* The table a key gives: each byte value's number the first eight bytes of
+ * SHA-256(key, value). */
+static void keyed_gear(const unsigned char key[32], uint64_t table[256])
+{
+    size_t i;
+
+    for (i = 0; i < 256; i++)
+    {
+        struct rs_sha256 ctx;
+        char             hex[RS_SHA256_HEX_SIZE];
+        unsigned char    b = (unsigned char)i;
+        uint64_t         v = 0;
+        size_t           k;
+
+        rs_sha256_init(&ctx);
+        rs_sha256_update(&ctx, key, 32);
+        rs_sha256_update(&ctx, &b, 1);
+        rs_sha256_final(&ctx, hex);
+        for (k = 0; k < 16; k++)
+        {
+            char c = hex[k];
+
+            v = (v << 4) | (uint64_t)(c <= '9' ? c - '0' : c - 'a' + 10);
+        }
+        table[i] = v;
+    }
+}
+
+size_t rs_repo_chunk_cut_keyed(const unsigned char key[32], const unsigned char *p, size_t n)
+{
+    uint64_t table[256];
+
+    keyed_gear(key, table);
+    return cut_with(table, p, n);
+}
+
+static size_t cut_with(const uint64_t *table, const unsigned char *p, size_t n)
 {
     /* FastCDC: a rolling hash over the bytes since the chunk's minimum,
      * cut where its top bits are all zero -- harder to meet before the
@@ -2168,10 +2219,6 @@ size_t rs_repo_chunk_cut(const unsigned char *p, size_t n)
     size_t         normal;
     size_t         i;
 
-    if (!gear_made)
-    {
-        make_gear();
-    }
     if (n <= RS_REPO_CHUNK_MIN)
     {
         return n;
@@ -2183,7 +2230,7 @@ size_t rs_repo_chunk_cut(const unsigned char *p, size_t n)
     normal = n < RS_REPO_CHUNK_AVG ? n : RS_REPO_CHUNK_AVG;
     for (i = RS_REPO_CHUNK_MIN; i < normal; i++)
     {
-        h = (h << 1) + gear[p[i]];
+        h = (h << 1) + table[p[i]];
         if ((h & hard) == 0)
         {
             return i + 1;
@@ -2191,7 +2238,7 @@ size_t rs_repo_chunk_cut(const unsigned char *p, size_t n)
     }
     for (; i < n; i++)
     {
-        h = (h << 1) + gear[p[i]];
+        h = (h << 1) + table[p[i]];
         if ((h & easy) == 0)
         {
             return i + 1;
@@ -2227,6 +2274,123 @@ struct rs_repo_writer {
     struct rs_buf    *err;
 };
 
+/* Clears a key, through a volatile pointer: a memset of what is not read
+ * again is one the compiler may leave out. */
+static void wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+
+    while (n-- > 0)
+    {
+        *v++ = 0;
+    }
+}
+
+/* 32 bytes from the kernel's random source, or false: a key has no
+ * stand-in. */
+static bool random_key(unsigned char key[32])
+{
+    int    fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    size_t got = 0;
+
+    while (fd >= 0 && got < 32)
+    {
+        ssize_t n = read(fd, key + got, 32 - got);
+
+        if (n <= 0)
+        {
+            break;
+        }
+        got += (size_t)n;
+    }
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+    return got == 32;
+}
+
+/*
+ * The key an encrypted repository's chunk boundaries follow. Chunk sizes are
+ * what is left to see of an encrypted chunk, and with boundaries anyone can
+ * work out, they would say which known files a repository holds; keyed, they
+ * say nothing. The key is kept in the repository, encrypted to its keys as
+ * everything else is (RS_REPO_CHUNK_KEY), and in this machine's cache, where
+ * a capture -- which has no secret key -- reads it. A machine that has
+ * neither the cache nor the secret key makes a key of its own: the same files
+ * are then cut differently there, and a large one that changed is stored
+ * whole once more. Without a random source, the fixed table.
+ */
+static void chunk_key(struct rs_repo *r)
+{
+    char         *path = rs_xasprintf("%s/%s", r->dir, RS_REPO_CHUNK_KEY);
+    unsigned char key[32];
+    char          hex[RS_SHA256_HEX_SIZE];
+    struct rs_buf b;
+    struct rs_buf err;
+    struct stat   st;
+    bool          have = false;
+    bool          there = lstat(path, &st) == 0;
+
+    rs_buf_init(&err);
+    if (cache_get(r, "keys", "chunks", 128, &b))
+    {
+        have = b.len >= 64 && unhex(b.data, key);
+        rs_buf_free(&b);
+    }
+    if (!have && there)
+    {
+        bool sealed;
+
+        have = read_sealed(path, 4096, true, &b, &sealed, &err) && b.len >= 64 &&
+               unhex(b.data, key);
+        rs_buf_free(&b);
+        if (have)
+        {
+            to_hex(key, hex);
+            cache_put(r, "keys", "chunks", hex, 64);
+        }
+    }
+    if (!have)
+    {
+        if (!random_key(key))
+        {
+            rs_warn("%s: there is no random source to make its chunking key from; its chunks "
+                    "are cut as an unencrypted repository's are", r->dir);
+            free(path);
+            rs_buf_free(&err);
+            return;
+        }
+        to_hex(key, hex);
+        cache_put(r, "keys", "chunks", hex, 64);
+        if (!there)
+        {
+            char *tmp = rs_xasprintf("%s/.%s.%ld.tmp", r->dir, RS_REPO_CHUNK_KEY, (long)getpid());
+
+            rs_buf_reset(&err);
+            if (!write_out(tmp, hex, 64, false, r->recips, seal_n(r), &err) ||
+                (link(tmp, path) != 0 && errno != EEXIST))
+            {
+                rs_warn("%s: its chunking key could not be kept there (%s); this machine "
+                        "keeps it", r->dir, err.len ? err.data : strerror(errno));
+            }
+            (void)unlink(tmp);
+            free(tmp);
+        } else
+        {
+            rs_warn("%s: its chunking key cannot be read here without the secret key, and "
+                    "this machine has no copy of it; a new one is used, so large files are "
+                    "stored whole once more", r->dir);
+        }
+    }
+    r->gear = rs_xcalloc(256, sizeof(*r->gear));
+    keyed_gear(key, r->gear);
+    wipe(key, sizeof(key));
+    wipe(hex, sizeof(hex));
+    free(path);
+    rs_buf_free(&err);
+}
+
 struct rs_repo_writer *rs_repo_writer_begin(struct rs_repo *r, struct rs_buf *err)
 {
     struct rs_repo_writer *w;
@@ -2248,6 +2412,10 @@ struct rs_repo_writer *rs_repo_writer_begin(struct rs_repo *r, struct rs_buf *er
     w->r = r;
     w->buf = rs_xmalloc(RS_REPO_CHUNK_MAX);
     load_objects(r);
+    if (r->encrypted && !r->gear)
+    {
+        chunk_key(r);
+    }
     /* A gzip that dies would otherwise kill restate with SIGPIPE on the next
      * write into it, before it could say why or clear up. */
     memset(&ignore, 0, sizeof(ignore));
@@ -2344,7 +2512,8 @@ static bool put_chunk(struct rs_repo_writer *w, const unsigned char *p, size_t l
 /* Cuts the first chunk off what is gathered, and stores it. */
 static bool cut_one(struct rs_repo_writer *w)
 {
-    size_t cut = rs_repo_chunk_cut(w->buf, w->len);
+    size_t cut = w->r->gear ? cut_with(w->r->gear, w->buf, w->len)
+                            : rs_repo_chunk_cut(w->buf, w->len);
 
     if (!put_chunk(w, w->buf, cut))
     {

@@ -32,6 +32,7 @@
 #include <stdint.h>
 
 #include "json.h"
+#include "util.h"
 
 /*
  * Checks every enabled source in `packages` (rs_packages_describe's
@@ -50,5 +51,26 @@ size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now,
  * the tests and the fuzzer.
  */
 bool rs_sources_valid_until(const char *release, int64_t *when);
+
+/*
+ * The index a repository serves at `base` (a URL ending in a slash: the
+ * suite's directory) -- InRelease, or Release and Release.gpg -- fetched into
+ * `home` and checked with gpgv against the keys the source `src` names, from
+ * `apt`'s inventory of them, as apt itself would; with `now` > 0, its
+ * Valid-Until too (an archive's snapshot is long expired, and is not held to
+ * it). Only the text the signature covers goes into `text`, NUL-terminated.
+ * False, with why in `why`, if it cannot be had or is not what it should be.
+ */
+bool rs_sources_release(const struct rs_jval *apt, const struct rs_jval *src, const char *base,
+                        const char *home, int64_t now, struct rs_buf *text, struct rs_buf *why);
+
+/*
+ * The text an InRelease file's signature covers, into `out`, NUL-terminated:
+ * as apt splits a clear-signed file, strictly -- the armor header first, the
+ * "Hash:" lines, the text with its dash-escaping undone, the signature, and
+ * nothing else -- so nothing outside the signature can be read as part of
+ * it. False if it is not in that form. Exposed for the tests and the fuzzer.
+ */
+bool rs_sources_signed_part(const char *text, size_t len, struct rs_buf *out);
 
 #endif /* RESTATE_SOURCES_H */

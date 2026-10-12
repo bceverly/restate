@@ -28,6 +28,7 @@ static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg", "
 static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz" };
 static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin/gpgconf",
                                              "/bin/gpgconf" };
+static const char *const sh_paths[] = { "/bin/sh", "/usr/bin/sh" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -35,6 +36,9 @@ static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin
 static const char *const no_env[] = { NULL };
 static const char *const curl_env[] = {
     "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY", NULL
+};
+static const char *const sh_env[] = {
+    "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", NULL
 };
 static const char *const gpg_env[] = {
     "HOME", "GNUPGHOME", "GPG_TTY", "TERM", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
@@ -64,6 +68,7 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("gpg", gpg_paths, gpg_env),
     PROGRAM("pigz", pigz_paths, no_env),
     PROGRAM("gpgconf", gpgconf_paths, no_env),
+    PROGRAM("sh", sh_paths, sh_env),
 };
 
 #undef PROGRAM
@@ -467,16 +472,17 @@ bool rs_run(enum rs_program p, char *const argv[], struct rs_buf *out, struct rs
     return rs_wait(pid, code, err);
 }
 
-bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, int *code,
-             struct rs_buf *why, struct rs_buf *err)
+bool rs_curl_many(const char *const *urls, const char *const *dests, size_t count,
+                  const struct rs_curl_opts *co, int *code, struct rs_buf *why,
+                  struct rs_buf *err)
 {
     struct rs_buf errtext;
-    bool          local = rs_starts_with(url, "file://");
+    bool          local = count > 0 && rs_starts_with(urls[0], "file://");
     const char   *protos = local ? "=file" : co->plain_http ? "=http,https" : "=https";
-    char         *argv[32];
+    char        **argv = rs_xcalloc(24 + 3 * count, sizeof(*argv));
     char          limit[24];
-    int           n = 0;
-    int           i;
+    size_t        n = 0;
+    size_t        i;
     bool          ok;
 
     argv[n++] = rs_xstrdup("curl");
@@ -506,9 +512,14 @@ bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, i
         argv[n++] = rs_xstrdup("--continue-at");
         argv[n++] = rs_xstrdup("-");
     }
-    argv[n++] = rs_xstrdup("--output");
-    argv[n++] = rs_xstrdup(dest);
-    argv[n++] = rs_xstrdup(url);
+    /* One process, one connection, for many files from one server; a URL
+     * that fails does not stop the rest. */
+    for (i = 0; i < count; i++)
+    {
+        argv[n++] = rs_xstrdup("--output");
+        argv[n++] = rs_xstrdup(dests[i]);
+        argv[n++] = rs_xstrdup(urls[i]);
+    }
     argv[n] = NULL;
     rs_buf_init(&errtext);
     ok = rs_run(RS_PROG_CURL, argv, NULL, co->progress ? NULL : &errtext, code, err);
@@ -516,6 +527,7 @@ bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, i
     {
         free(argv[i]);
     }
+    free(argv);
     if (ok && *code != 0)
     {
         while (errtext.len > 0 && (errtext.data[errtext.len - 1] == '\n' ||
@@ -529,4 +541,10 @@ bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, i
     }
     rs_buf_free(&errtext);
     return ok;
+}
+
+bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, int *code,
+             struct rs_buf *why, struct rs_buf *err)
+{
+    return rs_curl_many(&url, &dest, 1, co, code, why, err);
 }

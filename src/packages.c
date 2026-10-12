@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "index.h"
@@ -500,6 +501,8 @@ struct pkg {
     bool    listed;    /* some repository has another version of it */
     size_t *origins;   /* indexes into the origin labels */
     size_t  norigins;
+    size_t *others;    /* the labels of the repositories with another version */
+    size_t  nothers;
 };
 
 struct apt {
@@ -555,6 +558,7 @@ static void free_apt(struct apt *apt)
         free(apt->pkgs[i].version);
         free(apt->pkgs[i].state);
         free(apt->pkgs[i].origins);
+        free(apt->pkgs[i].others);
     }
     free(apt->pkgs);
     free_list(apt->labels, apt->nlabels);
@@ -749,9 +753,19 @@ static void add_signed_by(struct repos *rs, struct rs_jval *src, const char *val
 {
     const char *p = value;
 
-    if (strstr(value, "BEGIN PGP PUBLIC KEY BLOCK"))
+    const char *armor = strstr(value, "-----BEGIN PGP PUBLIC KEY BLOCK");
+
+    if (armor)
     {
+        struct rs_buf b64;
+
+        /* The key itself, which a check of the source's index needs: the
+         * file is in /etc/apt, but an inventory is read without the image. */
         rs_jobj_str(src, "signed_by", "the key in this file");
+        rs_buf_init(&b64);
+        rs_base64_encode(&b64, armor, strlen(armor));
+        rs_jobj_str(src, "key", b64.data ? b64.data : "");
+        rs_buf_free(&b64);
         return;
     }
     rs_jobj_str(src, "signed_by", value);
@@ -1040,29 +1054,30 @@ static const char *list_label(const struct repos *rs, const char *file)
     return file;
 }
 
-static void add_origin(struct pkg *p, size_t label)
+static void add_label(size_t **list, size_t *n, size_t label)
 {
     size_t i;
 
-    for (i = 0; i < p->norigins; i++)
+    for (i = 0; i < *n; i++)
     {
-        if (p->origins[i] == label)
+        if ((*list)[i] == label)
         {
             return;
         }
     }
-    p->origins = rs_xreallocarray(p->origins, p->norigins + 1, sizeof(*p->origins));
-    p->origins[p->norigins++] = label;
+    *list = rs_xreallocarray(*list, *n + 1, sizeof(**list));
+    (*list)[(*n)++] = label;
 }
 
-static void read_lists(const char *root, const struct repos *rs, struct apt *apt,
-                       struct rs_jval *out)
+static size_t read_lists(const char *root, const struct repos *rs, struct apt *apt,
+                         struct rs_jval *out)
 {
     static const char *const wanted[] = { "Package", "Architecture", "Version", NULL };
     char                   **names;
     size_t                   n;
     size_t                   i;
     bool                     compressed = false;
+    size_t                   read = 0;
     struct stanza            s;
 
     memset(&s, 0, sizeof(s));
@@ -1090,6 +1105,7 @@ static void read_lists(const char *root, const struct repos *rs, struct apt *apt
             continue;
         }
         label = label_index(apt, list_label(rs, names[i]));
+        read++;
         s.eof = false;
         while (stanza_next(fp, wanted, &s))
         {
@@ -1100,10 +1116,11 @@ static void read_lists(const char *root, const struct repos *rs, struct apt *apt
 
             if (p && version && strcmp(p->version, version) == 0)
             {
-                add_origin(p, label);
+                add_label(&p->origins, &p->norigins, label);
             } else if (p)
             {
                 p->listed = true;
+                add_label(&p->others, &p->nothers, label);
             }
         }
         (void)fclose(fp);
@@ -1115,6 +1132,7 @@ static void read_lists(const char *root, const struct repos *rs, struct apt *apt
         note(out, "apt keeps its package lists compressed here, and they were not read: "
                   "where each package came from is not recorded");
     }
+    return read;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1235,6 +1253,47 @@ static void describe_keys(const char *root, struct repos *rs, struct rs_jval *ap
     }
 }
 
+/*
+ * When a package was installed, as "installed": when dpkg last wrote its list
+ * of files, which it does as it unpacks each version. A version the archive
+ * had moved on from by the capture was in the archive then, so the archive's
+ * snapshot as of that time has it (--exact-versions).
+ */
+static void installed_at(const char *root, const struct pkg *p, struct rs_jval *o)
+{
+    static const char allowed[] = "abcdefghijklmnopqrstuvwxyz0123456789+.-";
+    struct stat       st;
+    char             *rel;
+    bool              found;
+
+    /* Both from the tree's own status file: nothing that leaves the directory. */
+    if (p->name[0] == '\0' || p->name[0] == '.' || strspn(p->name, allowed) != strlen(p->name) ||
+        strspn(p->arch, allowed) != strlen(p->arch))
+    {
+        return;
+    }
+    rel = rs_xasprintf("/var/lib/dpkg/info/%s:%s.list", p->name, p->arch);
+    found = stat_beneath(root, rel, &st);
+    free(rel);
+    if (!found)
+    {
+        rel = rs_xasprintf("/var/lib/dpkg/info/%s.list", p->name);
+        found = stat_beneath(root, rel, &st);
+        free(rel);
+    }
+    if (found)
+    {
+        struct rs_time t;
+        char           buf[RS_TIME_STR_MAX];
+
+        t.sec = (int64_t)st.st_mtime;
+        t.nsec = 0;
+        t.set = true;
+        rs_time_format(&t, buf);
+        rs_jobj_str(o, "installed", buf);
+    }
+}
+
 static void describe_apt(const char *root, struct rs_jval *out)
 {
     struct apt      apt;
@@ -1247,6 +1306,7 @@ static void describe_apt(const char *root, struct rs_jval *out)
     uint64_t        manual = 0;
     uint64_t        superseded = 0;
     uint64_t        local = 0;
+    size_t          lists;
 
     memset(&apt, 0, sizeof(apt));
     memset(&rs, 0, sizeof(rs));
@@ -1261,11 +1321,25 @@ static void describe_apt(const char *root, struct rs_jval *out)
     {
         add_words(array_member(a, "architectures"), archs.data, false);
         rs_buf_free(&archs);
+    } else
+    {
+        /* dpkg writes the file only once a second architecture is added:
+         * until then the machine's own is dpkg's. */
+        const struct pkg *d = NULL;
+
+        for (i = 0; !d && i < apt.npkgs; i++)
+        {
+            d = strcmp(apt.pkgs[i].name, "dpkg") == 0 ? &apt.pkgs[i] : NULL;
+        }
+        if (d && d->arch[0] && strcmp(d->arch, "all") != 0)
+        {
+            rs_jval_set_string(rs_jarr_add(array_member(a, "architectures")), d->arch);
+        }
     }
     read_all_sources(root, &rs, a);
     trusted_keys(root, &rs);
     describe_keys(root, &rs, a, out);
-    read_lists(root, &rs, &apt, out);
+    lists = read_lists(root, &rs, &apt, out);
 
     arr = array_member(a, "packages");
     for (i = 0; i < apt.npkgs; i++)
@@ -1296,9 +1370,19 @@ static void describe_apt(const char *root, struct rs_jval *out)
          * installed is in no repository's list: "superseded" where a
          * repository has another version of it now, "local" where none has
          * it at all -- installed from a .deb. */
-        if (p->norigins == 0)
+        if (p->norigins == 0 && lists > 0)
         {
             rs_jobj_str(o, "unavailable", p->listed ? "superseded" : "local");
+            if (p->listed)
+            {
+                /* Where to look for it in the archive's snapshot. */
+                from = array_member(o, "superseded_in");
+                for (j = 0; j < p->nothers; j++)
+                {
+                    rs_jval_set_string(rs_jarr_add(from), apt.labels[p->others[j]]);
+                }
+                installed_at(root, p, o);
+            }
             superseded += p->listed ? 1 : 0;
             local += p->listed ? 0 : 1;
         }
@@ -1773,7 +1857,7 @@ static bool named_in(const struct rs_jval *arr, const char *name)
  * the hardware, and asking for the old ones by name onto a different machine
  * -- a VM, say -- can remove the boot loader the installer just set up.
  */
-static bool installers_choice(const char *name)
+bool rs_packages_installers_choice(const char *name)
 {
     static const char *const prefixes[] = { "grub-", "grub2-", "shim", "linux-image-",
                                             "linux-headers-", "linux-modules-", "linux-generic",
@@ -1790,8 +1874,31 @@ static bool installers_choice(const char *name)
     return false;
 }
 
-char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
-                             bool pinned, size_t *n)
+/* The snapshot ID as of when a superseded package was installed, or NULL. */
+static char *dated(const struct rs_jval *p)
+{
+    const char *why = rs_jobject_str(p, "unavailable");
+    const char *when = rs_jobject_str(p, "installed");
+
+    struct rs_time t;
+    struct tm      tm;
+    time_t         sec;
+    char           buf[RS_TIME_STR_MAX];
+
+    if (!why || !when || strcmp(why, "superseded") != 0 || !rs_time_parse(when, &t))
+    {
+        return NULL;
+    }
+    sec = (time_t)t.sec;
+    if (!gmtime_r(&sec, &tm) || strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", &tm) == 0)
+    {
+        return NULL;
+    }
+    return rs_xstrdup(buf);
+}
+
+static char **apt_words(const struct rs_jval *packages, const struct rs_jval *skip, bool pinned,
+                        bool leave_dated, size_t *n)
 {
     const struct rs_jval *apt = rs_jobject_get(packages, "apt");
     const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
@@ -1813,9 +1920,20 @@ char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jva
                                         strcmp(arch, native) != 0;
 
         if (!name || !flag(p, "manual") || (why && strcmp(why, "local") == 0) ||
-            named_in(skip, name) || installers_choice(name))
+            named_in(skip, name) || rs_packages_installers_choice(name))
         {
             continue;
+        }
+        if (leave_dated)
+        {
+            char *id = dated(p);
+            bool  later = id != NULL;
+
+            free(id);
+            if (later)
+            {
+                continue;
+            }
         }
         words = rs_xreallocarray(words, *n + 1, sizeof(*words));
         if (pinned && !why && version)
@@ -1828,6 +1946,12 @@ char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jva
         }
     }
     return words;
+}
+
+char **rs_packages_apt_words(const struct rs_jval *packages, const struct rs_jval *skip,
+                             bool pinned, size_t *n)
+{
+    return apt_words(packages, skip, pinned, false, n);
 }
 
 /* Whether `word` (NAME[:ARCH][=VERSION]) is made only of what Debian allows
@@ -1900,6 +2024,108 @@ static void decide(struct rs_buf *out, const char *indent, const char *extra, co
     rs_buf_addf(out, "%s  fi\n", indent);
 }
 
+static int compare_strings(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/*
+ * The versions that had left the archive before the capture, each from the
+ * archive's snapshot as of when it was installed ("ID WORD" lines, sorted, so
+ * each snapshot's lists are fetched once); any that cannot be had there, at
+ * the version there is now.
+ */
+static void dated_block(const struct rs_jval *packages, const struct rs_jval *skip,
+                        struct rs_buf *out)
+{
+    const struct rs_jval *apt = rs_jobject_get(packages, "apt");
+    const struct rs_jval *pkgs = rs_jobject_get(apt, "packages");
+    const struct rs_jval *archs = rs_jobject_get(apt, "architectures");
+    const char           *native = archs && archs->type == RS_JARRAY && archs->n > 0 &&
+                                   archs->items[0].type == RS_JSTRING ? archs->items[0].s : NULL;
+    char                **lines = NULL;
+    size_t                n = 0;
+    size_t                i;
+
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+        const char           *name = rs_jobject_str(p, "name");
+        const char           *arch = rs_jobject_str(p, "architecture");
+        const char           *version = rs_jobject_str(p, "version");
+        bool                  foreign = arch && native && strcmp(arch, "all") != 0 &&
+                                        strcmp(arch, native) != 0;
+        char                 *id;
+        char                 *word;
+
+        if (!name || !version || !flag(p, "manual") || named_in(skip, name) ||
+            rs_packages_installers_choice(name))
+        {
+            continue;
+        }
+        id = dated(p);
+        if (!id)
+        {
+            continue;
+        }
+        word = rs_xasprintf("%s%s%s=%s", name, foreign ? ":" : "", foreign ? arch : "", version);
+        if (debian_word(word))
+        {
+            lines = rs_xreallocarray(lines, n + 1, sizeof(*lines));
+            lines[n++] = rs_xasprintf("%s %s", id, word);
+        }
+        free(word);
+        free(id);
+    }
+    if (n == 0)
+    {
+        free(lines);
+        return;
+    }
+    qsort(lines, n, sizeof(*lines), compare_strings);
+    rs_buf_addstr(out,
+                  "# The versions the archive had moved on from before the capture, each\n"
+                  "# from its snapshot as of when it was installed; any it does not have,\n"
+                  "# at the version there is now.\n"
+                  "last=''\n"
+                  "usable=''\n"
+                  "later=''\n"
+                  "while read -r id want; do\n"
+                  "  if [ \"$id\" != \"$last\" ]; then\n"
+                  "    last=$id\n"
+                  "    usable=''\n"
+                  "    if apt-get update --snapshot \"$id\" < /dev/null > /dev/null 2>&1; then\n"
+                  "      usable=yes\n"
+                  "    fi\n"
+                  "  fi\n"
+                  "  name=${want%%=*}\n"
+                  "  if [ -n \"$usable\" ] && apt-get install -y --allow-downgrades --snapshot \"$id\" "
+                  "\"$want\" < /dev/null; then\n"
+                  "    echo \"restate: $want, from the archive's snapshot as of $id\" >&2\n"
+                  "    ok=\"$ok $want\"\n"
+                  "  else\n"
+                  "    later=\"$later $name\"\n"
+                  "  fi\n"
+                  "done <<'DATED'\n");
+    for (i = 0; i < n; i++)
+    {
+        rs_buf_addf(out, "%s\n", lines[i]);
+        free(lines[i]);
+    }
+    free(lines);
+    rs_buf_addstr(out,
+                  "DATED\n"
+                  "apt-get update > /dev/null 2>&1 || true\n"
+                  "# shellcheck disable=SC2086\n"
+                  "if [ -n \"$later\" ] && ! apt-get install -y $later; then\n"
+                  "  for p in $later; do\n"
+                  "    apt-get install -y \"$p\" || true\n"
+                  "  done\n"
+                  "fi\n"
+                  "ok=\"$ok $later\"\n"
+                  "newer=\"$newer $later\"\n");
+}
+
 void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval *skip,
                             const char *snapshot, struct rs_buf *out)
 {
@@ -1907,7 +2133,7 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
     size_t i;
     size_t left_out = 0;
     bool   snap = snapshot_id(snapshot);
-    char **words = rs_packages_apt_words(packages, skip, true, &n);
+    char **words = apt_words(packages, skip, true, snap, &n);
 
     rs_buf_addstr(out,
                   "#!/bin/sh\n"
@@ -2016,6 +2242,7 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                       "  fi\n"
                       "  ok=\"$ok $exact $later\"\n"
                       "fi\n");
+        dated_block(packages, skip, out);
     }
     rs_buf_addstr(out,
                   "if [ -n \"$newer\" ]; then\n"

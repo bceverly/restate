@@ -13,6 +13,8 @@
  *   restate-repository           "restate-repository 2", "id HEX" -- which
  *                                names this machine's cache of it -- and
  *                                "encrypted" for one that is
+ *   chunk-key                    an encrypted repository's: the key its chunk
+ *                                boundaries follow, encrypted to its keys
  *   lock                         held by a capture, or a prune, while it runs
  *   readers                      held shared by whatever reads a snapshot's
  *                                content, and by a prune alone
@@ -48,6 +50,9 @@
  * machine's cache of the repository (/var/cache/restate/repositories/ID),
  * as it writes them, and decrypts only what it does not have, if it can.
  * Restoring, and pruning what the cache does not cover, need the secret key.
+ * Its chunks are cut where a key of its own says (chunk-key), not where
+ * anyone could work out: the sizes of encrypted chunks then say nothing
+ * about which known files it holds.
  *
  * Incremental runs: a file whose size, mtime, ctime and inode are what the
  * last snapshot recorded is not read at all (scan.h), as `git status` and
@@ -82,6 +87,7 @@
 #include "util.h"
 
 #define RS_REPO_MARKER   "restate-repository"
+#define RS_REPO_CHUNK_KEY "chunk-key"
 /* A pack is closed once this much has been written into it, before gzip:
  * small enough that reading one for a single chunk is quick. */
 #define RS_REPO_PACK_SIZE ((uint64_t)32 * 1024 * 1024)
@@ -292,6 +298,8 @@ void rs_repo_idx_free(struct rs_repo_idx *x);
 /* Where a chunk that starts at `p`, with `n` bytes there, ends: n itself if
  * that is no more than RS_REPO_CHUNK_MIN, and never past RS_REPO_CHUNK_MAX. */
 size_t rs_repo_chunk_cut(const unsigned char *p, size_t n);
+/* The same with the boundaries an encrypted repository's key gives. */
+size_t rs_repo_chunk_cut_keyed(const unsigned char key[32], const unsigned char *p, size_t n);
 
 /* Parses a repository's marker: its format's version, and whether it is
  * encrypted; false, with *newer set if a later restate made it, when it is

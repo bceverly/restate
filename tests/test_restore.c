@@ -67,7 +67,7 @@ static void capture(const char *tree, const char *img, struct rs_index *ix)
     /* The accounts in the kit, as capture puts them there. */
     {
         static const char *const kit[] = { "/etc/passwd", "/etc/group", "/etc/shadow",
-                                           "/etc/gshadow" };
+                                           "/etc/gshadow", "/etc/apt/" };
 
         iw.kit = kit;
         iw.nkit = sizeof(kit) / sizeof(kit[0]);
@@ -353,6 +353,7 @@ void test_restore(void)
         put(atree, "etc/passwd", text);
         free(text);
         put(atree, "etc/group", "root:x:0:\n");
+        put(atree, "etc/apt/sources.list", "deb http://archive.example.com/ubuntu stable main\n");
         put(atree, "home/u/doc", "doc\n");
         capture(atree, aimg, &aix);
         text = rs_xasprintf("root:x:0:0:root:/root:/bin/sh\n%s:x:%lu:%lu::/home/u:/bin/sh\n", me,
@@ -389,6 +390,34 @@ void test_restore(void)
             rs_buf_free(&r.err);
             free(out);
             free(errs);
+        }
+
+        TEST_CASE("restore: the kit alone, before the packages: not the accounts");
+        {
+            char *kroot = at(dir, "kroot");
+            char *f;
+
+            CHECK(mkdir(kroot, 0755) == 0);
+            memset(&r, 0, sizeof(r));
+            r.o.kit = true;
+            restore_into(&r, aimg, &aix, kroot, &out, &errs);
+            CHECK(r.ok);
+            CHECK_INT(r.st.files, 1);
+            CHECK_INT(r.st.missing, 0);
+            CHECK_INT(r.st.refused, 0);
+            f = at(kroot, "etc/apt/sources.list");
+            CHECK(access(f, F_OK) == 0);
+            free(f);
+            f = at(kroot, "etc/passwd");
+            CHECK(access(f, F_OK) != 0);
+            free(f);
+            f = at(kroot, "home/u/doc");
+            CHECK(access(f, F_OK) != 0);
+            free(f);
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+            free(kroot);
         }
         rs_index_free(&aix);
         free(doc);

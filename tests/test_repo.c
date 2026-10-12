@@ -366,6 +366,30 @@ static void test_pure(void)
             }
         }
         CHECK(shared + 2 >= n1);
+
+        /* With a key: cut somewhere else, the same for the same key, and
+         * still where the content says. */
+        {
+            unsigned char key[32];
+            unsigned char key2[32];
+            size_t        same = 0;
+            size_t        moved = 0;
+            size_t        n = 0;
+
+            memset(key, 7, sizeof(key));
+            memset(key2, 8, sizeof(key2));
+            for (at = 100; at < size + 100 && n < 64; n++)
+            {
+                size_t cut = rs_repo_chunk_cut_keyed(key, data + at, size + 100 - at);
+
+                CHECK_INT(rs_repo_chunk_cut_keyed(key, data + at, size + 100 - at), cut);
+                CHECK(cut > RS_REPO_CHUNK_MIN || at + cut == size + 100);
+                same += cut == rs_repo_chunk_cut(data + at, size + 100 - at);
+                moved += cut != rs_repo_chunk_cut_keyed(key2, data + at, size + 100 - at);
+                at += cut;
+            }
+            CHECK(n >= 4 && same + 2 < n && moved + 2 >= n);
+        }
         free(data);
     }
 
@@ -1072,6 +1096,27 @@ static size_t count(const char *pattern)
     return n;
 }
 
+/* The chunking key this machine's cache holds for the one repository in it. */
+static char *cached_key(const char *cache)
+{
+    char  *cmd = rs_xasprintf("cat '%s'/*/keys/chunks 2> /dev/null", cache);
+    FILE  *fp = popen(cmd, "r");
+    char   line[128];
+    char  *key = NULL;
+
+    if (fp && fgets(line, sizeof(line), fp))
+    {
+        line[strcspn(line, "\n")] = '\0';
+        key = rs_xstrdup(line);
+    }
+    if (fp)
+    {
+        (void)pclose(fp);
+    }
+    free(cmd);
+    return key;
+}
+
 static void test_encrypted(const char *dir)
 {
     char                  *home = rs_xasprintf("%s/gnupg", dir);
@@ -1080,6 +1125,8 @@ static void test_encrypted(const char *dir)
     char                  *repo = rs_xasprintf("%s/erepo", dir);
     char                  *tree = rs_xasprintf("%s/etree", dir);
     char                  *cache = rs_xasprintf("%s/cache", dir);
+    char                  *key1 = NULL;
+    char                  *key2 = NULL;
     char                  *old_home = getenv("GNUPGHOME") ? rs_xstrdup(getenv("GNUPGHOME")) : NULL;
     const char            *recips[1];
     char                  *first = NULL;
@@ -1148,8 +1195,17 @@ static void test_encrypted(const char *dir)
     CHECK(all_sealed(pattern));
     free(pattern);
     pattern = rs_xasprintf("'%s'/*/packs/*.idx", cache);
-    CHECK(count(pattern) >= 3);
+    CHECK(count(pattern) >= 2);
     free(pattern);
+    /* The chunking key: in the repository, encrypted, and here in the clear. */
+    pattern = rs_xasprintf("'%s'/" RS_REPO_CHUNK_KEY, repo);
+    CHECK(all_sealed(pattern));
+    free(pattern);
+    pattern = rs_xasprintf("'%s'/*/keys/chunks", cache);
+    CHECK_INT(count(pattern), 1);
+    free(pattern);
+    key1 = cached_key(cache);
+    CHECK(key1 && strlen(key1) == 64);
     pattern = rs_xasprintf("'%s'/*/snapshots/*.json.gz", cache);
     CHECK_INT(count(pattern), 1);
     free(pattern);
@@ -1200,6 +1256,9 @@ static void test_encrypted(const char *dir)
     rs_repo_set_recipients(r, recips, 1);
     CHECK(snap(r, tree, "2026-04-03T00:00:00.000000000Z", NULL, &st, &third));
     rs_repo_close(r);
+    /* A key of its own, since it cannot read the repository's; which stays. */
+    key2 = cached_key(cache);
+    CHECK(key2 && key1 && strcmp(key1, key2) != 0);
     r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
     CHECK(!rs_repo_prune(r, &keep, false, &pr, &err));
     CHECK_CONTAINS(err.data ? err.data : "", "could not be read");
@@ -1208,8 +1267,23 @@ static void test_encrypted(const char *dir)
     rs_repo_close(r);
     rs_quiet = false;
 
-    TEST_CASE("repo: with the key again, prune rewrites, and what is left is whole");
+    TEST_CASE("repo: with the key again, the repository's chunking key is read back");
     (void)setenv("GNUPGHOME", home, 1);
+    rs_test_rmtree(cache);
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    rs_repo_set_recipients(r, recips, 1);
+    {
+        struct rs_repo_writer *w = rs_repo_writer_begin(r, &err);
+
+        CHECK(w != NULL);
+        rs_repo_writer_abort(w);
+    }
+    rs_repo_close(r);
+    free(key2);
+    key2 = cached_key(cache);
+    CHECK(key2 && key1 && strcmp(key1, key2) == 0);
+
+    TEST_CASE("repo: with the key again, prune rewrites, and what is left is whole");
     r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
     CHECK(rs_repo_prune(r, &keep, false, &pr, &err));
     CHECK_STR(err.data ? err.data : "", "");
@@ -1237,6 +1311,8 @@ out:
     free(cmd);
     rs_buf_free(&err);
     rs_buf_free(&seen);
+    free(key1);
+    free(key2);
     free(first);
     free(second);
     free(third);

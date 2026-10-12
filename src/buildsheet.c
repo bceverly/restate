@@ -2040,6 +2040,13 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
         rs_layout_free(&s.l);
         return false;
     }
+    if (o->firmware && !rs_layout_set_firmware(&s.l, o->firmware))
+    {
+        rs_buf_addf(err, "--firmware %s: the machine description has no disk with a partition "
+                    "table to boot from", o->firmware);
+        rs_layout_free(&s.l);
+        return false;
+    }
     rs_buf_init(&s.notes);
     rs_buf_init(&ierr);
     s.have_installer = rs_installer_resolve(machine, &s.in, &ierr);

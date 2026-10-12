@@ -5,11 +5,12 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs six programs, each for something it should not do itself:
+ * restate runs seven programs, each for something it should not do itself:
  * gzip (compression), pigz (the same compression on every core, where it is
  * installed), curl (HTTPS), gpgv (OpenPGP signature checks), gpg (encrypting,
- * decrypting and signing images) and gpgconf (stopping the gpg-agent a
- * signature started in a throwaway home). Writing a compressor, a TLS stack
+ * decrypting and signing images), gpgconf (stopping the gpg-agent a
+ * signature started in a throwaway home) and sh (the script restore
+ * --packages writes, which runs apt, snap and the rest as a person would). Writing a compressor, a TLS stack
  * or an OpenPGP implementation here would be hundreds of lines of exactly the
  * code that should not be written twice; linking a library for them would end "links nothing but
  * libc". As separate processes their code stays out of this address space.
@@ -19,9 +20,9 @@
  * hand that user root -- and used only if it and its directory belong to root
  * and are writable by nobody else. It is started with posix_spawn: no shell,
  * nothing run in the child before the exec, and an environment of PATH and
- * LC_ALL plus what that one program needs: the proxy variables for curl, and
- * for gpg the home, terminal and display it finds a key and asks for its
- * passphrase with.
+ * LC_ALL plus what that one program needs: the proxy variables for curl and
+ * for sh (apt reads them), and for gpg the home, terminal and display it
+ * finds a key and asks for its passphrase with.
  *
  * And, with capture --quiesce, hooks: the scripts that pause a database or a
  * VM while its files are copied (hooks.h), held to the same rule of being
@@ -43,10 +44,11 @@ enum rs_program {
     RS_PROG_GPG,
     RS_PROG_PIGZ,
     RS_PROG_GPGCONF,
+    RS_PROG_SH,
     RS_PROG_COUNT
 };
 
-/* "gzip", "curl", "gpgv", "gpg", "pigz", "gpgconf". */
+/* "gzip", "curl", "gpgv", "gpg", "pigz", "gpgconf", "sh". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or
@@ -114,5 +116,15 @@ struct rs_curl_opts {
  */
 bool rs_curl(const char *url, const char *dest, const struct rs_curl_opts *co, int *code,
              struct rs_buf *why, struct rs_buf *err);
+
+/*
+ * The same for `count` files at once, url[i] into dests[i], in one curl and
+ * over one connection where they share a server: a URL that fails does not
+ * stop the others, and *code is curl's for the last that failed. What was
+ * fetched has to be checked file by file.
+ */
+bool rs_curl_many(const char *const *urls, const char *const *dests, size_t count,
+                  const struct rs_curl_opts *co, int *code, struct rs_buf *why,
+                  struct rs_buf *err);
 
 #endif /* RESTATE_RUN_H */

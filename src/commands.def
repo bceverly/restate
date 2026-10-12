@@ -50,6 +50,10 @@ RS_CMD(CMD_PACKAGES, "packages", "[IMAGE]",    0,  1,
 RS_CMD(CMD_INSTALLER, "installer", "[fetch] [IMAGE]", 0, 2,
        "show the installer that rebuilds this machine, or the one IMAGE was taken "
        "from; with fetch, download it and check its signature")
+RS_CMD(CMD_BASELINE, "baseline", "[fetch] [IMAGE]", 0, 2,
+       "list the exact packages this machine, or the one IMAGE was taken from, had installed; "
+       "with fetch, download each at its version, checked against its repository's signed "
+       "index, into a cache that restore --packages installs from")
 RS_CMD(CMD_BUILDSHEET, "buildsheet", "[IMAGE]", 0, 1,
        "write a plain-text runbook to rebuild this machine, or the one IMAGE was "
        "taken from: disks, encryption, LVM, filesystems, installer, restore")

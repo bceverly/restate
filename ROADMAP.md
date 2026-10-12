@@ -113,7 +113,10 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       diversions and merged /usr; what packages' scripts generate made
       expendable by rule; `--rules-only` to turn it off
 - [ ] The same for rpm, FreeBSD pkg, OpenBSD and NetBSD `+CONTENTS`
-- [ ] **Package-aware diff:** upgrades and removals reported per package
+- [x] **Package-aware diff:** `diff --packages` -- each package installed,
+      removed or upgraded (apt and snap) a line of its own, with the number of
+      files its change accounts for, and only the file changes no package
+      accounts for listed besides
 - [x] **Fetchability:** `capture --keep-local-packages` keeps the `.deb` of
       each installed version no repository has, from apt's cache (warning,
       with the `dpkg-repack` that puts one there, of each it cannot), and the
@@ -122,8 +125,11 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       the capture (`--exact-versions`: `apt-get --snapshot`, which reaches
       snapshot.ubuntu.com and snapshot.debian.org), where apt can; the newer
       version otherwise, and by default, as a security update would
-- [ ] Versions that had already left the archive when they were captured
-      (`"superseded"`), from the snapshot of a time they were in it
+- [x] Versions that had already left the archive when they were captured
+      (`"superseded"`), from the snapshot of a time they were in it: the
+      inventory records where the newer version is and when this one was
+      installed, and `--exact-versions` and `baseline fetch` take it from the
+      archive's snapshot as of then
 - [x] **Repositories apt can no longer use:** each source's index as apt
       last fetched it (InRelease, or Release and Release.gpg) checked with
       gpgv against the keys the source names -- armored ones too -- and its
@@ -197,9 +203,10 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       the machine itself (`virt-install`), sized from the captured CPUs,
       memory and used space. The machine description already records whether
       it is virtual and on what, and the space used on each filesystem
-- [ ] Changing firmware mode on the way (BIOS to UEFI, or back), which needs an
-      EFI system partition or a BIOS boot partition added; both targets keep
-      the original's mode for now
+- [x] Changing firmware mode on the way (BIOS to UEFI, or back):
+      `--firmware uefi|bios` with `--target`, an EFI system partition in place
+      of GRUB's BIOS boot partition (or added in front, on MBR), or the other
+      way
 - [x] **Image encryption at rest**: an image can hold key files (a LUKS key
       under `/etc`), so `capture --encrypt-to KEYFILE` encrypts it to OpenPGP
       public keys, with gpg in the same pipe as gzip; every command reads an
@@ -207,9 +214,12 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 
 ## Then — putting it back
 
-- [ ] **`restate baseline fetch`**: the exact packages, verified against the
-      vendor's signed archive, into `/var/cache/restate` (`/Library/Caches/restate`
-      on macOS) — itself expendable, so never inside an image
+- [x] **`restate baseline fetch`**: the exact packages, verified against the
+      vendor's signed archive -- the index by gpgv against the source's keys,
+      the list by the index's digest, each `.deb` by the list's -- into
+      `/var/cache/restate/baseline` (`/Library/Caches/restate` on macOS), from
+      the archive's snapshot where it has moved on; itself expendable, so never
+      inside an image
 - [x] **`restore`, the files:** every member checked against the index -- a
       file renamed into place only if its digest matches, a member the index
       does not list refused -- written beneath the root without following a
@@ -221,11 +231,13 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       its numbers where both have a user, the old passwords, homes and
       shells -- every owner mapped by name; `--numeric-owner`; the
       autoinstall file's account is the old machine's first person
-- [ ] **`restore`**: onto a fresh install, add the recorded sources and keys,
-      install the recorded packages at their versions (from the archive, the
-      snapshot archive, or kept `.deb` files), remove what the vendor ships
-      and the machine did not have, lay down the kept content, and restore
-      owners — mapped by name — modes, times and attributes
+- [x] **`restore --packages`**: onto a fresh install, add the recorded sources
+      and keys, install the recorded packages at their versions (from the
+      archive, the snapshot archive, the baseline or kept `.deb` files), mark
+      each installed by hand or as a dependency as it was, remove what the
+      vendor ships and the machine did not have (never the kernel, boot
+      loader, firmware or microcode), lay down the kept content, and restore
+      owners -- mapped by name -- modes, times and attributes
 - [x] **Signed images, and a restore that refuses a tampered one.**
       Encryption is not authentication: `--encrypt-to` needs only a public
       key, so anyone holding it can make an image that decrypts cleanly. So:
@@ -257,6 +269,9 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       an ACL's users and groups mapped by name; hard links as links; users
       and groups the image's owners depend on
 - [ ] ACLs that are not extended attributes: macOS's, and NFSv4 ACLs on ZFS
+- [ ] Air-gapped rebuilds: `restore --packages` with no network at all, every
+      package from the baseline and the kept `.deb` files, apt given a local
+      repository of them in place of its sources
 - [x] `status`: what has changed since the last capture, quickly -- verify's
       comparison, reading only what size, times and inode say changed
 
@@ -313,10 +328,10 @@ night without the disk filling up.
       given on each capture and prune, never read from the repository; a
       capture needing no secret key, from the machine's own cache of what it
       wrote
-- [ ] Chunk boundaries that depend on a key of the repository's, as restic's
+- [x] Chunk boundaries that depend on a key of the repository's, as restic's
       do, so that the sizes of the chunks in an encrypted repository say
-      nothing about known files -- moot while a pack is encrypted whole, which
-      hides them, and wanted if packs are ever split up
+      nothing about known files: `chunk-key`, encrypted to the repository's
+      keys and kept in the capturing machine's cache
 - [x] **Locks**: one capture or prune on a repository at a time, one
       `capture --quiesce` on a machine at a time, and exit status 5 for a run
       that found the lock taken; `--syslog` for one key=value line a

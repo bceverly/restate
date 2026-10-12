@@ -219,8 +219,40 @@ static bool write_file(const char *path, const void *data, size_t len)
 /* The keys a source is checked against, each written into `home` as a
  * binary keyring; their paths into *rings. False, with why, if the source
  * names a key the inventory does not have. */
+static bool keyring_file(const char *home, const char *data, char ***rings, size_t *n)
+{
+    struct rs_buf raw;
+    struct rs_buf bin;
+    char         *file;
+    bool          ok;
+
+    rs_buf_init(&raw);
+    rs_buf_init(&bin);
+    ok = rs_base64_decode(data, strlen(data), &raw);
+    if (ok && rs_pgp_armored(raw.data ? raw.data : "", raw.len))
+    {
+        ok = rs_pgp_dearmor(raw.data, raw.len, &bin);
+    } else if (ok)
+    {
+        rs_buf_add(&bin, raw.data ? raw.data : "", raw.len);
+    }
+    file = rs_xasprintf("%s/key%zu.gpg", home, *n);
+    ok = ok && bin.len > 0 && write_file(file, bin.data, bin.len);
+    if (ok)
+    {
+        *rings = rs_xreallocarray(*rings, *n + 1, sizeof(**rings));
+        (*rings)[(*n)++] = file;
+    } else
+    {
+        free(file);
+    }
+    rs_buf_free(&raw);
+    rs_buf_free(&bin);
+    return ok;
+}
+
 static bool keyrings(const char *home, const struct rs_jval *apt, const char *signed_by,
-                     char ***rings, size_t *n, struct rs_buf *why)
+                     const char *inline_key, char ***rings, size_t *n, struct rs_buf *why)
 {
     const struct rs_jval *keys = rs_jobject_get(apt, "keys");
     /* A Signed-By of fingerprints alone narrows apt's own keys, which is
@@ -230,15 +262,20 @@ static bool keyrings(const char *home, const struct rs_jval *apt, const char *si
 
     *rings = NULL;
     *n = 0;
+    if (inline_key)
+    {
+        if (!keyring_file(home, inline_key, rings, n))
+        {
+            rs_buf_addstr(why, "the key in its source file is not one gpgv can read");
+            return false;
+        }
+        return true;
+    }
     for (i = 0; keys && keys->type == RS_JARRAY && i < keys->n; i++)
     {
         const struct rs_jval *k = &keys->items[i];
         const char           *path = rs_jobject_str(k, "path");
         const char           *data = rs_jobject_str(k, "data");
-        struct rs_buf         raw;
-        struct rs_buf         bin;
-        char                 *file;
-        bool                  ok;
 
         if (!path || (by_path ? !names_key(signed_by, path) : !trusted_by_default(path)))
         {
@@ -254,27 +291,7 @@ static bool keyrings(const char *home, const struct rs_jval *apt, const char *si
             }
             continue;
         }
-        rs_buf_init(&raw);
-        rs_buf_init(&bin);
-        ok = rs_base64_decode(data, strlen(data), &raw);
-        if (ok && rs_pgp_armored(raw.data ? raw.data : "", raw.len))
-        {
-            ok = rs_pgp_dearmor(raw.data, raw.len, &bin);
-        } else if (ok)
-        {
-            rs_buf_add(&bin, raw.data ? raw.data : "", raw.len);
-        }
-        file = rs_xasprintf("%s/key%zu.gpg", home, *n);
-        if (ok && bin.len > 0 && write_file(file, bin.data, bin.len))
-        {
-            *rings = rs_xreallocarray(*rings, *n + 1, sizeof(**rings));
-            (*rings)[(*n)++] = file;
-        } else
-        {
-            free(file);
-        }
-        rs_buf_free(&raw);
-        rs_buf_free(&bin);
+        (void)keyring_file(home, data, rings, n);
     }
     if (by_path && *n == 0)
     {
@@ -377,8 +394,8 @@ static void add_date(struct rs_buf *b, int64_t when)
  * signature in `detached` -- is one apt accepts: signed by the source's keys,
  * and not expired by `now`. Why not, into `why`. */
 static void verify_release(const char *home, const struct rs_jval *apt, const char *signed_by,
-                           const char *release, const char *detached, int64_t now,
-                           struct rs_buf *why)
+                           const char *inline_key, const char *release, const char *detached,
+                           int64_t now, struct rs_buf *why)
 {
     char               **rings = NULL;
     size_t               nrings = 0;
@@ -390,7 +407,7 @@ static void verify_release(const char *home, const struct rs_jval *apt, const ch
     rs_buf_init(&status);
     rs_buf_init(&err);
     /* Each step says why it failed, into `why`, and the next is not taken. */
-    ok = keyrings(home, apt, signed_by, &rings, &nrings, why);
+    ok = keyrings(home, apt, signed_by, inline_key, &rings, &nrings, why);
     if (ok && !rs_pgp_gpgv(home, (const char *const *)rings, nrings, detached ? detached : release,
                            detached ? release : NULL, &status, &err))
     {
@@ -405,7 +422,8 @@ static void verify_release(const char *home, const struct rs_jval *apt, const ch
 
         if (rs_read_beneath(home, detached ? "/Release" : "/InRelease", RELEASE_MAX, &text))
         {
-            if (rs_sources_valid_until(text.data ? text.data : "", &until) && until < now)
+            if (now > 0 && rs_sources_valid_until(text.data ? text.data : "", &until) &&
+                until < now)
             {
                 rs_buf_addstr(why, "its index expired on ");
                 add_date(why, until);
@@ -431,8 +449,8 @@ static void unlink_free(char *path)
 /* One URI and suite, as apt last fetched it: why apt cannot use it, into
  * `why`; nothing if it can. */
 static void check_one(const char *root, const char *home, const struct rs_jval *apt,
-                      const char *signed_by, const char *uri, const char *suite, bool flat,
-                      int64_t now, struct rs_buf *why)
+                      const char *signed_by, const char *inline_key, const char *uri,
+                      const char *suite, bool flat, int64_t now, struct rs_buf *why)
 {
     char *detached = NULL;
     char *release = release_copy(root, home, uri, suite, flat, &detached);
@@ -443,7 +461,7 @@ static void check_one(const char *root, const char *home, const struct rs_jval *
                            "not fetch it");
     } else
     {
-        verify_release(home, apt, signed_by, release, detached, now, why);
+        verify_release(home, apt, signed_by, inline_key, release, detached, now, why);
     }
     unlink_free(release);
     unlink_free(detached);
@@ -486,8 +504,8 @@ static char *fetch(const char *home, const char *base, const char *name, struct 
 /* One URI and suite as its repository serves it now: why apt will not be
  * able to use it, into `why`; nothing if it will, or it is not http(s). */
 static void fetch_one(const char *home, const struct rs_jval *apt, const char *signed_by,
-                      const char *uri, const char *suite, bool flat, int64_t now,
-                      struct rs_buf *why)
+                      const char *inline_key, const char *uri, const char *suite, bool flat,
+                      int64_t now, struct rs_buf *why)
 {
     struct rs_buf base;
     struct rs_buf curl_why;
@@ -521,7 +539,7 @@ static void fetch_one(const char *home, const struct rs_jval *apt, const char *s
         struct rs_buf now_why;
 
         rs_buf_init(&now_why);
-        verify_release(home, apt, signed_by, release, detached, now, &now_why);
+        verify_release(home, apt, signed_by, inline_key, release, detached, now, &now_why);
         if (now_why.len > 0)
         {
             rs_buf_addf(why, "as its repository serves it now, %s", now_why.data);
@@ -564,15 +582,28 @@ size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now,
         const struct rs_jval *suites = rs_jobject_get(src, "suites");
         const struct rs_jval *comps = rs_jobject_get(src, "components");
         const char           *signed_by = rs_jobject_str(src, "signed_by");
+        const char           *inline_key = rs_jobject_str(src, "key");
         bool                  flat = !comps || comps->type != RS_JARRAY || comps->n == 0;
         struct rs_buf         why;
         size_t                u;
         size_t                s;
 
         /* Disabled, source packages only, or a key apt reads from the
-         * source file itself, which the inventory does not carry. */
+         * source file itself that an inventory from before 1.5 does not
+         * carry. */
+        if (signed_by && strcmp(signed_by, "the key in this file") == 0)
+        {
+            signed_by = NULL;
+            if (!inline_key)
+            {
+                continue;
+            }
+        } else
+        {
+            inline_key = NULL;
+        }
         if (rs_jobject_get(src, "enabled") || !has_word(rs_jobject_get(src, "types"), "deb") ||
-            (signed_by && strcmp(signed_by, "the key in this file") == 0) || !uris ||
+            !uris ||
             uris->type != RS_JARRAY || !suites || suites->type != RS_JARRAY)
         {
             continue;
@@ -589,12 +620,12 @@ size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now,
                     continue;
                 }
                 rs_buf_init(&one);
-                check_one(root, home, apt, signed_by && *signed_by ? signed_by : NULL,
+                check_one(root, home, apt, signed_by && *signed_by ? signed_by : NULL, inline_key,
                           uris->items[u].s, suites->items[s].s, flat, now, &one);
                 /* What apt has is fine; what it will fetch next may not be. */
                 if (one.len == 0 && online)
                 {
-                    fetch_one(home, apt, signed_by && *signed_by ? signed_by : NULL,
+                    fetch_one(home, apt, signed_by && *signed_by ? signed_by : NULL, inline_key,
                               uris->items[u].s, suites->items[s].s, flat, now, &one);
                 }
                 if (one.len > 0)
@@ -614,4 +645,184 @@ size_t rs_sources_check(const char *root, struct rs_jval *packages, int64_t now,
     }
     rs_pgp_home_remove(home);
     return problems;
+}
+
+/* ------------------------------------------------------------------------- */
+/* An index to fetch packages by                                              */
+/* ------------------------------------------------------------------------- */
+
+/* The line at *p, without its newline, moving past it. */
+static const char *next_line(const char **p, const char *end, size_t *len)
+{
+    const char *line = *p;
+    const char *nl = memchr(line, '\n', (size_t)(end - line));
+
+    *len = nl ? (size_t)(nl - line) : (size_t)(end - line);
+    *p = nl ? nl + 1 : end;
+    return line;
+}
+
+static bool line_is(const char *line, size_t len, const char *what)
+{
+    size_t n = strlen(what);
+
+    while (len > 0 && line[len - 1] == '\r')
+    {
+        len--;
+    }
+    return len == n && memcmp(line, what, n) == 0;
+}
+
+bool rs_sources_signed_part(const char *text, size_t len, struct rs_buf *out)
+{
+    const char *p = text;
+    const char *end = text + len;
+    const char *line;
+    size_t      n;
+    bool        body = false;
+    bool        first = true;
+
+    rs_buf_reset(out);
+    /* As apt splits one: the armor header first, nothing before it; the
+     * "Hash:" lines and a blank line; the text, dash-escaped; then the
+     * signature, and nothing after it but blank lines. */
+    line = next_line(&p, end, &n);
+    if (!line_is(line, n, "-----BEGIN PGP SIGNED MESSAGE-----"))
+    {
+        return false;
+    }
+    while (p < end)
+    {
+        line = next_line(&p, end, &n);
+        if (!body)
+        {
+            if (n == 0 || line_is(line, n, ""))
+            {
+                body = true;
+            } else if (n < 6 || memcmp(line, "Hash: ", 6) != 0)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (line_is(line, n, "-----BEGIN PGP SIGNATURE-----"))
+        {
+            while (p < end)
+            {
+                line = next_line(&p, end, &n);
+                if (line_is(line, n, "-----END PGP SIGNATURE-----"))
+                {
+                    while (p < end)
+                    {
+                        line = next_line(&p, end, &n);
+                        if (strspn(line, " \t\r") != n)
+                        {
+                            return false;
+                        }
+                    }
+                    rs_buf_add(out, "", 0);
+                    return true;
+                }
+                if (n >= 5 && memcmp(line, "-----", 5) == 0)
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+        if (n >= 5 && memcmp(line, "-----", 5) == 0)
+        {
+            return false;   /* another armor line in the text: not apt's */
+        }
+        if (n >= 2 && line[0] == '-' && line[1] == ' ')
+        {
+            line += 2;
+            n -= 2;
+        } else if (n >= 1 && line[0] == '-')
+        {
+            return false;
+        }
+        /* The newline before the signature is not part of the text. */
+        if (!first)
+        {
+            rs_buf_addc(out, '\n');
+        }
+        rs_buf_add(out, line, n);
+        first = false;
+    }
+    return false;
+}
+
+bool rs_sources_release(const struct rs_jval *apt, const struct rs_jval *src, const char *base,
+                        const char *home, int64_t now, struct rs_buf *text, struct rs_buf *why)
+{
+    const char   *signed_by = rs_jobject_str(src, "signed_by");
+    const char   *inline_key = rs_jobject_str(src, "key");
+    struct rs_buf curl_why;
+    struct rs_buf bad;
+    struct rs_buf raw;
+    char         *release;
+    char         *detached = NULL;
+    bool          ok = false;
+
+    if (signed_by && strcmp(signed_by, "the key in this file") == 0)
+    {
+        signed_by = NULL;
+        if (!inline_key)
+        {
+            rs_buf_addstr(why, "its key is in its source file, and this inventory was made "
+                               "before restate recorded it there");
+            return false;
+        }
+    } else
+    {
+        inline_key = NULL;
+    }
+    rs_buf_init(&curl_why);
+    rs_buf_init(&bad);
+    release = fetch(home, base, "InRelease", &curl_why);
+    if (!release)
+    {
+        release = fetch(home, base, "Release", &curl_why);
+        detached = release ? fetch(home, base, "Release.gpg", &curl_why) : NULL;
+    }
+    if (!release)
+    {
+        rs_buf_addf(why, "its repository does not serve an index at %s (%s)", base,
+                    curl_why.len ? curl_why.data : "curl failed");
+    } else
+    {
+        verify_release(home, apt, signed_by && *signed_by ? signed_by : NULL, inline_key,
+                       release, detached, now, &bad);
+        if (bad.len > 0)
+        {
+            rs_buf_addf(why, "its index at %s: %s", base, bad.data);
+        } else if (rs_read_beneath(home, detached ? "/Release" : "/InRelease", RELEASE_MAX, &raw))
+        {
+            /* Only what the signature covers is read. */
+            if (detached)
+            {
+                rs_buf_reset(text);
+                rs_buf_add(text, raw.data ? raw.data : "", raw.len);
+                rs_buf_add(text, "", 0);
+                ok = true;
+            } else
+            {
+                ok = rs_sources_signed_part(raw.data ? raw.data : "", raw.len, text);
+                if (!ok)
+                {
+                    rs_buf_addf(why, "its index at %s is not signed the way apt reads one", base);
+                }
+            }
+            rs_buf_free(&raw);
+        } else
+        {
+            rs_buf_addf(why, "its index at %s could not be read back", base);
+        }
+    }
+    unlink_free(release);
+    unlink_free(detached);
+    rs_buf_free(&curl_why);
+    rs_buf_free(&bad);
+    return ok;
 }

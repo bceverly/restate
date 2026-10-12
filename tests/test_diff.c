@@ -2,10 +2,13 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "diff.h"
+#include "json.h"
 #include "test.h"
 
 #define H1 "1111111111111111111111111111111111111111111111111111111111111111"
@@ -23,8 +26,8 @@ static struct rs_entry entry(const char *path, char type)
     return e;
 }
 
-static char *diff_text(const struct rs_index *a, const struct rs_index *b,
-                       struct rs_diff_stats *st)
+static char *diff_text_by(const struct rs_index *a, const struct rs_index *b,
+                          struct rs_diff_stats *st, bool by_package)
 {
     char  *dir = rs_test_tmpdir();
     char  *path = rs_xasprintf("%s/d", dir);
@@ -34,7 +37,7 @@ static char *diff_text(const struct rs_index *a, const struct rs_index *b,
 
     if (fp)
     {
-        CHECK(rs_diff_write(a, b, fp, st));
+        CHECK(by_package ? rs_diff_write_packages(a, b, fp, st) : rs_diff_write(a, b, fp, st));
         rewind(fp);
         n = fread(buf, 1, sizeof(buf) - 1, fp);
         (void)fclose(fp);
@@ -46,11 +49,29 @@ static char *diff_text(const struct rs_index *a, const struct rs_index *b,
     return rs_xstrdup(buf);
 }
 
+static char *diff_text(const struct rs_index *a, const struct rs_index *b,
+                       struct rs_diff_stats *st)
+{
+    return diff_text_by(a, b, st, false);
+}
+
+static void inventory(struct rs_index *m, const char *json)
+{
+    struct rs_json_parser jp;
+    struct rs_buf         err;
+
+    rs_buf_init(&err);
+    rs_json_init(&jp, json, strlen(json), &err);
+    CHECK(rs_json_value(&jp, &m->packages));
+    rs_buf_free(&err);
+}
+
 /* Adds an entry whose strings the index then owns. */
 static void add(struct rs_index *m, struct rs_entry e)
 {
     e.path = rs_xstrdup(e.path);
     e.target = e.target ? rs_xstrdup(e.target) : NULL;
+    e.package = e.package ? rs_xstrdup(e.package) : NULL;
     rs_index_add(m, &e);
 }
 
@@ -156,6 +177,83 @@ void test_diff(void)
     rs_index_init(&m2);
     text = diff_text(&m1, &m2, &st);
     CHECK_INT(st.deleted, m1.count);
+    free(text);
+    rs_index_free(&m1);
+    rs_index_free(&m2);
+
+    TEST_CASE("diff --packages: what changed by package, and the files that accounts for");
+    rs_index_init(&m1);
+    rs_index_init(&m2);
+    inventory(&m1, "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+                   "{\"name\": \"nginx\", \"architecture\": \"amd64\", \"version\": \"1.0\"},"
+                   "{\"name\": \"old\", \"architecture\": \"all\", \"version\": \"2\"},"
+                   "{\"name\": \"libc6\", \"architecture\": \"i386\", \"version\": \"2.4\"},"
+                   "{\"name\": \"same\", \"architecture\": \"amd64\", \"version\": \"1\"}]},"
+                   "\"snap\": [{\"name\": \"hello\", \"revision\": \"29\"}]}");
+    inventory(&m2, "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+                   "{\"name\": \"htop\", \"architecture\": \"amd64\", \"version\": \"3\"},"
+                   "{\"name\": \"libc6\", \"architecture\": \"i386\", \"version\": \"2.5\"},"
+                   "{\"name\": \"nginx\", \"architecture\": \"amd64\", \"version\": \"1.1\"},"
+                   "{\"name\": \"same\", \"architecture\": \"amd64\", \"version\": \"1\"},"
+                   "{\"name\": 7}]},"
+                   "\"snap\": [{\"name\": \"hello\", \"revision\": \"30\"}]}");
+    add(&m1, entry("/", 'd'));
+    a = entry("/etc/nginx/nginx.conf", 'f');
+    a.package = (char *)"nginx";
+    add(&m1, a);
+    a = entry("/usr/bin/nginx", 'f');
+    a.package = (char *)"nginx";
+    add(&m1, a);
+    a = entry("/usr/share/old/x", 'f');
+    a.package = (char *)"old";
+    add(&m1, a);
+    a = entry("/usr/share/same/x", 'f');
+    a.package = (char *)"same";
+    add(&m1, a);
+    add(&m2, entry("/", 'd'));
+    a = entry("/etc/nginx/nginx.conf", 'f');
+    a.package = (char *)"nginx";
+    a.modified = true;      /* edited by hand: listed whatever its package did */
+    a.mode = 0600;
+    add(&m2, a);
+    a = entry("/usr/bin/htop", 'f');
+    a.package = (char *)"htop";
+    add(&m2, a);
+    a = entry("/usr/bin/nginx", 'f');
+    a.package = (char *)"nginx";
+    a.mode = 0755;
+    add(&m2, a);
+    a = entry("/usr/share/same/x", 'f');
+    a.package = (char *)"same";
+    a.mode = 0600;          /* its package did not change: listed */
+    add(&m2, a);
+    add(&m2, entry("/var/new", 'f'));
+    CHECK(rs_index_sort(&m1, &err));
+    CHECK(rs_index_sort(&m2, &err));
+    text = diff_text_by(&m1, &m2, &st, true);
+    CHECK_STR(text, "I\tapt:htop\t3, 1 file\n"
+                    "U\tapt:libc6:i386\t2.4 -> 2.5\n"
+                    "U\tapt:nginx\t1.0 -> 1.1, 1 file\n"
+                    "R\tapt:old\t2, 1 file\n"
+                    "U\tsnap:hello\t29 -> 30\n"
+                    "M\t/etc/nginx/nginx.conf\tmode\n"
+                    "M\t/usr/share/same/x\tmode\n"
+                    "A\t/var/new\n");
+    CHECK_INT(st.packages, 5);
+    CHECK_INT(st.explained, 3);
+    CHECK_INT(st.added, 1);
+    CHECK_INT(st.modified, 2);
+    CHECK_INT(st.deleted, 0);
+    free(text);
+
+    TEST_CASE("diff --packages: without an inventory on both sides, the files alone");
+    rs_jval_free(&m1.packages);
+    memset(&m1.packages, 0, sizeof(m1.packages));
+    text = diff_text_by(&m1, &m2, &st, true);
+    CHECK_INT(st.packages, 0);
+    CHECK_INT(st.explained, 0);
+    CHECK_CONTAINS(text, "A\t/usr/bin/htop\n");
+    CHECK_CONTAINS(text, "D\t/usr/share/old/x\n");
     free(text);
     rs_index_free(&m1);
     rs_index_free(&m2);

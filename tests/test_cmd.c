@@ -246,6 +246,159 @@ void test_cmd(void)
     o.nrules_files = 1;
     CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
 
+    TEST_CASE("cmd: packages, by package: diff, baseline, restore --packages");
+    {
+        char *proot = rs_xasprintf("%s/proot", work);
+        char *img1 = rs_xasprintf("%s/p1.tar", work);
+        char *img2 = rs_xasprintf("%s/p2.tar", work);
+        char *into = rs_xasprintf("%s/into", work);
+        char *cache = rs_xasprintf("%s/bl", work);
+        int   status;
+
+        (void)mkdir(proot, 0755);
+        (void)mkdir(into, 0755);
+        {
+            static const char *const dirs[] = { "var", "var/lib", "var/lib/dpkg", "etc" };
+            size_t                   i;
+
+            for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+            {
+                char *d = rs_xasprintf("%s/%s", proot, dirs[i]);
+
+                (void)mkdir(d, 0755);
+                free(d);
+            }
+        }
+        rs_test_write(proot, "var/lib/dpkg/status",
+                      "Package: dpkg\nStatus: install ok installed\nArchitecture: amd64\n"
+                      "Version: 1.22\n\n"
+                      "Package: hello\nStatus: install ok installed\nArchitecture: amd64\n"
+                      "Version: 1\n", 0644);
+        rs_test_write(proot, "etc/hello.conf", "hi\n", 0644);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CAPTURE;
+        o.root = proot;
+        o.os = "linux";
+        o.quiet = true;
+        o.output = img1;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        rs_test_write(proot, "var/lib/dpkg/status",
+                      "Package: dpkg\nStatus: install ok installed\nArchitecture: amd64\n"
+                      "Version: 1.22\n\n"
+                      "Package: hello\nStatus: install ok installed\nArchitecture: amd64\n"
+                      "Version: 2\n", 0644);
+        o.output = img2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_DIFF;
+        o.packages = true;
+        args[0] = img1;
+        args[1] = img2;
+        o.args = args;
+        o.nargs = 2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_DIFFERENT);
+        CHECK_CONTAINS(out_text, "U\tapt:hello\t1 -> 2\n");
+        CHECK_CONTAINS(err_text, "1 packages changed");
+
+        /* baseline: listing an image's needs no signature; fetching does. */
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_BASELINE;
+        o.cache = cache;
+        args[0] = img2;
+        o.args = args;
+        o.nargs = 1;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(out_text, "hello 2 amd64\tto fetch\n");
+        CHECK_CONTAINS(err_text, "2 packages in the baseline, 0 of them cached");
+        args[0] = (char *)"fetch";
+        args[1] = img2;
+        o.nargs = 2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_UNVERIFIED);
+        CHECK_CONTAINS(err_text, "not fetching its packages");
+        o.allow_unverified = true;
+        o.quiet = true;
+        status = run_cmd(&o);
+        /* Nothing says where they came from, so nothing can be fetched. */
+        CHECK(status == RESTATE_EXIT_INCOMPLETE || status == RESTATE_EXIT_TROUBLE);
+        args[0] = img2;
+        o.nargs = 2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(err_text, "usage: restate baseline [fetch] [IMAGE]");
+        /* This tree's own, and one with no apt at all. */
+        o.nargs = 0;
+        o.root = proot;
+        o.quiet = false;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(out_text, "hello 2 amd64");
+        o.root = root;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(err_text, "this system has no apt packages to fetch");
+        args[0] = rules;
+        o.nargs = 1;
+        o.root = NULL;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+
+        /* restore --packages: dry, the script; for real, root onto "/". */
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_RESTORE;
+        o.packages = true;
+        o.allow_unverified = true;
+        o.dry_run = true;
+        o.root = into;
+        o.quiet = true;
+        args[0] = img2;
+        o.args = args;
+        o.nargs = 1;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(out_text, "#!/bin/sh\n");
+        CHECK_CONTAINS(out_text, "apt-get update");
+        CHECK_CONTAINS(out_text, "manual hello:amd64\n");
+        /* The baseline's cache: only a directory, and only root's alone. */
+        o.quiet = false;
+        o.cache = rules;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(err_text, "not a directory; the packages are fetched instead");
+        if (geteuid() != 0)
+        {
+            o.cache = work;
+            CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+            CHECK_CONTAINS(err_text, "not root's alone");
+        }
+        o.cache = NULL;
+        o.quiet = true;
+        o.dry_run = false;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(err_text, "installs onto the running system");
+        if (geteuid() != 0)
+        {
+            o.root = NULL;
+            CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+            CHECK_CONTAINS(err_text, "needs root");
+        }
+        args[0] = m1;   /* a bare index: no inventory */
+        o.root = into;
+        o.dry_run = true;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+
+        /* --firmware is for a rebuild elsewhere. */
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_BUILDSHEET;
+        o.firmware = "uefi";
+        args[0] = img2;
+        o.args = args;
+        o.nargs = 1;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(err_text, "--firmware needs --target");
+        o.command = CMD_AUTOINSTALL;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+        free(proot);
+        free(img1);
+        free(img2);
+        free(into);
+        free(cache);
+    }
+
     TEST_CASE("cmd: no command is trouble");
     memset(&o, 0, sizeof(o));
     CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);

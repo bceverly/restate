@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "autoinstall.h"
+#include "baseline.h"
 #include "buildsheet.h"
 #include "diff.h"
 #include "hooks.h"
@@ -30,6 +31,7 @@
 #include "packages.h"
 #include "pgp.h"
 #include "progress.h"
+#include "reinstall.h"
 #include "repo.h"
 #include "restore.h"
 #include "rules.h"
@@ -166,6 +168,22 @@ static bool output_close(struct output *out, bool ok)
     free(out->tmp);
     out->tmp = NULL;
     return ok;
+}
+
+/* Writes `text` where --output says, and frees it. */
+static int emit(const struct rs_options *o, struct rs_buf *text)
+{
+    struct output out;
+    bool          ok;
+
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text->data, 1, text->len, out.fp) == text->len;
+    rs_buf_free(text);
+    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -939,23 +957,30 @@ static int trust_check(const struct rs_options *o, const char *path, bool requir
         rs_buf_free(&why);
         return RESTATE_EXIT_OK;
     }
-    if (o->allow_unverified && o->command == CMD_RESTORE)
+    if (o->allow_unverified && (o->command == CMD_RESTORE || o->command == CMD_BASELINE))
     {
-        rs_warn("%s: %s; restoring it anyway, as --allow-unverified says", path, why.data);
+        rs_warn("%s: %s; %s anyway, as --allow-unverified says", path, why.data,
+                o->command == CMD_RESTORE ? "restoring it" : "fetching its packages");
         rs_buf_free(&why);
         return RESTATE_EXIT_OK;
     }
     if (o->ntrusted == 0)
     {
-        rs_error("%s: %s, and no --trusted-key was given to check it against: not restoring it. "
+        rs_error("%s: %s, and no --trusted-key was given to check it against: not %s. "
                  "Give the public key of whoever signed it (capture --sign-with) with "
-                 "--trusted-key KEYFILE, or restore it unchecked with --allow-unverified",
-                 path, why.data);
+                 "--trusted-key KEYFILE, or %s unchecked with --allow-unverified",
+                 path, why.data,
+                 o->command == CMD_RESTORE ? "restoring it" : "fetching its packages",
+                 o->command == CMD_RESTORE ? "restore it" : "fetch them");
     } else
     {
-        rs_error("%s: %s: not %s it%s", path, why.data,
-                 o->command == CMD_RESTORE ? "restoring" : "using",
-                 o->command == CMD_RESTORE ? " (--allow-unverified would)" : "");
+        rs_error("%s: %s: not %s%s", path, why.data,
+                 o->command == CMD_RESTORE    ? "restoring it"
+                 : o->command == CMD_BASELINE ? "fetching its packages"
+                                              : "using it",
+                 o->command == CMD_RESTORE || o->command == CMD_BASELINE
+                     ? " (--allow-unverified would)"
+                     : "");
     }
     rs_buf_free(&why);
     return RESTATE_EXIT_UNVERIFIED;
@@ -1655,8 +1680,16 @@ static void diff_summary(const struct rs_options *o, const struct rs_diff_stats 
         return;
     }
     (void)fflush(stdout);
-    (void)fprintf(stderr, "restate: %zu added, %zu deleted, %zu modified\n",
-                  d->added, d->deleted, d->modified);
+    if (o->packages && o->command == CMD_DIFF)
+    {
+        (void)fprintf(stderr, "restate: %zu packages changed, accounting for %zu files; "
+                      "otherwise ", d->packages, d->explained);
+    } else
+    {
+        (void)fprintf(stderr, "restate: ");
+    }
+    (void)fprintf(stderr, "%zu added, %zu deleted, %zu modified\n", d->added, d->deleted,
+                  d->modified);
 }
 
 static int write_diff(const struct rs_options *o, const struct rs_index *a,
@@ -1669,7 +1702,7 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     {
         return RESTATE_EXIT_TROUBLE;
     }
-    ok = rs_diff_write(a, b, out.fp, d);
+    ok = o->packages && o->command == CMD_DIFF ? rs_diff_write_packages(a, b, out.fp, d) : rs_diff_write(a, b, out.fp, d);
     if (!ok)
     {
         rs_error("%s: %s", out.tmp ? out.tmp : "standard output", strerror(errno));
@@ -1679,7 +1712,7 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
         return RESTATE_EXIT_TROUBLE;
     }
     diff_summary(o, d);
-    return (d->added || d->deleted || d->modified) ? RESTATE_EXIT_DIFFERENT
+    return (d->added || d->deleted || d->modified || d->packages) ? RESTATE_EXIT_DIFFERENT
                                                    : RESTATE_EXIT_OK;
 }
 
@@ -1920,6 +1953,153 @@ int rs_cmd_export(const struct rs_options *o)
     return status;
 }
 
+/*
+ * The baseline cache restore --packages installs from: the one given, or the
+ * default, if it is there -- and only if it is root's and no one else can
+ * write it, since what is in it is installed as root.
+ */
+static const char *baseline_cache(const struct rs_options *o)
+{
+    const char *cache = o->cache ? o->cache : rs_baseline_default_cache();
+    struct stat st;
+
+    if (stat(cache, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        if (o->cache)
+        {
+            rs_warn("--cache %s: not a directory; the packages are fetched instead", cache);
+        }
+        return NULL;
+    }
+    if (st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+    {
+        rs_warn("%s: not root's alone, so nothing is installed from it; the packages are "
+                "fetched instead", cache);
+        return NULL;
+    }
+    return cache;
+}
+
+/* Runs the package script `script`, from a file only root can reach. */
+static int run_script(const char *script)
+{
+    char          dir[] = "/tmp/restate.XXXXXX";
+    char         *path;
+    struct rs_buf err;
+    int           fd;
+    int           code = -1;
+    bool          ok;
+
+    if (!mkdtemp(dir))
+    {
+        rs_error("%s: %s", dir, strerror(errno));
+        return RESTATE_EXIT_TROUBLE;
+    }
+    path = rs_xasprintf("%s/packages.sh", dir);
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
+    ok = fd >= 0 && write(fd, script, strlen(script)) == (ssize_t)strlen(script);
+    ok = fd >= 0 && close(fd) == 0 && ok;
+    rs_buf_init(&err);
+    if (ok)
+    {
+        char  a0[] = "sh";
+        char *argv[3];
+
+        argv[0] = a0;
+        argv[1] = path;
+        argv[2] = NULL;
+        ok = rs_run(RS_PROG_SH, argv, NULL, NULL, &code, &err);
+        if (!ok)
+        {
+            rs_error("the package script could not be run: %s", err.data);
+        }
+    } else
+    {
+        rs_error("%s: %s", path, strerror(errno));
+    }
+    (void)unlink(path);
+    (void)rmdir(dir);
+    free(path);
+    rs_buf_free(&err);
+    if (!ok)
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (code != 0)
+    {
+        rs_warn("the package script ended with status %d; restoring the files anyway", code);
+        return RESTATE_EXIT_INCOMPLETE;
+    }
+    return RESTATE_EXIT_OK;
+}
+
+/*
+ * restore --packages, before the files: the kit -- /etc/apt and the kept
+ * packages -- then the script that installs the packages (reinstall.h).
+ * Dry, the script is written out instead, for reading.
+ */
+static int restore_packages(const struct rs_options *o, const struct rs_index *ix,
+                            struct rs_restore_opts *ro)
+{
+    struct rs_reinstall_opts io;
+    struct rs_restore_stats  st;
+    struct rs_buf            script;
+    struct rs_buf            err;
+    char                    *snapshot;
+    int                      status;
+
+    if (ix->packages.type != RS_JOBJECT)
+    {
+        rs_error("%s has no package inventory: it was made by a restate older than 1.1",
+                 o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!o->dry_run && strcmp(ro->root, "/") != 0)
+    {
+        rs_error("--packages installs onto the running system, and --root is %s: restore the "
+                 "packages there from a shell inside it (chroot), or leave --packages out",
+                 ro->root);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!o->dry_run && geteuid() != 0)
+    {
+        rs_error("--packages installs packages, which needs root");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    snapshot = o->exact_versions ? rs_repo_snapshot_name(ix->created) : NULL;
+    memset(&io, 0, sizeof(io));
+    io.snapshot = snapshot;
+    io.cache = baseline_cache(o);
+    rs_buf_init(&script);
+    rs_reinstall_script(&ix->packages, &io, &script);
+    free(snapshot);
+    if (o->dry_run)
+    {
+        /* What would be run, to read: on standard output, or -o. */
+        return emit(o, &script);
+    }
+    rs_buf_init(&err);
+    ro->kit = true;
+    ro->dry_run = false;
+    if (!rs_restore(o->args[0], ix, ro, &st, &err))
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        rs_buf_free(&script);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ro->kit = false;
+    rs_buf_free(&err);
+    if (!o->quiet)
+    {
+        (void)fprintf(stderr, "restate: put back the image's apt configuration and kept "
+                      "packages (%" PRIu64 " files); now its packages\n", st.files);
+    }
+    status = run_script(script.data ? script.data : "");
+    rs_buf_free(&script);
+    return status;
+}
+
 int rs_cmd_restore(const struct rs_options *o)
 {
     struct rs_index         ix;
@@ -1928,6 +2108,8 @@ int rs_cmd_restore(const struct rs_options *o)
     struct rs_buf           err;
     struct trust            tr;
     int                     status;
+    int                     packages = RESTATE_EXIT_OK;
+    const char            **excludes = NULL;
     bool                    ok;
 
     /* Before anything is written -- before the index is even read: whose
@@ -1988,8 +2170,33 @@ int rs_cmd_restore(const struct rs_options *o)
         }
         ro.quiet = false;
     }
+    if (o->packages)
+    {
+        packages = restore_packages(o, &ix, &ro);
+        if (packages != RESTATE_EXIT_OK && packages != RESTATE_EXIT_INCOMPLETE)
+        {
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return packages;
+        }
+    }
     ro.dry_run = o->dry_run;
+    ro.kit = false;
+    if (o->packages)
+    {
+        /* Which packages were installed by hand: the script has just made
+         * that what the old machine had, for the packages there are now. */
+        excludes = rs_xcalloc(o->nexcludes + 1, sizeof(*excludes));
+        if (o->nexcludes > 0)
+        {
+            memcpy(excludes, o->excludes, o->nexcludes * sizeof(*excludes));
+        }
+        excludes[o->nexcludes] = "/var/lib/apt/extended_states";
+        ro.exclude = excludes;
+        ro.nexclude = o->nexcludes + 1;
+    }
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
+    free(excludes);
     rs_index_free(&ix);
     if (!ok)
     {
@@ -2012,8 +2219,10 @@ int rs_cmd_restore(const struct rs_options *o)
         }
         if (st.excluded > 0)
         {
-            (void)fprintf(stderr, "restate: left out %" PRIu64 " paths (--exclude)\n",
-                          st.excluded);
+            (void)fprintf(stderr, "restate: left out %" PRIu64 " paths (%s)\n", st.excluded,
+                          o->packages ? "--exclude, and apt's record of what was installed by "
+                                        "hand, which --packages set"
+                                      : "--exclude");
         }
         if (st.owners > 0)
         {
@@ -2033,7 +2242,7 @@ int rs_cmd_restore(const struct rs_options *o)
                       st.refused, st.failed, st.missing);
         return RESTATE_EXIT_INCOMPLETE;
     }
-    return RESTATE_EXIT_OK;
+    return packages;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2335,6 +2544,128 @@ int rs_cmd_installer(const struct rs_options *o)
 }
 
 /*
+ * The package baseline: what `baseline fetch` would fetch, or fetching it.
+ * From an image, its inventory -- whose packages and keys restore installs as
+ * root, so it is held to restore's rule: signed by a --trusted-key, or
+ * --allow-unverified -- and otherwise this system's own.
+ */
+int rs_cmd_baseline(const struct rs_options *o)
+{
+    bool                     fetch = o->nargs > 0 && strcmp(o->args[0], "fetch") == 0;
+    const char              *image = o->nargs > (fetch ? 1u : 0u) ? o->args[fetch ? 1 : 0] : NULL;
+    struct rs_jval           packages;
+    struct rs_baseline_stats st;
+    struct rs_baseline_opts  bo;
+    struct rs_buf            err;
+    struct trust             tr;
+    char                    *snapshot;
+    int                      status;
+
+    if (o->nargs == 2 && !fetch)
+    {
+        rs_error("usage: restate baseline [fetch] [IMAGE]");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    memset(&packages, 0, sizeof(packages));
+    rs_buf_init(&err);
+    if (image)
+    {
+        struct rs_index ix;
+
+        status = trust_check(o, image, fetch || o->ntrusted > 0, &tr);
+        if (status != RESTATE_EXIT_OK)
+        {
+            rs_buf_free(&err);
+            return status;
+        }
+        rs_index_init(&ix);
+        if (!rs_index_load(&ix, image, &err))
+        {
+            rs_error("%s", err.data);
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        status = trust_matches(o, image, &tr, &ix);
+        if (status == RESTATE_EXIT_OK && ix.packages.type != RS_JOBJECT)
+        {
+            rs_error("%s has no package inventory: it was made by a restate older than 1.1",
+                     image);
+            status = RESTATE_EXIT_TROUBLE;
+        }
+        if (status != RESTATE_EXIT_OK)
+        {
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return status;
+        }
+        rs_jval_copy(&packages, &ix.packages);
+        snapshot = rs_repo_snapshot_name(ix.created);
+        rs_index_free(&ix);
+    } else
+    {
+        rs_packages_describe(o->root ? o->root : "/", &packages);
+        snapshot = rs_repo_snapshot_name(NULL);
+    }
+    if (!rs_jobject_get(&packages, "apt"))
+    {
+        rs_error("%s has no apt packages to fetch", image ? image : "this system");
+        rs_jval_free(&packages);
+        rs_buf_free(&err);
+        free(snapshot);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!fetch)
+    {
+        struct rs_buf text;
+
+        rs_buf_init(&text);
+        rs_baseline_list(&packages, o->cache, &text, &st);
+        rs_jval_free(&packages);
+        rs_buf_free(&err);
+        free(snapshot);
+        status = emit(o, &text);
+        if (status == RESTATE_EXIT_OK && !o->quiet)
+        {
+            (void)fprintf(stderr, "restate: %zu packages in the baseline, %zu of them cached in "
+                          "%s; %zu installed from .deb files no repository has\n", st.wanted,
+                          st.cached, o->cache ? o->cache : rs_baseline_default_cache(), st.local);
+        }
+        return status;
+    }
+    memset(&bo, 0, sizeof(bo));
+    bo.cache = o->cache;
+    bo.snapshot = snapshot;
+    bo.quiet = o->quiet;
+    if (!rs_baseline_fetch(&packages, &bo, &st, &err))
+    {
+        rs_error("%s", err.data);
+        status = RESTATE_EXIT_TROUBLE;
+    } else
+    {
+        if (!o->quiet)
+        {
+            (void)fprintf(stderr, "restate: %zu packages in the baseline: %zu fetched (%" PRIu64
+                          " bytes, %zu of them from an archive's snapshot), %zu already in %s; %zu "
+                          "could not be had\n", st.wanted, st.fetched, st.bytes, st.snapshot,
+                          st.cached, o->cache ? o->cache : rs_baseline_default_cache(),
+                          st.missing);
+            if (st.local > 0)
+            {
+                (void)fprintf(stderr, "restate: %zu were installed from .deb files no repository "
+                              "has: only an image can keep those (capture "
+                              "--keep-local-packages)\n", st.local);
+            }
+        }
+        status = st.missing > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    }
+    rs_jval_free(&packages);
+    rs_buf_free(&err);
+    free(snapshot);
+    return status;
+}
+
+/*
  * Whether the build files can be made from `image`: not from a snapshot in a
  * repository, which is no file their commands could unpack -- it is exported
  * as an image first, and they are made from that.
@@ -2394,22 +2725,6 @@ static bool machine_for(const struct rs_options *o, const char *image, struct rs
         rs_packages_describe(o->root ? o->root : "/", packages);
     }
     return true;
-}
-
-/* Writes `text` where --output says, and frees it. */
-static int emit(const struct rs_options *o, struct rs_buf *text)
-{
-    struct output out;
-    bool          ok;
-
-    if (!output_open(o, &out))
-    {
-        rs_buf_free(text);
-        return RESTATE_EXIT_TROUBLE;
-    }
-    ok = fwrite(text->data, 1, text->len, out.fp) == text->len;
-    rs_buf_free(text);
-    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
 /*
@@ -2516,6 +2831,18 @@ static bool trust_for(const struct rs_options *o, bool knows, bool installer, ch
     return true;
 }
 
+/* --firmware changes the partitions, which only a rebuild elsewhere renumbers. */
+static bool firmware_ok(const struct rs_options *o)
+{
+    if (o->firmware && !o->target)
+    {
+        rs_error("--firmware needs --target vm or --target metal: rebuilt as the same "
+                 "machine, it boots as that machine did");
+        return false;
+    }
+    return true;
+}
+
 int rs_cmd_buildsheet(const struct rs_options *o)
 {
     const char          *image = o->nargs > 0 ? o->args[0] : NULL;
@@ -2532,7 +2859,7 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     char                *snapshot;
     bool                 ok;
 
-    if (!from_a_file(image))
+    if (!from_a_file(image) || !firmware_ok(o))
     {
         return RESTATE_EXIT_TROUBLE;
     }
@@ -2550,6 +2877,7 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     so.trust = trust;
     so.old_image = old_image;
     so.target = target_of(o);
+    so.firmware = o->firmware;
     so.image = image;
     so.version = RESTATE_VERSION;
     so.packages = packages.type == RS_JOBJECT ? &packages : NULL;
@@ -2589,7 +2917,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     char               *snapshot;
     bool                ok;
 
-    if (!from_a_file(image))
+    if (!from_a_file(image) || !firmware_ok(o))
     {
         return RESTATE_EXIT_TROUBLE;
     }
@@ -2608,6 +2936,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     ao.trust_keyring = keyring;
     ao.old_image = old_image;
     ao.target = target_of(o);
+    ao.firmware = o->firmware;
     ao.image = image;
     ao.version = RESTATE_VERSION;
     ao.packages = packages.type == RS_JOBJECT ? &packages : NULL;
@@ -2733,6 +3062,8 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_packages(o);
     case CMD_INSTALLER:
         return rs_cmd_installer(o);
+    case CMD_BASELINE:
+        return rs_cmd_baseline(o);
     case CMD_BUILDSHEET:
         return rs_cmd_buildsheet(o);
     case CMD_AUTOINSTALL:

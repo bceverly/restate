@@ -90,6 +90,9 @@ list what is installed, and where each package came from \-\- apt, snap, flatpak
 \fBinstaller\fR \fI[fetch] [IMAGE]\fR
 show the installer that rebuilds this machine, or the one IMAGE was taken from; with fetch, download it and check its signature
 .TP
+\fBbaseline\fR \fI[fetch] [IMAGE]\fR
+list the exact packages this machine, or the one IMAGE was taken from, had installed; with fetch, download each at its version, checked against its repository's signed index, into a cache that restore \-\-packages installs from
+.TP
 \fBbuildsheet\fR \fI[IMAGE]\fR
 write a plain\-text runbook to rebuild this machine, or the one IMAGE was taken from: disks, encryption, LVM, filesystems, installer, restore
 .TP
@@ -161,7 +164,7 @@ record mount points but do not descend into other filesystems
 record metadata only; much faster, but content is then judged by size and mtime
 .TP
 \fB\-\-cache\fR=\fIDIR\fR
-installer fetch: keep installers in DIR rather than the system's cache
+installer fetch, baseline fetch: keep what is downloaded in DIR rather than the system's cache; restore \-\-packages: take packages from there
 .TP
 \fB\-\-mirror\fR=\fIURL\fR
 installer fetch: download from the directory at URL (https:// or file://) rather than the vendor's
@@ -169,8 +172,11 @@ installer fetch: download from the directory at URL (https:// or file://) rather
 \fB\-\-target\fR=\fIKIND\fR
 buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other hardware (metal) rather than the same machine
 .TP
+\fB\-\-firmware\fR=\fIMODE\fR
+buildsheet, autoinstall, with \-\-target: boot the rebuilt machine by UEFI (uefi) or BIOS (bios) rather than as the old one did, with the partition that needs
+.TP
 \-\-exact\-versions
-buildsheet, autoinstall: install each package at the version recorded, from snapshot.ubuntu.com as of the capture where the archive has a newer one now, rather than the newer one
+buildsheet, autoinstall, restore \-\-packages: each package at the version recorded, from the archive's snapshot (snapshot.ubuntu.com, snapshot.debian.org) where the archive has moved on, rather than the newer one
 .TP
 \-\-image\-at=PATH
 autoinstall: where the installer will find the image (a mounted disk or share); the file then installs the packages and restores the files from it
@@ -180,6 +186,9 @@ restore: leave out PATTERN (written as in a rules file, everything beneath it to
 .TP
 \-\-numeric\-owner
 restore: owners by the numbers the index records, and the image's own account files, rather than by name through the image's accounts merged with the system's
+.TP
+\fB\-\-packages\fR
+diff: say which packages were installed, removed and upgraded, and leave out the file changes they account for. restore: put the image's packages back first \-\- its repositories and keys, its packages at their versions (from the baseline cache where fetched), what was installed by hand and what as a dependency \-\- and remove what it did not have; root only, onto the running system
 .TP
 \-\-check\-first
 restore: read the whole image first, checking every file against the index and writing nothing, and put it back only if all of it is whole
@@ -483,7 +492,11 @@ Only public keys are there to record. From apt's package lists it records
 which repositories each installed version can be had from again, and, for
 the ones none can, why:
 .B """superseded"""
-where a repository has another version of the package now, and
+where a repository has another version of the package now \- with
+.B superseded_in
+naming those repositories and
+.B installed
+when this version went in, which is when the archive's snapshot has it \- and
 .B """local"""
 where none has it at all \- it was installed from a
 .I .deb
@@ -502,7 +515,10 @@ and
 (or else apt's
 .I trusted.gpg
 and
-.IR trusted.gpg.d ),
+.IR trusted.gpg.d ,
+or the key written into the source's own
+.I .sources
+file, as Ubuntu writes a PPA's),
 with
 .BR gpgv (1),
 and its
@@ -581,7 +597,9 @@ file, and
 .I NAME
 a package no repository has. A superseded version, one a repository has a
 newer version of, is kept if it is in the cache and passed over quietly if
-not, since a rebuild installs the newer one.
+not, since a rebuild installs the newer one \- or, with
+.BR \-\-exact\-versions ,
+this one, from the archive's snapshot as of when it was installed.
 .B verify
 walks the files an image kept, so they are not reported as deleted. Off by
 default: those files can be large.
@@ -659,6 +677,50 @@ its owner, mode, times and SHA-256, and its content is left out of an image
 unless
 .B \-\-baseline\-content
 is given.
+.SS Fetching the packages
+The packages themselves, at the versions recorded, are another matter: the
+archive moves on, and a vendor that keeps only its newest release drops the
+rest.
+.B restate baseline
+lists every apt package a machine has \- or the one an image was taken
+from \- and whether the cache has it, and
+.B restate baseline fetch
+downloads each at its version, as a
+.I .deb
+named as apt names it in its own cache, into
+.I /var/cache/restate/baseline
+.RB ( \-\-cache
+to change that), where
+.B restore \-\-packages
+installs from.
+.PP
+Each repository's index \-
+.IR InRelease ,
+or
+.I Release
+and
+.I Release.gpg
+\- is checked with
+.BR gpgv (1)
+against the keys its source names, as apt checks it, and only the text the
+signature covers is read; each
+.I Packages
+list is checked against the index's SHA-256 for it, and each
+.I .deb
+against the list's, before it is renamed into the cache. A version the
+archive no longer has is looked for in its snapshot \- as of the capture, or,
+for one the archive had moved on from already, as of when it was installed
+\- on snapshot.ubuntu.com and snapshot.debian.org, signed by the same keys.
+Run again, it checks what the cache has and downloads only what is missing or
+does not match. The packages are installed as root, so fetching an image's is
+held to restore's rule: the image has to be signed by a
+.BR \-\-trusted\-key ,
+or the fetch given
+.BR \-\-allow\-unverified .
+Exit status 3 if any could not be had. What was installed from a
+.I .deb
+no repository has, only an image can keep
+.RB ( "capture \-\-keep\-local\-packages" ).
 .SH INSTALLERS
 .B restate installer
 names the installation image a machine is rebuilt from, worked out from its
@@ -853,6 +915,16 @@ runs it, and the guest-only packages removed. Either way the sheet covers
 what does not move: network interface names and MAC addresses, LUKS keys
 held by the old machine's TPM, Secure Boot keys and the hibernation
 resume device.
+.PP
+.BR "\-\-firmware uefi" " or " "\-\-firmware bios" ,
+with either target, changes how the rebuilt machine boots, and the partition
+that needs on the disk it boots from: an EFI system partition (512 MiB,
+mounted at
+.IR /boot/efi )
+in place of GRUB's BIOS boot partition, or added in front of the others on an
+MBR disk; or a BIOS boot partition in place of the EFI system partition,
+which an MBR disk does without. The installer then puts in the boot loader
+for that mode.
 .SH LIVE SERVICES
 A file copied while something writes to it can come back half old and half
 new: a database's pages from two moments, a virtual machine's disk in the
@@ -1007,6 +1079,38 @@ reads and checks the whole image and says what would be put back, writing
 nothing. The exit status is 3 if any file was refused, could not be written
 or is missing from the image.
 .PP
+.B \-\-packages
+puts the old machine's packages back first, onto the running system, as root,
+on a fresh install: the image's
+.I /etc/apt
+\- its repositories and the keys kept there \- and the keys kept elsewhere,
+from its inventory; every package installed by hand, at its version where a
+repository still has it, from the archive's snapshot with
+.BR \-\-exact\-versions ,
+and from the baseline (see
+.BR BASELINE )
+where none has it \- the baseline's cache is used only if it is root's and no
+one else can write it; the
+.I .deb
+files the image kept; the holds; and each package marked installed by hand or
+as a dependency, as it was. What the old machine did not have is marked a
+dependency, so that
+.B apt\-get autoremove
+takes away what nothing it had needs \- never the kernel, the boot loader,
+firmware or microcode, which follow the hardware, and nothing at all on a
+machine of another architecture. Then the snaps, the system's flatpaks, the
+Python, npm and Ruby packages installed system-wide, and the alternatives
+chosen by hand; then the files, as without it, but for apt's own record of
+what was installed by hand, which the packages have just set. It is done by a
+.BR sh (1)
+script, written and run by
+.BR restate ;
+with
+.B \-\-dry\-run
+it is written to standard output, or
+.BR \-\-output ,
+to read instead. Exit status 3 if the script did not finish cleanly.
+.PP
 An image says whose it is only if it is signed (see
 .BR "IMAGES AND INDEXES" ),
 so
@@ -1122,6 +1226,15 @@ need the secret key. Without
 .BR \-\-encrypt\-to ,
 .B prune
 cannot rewrite a pack, and removes only those nothing needs at all.
+.PP
+An encrypted chunk still shows its size, and with the boundaries every
+repository uses, chunk sizes would say which known files a repository holds.
+So an encrypted repository cuts its chunks where a key of its own says,
+.IR chunk\-key :
+made by the first capture, kept in the repository encrypted to its keys and
+in the capturing machine's cache, where a capture reads it without the secret
+key. A machine with neither makes a key of its own, and stores its large
+files whole once more.
 .PP
 One capture or prune runs on a repository at a time, and one
 .B capture \-\-quiesce
@@ -1344,8 +1457,12 @@ written into an index instead of the clock.
 And their upper-case forms: passed to
 .BR curl (1)
 by
-.BR "restate installer fetch" ,
-for a machine that reaches the Internet through a proxy.
+.BR "restate installer fetch" " and " "baseline fetch" ,
+for a machine that reaches the Internet through a proxy; and, with
+.BR http_proxy ,
+to the script
+.B restore \-\-packages
+runs, for apt.
 .TP
 .BR HOME ", " GNUPGHOME ", " GPG_TTY ", " TERM ", " DISPLAY ", " WAYLAND_DISPLAY ", " XDG_RUNTIME_DIR ", " DBUS_SESSION_BUS_ADDRESS
 Passed to
@@ -1390,17 +1507,30 @@ with its owner, mode, times and SHA-256.
 .TP
 .B A safety net before an upgrade
 Capture before a release upgrade, keep the image, and
-.B diff
-afterwards.
+.B diff \-\-packages
+afterwards: each package installed, removed or upgraded is a line of its
+own, as
+.BR I ,
+.B R
+or
+.BR U ,
+with the number of files its change accounts for, and only the file changes
+no package accounts for \- an edited configuration file \- are listed
+besides.
 .TP
 .B Rebuilding after a dead disk
 .B restate buildsheet
 and
 .B restate autoinstall
 turn an image's machine description into the steps that rebuild the disk
-layout and reinstall onto it, by hand or unattended; the image then puts
-the files back. Packages installed since the original install still have to
-be reinstalled by hand in this version.
+layout and reinstall onto it, by hand or unattended;
+.B restore \-\-packages
+then puts the packages back, at their versions, and the files after them.
+.TP
+.B A new laptop, set up like the old one
+Install the distribution, then
+.B restore \-\-packages
+the old laptop's image: the same repositories, packages and files.
 .TP
 .B Into a virtual machine, or back onto hardware
 The same, with
@@ -1408,12 +1538,14 @@ The same, with
 or
 .BR "\-\-target metal" :
 volumes resized to what they use, the VM itself defined, and the drivers,
-interface names, TPM-held keys and hardware-only packages accounted for.
+interface names, TPM-held keys and hardware-only packages accounted for;
+with
+.BR \-\-firmware ,
+booting by UEFI where it booted by BIOS, or the other way.
 .PP
-Planned, and described in the project's ROADMAP: the package inventory that
-makes a rebuild complete; stamping out many copies of one machine, each
-with its own host name, address, machine-id and SSH host keys; and
-air-gapped rebuilds.
+Planned, and described in the project's ROADMAP: stamping out many copies
+of one machine, each with its own host name, address, machine-id and SSH
+host keys; and air-gapped rebuilds.
 .SH EXAMPLES
 .PP
 .RS
@@ -1481,6 +1613,16 @@ and signature they were checked against
 on macOS). Anything here can be deleted; it is fetched again when needed.
 .PP
 .TP
+.I /var/cache/restate/baseline/
+Where
+.B restate baseline fetch
+keeps the packages it fetched, each checked against its repository's signed
+index, and
+.B restore \-\-packages
+installs from
+.RI ( /Library/Caches/restate/baseline
+on macOS). Anything here can be deleted; it is fetched again when needed.
+.TP
 .I /etc/restate/hooks.d/
 A site's hooks for
 .BR "capture \-\-quiesce" ,
@@ -1537,17 +1679,22 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs six programs, each for something it should not do itself:
+runs seven programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
 image where it is installed),
 .BR curl (1),
 .BR gpgv (1),
-.BR gpg (1)
-and
+.BR gpg (1),
 .BR gpgconf (1)
-(to stop the agent gpg starts when it signs).
+(to stop the agent gpg starts when it signs) and
+.BR sh (1)
+(the script
+.B restore \-\-packages
+writes, which runs apt, snap and the rest as a person would; every name and
+version in it is checked against what its package manager allows, and every
+other word quoted, so it runs nothing the image's tree wrote).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then
@@ -1571,10 +1718,13 @@ curl is held to HTTPS, redirects included, and ignores
 Nothing downloaded is used until its checksum has been verified against a
 signature by the pinned vendor key. The one exception to HTTPS is
 .BR \-\-fetch\-sources ,
-which fetches apt's indexes the way apt does, plain http included, and
-believes them only once
+and
+.BR "baseline fetch" ,
+which fetch apt's indexes and packages the way apt does, plain http
+included, and believe them only once
 .B gpgv
-has checked their signatures.
+has checked the index's signature, and the index's digests what was
+fetched.
 .PP
 A repository is made 0700, and everything in it 0600. One that is not
 encrypted belongs somewhere only root reads; one made with

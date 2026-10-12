@@ -35,6 +35,8 @@ struct rs_diff_stats {
     size_t added;
     size_t deleted;
     size_t modified;
+    size_t packages;    /* packages installed, removed or changed (by_packages) */
+    size_t explained;   /* file changes a package's change accounts for */
 };
 
 /* The RS_DIFF_* bits that differ between two entries for the same path. */
@@ -44,6 +46,28 @@ unsigned rs_diff_entries(const struct rs_entry *old, const struct rs_entry *new_
  * error. */
 bool rs_diff_write(const struct rs_index *old, const struct rs_index *new_,
                    FILE *out, struct rs_diff_stats *stats);
+
+/*
+ * The same, by package (diff --packages). First a line for each package
+ * whose installation changed between the two inventories -- apt's and
+ * snap's -- "I" installed, "R" removed, "U" another version:
+ *
+ *   U  apt:nginx   1.24.0-1 -> 1.24.0-2, 37 files
+ *   I  apt:htop    3.3.0-4, 12 files
+ *   R  snap:hello  29
+ *
+ * (the columns separated by tabs, as rs_diff_write's are)
+ *
+ * then the file changes that none of those accounts for, as rs_diff_write
+ * writes them. A change is accounted for when the file is the changed
+ * package's and is what the package put there: added by a package installed
+ * or changed, deleted with one removed or changed, or modified as the
+ * package's new version has it. A file someone edited is still listed,
+ * whatever happened to its package. Without an inventory on both sides,
+ * there are no package lines and every file is listed.
+ */
+bool rs_diff_write_packages(const struct rs_index *old, const struct rs_index *new_,
+                            FILE *out, struct rs_diff_stats *stats);
 
 /* "content,mode" and so on, into `out`. */
 void rs_diff_describe(unsigned what, struct rs_buf *out);

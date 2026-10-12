@@ -645,6 +645,20 @@ static void link_files(struct ctx *c)
     }
 }
 
+static bool account_file(const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(account_files) / sizeof(account_files[0]); i++)
+    {
+        if (strcmp(path, account_files[i]) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* One member of the image: it has to be an entry the index lists, and the
  * thing the index says. */
 static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *m,
@@ -707,6 +721,10 @@ static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *
         return true;
     }
     c->seen[e - c->ix->entries] = true;
+    if (c->o->kit && account_file(e->path))
+    {
+        return true;
+    }
     if (excluded(c, e->path))
     {
         c->st->excluded++;
@@ -895,7 +913,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     {
         st->merged = merge_accounts(&c, path);
     }
-    if (!rs_image_open_files(path, &s, err))
+    if (o->kit ? !rs_image_open_kit(path, &s, err) : !rs_image_open_files(path, &s, err))
     {
         (void)sigaction(SIGPIPE, &saved, NULL);
         rs_accounts_free(&c.accounts);
@@ -906,7 +924,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     c.seen = rs_xcalloc(ix->count + 1, sizeof(*c.seen));
     for (i = 0; i < ix->count; i++)
     {
-        if (ix->entries[i].type == 'f' && ix->entries[i].stored)
+        if (ix->entries[i].type == 'f' && ix->entries[i].stored && !o->kit)
         {
             total += ix->entries[i].size;
         }
@@ -934,7 +952,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
         ok = false;
     }
     (void)sigaction(SIGPIPE, &saved, NULL);
-    if (ok)
+    if (ok && !o->kit)
     {
         /* What the archive does not carry: device nodes, from the index. */
         for (i = 0; i < ix->count; i++)
@@ -956,7 +974,14 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
                 c.st->missing++;
             }
         }
-        link_files(&c);
+    }
+    if (ok)
+    {
+        /* Hard links reach beyond the kit; the files' own restore makes them. */
+        if (!o->kit)
+        {
+            link_files(&c);
+        }
         finish_dirs(&c);
     }
     free(c.done);

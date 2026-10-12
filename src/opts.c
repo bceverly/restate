@@ -267,6 +267,17 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             }
             o->target = optarg;
             break;
+        case OPT_FIRMWARE:
+            if (strcmp(optarg, "uefi") != 0 && strcmp(optarg, "bios") != 0)
+            {
+                rs_buf_addf(err, "--firmware: \"%s\" is not uefi or bios", optarg);
+                return false;
+            }
+            o->firmware = optarg;
+            break;
+        case OPT_PACKAGES:
+            o->packages = true;
+            break;
         case OPT_KEEP_LOCAL:
             o->keep_local = true;
             break;

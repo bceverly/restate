@@ -443,8 +443,24 @@ void test_sources(void)
     rs_test_write(root, "etc/apt/sources.list.d/src.sources",
                   "Types: deb-src\nURIs: https://src.example/deb\nSuites: stable\n"
                   "Components: main\n", 0644);
-    rs_test_write(root, "etc/apt/sources.list.d/inline.sources",
-                  "Types: deb\nURIs: https://inline.example/deb\nSuites: stable\n"
+    /* The key in the source file itself, as Ubuntu writes a PPA's now: one
+     * that signed the index, and one that is not a key at all. */
+    signed_release(home, lists, "inline.example_deb_dists_stable_", "a@example.invalid", NULL,
+                   NULL);
+    signed_release(home, lists, "badinline.example_deb_dists_stable_", "a@example.invalid", NULL,
+                   NULL);
+    {
+        char *cmd = rs_xasprintf("{ printf 'Types: deb\\nURIs: https://inline.example/deb\\n"
+                                 "Suites: stable\\nComponents: main\\nSigned-By:\\n'; "
+                                 "sed -e 's/^$/./' -e 's/^/ /' '%s/usr/share/keyrings/a.asc'; } "
+                                 "> '%s/etc/apt/sources.list.d/inline.sources'",
+                                 root, root);
+
+        CHECK(quiet(cmd) == 0);
+        free(cmd);
+    }
+    rs_test_write(root, "etc/apt/sources.list.d/badinline.sources",
+                  "Types: deb\nURIs: https://badinline.example/deb\nSuites: stable\n"
                   "Components: main\nSigned-By:\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n .\n "
                   "AAEC\n -----END PGP PUBLIC KEY BLOCK-----\n", 0644);
 
@@ -454,7 +470,7 @@ void test_sources(void)
     rs_packages_describe(root, &p);
     n = rs_sources_check(root, &p, (int64_t)time(NULL), false, &checked);
     CHECK(checked);
-    CHECK_INT(n, 5);
+    CHECK_INT(n, 6);
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/test.sources"), "ok");
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/armored.sources"), "ok");
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/trusted.list"), "ok");
@@ -464,6 +480,8 @@ void test_sources(void)
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/off.sources"), "ok");
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/src.sources"), "ok");
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/inline.sources"), "ok");
+    CHECK_CONTAINS(problem_of(&p, "/etc/apt/sources.list.d/badinline.sources"),
+                   "https://badinline.example/deb stable: ");
     CHECK_CONTAINS(problem_of(&p, "/etc/apt/sources.list.d/wrong.sources"),
                    "https://wrong.example/deb/ stable: signed by a key that is not given (ID ");
     CHECK_STR(problem_of(&p, "/etc/apt/sources.list.d/nokey.sources"),

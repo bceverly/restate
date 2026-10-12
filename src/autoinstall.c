@@ -1349,6 +1349,13 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
         rs_layout_free(&g.l);
         return false;
     }
+    if (o->firmware && !rs_layout_set_firmware(&g.l, o->firmware))
+    {
+        rs_buf_addf(err, "--firmware %s: the machine description has no disk with a partition "
+                    "table to boot from", o->firmware);
+        rs_layout_free(&g.l);
+        return false;
+    }
     for (i = 0; i < g.l.nvols; i++)
     {
         if (g.l.vols[i].foreign && g.l.vols[i].kind == RS_VOL_PART && o->target == RS_TARGET_SAME &&

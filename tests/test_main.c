@@ -223,6 +223,8 @@ int main(void)
     test_repo();
     test_diff();
     test_opts();
+    test_reinstall();
+    test_baseline();
     test_cmd();
 
     rs_name_cache_free();

@@ -585,7 +585,7 @@ static void sheet_cases(void)
 
     TEST_CASE("buildsheet: what it cannot do");
     {
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false, NULL, NULL };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false, NULL, NULL, NULL };
         struct rs_buf        out;
         struct rs_buf        err;
 
@@ -1001,7 +1001,7 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL, NULL };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL, NULL, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 
@@ -1026,9 +1026,188 @@ static void autoinstall_cases(void)
     }
 }
 
+/* A BIOS machine on a GPT disk: GRUB's partition first. */
+static const char gpt_bios_json[] =
+    "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"architecture\": \"x86_64\","
+    "   \"type\": \"server\"},"
+    " \"firmware\": {\"mode\": \"bios\"},"
+    " \"disks\": [{\"name\": \"sda\", \"size\": 21474836480, \"table\": {\"type\": \"gpt\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 1048576,"
+    "     \"type\": \"21686148-6449-6e6f-744e-656564454649\"},"
+    "    {\"name\": \"sda2\", \"number\": 2, \"start\": 2097152, \"size\": 20000000000,"
+    "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"r\"}}]}],"
+    " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"}]"
+    "}";
+
+/* A UEFI machine on an MBR disk. */
+static const char dos_uefi_json[] =
+    "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"architecture\": \"x86_64\","
+    "   \"type\": \"server\"},"
+    " \"firmware\": {\"mode\": \"uefi\"},"
+    " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": \"dos\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"vda1\", \"number\": 1, \"start\": 1048576, \"size\": 536870912,"
+    "     \"type\": \"0xef\", \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\"}},"
+    "    {\"name\": \"vda2\", \"number\": 2, \"start\": 537919488, \"size\": 20000000000,"
+    "     \"type\": \"0x83\", \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", "
+    "\"uuid\": \"r\"}}]}],"
+    " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"},"
+    "            {\"spec\": \"/dev/vda1\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
+    "}";
+
+static char *sheet_firmware(const struct rs_jval *m, enum rs_target t, const char *fw)
+{
+    struct rs_sheet_opts o;
+    struct rs_buf        out;
+    struct rs_buf        err;
+
+    memset(&o, 0, sizeof(o));
+    o.target = t;
+    o.version = "9.9";
+    o.firmware = fw;
+    rs_buf_init(&out);
+    rs_buf_init(&err);
+    CHECK(rs_buildsheet(m, &o, &out, &err));
+    rs_buf_free(&err);
+    return rs_buf_detach(&out);
+}
+
+static char *autoinst_firmware(const struct rs_jval *m, enum rs_target t, const char *fw)
+{
+    struct rs_auto_opts o;
+    struct rs_buf       out;
+    struct rs_buf       err;
+
+    memset(&o, 0, sizeof(o));
+    o.target = t;
+    o.version = "9.9";
+    o.firmware = fw;
+    rs_buf_init(&out);
+    rs_buf_init(&err);
+    CHECK(rs_autoinstall(m, &o, &out, &err));
+    rs_buf_free(&err);
+    return rs_buf_detach(&out);
+}
+
+static void firmware_cases(void)
+{
+    struct rs_jval   m;
+    struct rs_layout l;
+    char            *s;
+    size_t           v;
+
+    TEST_CASE("firmware: a BIOS guest on an MBR disk, rebuilt to boot by UEFI");
+    parse(guest_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "uefi"));
+    CHECK_STR(l.firmware, "uefi");
+    /* An EFI system partition, added in front of the others. */
+    v = rs_layout_find(&l, "esp");
+    CHECK(v != SIZE_MAX);
+    if (v != SIZE_MAX)
+    {
+        CHECK_STR(l.vols[v].ptype, "0xef");
+        CHECK_STR(l.vols[v].mountpoint, "/boot/efi");
+        CHECK_STR(l.vols[v].path, "/dev/vda1");
+        CHECK(l.vols[v + 1].kind == RS_VOL_PART && strcmp(l.vols[v + 1].name, "vda1") == 0);
+    }
+    CHECK(rs_layout_set_firmware(&l, "uefi"));   /* already: nothing more */
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_METAL, "uefi");
+    CHECK_CONTAINS(s, "Firmware set to boot UEFI");
+    CHECK_CONTAINS(s, "vda1 : size=512MiB, type=ef\n");
+    CHECK_CONTAINS(s, "vda2 : size=");
+    CHECK_CONTAINS(s, "/boot/efi");
+    free(s);
+    s = autoinst_firmware(&m, RS_TARGET_METAL, "uefi");
+    CHECK_CONTAINS(s, "id: \"part-esp\"");
+    CHECK_CONTAINS(s, "path: \"/boot/efi\"");
+    CHECK(strstr(s, "        grub_device: true\n      - type: partition") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: UEFI on GPT, rebuilt to boot by BIOS");
+    server(&m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "bios"));
+    v = rs_layout_find(&l, "sda1");
+    CHECK_STR(l.vols[v].ptype, "21686148-6449-6e6f-744e-656564454649");
+    CHECK(l.vols[v].mountpoint == NULL);
+    CHECK_INT(l.vols[v].size, 1048576);
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_VM, "bios");
+    CHECK_CONTAINS(s, "type=21686148-6449-6e6f-744e-656564454649");
+    CHECK(strstr(s, "/boot/efi") == NULL);
+    CHECK_CONTAINS(s, "Install the boot loader to $DISK1 itself");
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: GRUB's BIOS partition on GPT becomes the ESP");
+    parse(gpt_bios_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "uefi"));
+    v = rs_layout_find(&l, "sda1");
+    CHECK_STR(l.vols[v].ptype, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+    CHECK_STR(l.vols[v].fstype, "vfat");
+    CHECK_INT(l.vols[v].size, (uint64_t)512 * 1024 * 1024);
+    CHECK(rs_layout_find(&l, "esp") == SIZE_MAX);
+    rs_layout_free(&l);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: UEFI on MBR to BIOS, and the ESP left out");
+    parse(dos_uefi_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "bios"));
+    v = rs_layout_find(&l, "vda1");
+    CHECK(l.vols[v].foreign);
+    CHECK_CONTAINS(l.vols[v].foreign_why, "BIOS boot does not use");
+    CHECK(rs_layout_fit(&l, v, RS_TARGET_VM) == 0);
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_VM, "bios");
+    CHECK(strstr(s, "type=ef") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: nothing to boot from");
+    parse("{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\"},"
+          " \"firmware\": {\"mode\": \"bios\"},"
+          " \"disks\": [{\"name\": \"vda\", \"size\": 1000000000,"
+          "   \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\"}}]}", &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(!rs_layout_set_firmware(&l, "uefi"));
+    CHECK(rs_layout_set_firmware(&l, NULL));
+    rs_layout_free(&l);
+    {
+        struct rs_sheet_opts o;
+        struct rs_auto_opts  a;
+        struct rs_buf        out;
+        struct rs_buf        err;
+
+        memset(&o, 0, sizeof(o));
+        o.target = RS_TARGET_VM;
+        o.firmware = "uefi";
+        rs_buf_init(&out);
+        rs_buf_init(&err);
+        CHECK(!rs_buildsheet(&m, &o, &out, &err));
+        CHECK_CONTAINS(err.data, "--firmware uefi");
+        rs_buf_reset(&err);
+        memset(&a, 0, sizeof(a));
+        a.target = RS_TARGET_VM;
+        a.firmware = "uefi";
+        CHECK(!rs_autoinstall(&m, &a, &out, &err));
+        CHECK_CONTAINS(err.data, "--firmware uefi");
+        rs_buf_free(&out);
+        rs_buf_free(&err);
+    }
+    rs_jval_free(&m);
+}
+
 void test_rebuild(void)
 {
     package_cases();
+    firmware_cases();
     autoinstall_package_cases();
     layout_cases();
     sheet_cases();

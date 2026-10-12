@@ -99,6 +99,15 @@ void test_opts(void)
     CHECK_CONTAINS(err.data, "scan takes no arguments");
     CHECK(!parse_args(&o, &err, ARGS("diff", "one")));
     CHECK_CONTAINS(err.data, "usage: restate diff OLD NEW");
+    CHECK(!parse_args(&o, &err, ARGS("buildsheet", "--firmware", "efi")));
+    CHECK_CONTAINS(err.data, "--firmware: \"efi\" is not uefi or bios");
+    CHECK(parse_args(&o, &err, ARGS("buildsheet", "--target", "vm", "--firmware", "bios")));
+    CHECK_STR(o.firmware, "bios");
+    CHECK(parse_args(&o, &err, ARGS("restore", "--packages", "img.tar")));
+    CHECK(o.packages);
+    CHECK(parse_args(&o, &err, ARGS("baseline", "fetch", "img.tar")));
+    CHECK_INT(o.command, CMD_BASELINE);
+    CHECK_INT(o.nargs, 2);
     CHECK(!parse_args(&o, &err, ARGS("classify")));
     CHECK_CONTAINS(err.data, "usage: restate classify PATH...");
     CHECK(parse_args(&o, &err, ARGS("classify", "/a", "/b", "/c")));

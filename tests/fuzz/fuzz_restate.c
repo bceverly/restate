@@ -34,8 +34,14 @@
  *      md5sums and list, between NULs -- loaded, and every path looked up
  *  12  what /proc says of a process -- its status, an fdinfo and a mongod
  *      configuration between NULs, then its command line -- parsed
- *  13  OpenPGP as text: ASCII armor taken off, gpgv's status lines read, and
+ *  13  a repository's pack index, its marker and snapshot names, and the
+ *      chunker
+ *  14  OpenPGP as text: ASCII armor taken off, gpgv's status lines read, and
  *      a Release file's Valid-Until, all from the same input
+ *  15  an apt repository as baseline fetch reads it -- an InRelease file, a
+ *      Packages list, an origin and a URI, between NULs -- the signed text
+ *      split out, the list's entries read, the origin split and the URI
+ *      mapped to the archive's snapshot
  *
  * It is reached two ways:
  *
@@ -55,6 +61,7 @@
 #include <unistd.h>
 
 #include "accounts.h"
+#include "baseline.h"
 #include "diff.h"
 #include "glob.h"
 #include "index.h"
@@ -227,6 +234,91 @@ static void fuzz_openpgp(const char *text, size_t len)
         abort();
     }
     free(s);
+}
+
+static bool all_hex(const char *s, size_t n)
+{
+    return strlen(s) == n && strspn(s, "0123456789abcdef") == n;
+}
+
+static void apt_entry(void *ctx, const struct rs_baseline_entry *e)
+{
+    (void)ctx;
+    if (!e->name || !e->version || !e->arch || !e->filename || !all_hex(e->sha256, 64))
+    {
+        abort();
+    }
+}
+
+/* What baseline fetch reads of a repository, NUL-separated. */
+static void fuzz_apt(const char *text, size_t len)
+{
+    const char   *parts[4] = { "", "", "", "" };
+    size_t        lens[4] = { 0, 0, 0, 0 };
+    char         *copy[4];
+    struct rs_buf out;
+    char          sha[RS_SHA256_HEX_SIZE];
+    uint64_t      size;
+    char         *uri;
+    char         *suite;
+    char         *comp;
+    char         *deb;
+    size_t        k = 0;
+    size_t        i;
+
+    parts[0] = text;
+    for (i = 0; i < len && k < 3; i++)
+    {
+        if (text[i] == '\0')
+        {
+            lens[k] = (size_t)(text + i - parts[k]);
+            parts[++k] = text + i + 1;
+        }
+    }
+    lens[k] = (size_t)(text + len - parts[k]);
+    for (i = 0; i < 4; i++)
+    {
+        copy[i] = rs_xstrndup(parts[i], lens[i]);
+    }
+    rs_buf_init(&out);
+    if (rs_sources_signed_part(parts[0], lens[0], &out) && out.len > lens[0])
+    {
+        abort();
+    }
+    rs_buf_free(&out);
+    if (rs_baseline_release_entry(copy[0], "main/binary-amd64/Packages.gz", sha, &size) &&
+        !all_hex(sha, 64))
+    {
+        abort();
+    }
+    rs_baseline_parse_packages(parts[1], lens[1], apt_entry, NULL);
+    if (rs_baseline_label(copy[2], &uri, &suite, &comp))
+    {
+        if (uri[0] == '\0' || strchr(uri, ' ') || strchr(comp, '/'))
+        {
+            abort();
+        }
+        free(uri);
+        free(suite);
+        free(comp);
+    }
+    rs_buf_init(&out);
+    if (rs_baseline_snapshot_uri(copy[3], "20261010T000000Z", &out) &&
+        !rs_starts_with(out.data, "https://snapshot."))
+    {
+        abort();
+    }
+    rs_buf_free(&out);
+    deb = rs_baseline_deb_name(copy[2], copy[3], "amd64");
+    if (deb && (strchr(deb, '/') || strlen(deb) < 5 || strcmp(deb + strlen(deb) - 4, ".deb") != 0))
+    {
+        abort();
+    }
+    free(deb);
+    for (i = 0; i < 4; i++)
+    {
+        free(copy[i]);
+    }
 }
 
 /* A pack's .idx, and the names prune chooses between, from the same text. */
@@ -818,7 +910,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 15)
+    switch (data[0] % 16)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -862,8 +954,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 13:
         fuzz_repo(text, size - 1);
         break;
-    default:
+    case 14:
         fuzz_openpgp(text, size - 1);
+        break;
+    default:
+        fuzz_apt(text, size - 1);
         break;
     }
     return 0;

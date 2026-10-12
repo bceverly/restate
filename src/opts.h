@@ -42,7 +42,9 @@ enum {
     OPT_KEEP_MONTHLY,
     OPT_SYSLOG,
     OPT_EXACT_VERSIONS,
-    OPT_FETCH_SOURCES
+    OPT_FETCH_SOURCES,
+    OPT_PACKAGES,
+    OPT_FIRMWARE
 };
 
 enum rs_command {
@@ -66,6 +68,7 @@ struct rs_options {
     const char     *cache;
     const char     *mirror;
     const char     *target;       /* "vm" or "metal", or NULL: the same machine */
+    const char     *firmware;     /* "uefi" or "bios", or NULL: the machine's own */
     const char    **recipients;   /* --encrypt-to: public key files */
     size_t          nrecipients;
     const char     *sign_with;    /* --sign-with: a secret key file */
@@ -90,6 +93,7 @@ struct rs_options {
     size_t          nexcludes;
     bool            dry_run;
     bool            check_first;    /* restore: read it all first */
+    bool            packages;       /* --packages: diff by package, restore them */
     bool            numeric_owner;
     const char     *image_at;       /* --image-at */
     bool            one_fs;

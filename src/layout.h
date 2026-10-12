@@ -163,6 +163,17 @@ struct rs_layout {
 bool rs_layout_build(const struct rs_jval *machine, struct rs_layout *out);
 void rs_layout_free(struct rs_layout *l);
 
+/*
+ * Makes the layout one that boots by `mode` ("uefi" or "bios") rather than as
+ * the machine did: on the disk it boots from, an EFI system partition (512
+ * MiB, vfat, /boot/efi) in place of GRUB's BIOS boot partition, or added at
+ * the front; or the other way, a BIOS boot partition in place of the ESP on
+ * a GPT disk, and the ESP left out on a DOS one. False if there is no disk to
+ * boot from. For a rebuild elsewhere (RS_TARGET_VM, RS_TARGET_METAL), whose
+ * partitions are numbered afresh.
+ */
+bool rs_layout_set_firmware(struct rs_layout *l, const char *mode);
+
 /* The volume whose kernel name is `name`, or SIZE_MAX. */
 size_t rs_layout_find(const struct rs_layout *l, const char *name);
 

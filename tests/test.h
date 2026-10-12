@@ -103,5 +103,7 @@ void test_scan(void);
 void test_diff(void);
 void test_opts(void);
 void test_cmd(void);
+void test_reinstall(void);
+void test_baseline(void);
 
 #endif /* RESTATE_TEST_H */

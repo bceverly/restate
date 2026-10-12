@@ -52,6 +52,8 @@ struct rs_restore_opts {
     bool               quiet;      /* and, dry, not say what would be put back */
     bool               verbose;    /* name everything put back */
     bool               numeric_owner; /* the index's numbers, not names */
+    bool               kit;        /* the kit alone -- /etc/apt and the kept
+                                    * packages -- and not the account files */
 };
 
 struct rs_restore_stats {
@@ -73,6 +75,9 @@ struct rs_restore_stats {
 /*
  * Restores the files of the image at `path`, whose index is `ix`. True if it
  * read the whole image; the stats say what was put back, and what was not.
+ * With o->kit, only the kit's files, which a package restore needs before
+ * any package is installed: the account files are left for the files' own
+ * restore, which merges them with the accounts the packages have made.
  */
 bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_restore_opts *o,
                 struct rs_restore_stats *st, struct rs_buf *err);

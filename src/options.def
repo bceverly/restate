@@ -72,17 +72,21 @@ RS_OPT('x', "one-file-system",  no_argument,       NULL,
 RS_OPT('n', "no-hash",          no_argument,       NULL,
        "record metadata only; much faster, but content is then judged by size and mtime")
 RS_OPT(OPT_CACHE, "cache",      required_argument, "DIR",
-       "installer fetch: keep installers in DIR rather than the system's cache")
+       "installer fetch, baseline fetch: keep what is downloaded in DIR rather than the "
+       "system's cache; restore --packages: take packages from there")
 RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
        "installer fetch: download from the directory at URL (https:// or file://) "
        "rather than the vendor's")
 RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
        "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
        "hardware (metal) rather than the same machine")
+RS_OPT(OPT_FIRMWARE, "firmware", required_argument, "MODE",
+       "buildsheet, autoinstall, with --target: boot the rebuilt machine by UEFI (uefi) or "
+       "BIOS (bios) rather than as the old one did, with the partition that needs")
 RS_OPT(OPT_EXACT_VERSIONS, "exact-versions", no_argument, NULL,
-       "buildsheet, autoinstall: install each package at the version recorded, from "
-       "snapshot.ubuntu.com as of the capture where the archive has a newer one now, "
-       "rather than the newer one")
+       "buildsheet, autoinstall, restore --packages: each package at the "
+       "version recorded, from the archive's snapshot (snapshot.ubuntu.com, "
+       "snapshot.debian.org) where the archive has moved on, rather than the newer one")
 RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
        "autoinstall: where the installer will find the image (a mounted disk or "
        "share); the file then installs the packages and restores the files from it")
@@ -92,6 +96,12 @@ RS_OPT(OPT_EXCLUDE, "exclude",        required_argument, "PATTERN",
 RS_OPT(OPT_NUMERIC_OWNER, "numeric-owner", no_argument,     NULL,
        "restore: owners by the numbers the index records, and the image's own account "
        "files, rather than by name through the image's accounts merged with the system's")
+RS_OPT(OPT_PACKAGES, "packages",       no_argument,       NULL,
+       "diff: say which packages were installed, removed and upgraded, and leave out the "
+       "file changes they account for. restore: put the image's packages back first -- its "
+       "repositories and keys, its packages at their versions (from the baseline cache where "
+       "fetched), what was installed by hand and what as a dependency -- and remove what it "
+       "did not have; root only, onto the running system")
 RS_OPT(OPT_CHECK_FIRST, "check-first", no_argument,     NULL,
        "restore: read the whole image first, checking every file against the index and "
        "writing nothing, and put it back only if all of it is whole")
