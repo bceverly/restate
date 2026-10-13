@@ -196,7 +196,8 @@ static void pure(void)
             " {\"uris\": [\"https://port.example:8443/apt/\"]},"
             " {\"uris\": 7}, {\"uris\": [7]}]}";
         static const char auth[] =
-            "machine esm.ubuntu.com/apps/ubuntu/ login bearer password s3cret\n"
+            "# written by ubuntu-pro-client: machine evil.example login x password y\n"
+            "machine esm.ubuntu.com/apps/ubuntu/ login bearer password s3cret  # esm-apps\n"
             "machine https://port.example/apt login u\n password p\n"
             "machine both.example login u password p\n"
             "machine plain.example login u password p\n"

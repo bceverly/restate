@@ -243,7 +243,15 @@ static bool next_word(const char **p, char *word, size_t max)
 {
     size_t n;
 
-    *p += strspn(*p, " \t\r\n");
+    for (;;)
+    {
+        *p += strspn(*p, " \t\r\n");
+        if (**p != '#')
+        {
+            break;
+        }
+        *p += strcspn(*p, "\n");   /* a comment, to the end of its line */
+    }
     n = strcspn(*p, " \t\r\n");
     if (n == 0)
     {
@@ -380,8 +388,14 @@ static char *netrc_file(const struct rs_jval *apt, const char *home)
         {
             break;
         }
-        n = strlen(e->d_name);
-        if (e->d_name[0] == '.' || n < 6 || strcmp(e->d_name + n - 5, ".conf") != 0)
+        /* As apt takes them: a name of letters, digits, "_" and "-", with
+         * ".conf" after it or nothing -- Ubuntu Pro's is 90ubuntu-advantage
+         * -- and no other file left there, a .dpkg-old or a backup. */
+        n = strcspn(e->d_name, ".");
+        if (n == 0 ||
+            strspn(e->d_name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") !=
+                n ||
+            (e->d_name[n] != '\0' && strcmp(e->d_name + n, ".conf") != 0))
         {
             continue;
         }
@@ -1258,9 +1272,12 @@ static void download(struct run *r)
                 {
                     say(r, "%s %s (%s): %s could not be downloaded%s", w->name, w->version,
                         w->arch, w->url,
-                        r->netrc ? "" : " (a repository that needs a login, as Ubuntu Pro's "
-                                        "does, needs restate run as root, to read apt's "
-                                        "credentials)");
+                        r->netrc            ? ""
+                        : geteuid() != 0    ? " (a repository that needs a login, as Ubuntu "
+                                              "Pro's does, needs restate run as root, to read "
+                                              "apt's credentials)"
+                                            : " (if it needs a login, apt has none for it in "
+                                              "/etc/apt/auth.conf or auth.conf.d)");
                 }
             }
             free(final);
