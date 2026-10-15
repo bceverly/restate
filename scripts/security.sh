@@ -27,8 +27,8 @@
 #
 # gcc -fanalyzer -- leaks, double frees, null dereferences -- is `make lint`'s,
 # which runs at every commit and in CI; running it here too would only run it
-# twice. RESTATE_SECURITY_SKIP_MEMCHECK=1 leaves out the sanitizers' run for
-# the same reason, where `make test` has just made it: `make check` sets it.
+# twice. So with the sanitizers' run, where `make test` -- which makes it --
+# is recorded as having passed on exactly these files (scripts/passed.sh).
 #
 # Anything not installed is reported as skipped rather than failing the run.
 set -uo pipefail
@@ -230,8 +230,8 @@ section "the sanitizers, at runtime"
 # The static tools above reason about the code; this runs it. For a parser
 # that is the more convincing of the two, which is why it is part of the
 # security scan and not only of `make test`.
-if [ "${RESTATE_SECURITY_SKIP_MEMCHECK:-0}" = "1" ]; then
-  ok "run by make test, just now, on this tree: not run twice"
+if scripts/passed.sh --fresh test; then
+  ok "make test, which runs them, has passed on exactly these files: not run twice"
 elif scripts/memcheck.sh > "$REPORTS/memcheck.log" 2>&1; then
   ok "no memory errors, leaks or undefined behavior"
 else

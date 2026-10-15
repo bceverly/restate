@@ -17,13 +17,22 @@ The pre-commit hook runs `make lint` and refuses a commit if anything fails
 *or is skipped* — a scanner that is not installed passes by doing nothing,
 which proves nothing.
 
-Before a push, run `make check`: lint, `make test` and `make security`, run
-once and as strictly. It records the exact tree it passed on, and the
-pre-push hook lets a push through only if what it pushes has that tree — so a
-commit made with the pre-commit hook bypassed, or a file edited after the
-check, is caught before it leaves the machine. The hook itself takes a moment:
-GitHub drops a push whose hook runs for minutes. Lint that has passed on a
-tree, at commit or in `make check`, is not run on it again.
+`make test`, `make lint` and `make security` each record, in `.passed/`, the
+content they passed on — only when they pass with nothing skipped, and the
+record is deleted when a run starts, so a failed run leaves none. Content, not
+timestamps: touching a file changes nothing, editing one does. A check run by
+hand therefore counts, and nothing that has passed on exactly these files is
+run on them again:
+
+- the pre-commit hook skips lint that has passed on them;
+- `make check` runs whichever of test, lint and security has not;
+- the pre-push hook runs nothing — GitHub drops a push whose hook runs for
+  minutes — but refuses a commit whose files all three have not passed on.
+  A commit made with the pre-commit hook bypassed, or a file edited after the
+  checks, is caught before it leaves the machine.
+
+The tests' record ignores the prose (`*.md`, `docs/`), which no test reads;
+lint's and the security scan's cover everything.
 
 `RESTATE_SKIP_HOOK=1` bypasses either hook, for the rare honest reason.
 

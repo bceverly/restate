@@ -1132,7 +1132,7 @@ root. `/usr/local/sbin` is on root's `PATH` on every Ubuntu release.
 make install-dev    # every compiler, analyzer and scanner the checks use, and the git hooks
 make build          # ./bin/restate
 make test           # the tests, sanitizers, valgrind and the coverage gate
-make check          # lint, test and security, strictly: what a push needs
+make check          # test, lint and security, whichever has not passed: what a push needs
 ```
 
 `./bin/restate` runs straight from the tree; nothing needs installing to try a
@@ -1220,7 +1220,7 @@ Run `make` with no arguments for the full list.
 |---|---|
 | `make build` | compile into `./bin`, regenerating the manpage |
 | `make test` | unit, end-to-end, sanitizers, valgrind, and the 80% coverage gate — overall and per file |
-| `make check` | lint, test and security, run once, nothing skipped; records the tree it passed on, which the pre-push hook holds every push to |
+| `make check` | test, lint and security, each unless it has passed on exactly these files; what the pre-push hook holds every push to (see [CONTRIBUTING.md](CONTRIBUTING.md)) |
 | `make lint` | the compiler with `-Werror`, `gcc -fanalyzer`, cppcheck, clang-tidy, shellcheck, actionlint, house style, copyright audit, generated-file freshness |
 | `make security` | the security scanners, sanitizers, a fuzz run, gitleaks, Lucky 13 (`gcc -fanalyzer` is `make lint`'s) |
 | `make fuzz` | fuzz every parser |

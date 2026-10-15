@@ -60,8 +60,9 @@ compile_commands.json
 # looked. One pattern covers all three.
 .lint/
 .sanitize*
-# make check's logs, one per target it ran.
-.check/
+# make lint, test and security's records of passing -- on what content -- and
+# their logs: see scripts/passed.sh.
+.passed/
 
 # --- Fuzzing (make fuzz) ---------------------------------------------------
 # The corpus is generated; a crash file is a bug report to keep by hand, not in

@@ -15,12 +15,14 @@
 # installed. At commit time that trade is the wrong way round, so a skip here
 # is a failure and `make install-dev` is the fix.
 #
+# Lint that has passed on exactly these files -- run by hand, by `make check`,
+# or at the last commit -- is not run again: scripts/passed.sh records what it
+# passed on, and records nothing for a run that skipped a tool.
+#
 # Lint only: the tests and the security scan are `make check`'s, which the
-# pre-push hook requires, and a commit is a save point rather than a release.
-# Lint that has passed on this very tree -- in `make check`, or at the last
-# commit -- is not run again; passing, it records the tree for `make check`,
-# which then does not run it again either. Set RESTATE_SKIP_HOOK=1 to bypass;
-# the pre-push hook still holds the push to `make check`.
+# pre-push hook holds every push to; a commit is a save point rather than a
+# release. Set RESTATE_SKIP_HOOK=1 to bypass -- the pre-push hook will still
+# want lint to have passed on what is pushed.
 set -uo pipefail
 
 if [ "${RESTATE_SKIP_HOOK:-0}" = "1" ]; then
@@ -33,10 +35,8 @@ cd "$REPO_ROOT" || exit 0
 
 printf '\n\033[1mpre-commit\033[0m \033[2m(RESTATE_SKIP_HOOK=1 to skip)\033[0m\n'
 
-LINTED="$(git rev-parse --absolute-git-dir)/restate-linted"
-TREE="$(scripts/tree-id.sh 2> /dev/null)" || TREE=""
-if [ -n "$TREE" ] && [ "$(cat "$LINTED" 2> /dev/null)" = "$TREE" ]; then
-  printf '\033[92m✓ lint passed on this very tree already\033[0m\n\n'
+if scripts/passed.sh --fresh lint; then
+  printf '\033[92m✓ lint has passed on exactly these files already\033[0m\n\n'
   exit 0
 fi
 
@@ -48,8 +48,8 @@ if ! make --no-print-directory build > /dev/null; then
   exit 1
 fi
 
-# Captured rather than streamed, so the skip check below can read it and so a
-# clean run stays quiet. On failure the whole thing is printed.
+# Captured rather than streamed, so a clean run stays quiet. On failure the
+# whole thing is printed.
 LINT_OUTPUT="$(make --no-print-directory lint 2>&1)"
 LINT_STATUS=$?
 
@@ -59,17 +59,18 @@ if [ "$LINT_STATUS" -ne 0 ]; then
   exit 1
 fi
 
-# A tool that is not installed passes by doing nothing. Not here.
-if printf '%s' "$LINT_OUTPUT" | grep -q 'Skipped:'; then
+# Passed, but not recorded: a tool was skipped (or the files changed while it
+# ran). A tool that is not installed passes by doing nothing. Not here.
+if ! scripts/passed.sh --fresh lint; then
   printf '%s\n' "$LINT_OUTPUT"
-  printf '\n\033[91m✗ lint passed but skipped a tool — not committing\033[0m\n'
-  printf '  A scanner that is not installed reports "skipped" and passes, which\n'
-  printf '  is a clean result that proves nothing. Install them all:\n\n'
+  printf '\n\033[91m✗ lint passed but is not recorded as passing — not committing\033[0m\n'
+  printf '  It says just above why: a file changed while it ran (run it again), or\n'
+  printf '  it skipped a tool. A scanner that is not installed reports "skipped"\n'
+  printf '  and passes, which is a clean result that proves nothing. Install them:\n\n'
   printf '      \033[96mmake install-dev\033[0m\n\n'
   printf '  Or commit anyway with \033[96mRESTATE_SKIP_HOOK=1 git commit ...\033[0m\n\n'
   exit 1
 fi
 
-[ -z "$TREE" ] || printf '%s\n' "$TREE" > "$LINTED"
 printf '\033[92m✓ lint is clean, with every analyzer present\033[0m\n\n'
 exit 0

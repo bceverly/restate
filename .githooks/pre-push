@@ -5,17 +5,17 @@
 #
 # restate — installed by scripts/install-hooks.sh
 #
-# Lets a push through only if what it pushes is exactly what `make check`
-# passed on: lint, the tests, the sanitizers, valgrind, the coverage gate and
-# the security scan.
+# Lets a push through only if `make test`, `make lint` and `make security`
+# have each passed on exactly the files it pushes.
 #
-# It runs none of that itself. git holds the connection to the remote open
-# while a pre-push hook runs, and the checks take long enough that GitHub
-# drops it. Instead `make check` records the git tree it passed on, and this
-# compares the tree of each commit being pushed with it -- in a moment. A
-# commit made with the pre-commit hook bypassed, a file edited since the
-# check, a partial commit of a checked tree: each has another tree, and is
-# refused.
+# It runs none of them. git holds the connection to the remote open while a
+# pre-push hook runs, and they take long enough that GitHub drops it. Each
+# records what it passed on (scripts/passed.sh), by content; this works out
+# the same keys from the tree of each commit being pushed and compares them,
+# in a moment. A commit made with the pre-commit hook bypassed, a file edited
+# after the checks, part of a checked tree committed and the rest not: each
+# has other content, and is refused, with what to run. `make check` runs
+# whatever has not passed.
 #
 # Only the tip of each branch or tag pushed is held to it: that is what lands.
 #
@@ -30,29 +30,29 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$REPO_ROOT" || exit 0
 
-CHECKED="$(cat "$(git rev-parse --absolute-git-dir)/restate-checked" 2> /dev/null)"
-REFUSED=()
+STALE=()
+REFS=()
 
 # git gives a line per ref pushed: local ref, local object, remote ref, remote
 # object. A local object of all zeros is a deletion: nothing lands.
 while read -r local_ref local_sha _ _; do
   [[ "$local_sha" =~ ^0+$ ]] && continue
-  tree="$(git rev-parse --verify --quiet "$local_sha^{tree}")"
-  if [ -z "$tree" ] || [ "$tree" != "$CHECKED" ]; then
-    REFUSED+=("$local_ref")
-  fi
+  tree="$(git rev-parse --verify --quiet "$local_sha^{tree}")" || tree=""
+  for phase in test lint security; do
+    if [ -z "$tree" ] || ! scripts/passed.sh --fresh --tree "$tree" "$phase"; then
+      [[ " ${STALE[*]} " == *" $phase "* ]] || STALE+=("$phase")
+      [[ " ${REFS[*]} " == *" $local_ref "* ]] || REFS+=("$local_ref")
+    fi
+  done
 done
 
-if [ "${#REFUSED[@]}" -gt 0 ]; then
+if [ "${#STALE[@]}" -gt 0 ]; then
   printf '\n\033[1mpre-push\033[0m\n'
-  printf '\033[91m✗ not what make check passed on: %s\033[0m\n' "${REFUSED[*]}"
-  if [ -z "$CHECKED" ]; then
-    printf '  make check has not passed, or the last run of it did not.\n'
-  else
-    printf '  The tree make check passed on is not this commit'"'"'s: something changed\n'
-    printf '  after it, or was left out of the commit.\n'
-  fi
-  printf '\n      \033[96mmake check\033[0m   then push again\n\n'
+  printf '\033[91m✗ %s: not passed on exactly these files: %s\033[0m\n' \
+    "${REFS[*]}" "$(printf 'make %s, ' "${STALE[@]}" | sed 's/, $//')"
+  printf '  Something changed after it passed, or was left out of the commit, or\n'
+  printf '  it has not been run on them.\n'
+  printf '\n      \033[96mmake check\033[0m   runs what has not passed; then push again\n\n'
   printf '  Or push anyway with \033[96mRESTATE_SKIP_HOOK=1 git push ...\033[0m\n\n'
   exit 1
 fi

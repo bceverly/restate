@@ -245,11 +245,12 @@ fi
 git remote get-url origin > /dev/null 2>&1 \
   || die "No 'origin' remote configured; nothing to push to."
 
-# `make check` -- what the pre-push hook holds every push to -- on the tree
-# about to be committed, before anything is committed or pushed, so a failure
-# leaves nothing done. It records the tree it passed on: the commit below has
-# that tree, so the pre-commit hook does not lint it again and the pre-push
-# hook lets it through without running anything.
+# `make check` -- test, lint and security, what the pre-push hook holds every
+# push to -- on the files about to be committed, before anything is committed
+# or pushed, so a failure leaves nothing done. Each records what it passed on:
+# the commit below is exactly those files, so the pre-commit hook does not
+# lint it again and the pre-push hook lets it through without running
+# anything.
 bold "Checking"
 make --no-print-directory check < /dev/null \
   || die "make check failed; nothing was committed or pushed."
