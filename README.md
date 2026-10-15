@@ -694,6 +694,13 @@ users and groups an ACL names mapped by name, as owners are. SELinux and
 Smack labels and IMA and EVM signatures are left to the target's own policy
 and keys.
 
+A file already in place as the image has it -- the same size and
+modification time, no other name, and content that hashes to the index's
+digest -- is not written again, only given its owner, mode, attributes and
+times. A restore run again, or onto a machine that has most of its files
+already, then needs no room beside a large file for a second copy and none
+of the time to write one.
+
 Owners are restored by name. A rebuilt machine's packages numbered their own
 users as they went in (postgres may be 128 where it was 125), so the image's
 `/etc/passwd`, `/etc/group` and shadows are merged with the new system's
@@ -725,7 +732,8 @@ repository still has it (from the archive's snapshot, with
 none does; the `.deb` files the image kept; the holds; each package marked
 installed by hand or as a dependency, as it was. What the old machine did not
 have is marked a dependency, so `apt-get autoremove` takes away what nothing
-it had needs -- never the kernel, the boot loader, firmware or microcode,
+it had needs -- never the kernel, the boot loader, firmware, microcode or a
+virtual machine's guest tools (qemu-guest-agent, open-vm-tools and the like),
 which follow the hardware. Then the snaps, flatpaks, the Python, npm and Ruby
 packages installed system-wide, and the alternatives chosen by hand. It is
 all done by a shell script, as a person would do it; `--dry-run` writes the

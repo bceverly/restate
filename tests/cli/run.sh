@@ -565,6 +565,10 @@ expect 0 "verify finds the restored tree the same" -- "$BIN" verify --root rout 
 # What differs, if anything does: verify lists it on standard output.
 [ -z "$OUT" ] || printf '%s\n' "$OUT" | head -5 | sed 's/^/        verify: /'
 contains "$ERR" "0 added, 0 deleted, 0 modified" "nothing differs"
+key_inode=$(inode rout/etc/app/key)
+expect 0 "restore again, over itself" -- "$BIN" restore --allow-unverified --root rout rimg.tar
+contains "$ERR" "were in place already" "says what it left in place"
+check "and leaves it, not writing it again" test "$(inode rout/etc/app/key)" = "$key_inode"
 
 mkdir -p rdry
 expect 0 "restore --dry-run" -- "$BIN" restore --allow-unverified --dry-run --root rdry rimg.tar

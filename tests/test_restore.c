@@ -9,6 +9,7 @@
 
 #include "image.h"
 #include "index.h"
+#include "packages.h"
 #include "restore.h"
 #include "rules.h"
 #include "scan.h"
@@ -182,14 +183,66 @@ void test_restore(void)
         free(errs);
 
         TEST_CASE("restore: again, over what is there");
-        memset(&r, 0, sizeof(r));
-        restore_into(&r, img, &ix, root, &out, &errs);
-        CHECK(r.ok);
-        CHECK_INT(r.st.files, 5);
-        CHECK_INT(r.st.failed, 0);
-        rs_buf_free(&r.err);
-        free(out);
-        free(errs);
+        {
+            char                  *hosts = at(root, "etc/hosts");
+            char                  *key = at(root, "etc/app/key");
+            const struct rs_entry *ke = rs_index_find(&ix, "/etc/app/key");
+            struct timespec        ts[2];
+            struct stat            before;
+            struct stat            after;
+            struct rs_buf          text;
+            int                    fd;
+
+            CHECK(stat(hosts, &before) == 0);
+            /* /etc/app/key changed, but its size and time kept: the time
+             * alone is no proof, so it is put back. /etc/hosts given another
+             * mode: in place, its mode put back. */
+            fd = open(key, O_WRONLY);
+            CHECK(fd >= 0);
+            CHECK(write(fd, "SECRET\n", 7) == 7);
+            (void)close(fd);
+            ts[0].tv_sec = 0;
+            ts[0].tv_nsec = UTIME_OMIT;
+            ts[1].tv_sec = (time_t)ke->mtime.sec;
+            ts[1].tv_nsec = (long)ke->mtime.nsec;
+            CHECK(utimensat(AT_FDCWD, key, ts, 0) == 0);
+            CHECK(chmod(hosts, 0600) == 0);
+            memset(&r, 0, sizeof(r));
+            r.o.verbose = true;
+            restore_into(&r, img, &ix, root, &out, &errs);
+            CHECK(r.ok);
+            CHECK_INT(r.st.files, 5);
+            CHECK_INT(r.st.failed, 0);
+            /* /etc/hosts, /home/u/doc and /var/x/one, linked to again; not
+             * the key, of another content. */
+            CHECK_INT(r.st.unchanged, 3);
+            CHECK_CONTAINS(out, "leave as it is /etc/hosts\n");
+            CHECK_CONTAINS(out, "restore /etc/app/key\n");
+            CHECK_CONTAINS(out, "link /var/x/two\n");
+            {
+                char       *one = at(root, "var/x/one");
+                char       *two = at(root, "var/x/two");
+                struct stat a;
+                struct stat b;
+
+                CHECK(stat(one, &a) == 0 && stat(two, &b) == 0);
+                CHECK(a.st_ino == b.st_ino);
+                free(one);
+                free(two);
+            }
+            CHECK(stat(hosts, &after) == 0);
+            CHECK(after.st_ino == before.st_ino);
+            CHECK_INT(after.st_mode & 07777, 0644);
+            rs_buf_init(&text);
+            CHECK(rs_read_beneath(root, "/etc/app/key", 64, &text));
+            CHECK_STR(text.data ? text.data : "", "secret\n");
+            rs_buf_free(&text);
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+            free(hosts);
+            free(key);
+        }
         free(root);
     }
 

@@ -16,6 +16,14 @@
  * where a directory should be is replaced rather than followed, and every
  * file is created beside its destination and renamed.
  *
+ * A file already in place as the index records it -- a regular file of the
+ * same size and modification time, with no other name, whose content hashes
+ * to the index's digest -- is not written again, only given the index's
+ * owner, attributes, mode and times: a restore run again, or onto a copy of
+ * the machine, then needs no room beside a large file for a second copy of
+ * it, and none of the time to write it. The image's copy is still read
+ * through and checked.
+ *
  * Then what tar does loosely: owners, modes and times (to the nanosecond)
  * from the index, extended attributes -- POSIX ACLs and file capabilities
  * among them, set after the owner, since a change of owner clears a file's
@@ -58,6 +66,7 @@ struct rs_restore_opts {
 
 struct rs_restore_stats {
     uint64_t files;
+    uint64_t unchanged;   /* of those, already in place as the image has them */
     uint64_t directories;
     uint64_t symlinks;
     uint64_t links;       /* hard links made */

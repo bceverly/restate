@@ -61,7 +61,7 @@ static const char fake_apt_get[] =
 static const char fake_apt_mark[] =
     "#!/bin/sh\n"
     "if [ \"$1\" = showmanual ]; then\n"
-    "  printf 'jq\\nhtop\\ncowsay\\nlinux-image-generic\\nintel-microcode\\n'\n"
+    "  printf 'jq\\nhtop\\ncowsay\\nlinux-image-generic\\nintel-microcode\\nqemu-guest-agent\\n'\n"
     "  exit 0\n"
     "fi\n"
     "echo \"apt-mark $*\" >> \"$LOG\"\n";
@@ -186,10 +186,12 @@ void test_reinstall(void)
         CHECK_CONTAINS(log.data, "apt-mark hold htop:amd64\n");
         CHECK_CONTAINS(log.data, "apt-mark manual jq:amd64 htop:amd64\n");
         CHECK_CONTAINS(log.data, "apt-mark auto libjq1:amd64 tzdata:amd64\n");
-        /* Not on the old machine: cowsay; never the kernel or microcode. */
+        /* Not on the old machine: cowsay; never the kernel, microcode or a
+         * virtual machine's guest agent. */
         CHECK_CONTAINS(log.data, "apt-mark auto cowsay:amd64\n");
         CHECK(strstr(log.data, "linux-image-generic") == NULL);
         CHECK(strstr(log.data, "intel-microcode") == NULL);
+        CHECK(strstr(log.data, "qemu-guest-agent") == NULL);
         CHECK_CONTAINS(log.data, "apt-get autoremove -y\n");
         /* jq is installed at 1.6, not 1.7: without --exact-versions, kept. */
         CHECK(strstr(log.data, "/var/cache/apt/archives/jq_1.7_amd64.deb") == NULL);

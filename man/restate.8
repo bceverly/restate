@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "October 13, 2026" "restate 1.4.0.4" "System Manager's Manual"
+.TH RESTATE 8 "October 14, 2026" "restate 1.4.0.4" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -1025,7 +1025,11 @@ file is written beside its destination, hashed as it is written, and renamed
 into place only if its digest is the index's, so a file that does not match
 never lands. Every path is reached from the root one directory at a time,
 never through a symbolic link: a link where a directory belongs is replaced,
-not followed.
+not followed. A file already in place as the image has it \- of the same
+size and modification time, with no other name, whose content hashes to the
+index's digest \- is not written again, only given its owner, mode,
+attributes and times, so a restore run again needs no room beside a large
+file for a second copy of it.
 .PP
 By itself that leaves a damaged image restored as far as it is whole. With
 .BR \-\-check\-first ,
@@ -1106,7 +1110,8 @@ as a dependency, as it was. What the old machine did not have is marked a
 dependency, so that
 .B apt\-get autoremove
 takes away what nothing it had needs \- never the kernel, the boot loader,
-firmware or microcode, which follow the hardware, and nothing at all on a
+firmware, microcode or a virtual machine's guest tools (qemu\-guest\-agent,
+open\-vm\-tools and the like), which follow the hardware, and nothing at all on a
 machine of another architecture. Then the snaps, the system's flatpaks, the
 Python, npm and Ruby packages installed system-wide, and the alternatives
 chosen by hand; then the files, as without it, but for apt's own record of

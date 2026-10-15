@@ -2212,6 +2212,12 @@ int rs_cmd_restore(const struct rs_options *o)
                       " others under %s\n", o->dry_run ? "would put back" : "put back",
                       st.files, st.bytes, st.directories, st.symlinks, st.links, st.other,
                       ro.root);
+        if (st.unchanged > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " of those files were in place already, "
+                          "as the image has them: left as they were, but for their owners, "
+                          "modes and times\n", st.unchanged);
+        }
         if (st.merged)
         {
             (void)fprintf(stderr, "restate: owners mapped by name, through the image's accounts "

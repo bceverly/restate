@@ -654,6 +654,7 @@ struct want {
     char                  sha[RS_SHA256_HEX_SIZE];
     uint64_t              size;
     char                 *url;
+    char                 *now;      /* the version its repository has instead */
 };
 
 /* One repository's suite, and what is wanted from it. */
@@ -721,6 +722,27 @@ static struct want *find_want(const struct run *r, const char *name, const char 
     key.arch = arch;
     key.version = version;
     return r->nw ? bsearch(&key, r->w, r->nw, sizeof(*r->w), compare_wants) : NULL;
+}
+
+static int compare_name_arch(const void *a, const void *b)
+{
+    const struct want *x = a;
+    const struct want *y = b;
+    int                c = strcmp(x->name, y->name);
+
+    return c != 0 ? c : strcmp(x->arch, y->arch);
+}
+
+/* A package wanted at some version -- for saying what its repository has in
+ * its place. */
+static struct want *find_name(const struct run *r, const char *name, const char *arch)
+{
+    struct want key;
+
+    memset(&key, 0, sizeof(key));
+    key.name = name;
+    key.arch = arch;
+    return r->nw ? bsearch(&key, r->w, r->nw, sizeof(*r->w), compare_name_arch) : NULL;
 }
 
 /* The snapshot ID of a superseded package's installation, as packages.c
@@ -960,7 +982,16 @@ static void found(void *ctx, const struct rs_baseline_entry *e)
     struct want *w = find_want(r, e->name, e->arch, e->version);
     const char  *filename;
 
-    if (!w || w->found || !clean_relative(e->filename))
+    if (!w)
+    {
+        w = r->at->snapshot ? NULL : find_name(r, e->name, e->arch);
+        if (w && !w->now)
+        {
+            w->now = rs_xstrdup(e->version);
+        }
+        return;
+    }
+    if (w->found || !clean_relative(e->filename))
     {
         return;
     }
@@ -1366,6 +1397,7 @@ static void free_wants(struct run *r)
         free(r->w[i].dated);
         free(r->w[i].deb);
         free(r->w[i].url);
+        free(r->w[i].now);
     }
     free(r->w);
 }
@@ -1436,7 +1468,12 @@ bool rs_baseline_fetch(const struct rs_jval *packages, const struct rs_baseline_
             continue;
         }
         st->missing++;
-        if (!w->found && shown < 20)
+        if (!w->found && shown < 20 && w->now)
+        {
+            say(&r, "%s %s (%s): gone -- its repository has %s now, and no snapshot restate "
+                "could check has this one", w->name, w->version, w->arch, w->now);
+            shown++;
+        } else if (!w->found && shown < 20)
         {
             say(&r, "%s %s (%s): no repository restate could check has it", w->name,
                 w->version, w->arch);

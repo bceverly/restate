@@ -17,6 +17,7 @@
 #include "accounts.h"
 #include "glob.h"
 #include "image.h"
+#include "meta.h"
 #include "progress.h"
 #include "sha256.h"
 
@@ -223,21 +224,29 @@ static void set_xattrs(struct ctx *c, int fd, const struct rs_entry *e)
  * none if it is -1. Owner first: chown clears set-id bits and capabilities,
  * which the attributes and chmod then put back; mode after the attributes,
  * since setting an ACL sets the group bits from it. */
+/* The owner `e` is to have: by name, through the merged accounts, where the
+ * index has a name. */
+static void owner_of(const struct ctx *c, const struct rs_entry *e, uint64_t *uid,
+                     uint64_t *gid)
+{
+    *uid = e->uid;
+    *gid = e->gid;
+    if (c->st->merged)
+    {
+        (void)rs_accounts_uid(&c->accounts, e->user, uid);
+        (void)rs_accounts_gid(&c->accounts, e->group, gid);
+    }
+}
+
 static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_entry *e,
                      bool symlink, int xfd)
 {
     struct timespec ts[2];
     int             flags = symlink ? AT_SYMLINK_NOFOLLOW : 0;
+    uint64_t        uid;
+    uint64_t        gid;
 
-    uint64_t        uid = e->uid;
-    uint64_t        gid = e->gid;
-
-    /* By name, through the merged accounts, where the index has a name. */
-    if (c->st->merged)
-    {
-        (void)rs_accounts_uid(&c->accounts, e->user, &uid);
-        (void)rs_accounts_gid(&c->accounts, e->group, &gid);
-    }
+    owner_of(c, e, &uid, &gid);
     if (fchownat(dir, name, (uid_t)uid, (gid_t)gid, AT_SYMLINK_NOFOLLOW) != 0)
     {
         if (errno != EPERM)
@@ -265,6 +274,90 @@ static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_e
     ts[0] = ts_of(&e->atime);
     ts[1] = ts_of(&e->mtime);
     return utimensat(dir, name, ts, flags) == 0;
+}
+
+/* Owner, extended attributes, mode and times, as set_meta sets them, on a
+ * file already in place: through `fd`, open on it, so they land on the file
+ * that was checked and not on whatever its name has since become. */
+static bool set_meta_fd(struct ctx *c, int fd, const struct rs_entry *e)
+{
+    struct timespec ts[2];
+    uint64_t        uid;
+    uint64_t        gid;
+
+    owner_of(c, e, &uid, &gid);
+    if (fchown(fd, (uid_t)uid, (gid_t)gid) != 0)
+    {
+        if (errno != EPERM)
+        {
+            return false;
+        }
+        c->st->owners++;
+    }
+    set_xattrs(c, fd, e);
+    if (fchmod(fd, (mode_t)e->mode) != 0)
+    {
+        return false;
+    }
+    ts[0] = ts_of(&e->atime);
+    ts[1] = ts_of(&e->mtime);
+    return futimens(fd, ts) == 0;
+}
+
+/* Whether what `fd` reads hashes to `hash`. */
+static bool hashes_to(int fd, const char *hash)
+{
+    unsigned char    chunk[65536];
+    struct rs_sha256 sha;
+    char             hex[RS_SHA256_HEX_SIZE];
+    ssize_t          n;
+
+    rs_sha256_init(&sha);
+    while ((n = read(fd, chunk, sizeof(chunk))) > 0)
+    {
+        rs_sha256_update(&sha, chunk, (size_t)n);
+    }
+    rs_sha256_final(&sha, hex);
+    return n == 0 && strcmp(hex, hash) == 0;
+}
+
+/*
+ * The file already at `name` in `dir`, open, if it is the one the index
+ * records: a regular file with no other name, of the index's size and
+ * modification time, whose content hashes to the index's digest. Else -1.
+ * Writing it again would take as much space again as it does, beside it,
+ * until the rename -- more than a full disk has, for a large one -- and the
+ * time to write it, for nothing.
+ */
+static int in_place(int dir, const char *name, const struct rs_entry *e)
+{
+    struct stat    st;
+    struct rs_time atime;
+    struct rs_time mtime;
+    struct rs_time ctime;
+    int            fd;
+
+    if (e->hash_state != RS_HASH_PRESENT)
+    {
+        return -1;
+    }
+    /* Non-blocking: a FIFO in its place is not waited on. */
+    fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 1 &&
+        (uint64_t)st.st_size == e->size)
+    {
+        rs_stat_times(&st, &atime, &mtime, &ctime);
+        if (rs_time_equal(&mtime, &e->mtime) && hashes_to(fd, e->hash))
+        {
+            return fd;
+        }
+    }
+    (void)close(fd);
+    return -1;
 }
 
 /* Renames `tmp` over `name`; a directory in the way is not replaced. */
@@ -346,15 +439,22 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     int              dir = open_parent(c, e->path, &name);
     char            *tmp = NULL;
     int              out = -1;
+    int              kept = -1;
     bool             ok = true;
     bool             wrote = true;
     ssize_t          n;
 
+    /* Already there, as the image has it: read past, and checked, but not
+     * written again. */
+    if (dir >= 0 && !c->o->dry_run && !merged)
+    {
+        kept = in_place(dir, name, e);
+    }
     if (dir == -1)
     {
         failed(c, e->path, strerror(errno));
         wrote = false;
-    } else if (dir >= 0 && !c->o->dry_run)
+    } else if (dir >= 0 && !c->o->dry_run && kept < 0)
     {
         tmp = temp_name(c);
         out = openat(dir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -420,6 +520,19 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
         c->st->refused++;
         wrote = false;
     }
+    if (kept >= 0)
+    {
+        if (wrote && ok && !set_meta_fd(c, kept, e))
+        {
+            failed(c, e->path, strerror(errno));
+            wrote = false;
+        }
+        (void)close(kept);
+        if (wrote && ok)
+        {
+            c->st->unchanged++;
+        }
+    }
     if (out >= 0)
     {
         if (wrote && ok && !set_meta(c, dir, tmp, e, false, out))
@@ -440,7 +553,7 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     {
         c->st->files++;
         c->done[e - c->ix->entries] = true;
-        said(c, "restore", e->path);
+        said(c, kept >= 0 ? "leave as it is" : "restore", e->path);
     }
     free(tmp);
     if (dir >= 0)

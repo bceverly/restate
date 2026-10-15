@@ -366,6 +366,24 @@ static void make_repo(const char *dir, const char *home, const char *who)
     free(hello_sha);
 }
 
+struct said {
+    const struct rs_jval          *pk;
+    const struct rs_baseline_opts *o;
+};
+
+static int fetch_aloud(const void *arg)
+{
+    const struct said       *a = arg;
+    struct rs_baseline_stats st;
+    struct rs_buf            err;
+    bool                     ok;
+
+    rs_buf_init(&err);
+    ok = rs_baseline_fetch(a->pk, a->o, &st, &err);
+    rs_buf_free(&err);
+    return ok && st.missing == 2 ? 0 : 1;
+}
+
 static void fetching(void)
 {
     char                    *dir = rs_test_tmpdir();
@@ -471,6 +489,42 @@ static void fetching(void)
     CHECK_INT(st.cached, 3);
     CHECK_INT(st.local, 1);
     rs_buf_free(&text);
+
+    TEST_CASE("baseline fetch: what is gone says what its repository has now");
+    {
+        struct rs_jval          old;
+        struct rs_baseline_opts loud = o;
+        struct said             a;
+        char                   *out = NULL;
+        char                   *said = NULL;
+        char                   *old_json = rs_xasprintf(
+            "{\"apt\": {\"architectures\": [\"amd64\"],"
+            " \"sources\": [{\"file\": \"/etc/apt/sources.list.d/t.sources\", \"types\": [\"deb\"],"
+            "  \"uris\": [\"file://%s/repo\"], \"suites\": [\"stable\"], \"components\": [\"main\"],"
+            "  \"signed_by\": \"/usr/share/keyrings/a.gpg\"}],"
+            " \"keys\": [{\"path\": \"/usr/share/keyrings/a.gpg\", \"data\": \"%s\"}],"
+            " \"packages\": ["
+            "  {\"name\": \"hello\", \"architecture\": \"amd64\", \"version\": \"0.9\","
+            "   \"origins\": [\"file://%s/repo stable/main\"]},"
+            "  {\"name\": \"elsewhere\", \"architecture\": \"amd64\", \"version\": \"1\","
+            "   \"origins\": [\"file://%s/repo stable/main\"]}]}}",
+            dir, b64.data ? b64.data : "", dir, dir);
+
+        memset(&old, 0, sizeof(old));
+        rs_buf_reset(&err);
+        rs_json_init(&jp, old_json, strlen(old_json), &err);
+        CHECK(rs_json_value(&jp, &old));
+        loud.quiet = false;
+        a.pk = &old;
+        a.o = &loud;
+        CHECK_INT(rs_test_capture(fetch_aloud, &a, &out, &said), 0);
+        CHECK_CONTAINS(said, "hello 0.9 (amd64): gone -- its repository has 1.0 now");
+        CHECK_CONTAINS(said, "elsewhere 1 (amd64): no repository restate could check has it");
+        free(out);
+        free(said);
+        rs_jval_free(&old);
+        free(old_json);
+    }
 
     TEST_CASE("baseline fetch: an index signed by another key is not used");
     rs_test_rmtree(cache);
