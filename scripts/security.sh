@@ -16,15 +16,19 @@
 # are ordered by how close they sit to that:
 #
 #   1. the binary's own hardening      is the shipped executable defended
-#   2. gcc -fanalyzer                  leaks, double frees, null derefs
-#   3. cppcheck + CERT C rules         the rule-based second opinion
-#   4. clang's static analyzer         the third
-#   5. flawfinder                      known-dangerous API use
-#   6. semgrep                         pattern-based SAST
-#   7. the sanitizers                  the real thing, at runtime
-#   8. a short fuzz run                the real thing, on inputs nobody wrote
-#   9. gitleaks                        committed secrets
-#  10. MITRE's "Lucky 13"              the unforgivable classes, one by one
+#   2. cppcheck + CERT C rules         the rule-based second opinion
+#   3. clang's static analyzer         the third
+#   4. flawfinder                      known-dangerous API use
+#   5. semgrep                         pattern-based SAST
+#   6. the sanitizers                  the real thing, at runtime
+#   7. a short fuzz run                the real thing, on inputs nobody wrote
+#   8. gitleaks                        committed secrets
+#   9. MITRE's "Lucky 13"              the unforgivable classes, one by one
+#
+# gcc -fanalyzer -- leaks, double frees, null dereferences -- is `make lint`'s,
+# which runs at every commit and in CI; running it here too would only run it
+# twice. RESTATE_SECURITY_SKIP_MEMCHECK=1 leaves out the sanitizers' run for
+# the same reason, where `make test` has just made it: `make check` sets it.
 #
 # Anything not installed is reported as skipped rather than failing the run.
 set -uo pipefail
@@ -133,21 +137,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "gcc -fanalyzer — leaks, double frees, null dereferences"
-if "$CC" -fanalyzer -fsyntax-only -x c /dev/null > /dev/null 2>&1; then
-  if "$CC" -std=c11 -O2 "${CPPFLAGS_ALL[@]}" -fanalyzer \
-       -Wanalyzer-too-complex -Wall -Wextra -Werror \
-       -fsyntax-only src/*.c 2> "$REPORTS/analyzer.log"; then
-    ok "no findings"
-  else
-    bad "gcc -fanalyzer found something"
-    sed 's/^/      /' "$REPORTS/analyzer.log" | head -40
-  fi
-else
-  skip "this compiler has no -fanalyzer"
-fi
-
-# ---------------------------------------------------------------------------
 section "cppcheck — with the CERT C rules"
 if command -v cppcheck > /dev/null 2>&1; then
   ADDONS=()
@@ -241,7 +230,9 @@ section "the sanitizers, at runtime"
 # The static tools above reason about the code; this runs it. For a parser
 # that is the more convincing of the two, which is why it is part of the
 # security scan and not only of `make test`.
-if scripts/memcheck.sh > "$REPORTS/memcheck.log" 2>&1; then
+if [ "${RESTATE_SECURITY_SKIP_MEMCHECK:-0}" = "1" ]; then
+  ok "run by make test, just now, on this tree: not run twice"
+elif scripts/memcheck.sh > "$REPORTS/memcheck.log" 2>&1; then
   ok "no memory errors, leaks or undefined behavior"
 else
   bad "the sanitizers found something"

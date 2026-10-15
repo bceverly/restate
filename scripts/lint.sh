@@ -98,9 +98,18 @@ section "gcc -fanalyzer — path-sensitive analysis"
 # gcc and says "cc (Ubuntu 15.2.0) 15.2.0" when asked, with the word "gcc"
 # nowhere in it — so a name match reported "not gcc" about gcc and skipped the
 # analyzer silently, which is the one thing this script promises not to do.
+#
+# Compiled, not -fsyntax-only: the analyzer runs on the compiled code, and with
+# -fsyntax-only gcc never gets that far -- for a long time this check passed by
+# analyzing nothing, a double free and all. A file at a time, as many at once
+# as there are processors; -Werror, so a finding is a failure and not only
+# something printed.
 if "$CC" -fanalyzer -fsyntax-only -x c /dev/null > /dev/null 2>&1; then
-  if "$CC" -std=c11 -O2 "${CPPFLAGS_ALL[@]}" -fanalyzer -Wall \
-       -fsyntax-only src/*.c 2> "$WORK/analyzer.log"; then
+  : > "$WORK/analyzer.log"
+  if printf '%s\0' src/*.c |
+       xargs -0 -n 1 -P "$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 2)" \
+         "$CC" -std=c11 -O2 "${CPPFLAGS_ALL[@]}" -fanalyzer -Wall -Wextra -Werror \
+         -c -o /dev/null 2>> "$WORK/analyzer.log"; then
     ok "no findings"
   else
     bad "gcc -fanalyzer found something"

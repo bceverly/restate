@@ -20,7 +20,8 @@
 #      and asks you to confirm it.
 #   2. Writes it into VERSION, rebuilds, regenerates the manpage and the
 #      README's Usage block, and checks the manpage names the new version.
-#   3. Runs the tests (`make test`), so a failure leaves nothing committed.
+#   3. Runs `make check` -- lint, the tests and the security scan -- so a
+#      failure leaves nothing committed.
 #   4. Commits and pushes that change.
 #   5. Creates an annotated tag and pushes the tag.
 #
@@ -152,10 +153,13 @@ fi
 # left out of it. Commit them, or stash them, first.
 # VERSION is left out: the catch-up above may just have changed it, and the
 # release writes and commits it regardless.
-if [ -n "$(git status --porcelain --untracked-files=no -- . ':!VERSION' 2>/dev/null)" ]; then
-  git status --short --untracked-files=no -- . ':!VERSION' | sed 's/^/      /'
-  die "The working tree has uncommitted changes (above). Commit them first:
-       a release has to be exactly what is committed."
+# A new file not committed counts too: the build compiles every src/*.c, so
+# one would be tested here and missing from the release.
+if [ -n "$(git status --porcelain -- . ':!VERSION' 2>/dev/null)" ]; then
+  git status --short -- . ':!VERSION' | sed 's/^/      /'
+  die "The working tree has uncommitted changes or new files (above). Commit
+       them, or remove them, first: a release has to be exactly what is
+       committed."
 fi
 
 # ---------------------------------------------------------------------------
@@ -241,17 +245,14 @@ fi
 git remote get-url origin > /dev/null 2>&1 \
   || die "No 'origin' remote configured; nothing to push to."
 
-# The tests run here, before anything is committed or pushed, rather than in
-# the pre-push hook. git connects to the remote before it runs that hook, and
-# the suite -- both suites, the sanitizers, valgrind and the coverage gate --
-# takes long enough that GitHub drops the idle connection, so a release whose
-# tests all passed then failed to push. Run here, nothing is open while they
-# run, and a failure leaves nothing committed. Standard input is /dev/null for
-# the same reason the hook gives it: `restate diff -` reads it.
-bold "Testing"
-make --no-print-directory test < /dev/null \
-  || die "The tests failed; nothing was committed or pushed."
-ok "Tests, sanitizers, valgrind and the coverage gate all passed."
+# `make check` -- what the pre-push hook holds every push to -- on the tree
+# about to be committed, before anything is committed or pushed, so a failure
+# leaves nothing done. It records the tree it passed on: the commit below has
+# that tree, so the pre-commit hook does not lint it again and the pre-push
+# hook lets it through without running anything.
+bold "Checking"
+make --no-print-directory check < /dev/null \
+  || die "make check failed; nothing was committed or pushed."
 
 git add VERSION man/restate.8 README.md || die "Could not stage the version files."
 
@@ -265,25 +266,15 @@ else
 fi
 
 info "Pushing $BRANCH to origin…"
-RESTATE_SKIP_HOOK=1 git push origin "$BRANCH" || die "Push failed; the tag was not created."
+git push origin "$BRANCH" || die "Push failed; the tag was not created."
 ok "Pushed $BRANCH."
 
 info "Tagging $TAG…"
 git tag -a "$TAG" -m "Release $TAG" || die "Could not create tag $TAG."
 ok "Created tag $TAG."
 
-# RESTATE_SKIP_HOOK=1 on both pushes, and this is the one place it is honest.
-#
-# The pre-push hook runs the same `make test` that ran under "Testing" above,
-# on this tree. Nothing has been touched since but the commit of the files that
-# were tested, and the hook tests the working tree rather than the ref being
-# pushed -- so running it again reads the same bytes and can only reach the
-# same answer, several minutes later and with the connection held open.
-#
-# Skipping it is not skipping the check; the check ran, on this tree, moments
-# ago. If it had failed, the die above means execution never got here.
 info "Pushing tag $TAG…"
-if ! RESTATE_SKIP_HOOK=1 git push origin "$TAG"; then
+if ! git push origin "$TAG"; then
   # Leave the local tag in place so it can be retried or inspected.
   die "Could not push the tag. The local tag $TAG still exists; delete it with
        'git tag -d $TAG' if you want to start over."

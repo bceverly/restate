@@ -204,7 +204,9 @@ static struct pkg *inventory(const struct rs_index *ix, size_t *n)
     {
         qsort(p, *n, sizeof(*p), compare_pkg);
     }
-    return p;
+    /* Never NULL, even for none: so the analyzers need not wonder whether a
+     * NULL list can have a count. */
+    return p ? p : rs_xcalloc(1, sizeof(*p));
 }
 
 static void add_change(struct changes *cs, char kind, const struct pkg *p, const char *from,

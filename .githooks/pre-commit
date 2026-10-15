@@ -15,9 +15,12 @@
 # installed. At commit time that trade is the wrong way round, so a skip here
 # is a failure and `make install-dev` is the fix.
 #
-# Lint only. The tests run at pre-push: they take a couple of minutes with the
-# sanitizers and the coverage gate, and a commit is a save point rather than a
-# release. Set RESTATE_SKIP_HOOK=1 to bypass.
+# Lint only: the tests and the security scan are `make check`'s, which the
+# pre-push hook requires, and a commit is a save point rather than a release.
+# Lint that has passed on this very tree -- in `make check`, or at the last
+# commit -- is not run again; passing, it records the tree for `make check`,
+# which then does not run it again either. Set RESTATE_SKIP_HOOK=1 to bypass;
+# the pre-push hook still holds the push to `make check`.
 set -uo pipefail
 
 if [ "${RESTATE_SKIP_HOOK:-0}" = "1" ]; then
@@ -29,6 +32,13 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$REPO_ROOT" || exit 0
 
 printf '\n\033[1mpre-commit\033[0m \033[2m(RESTATE_SKIP_HOOK=1 to skip)\033[0m\n'
+
+LINTED="$(git rev-parse --absolute-git-dir)/restate-linted"
+TREE="$(scripts/tree-id.sh 2> /dev/null)" || TREE=""
+if [ -n "$TREE" ] && [ "$(cat "$LINTED" 2> /dev/null)" = "$TREE" ]; then
+  printf '\033[92m✓ lint passed on this very tree already\033[0m\n\n'
+  exit 0
+fi
 
 # The binary has to exist before lint runs: the manpage freshness check and the
 # version check both read it. `make lint` depends on `build` and would do this
@@ -60,5 +70,6 @@ if printf '%s' "$LINT_OUTPUT" | grep -q 'Skipped:'; then
   exit 1
 fi
 
+[ -z "$TREE" ] || printf '%s\n' "$TREE" > "$LINTED"
 printf '\033[92m✓ lint is clean, with every analyzer present\033[0m\n\n'
 exit 0

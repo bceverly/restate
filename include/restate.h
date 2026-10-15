@@ -64,9 +64,14 @@
 #define RESTATE_PRINTF(fmt, first) \
     __attribute__((format(printf, fmt, first))) /* Flawfinder: ignore */
 #define RESTATE_NORETURN __attribute__((noreturn))
+/* Never NULL: the allocators end the program rather than return one. Said so
+ * that gcc's analyzer, which cannot see into them, does not follow a path
+ * where they did. */
+#define RESTATE_NONNULL_RETURN __attribute__((returns_nonnull))
 #else
 #define RESTATE_PRINTF(fmt, first)
 #define RESTATE_NORETURN
+#define RESTATE_NONNULL_RETURN
 #endif
 
 #endif /* RESTATE_H */

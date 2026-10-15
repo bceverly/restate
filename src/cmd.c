@@ -93,6 +93,22 @@ static bool load_rules(const struct rs_options *o, struct rs_rules *rules,
  * index is a map of everything on the machine and who owns it, which is
  * nobody else's business.
  */
+/*
+ * gcc's analyzer loses track of a FILE held in a struct output across the
+ * call that closes it, and reports a leak at the end of each function that
+ * holds one -- a leak that is not there. Said around those functions alone;
+ * a real leak there is still found at run time, by ASan, LeakSanitizer and
+ * valgrind, which the tests all run under.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+#define OUTPUT_HELD_BEGIN \
+    _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wanalyzer-malloc-leak\"")
+#define OUTPUT_HELD_END _Pragma("GCC diagnostic pop")
+#else
+#define OUTPUT_HELD_BEGIN
+#define OUTPUT_HELD_END
+#endif
+
 struct output {
     FILE       *fp;
     char       *tmp;
@@ -171,6 +187,7 @@ static bool output_close(struct output *out, bool ok)
 }
 
 /* Writes `text` where --output says, and frees it. */
+OUTPUT_HELD_BEGIN
 static int emit(const struct rs_options *o, struct rs_buf *text)
 {
     struct output out;
@@ -185,6 +202,8 @@ static int emit(const struct rs_options *o, struct rs_buf *text)
     rs_buf_free(text);
     return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
+
+OUTPUT_HELD_END
 
 /* ------------------------------------------------------------------------- */
 /* Scanning                                                                  */
@@ -1513,6 +1532,7 @@ int rs_cmd_init(const struct rs_options *o)
     return RESTATE_EXIT_OK;
 }
 
+OUTPUT_HELD_BEGIN
 int rs_cmd_snapshots(const struct rs_options *o)
 {
     struct rs_repo *r;
@@ -1588,6 +1608,8 @@ int rs_cmd_snapshots(const struct rs_options *o)
     rs_buf_free(&text);
     return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
+
+OUTPUT_HELD_END
 
 int rs_cmd_prune(const struct rs_options *o)
 {
@@ -2255,6 +2277,7 @@ int rs_cmd_restore(const struct rs_options *o)
 /* Explaining                                                                */
 /* ------------------------------------------------------------------------- */
 
+OUTPUT_HELD_BEGIN
 int rs_cmd_machine(const struct rs_options *o)
 {
     struct rs_jval machine;
@@ -2277,6 +2300,8 @@ int rs_cmd_machine(const struct rs_options *o)
     rs_buf_free(&text);
     return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
+
+OUTPUT_HELD_END
 
 /*
  * What the index records on each mounted filesystem: the bytes of every file
@@ -2967,6 +2992,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     return emit(o, &text);
 }
 
+OUTPUT_HELD_BEGIN
 int rs_cmd_classify(const struct rs_options *o)
 {
     struct rs_rules rules;
@@ -3022,6 +3048,8 @@ int rs_cmd_classify(const struct rs_options *o)
     }
     return status;
 }
+
+OUTPUT_HELD_END
 
 int rs_cmd_rules(const struct rs_options *o)
 {

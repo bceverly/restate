@@ -24,14 +24,14 @@
  * the allocator: rs_xcalloc and rs_xreallocarray do the multiplication
  * themselves rather than trusting the caller to.
  */
-void *rs_xmalloc(size_t n);
-void *rs_xcalloc(size_t count, size_t size);
-void *rs_xrealloc(void *p, size_t n);
-void *rs_xreallocarray(void *p, size_t count, size_t size);
-char *rs_xstrdup(const char *s);
-char *rs_xstrndup(const char *s, size_t n);
-char *rs_xasprintf(const char *fmt, ...) RESTATE_PRINTF(1, 2);
-char *rs_xvasprintf(const char *fmt, va_list ap) RESTATE_PRINTF(1, 0);
+void *rs_xmalloc(size_t n) RESTATE_NONNULL_RETURN;
+void *rs_xcalloc(size_t count, size_t size) RESTATE_NONNULL_RETURN;
+void *rs_xrealloc(void *p, size_t n) RESTATE_NONNULL_RETURN;
+void *rs_xreallocarray(void *p, size_t count, size_t size) RESTATE_NONNULL_RETURN;
+char *rs_xstrdup(const char *s) RESTATE_NONNULL_RETURN;
+char *rs_xstrndup(const char *s, size_t n) RESTATE_NONNULL_RETURN;
+char *rs_xasprintf(const char *fmt, ...) RESTATE_PRINTF(1, 2) RESTATE_NONNULL_RETURN;
+char *rs_xvasprintf(const char *fmt, va_list ap) RESTATE_PRINTF(1, 0) RESTATE_NONNULL_RETURN;
 
 /* A growable, always NUL-terminated byte buffer. */
 struct rs_buf {

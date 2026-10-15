@@ -15,8 +15,17 @@ make install-dev    # compilers, analyzers, valgrind, fuzzing tools, git hooks
 
 The pre-commit hook runs `make lint` and refuses a commit if anything fails
 *or is skipped* — a scanner that is not installed passes by doing nothing,
-which proves nothing. The pre-push hook runs `make test`. `RESTATE_SKIP_HOOK=1`
-bypasses either, for the rare honest reason.
+which proves nothing.
+
+Before a push, run `make check`: lint, `make test` and `make security`, run
+once and as strictly. It records the exact tree it passed on, and the
+pre-push hook lets a push through only if what it pushes has that tree — so a
+commit made with the pre-commit hook bypassed, or a file edited after the
+check, is caught before it leaves the machine. The hook itself takes a moment:
+GitHub drops a push whose hook runs for minutes. Lint that has passed on a
+tree, at commit or in `make check`, is not run on it again.
+
+`RESTATE_SKIP_HOOK=1` bypasses either hook, for the rare honest reason.
 
 ## The bar
 
@@ -26,6 +35,8 @@ bypasses either, for the rare honest reason.
 - `make test` passes: unit tests, end-to-end tests, the sanitizers, valgrind,
   and **at least 80% line coverage — overall and in every source file**. The
   gates can be raised, never lowered.
+- `make security` is clean: the static analyzers, flawfinder, semgrep, a fuzz
+  run, gitleaks and the Lucky 13. `make check` runs all three.
 - New behavior comes with tests that exercise it, and a fixed bug with a test
   that fails without the fix: unit tests in `tests/test_*.c`, end-to-end
   checks of the command line in `tests/cli/run.sh`. Coverage that only rises

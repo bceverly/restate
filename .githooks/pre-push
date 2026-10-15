@@ -5,15 +5,19 @@
 #
 # restate — installed by scripts/install-hooks.sh
 #
-# Runs the TESTS before every push. Lint runs at pre-commit, where it is fast
-# enough to belong and where a finding is cheapest to fix; running it again
-# here would only make pushing slower for an answer already known.
+# Lets a push through only if what it pushes is exactly what `make check`
+# passed on: lint, the tests, the sanitizers, valgrind, the coverage gate and
+# the security scan.
 #
-# The tests are here rather than at pre-commit deliberately: with the
-# sanitizers and the coverage gate they take a couple of minutes, and
-# interrupting every save point for that teaches people to pass --no-verify,
-# which switches off the push check too. A push is when the work leaves this
-# machine, which is the moment worth spending two minutes on.
+# It runs none of that itself. git holds the connection to the remote open
+# while a pre-push hook runs, and the checks take long enough that GitHub
+# drops it. Instead `make check` records the git tree it passed on, and this
+# compares the tree of each commit being pushed with it -- in a moment. A
+# commit made with the pre-commit hook bypassed, a file edited since the
+# check, a partial commit of a checked tree: each has another tree, and is
+# refused.
+#
+# Only the tip of each branch or tag pushed is held to it: that is what lands.
 #
 # Set RESTATE_SKIP_HOOK=1 to push anyway.
 set -uo pipefail
@@ -26,22 +30,30 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 cd "$REPO_ROOT" || exit 0
 
-printf '\n\033[1mpre-push\033[0m \033[2m(RESTATE_SKIP_HOOK=1 to skip)\033[0m\n'
+CHECKED="$(cat "$(git rev-parse --absolute-git-dir)/restate-checked" 2> /dev/null)"
+REFUSED=()
 
-if ! make --no-print-directory build > /dev/null < /dev/null; then
-  printf '\n\033[91m✗ the build failed — not pushing\033[0m\n\n'
+# git gives a line per ref pushed: local ref, local object, remote ref, remote
+# object. A local object of all zeros is a deletion: nothing lands.
+while read -r local_ref local_sha _ _; do
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  tree="$(git rev-parse --verify --quiet "$local_sha^{tree}")"
+  if [ -z "$tree" ] || [ "$tree" != "$CHECKED" ]; then
+    REFUSED+=("$local_ref")
+  fi
+done
+
+if [ "${#REFUSED[@]}" -gt 0 ]; then
+  printf '\n\033[1mpre-push\033[0m\n'
+  printf '\033[91m✗ not what make check passed on: %s\033[0m\n' "${REFUSED[*]}"
+  if [ -z "$CHECKED" ]; then
+    printf '  make check has not passed, or the last run of it did not.\n'
+  else
+    printf '  The tree make check passed on is not this commit'"'"'s: something changed\n'
+    printf '  after it, or was left out of the commit.\n'
+  fi
+  printf '\n      \033[96mmake check\033[0m   then push again\n\n'
+  printf '  Or push anyway with \033[96mRESTATE_SKIP_HOOK=1 git push ...\033[0m\n\n'
   exit 1
 fi
-
-# Git feeds a pre-push hook the list of refs being pushed on stdin. Nothing
-# here reads it, but the test suite inherits it -- and `restate diff -` reads
-# standard input, so a test that ran it bare would be handed git's ref list as
-# a manifest. Redirecting from /dev/null once, here, means no test can acquire
-# that input by accident.
-if ! make --no-print-directory test < /dev/null; then
-  printf '\n\033[91m✗ tests failed — not pushing\033[0m\n\n'
-  exit 1
-fi
-
-printf '\n\033[92m✓ tests, sanitizers, valgrind and the 80%% coverage gate all passed\033[0m\n\n'
 exit 0

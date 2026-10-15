@@ -1131,7 +1131,8 @@ root. `/usr/local/sbin` is on root's `PATH` on every Ubuntu release.
 ```bash
 make install-dev    # every compiler, analyzer and scanner the checks use, and the git hooks
 make build          # ./bin/restate
-make test           # everything CI runs on every push, locally
+make test           # the tests, sanitizers, valgrind and the coverage gate
+make check          # lint, test and security, strictly: what a push needs
 ```
 
 `./bin/restate` runs straight from the tree; nothing needs installing to try a
@@ -1201,11 +1202,12 @@ make security        # everything below, the same way CI runs it
 make lucky13         # MITRE's thirteen unforgivable vulnerability classes, one by one
 ```
 
-`make security` checks the built binary's hardening, then runs `gcc
--fanalyzer`, cppcheck with the CERT C rules, the clang static analyzer,
-flawfinder, semgrep, the sanitizers, a fuzz run, gitleaks over the whole
-history, MITRE's "Lucky 13", and confirms the binary links nothing beyond libc.
-CodeQL (`security-extended`) and the OpenSSF Scorecard run in CI.
+`make security` checks the built binary's hardening, then runs cppcheck with
+the CERT C rules, the clang static analyzer, flawfinder, semgrep, the
+sanitizers, a fuzz run, gitleaks over the whole history, MITRE's "Lucky 13",
+and confirms the binary links nothing beyond libc. `gcc -fanalyzer` runs in
+`make lint`, at every commit. CodeQL (`security-extended`) and the OpenSSF
+Scorecard run in CI.
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report a
 vulnerability privately.
@@ -1218,8 +1220,9 @@ Run `make` with no arguments for the full list.
 |---|---|
 | `make build` | compile into `./bin`, regenerating the manpage |
 | `make test` | unit, end-to-end, sanitizers, valgrind, and the 80% coverage gate — overall and per file |
+| `make check` | lint, test and security, run once, nothing skipped; records the tree it passed on, which the pre-push hook holds every push to |
 | `make lint` | the compiler with `-Werror`, `gcc -fanalyzer`, cppcheck, clang-tidy, shellcheck, actionlint, house style, copyright audit, generated-file freshness |
-| `make security` | the security scanners, sanitizers, a fuzz run, gitleaks, Lucky 13 |
+| `make security` | the security scanners, sanitizers, a fuzz run, gitleaks, Lucky 13 (`gcc -fanalyzer` is `make lint`'s) |
 | `make fuzz` | fuzz every parser |
 | `make install` / `make uninstall` | into / out of `$(prefix)`, default `/usr/local` |
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
