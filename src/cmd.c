@@ -21,6 +21,7 @@
 #include "baseline.h"
 #include "buildsheet.h"
 #include "diff.h"
+#include "fstab.h"
 #include "hooks.h"
 #include "image.h"
 #include "index.h"
@@ -2122,6 +2123,58 @@ static int restore_packages(const struct rs_options *o, const struct rs_index *i
     return status;
 }
 
+/*
+ * Whether to leave the image's /etc/fstab and /etc/crypttab out, and keep
+ * the root's own: when the image's name disks this machine does not have,
+ * and the root has its own to keep (see fstab.h). Says which, either way.
+ */
+static bool keep_own_fstab(const struct rs_options *o, const struct rs_index *ix,
+                           const char *root)
+{
+    static const char *const files[] = { "etc/fstab", "etc/crypttab" };
+    struct rs_buf            why;
+    bool                     own = false;
+    bool                     keep = false;
+    size_t                   i;
+
+    if (ix->machine.type != RS_JOBJECT)
+    {
+        return false;
+    }
+    rs_buf_init(&why);
+    if (!rs_fstab_foreign(&ix->machine, "/dev", &why))
+    {
+        rs_buf_free(&why);
+        return false;
+    }
+    for (i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+    {
+        char       *p = rs_xasprintf("%s/%s", strcmp(root, "/") == 0 ? "" : root, files[i]);
+        struct stat st;
+
+        own = own || lstat(p, &st) == 0;
+        free(p);
+    }
+    if (o->image_fstab)
+    {
+        rs_warn("the image's /etc/fstab and /etc/crypttab name disks this machine does not "
+                "have: %s; put back all the same, as --image-fstab says: correct them before "
+                "it next boots", why.data);
+    } else if (own)
+    {
+        keep = true;
+        if (!o->quiet)
+        {
+            (void)fprintf(stderr, "restate: %s %s's own /etc/fstab and /etc/crypttab, not the "
+                          "image's, which name disks this machine does not have: %s "
+                          "(--image-fstab puts the image's back all the same)\n",
+                          o->dry_run ? "would keep" : "keeping", root, why.data);
+        }
+    }
+    rs_buf_free(&why);
+    return keep;
+}
+
 int rs_cmd_restore(const struct rs_options *o)
 {
     struct rs_index         ix;
@@ -2132,6 +2185,8 @@ int rs_cmd_restore(const struct rs_options *o)
     int                     status;
     int                     packages = RESTATE_EXIT_OK;
     const char            **excludes = NULL;
+    const char             *left_out = "--exclude";
+    bool                    keep_fstab;
     bool                    ok;
 
     /* Before anything is written -- before the index is even read: whose
@@ -2164,6 +2219,7 @@ int rs_cmd_restore(const struct rs_options *o)
     ro.nexclude = o->nexcludes;
     ro.verbose = o->verbose;
     ro.numeric_owner = o->numeric_owner;
+    keep_fstab = keep_own_fstab(o, &ix, ro.root);
     if (o->check_first && !o->dry_run)
     {
         /* Read through once, checking everything and writing nothing, so a
@@ -2204,18 +2260,33 @@ int rs_cmd_restore(const struct rs_options *o)
     }
     ro.dry_run = o->dry_run;
     ro.kit = false;
-    if (o->packages)
+    if (o->packages || keep_fstab)
     {
-        /* Which packages were installed by hand: the script has just made
-         * that what the old machine had, for the packages there are now. */
-        excludes = rs_xcalloc(o->nexcludes + 1, sizeof(*excludes));
+        size_t n = o->nexcludes;
+
+        excludes = rs_xcalloc(o->nexcludes + 3, sizeof(*excludes));
         if (o->nexcludes > 0)
         {
             memcpy(excludes, o->excludes, o->nexcludes * sizeof(*excludes));
         }
-        excludes[o->nexcludes] = "/var/lib/apt/extended_states";
+        /* Which packages were installed by hand: the script has just made
+         * that what the old machine had, for the packages there are now. */
+        if (o->packages)
+        {
+            excludes[n++] = "/var/lib/apt/extended_states";
+            left_out = "--exclude, and apt's record of what was installed by hand, which "
+                       "--packages set";
+        }
+        if (keep_fstab)
+        {
+            excludes[n++] = "/etc/fstab";
+            excludes[n++] = "/etc/crypttab";
+            left_out = o->packages ? "--exclude, apt's record of what was installed by hand, "
+                                     "which --packages set, and the image's fstab and crypttab"
+                                   : "--exclude, and the image's fstab and crypttab";
+        }
         ro.exclude = excludes;
-        ro.nexclude = o->nexcludes + 1;
+        ro.nexclude = n;
     }
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     free(excludes);
@@ -2248,9 +2319,7 @@ int rs_cmd_restore(const struct rs_options *o)
         if (st.excluded > 0)
         {
             (void)fprintf(stderr, "restate: left out %" PRIu64 " paths (%s)\n", st.excluded,
-                          o->packages ? "--exclude, and apt's record of what was installed by "
-                                        "hand, which --packages set"
-                                      : "--exclude");
+                          left_out);
         }
         if (st.owners > 0)
         {

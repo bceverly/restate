@@ -44,7 +44,8 @@ enum {
     OPT_EXACT_VERSIONS,
     OPT_FETCH_SOURCES,
     OPT_PACKAGES,
-    OPT_FIRMWARE
+    OPT_FIRMWARE,
+    OPT_IMAGE_FSTAB
 };
 
 enum rs_command {
@@ -95,6 +96,8 @@ struct rs_options {
     bool            check_first;    /* restore: read it all first */
     bool            packages;       /* --packages: diff by package, restore them */
     bool            numeric_owner;
+    bool            image_fstab;    /* restore: the image's, whatever disks
+                                     * they name */
     const char     *image_at;       /* --image-at */
     bool            one_fs;
     bool            no_hash;

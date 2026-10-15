@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "fstab.h"
 #include "image.h"
 #include "index.h"
 #include "packages.h"
@@ -133,6 +134,82 @@ static void restore_into(struct run *r, const char *img, const struct rs_index *
     (void)rs_test_capture(run_restore, r, out, errs);
 }
 
+static void parse(const char *text, struct rs_jval *v)
+{
+    struct rs_json_parser jp;
+    struct rs_buf         err;
+
+    memset(v, 0, sizeof(*v));
+    rs_buf_init(&err);
+    rs_json_init(&jp, text, strlen(text), &err);
+    CHECK(rs_json_value(&jp, v));
+    rs_buf_free(&err);
+}
+
+/* Which of the disks an image's fstab and crypttab name a machine has: one
+ * whose /dev has a disk by UUID AAAA, and an LVM volume vg-root. */
+static void test_fstab(void)
+{
+    static const char tables[] =
+        "{\"fstab\": ["
+        "{\"spec\": \"UUID=AAAA\", \"file\": \"/\", \"options\": \"defaults\"},"
+        "{\"spec\": \"UUID=\\\"AAAA\\\"\", \"file\": \"/quoted\"},"
+        "{\"spec\": \"UUID=D01E-8437\", \"file\": \"/boot/efi\", \"options\": \"umask=0077\"},"
+        "{\"spec\": \"LABEL=gone\", \"file\": \"/data\", \"options\": \"rw,nofail\"},"
+        "{\"spec\": \"PARTUUID=gone\", \"file\": \"/x\", \"options\": \"noauto\"},"
+        "{\"spec\": \"PARTLABEL=gone\", \"file\": \"/y\", \"options\": \"nofailing\"},"
+        "{\"spec\": \"/dev/mapper/vg-root\", \"file\": \"/srv\"},"
+        "{\"spec\": \"/dev/mapper/cryptroot\", \"file\": \"/home\"},"
+        "{\"spec\": \"/dev/sdz9\", \"file\": \"/old\"},"
+        "{\"spec\": \"/dev/../etc/passwd\", \"file\": \"/p\"},"
+        "{\"spec\": \"UUID=a/b\"},"
+        "{\"spec\": \"server:/export\", \"file\": \"/mnt\", \"type\": \"nfs\"},"
+        "{\"spec\": \"/swapfile\", \"file\": \"none\", \"type\": \"swap\"},"
+        "{\"spec\": \"tmpfs\", \"file\": \"/tmp\"},"
+        "{\"file\": \"/nospec\"}],"
+        "\"crypttab\": ["
+        "{\"name\": \"cryptroot\", \"device\": \"UUID=BBBB\", \"options\": \"luks\"},"
+        "{\"name\": \"other\", \"device\": \"/dev/disk/by-uuid/AAAA\"},"
+        "{\"name\": \"spare\", \"device\": \"UUID=CCCC\", \"options\": \"luks,noauto\"}]}";
+    char          *dev = rs_test_tmpdir();
+    struct rs_jval machine;
+    struct rs_buf  why;
+
+    TEST_CASE("restore: which disks an image's fstab and crypttab name that are not here");
+    put(dev, "disk/by-uuid/AAAA", "");
+    put(dev, "mapper/vg-root", "");
+    parse(tables, &machine);
+    rs_buf_init(&why);
+    CHECK(rs_fstab_foreign(&machine, dev, &why));
+    CHECK_STR(why.data ? why.data : "",
+              "UUID=D01E-8437 (/boot/efi), PARTLABEL=gone (/y), /dev/sdz9 (/old), "
+              "/dev/../etc/passwd (/p), UUID=a/b (?), UUID=BBBB (cryptroot)");
+    rs_buf_free(&why);
+    rs_jval_free(&machine);
+
+    TEST_CASE("restore: an fstab and crypttab whose disks are all here");
+    parse("{\"fstab\": [{\"spec\": \"UUID=AAAA\", \"file\": \"/\"},"
+          "{\"spec\": \"/dev/mapper/open\", \"file\": \"/home\"}],"
+          "\"crypttab\": [{\"name\": \"open\", \"device\": \"UUID=AAAA\"}]}", &machine);
+    rs_buf_init(&why);
+    CHECK(!rs_fstab_foreign(&machine, dev, &why));
+    CHECK_INT(why.len, 0);
+    rs_buf_free(&why);
+    rs_jval_free(&machine);
+
+    TEST_CASE("restore: a machine description with neither table");
+    parse("{\"notes\": []}", &machine);
+    rs_buf_init(&why);
+    CHECK(!rs_fstab_foreign(&machine, dev, &why));
+    rs_jval_free(&machine);
+    parse("{\"fstab\": {}, \"crypttab\": \"x\"}", &machine);
+    CHECK(!rs_fstab_foreign(&machine, dev, &why));
+    rs_buf_free(&why);
+    rs_jval_free(&machine);
+    rs_test_rmtree(dev);
+    free(dev);
+}
+
 void test_restore(void)
 {
     char           *dir = rs_test_tmpdir();
@@ -190,10 +267,17 @@ void test_restore(void)
             struct timespec        ts[2];
             struct stat            before;
             struct stat            after;
+            struct stat            linked;
             struct rs_buf          text;
             int                    fd;
 
             CHECK(stat(hosts, &before) == 0);
+            {
+                char *one = at(root, "var/x/one");
+
+                CHECK(stat(one, &linked) == 0);
+                free(one);
+            }
             /* /etc/app/key changed, but its size and time kept: the time
              * alone is no proof, so it is put back. /etc/hosts given another
              * mode: in place, its mode put back. */
@@ -213,12 +297,14 @@ void test_restore(void)
             CHECK(r.ok);
             CHECK_INT(r.st.files, 5);
             CHECK_INT(r.st.failed, 0);
-            /* /etc/hosts, /home/u/doc and /var/x/one, linked to again; not
-             * the key, of another content. */
-            CHECK_INT(r.st.unchanged, 3);
+            /* /etc/hosts, /home/u/doc, and /var/x/one and /var/x/two, which
+             * are one file with both its names already; not the key, of
+             * another content. */
+            CHECK_INT(r.st.unchanged, 4);
             CHECK_CONTAINS(out, "leave as it is /etc/hosts\n");
             CHECK_CONTAINS(out, "restore /etc/app/key\n");
-            CHECK_CONTAINS(out, "link /var/x/two\n");
+            CHECK_CONTAINS(out, "leave as it is /var/x/two\n");
+            CHECK(strstr(out, "link /var/x/two\n") == NULL);
             {
                 char       *one = at(root, "var/x/one");
                 char       *two = at(root, "var/x/two");
@@ -227,6 +313,8 @@ void test_restore(void)
 
                 CHECK(stat(one, &a) == 0 && stat(two, &b) == 0);
                 CHECK(a.st_ino == b.st_ino);
+                CHECK(a.st_ino == linked.st_ino);
+                CHECK_INT(a.st_nlink, 2);
                 free(one);
                 free(two);
             }
@@ -242,6 +330,39 @@ void test_restore(void)
             free(errs);
             free(hosts);
             free(key);
+        }
+
+        TEST_CASE("restore: again, over a linked file with a name the image does not give it");
+        {
+            char       *one = at(root, "var/x/one");
+            char       *two = at(root, "var/x/two");
+            char       *three = at(root, "var/x/three");
+            struct stat a;
+            struct stat b;
+            struct stat c;
+
+            /* A third name: the file is not the image's as it stands, and
+             * the third, not in the image, keeps what it had. */
+            CHECK(link(one, three) == 0);
+            memset(&r, 0, sizeof(r));
+            r.o.verbose = true;
+            restore_into(&r, img, &ix, root, &out, &errs);
+            CHECK(r.ok);
+            CHECK_INT(r.st.failed, 0);
+            CHECK_INT(r.st.unchanged, 3);
+            CHECK_CONTAINS(out, "restore /var/x/two\n");
+            CHECK_CONTAINS(out, "link /var/x/two\n");
+            CHECK(stat(one, &a) == 0 && stat(two, &b) == 0 && stat(three, &c) == 0);
+            CHECK(a.st_ino == b.st_ino);
+            CHECK(a.st_ino != c.st_ino);
+            CHECK_INT(a.st_nlink, 2);
+            CHECK_INT(c.st_nlink, 1);
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+            free(one);
+            free(two);
+            free(three);
         }
         free(root);
     }
@@ -662,4 +783,5 @@ void test_restore(void)
     free(tree);
     free(img);
     free(dir);
+    test_fstab();
 }

@@ -21,6 +21,13 @@
 #include "progress.h"
 #include "sha256.h"
 
+/* An index entry with other names: which file it is, and which entry. */
+struct link {
+    uint64_t dev;
+    uint64_t ino;
+    size_t   i;
+};
+
 struct ctx {
     const struct rs_index        *ix;
     const struct rs_restore_opts *o;
@@ -28,6 +35,9 @@ struct ctx {
     int                           root;
     bool                         *done;      /* per index entry: put back */
     bool                         *seen;      /* per index entry: in the image */
+    struct link                  *linked;    /* the files with other names, by
+                                              * inode, then index order */
+    size_t                        nlinked;
     unsigned long                 counter;   /* for temporary names */
     struct rs_accounts            accounts;  /* merged, when c->st->merged */
 };
@@ -321,15 +331,152 @@ static bool hashes_to(int fd, const char *hash)
     return n == 0 && strcmp(hex, hash) == 0;
 }
 
+static int by_inode(const void *pa, const void *pb)
+{
+    const struct link *a = pa;
+    const struct link *b = pb;
+
+    if (a->dev != b->dev)
+    {
+        return a->dev < b->dev ? -1 : 1;
+    }
+    if (a->ino != b->ino)
+    {
+        return a->ino < b->ino ? -1 : 1;
+    }
+    return a->i < b->i ? -1 : a->i > b->i;
+}
+
+/* The files the index records with other names, grouped by inode. */
+static void group_links(struct ctx *c)
+{
+    size_t i;
+
+    c->linked = rs_xcalloc(c->ix->count + 1, sizeof(*c->linked));
+    for (i = 0; i < c->ix->count; i++)
+    {
+        const struct rs_entry *e = &c->ix->entries[i];
+
+        if (e->type == 'f' && e->nlink >= 2)
+        {
+            c->linked[c->nlinked].dev = e->dev;
+            c->linked[c->nlinked].ino = e->ino;
+            c->linked[c->nlinked++].i = i;
+        }
+    }
+    qsort(c->linked, c->nlinked, sizeof(*c->linked), by_inode);
+}
+
+/* One past the last of the group of names that begins at `from`. */
+static size_t group_end(const struct ctx *c, size_t from)
+{
+    size_t to = from + 1;
+
+    while (to < c->nlinked && c->linked[to].dev == c->linked[from].dev &&
+           c->linked[to].ino == c->linked[from].ino)
+    {
+        to++;
+    }
+    return to;
+}
+
+/* Where the group of names `e` is one of begins. */
+static size_t group_start(const struct ctx *c, const struct rs_entry *e)
+{
+    size_t lo = 0;
+    size_t hi = c->nlinked;
+
+    while (lo < hi)
+    {
+        size_t             mid = lo + (hi - lo) / 2;
+        const struct link *m = &c->linked[mid];
+
+        if (m->dev < e->dev || (m->dev == e->dev && m->ino < e->ino))
+        {
+            lo = mid + 1;
+        } else
+        {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/* What is at `path` beneath the root, found without making anything on the
+ * way or following a symlink. */
+static bool stat_beneath(const struct ctx *c, const char *path, struct stat *st)
+{
+    const char *p = path + 1;
+    const char *slash;
+    int         fd = dup(c->root);
+    bool        found;
+
+    while (fd >= 0 && (slash = strchr(p, '/')) != NULL)
+    {
+        char *comp = rs_xstrndup(p, (size_t)(slash - p));
+        int   next = openat(fd, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+        free(comp);
+        (void)close(fd);
+        fd = next;
+        p = slash + 1;
+    }
+    if (fd < 0)
+    {
+        return false;
+    }
+    found = fstatat(fd, p, st, AT_SYMLINK_NOFOLLOW) == 0;
+    (void)close(fd);
+    return found;
+}
+
+/*
+ * Whether the file `st` describes has exactly the names the index gives `e`
+ * and the files linked to it -- those not left out -- and no others: then it
+ * can be left as it is, and each of its names with it. A file with no other
+ * name in the index has to have none here.
+ */
+static bool names_as_indexed(const struct ctx *c, const struct rs_entry *e, const struct stat *st)
+{
+    size_t from;
+    size_t to;
+    size_t k;
+    size_t names = 0;
+
+    if (e->nlink < 2)
+    {
+        return st->st_nlink == 1;
+    }
+    from = group_start(c, e);
+    to = from < c->nlinked ? group_end(c, from) : from;
+    for (k = from; k < to; k++)
+    {
+        const struct rs_entry *b = &c->ix->entries[c->linked[k].i];
+        struct stat            other;
+
+        if (excluded(c, b->path))
+        {
+            continue;
+        }
+        names++;
+        if (b != e && (!stat_beneath(c, b->path, &other) || other.st_dev != st->st_dev ||
+                       other.st_ino != st->st_ino))
+        {
+            return false;
+        }
+    }
+    return (uint64_t)st->st_nlink == names;
+}
+
 /*
  * The file already at `name` in `dir`, open, if it is the one the index
- * records: a regular file with no other name, of the index's size and
- * modification time, whose content hashes to the index's digest. Else -1.
- * Writing it again would take as much space again as it does, beside it,
- * until the rename -- more than a full disk has, for a large one -- and the
- * time to write it, for nothing.
+ * records: a regular file of the index's size and modification time, whose
+ * content hashes to the index's digest, and with the index's names for it
+ * and no others. Else -1. Writing it again would take as much space again
+ * as it does, beside it, until the rename -- more than a full disk has, for
+ * a large one -- and the time to write it, for nothing.
  */
-static int in_place(int dir, const char *name, const struct rs_entry *e)
+static int in_place(const struct ctx *c, int dir, const char *name, const struct rs_entry *e)
 {
     struct stat    st;
     struct rs_time atime;
@@ -347,11 +494,11 @@ static int in_place(int dir, const char *name, const struct rs_entry *e)
     {
         return -1;
     }
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 1 &&
-        (uint64_t)st.st_size == e->size)
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == e->size)
     {
         rs_stat_times(&st, &atime, &mtime, &ctime);
-        if (rs_time_equal(&mtime, &e->mtime) && hashes_to(fd, e->hash))
+        if (rs_time_equal(&mtime, &e->mtime) && names_as_indexed(c, e, &st) &&
+            hashes_to(fd, e->hash))
         {
             return fd;
         }
@@ -448,7 +595,7 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
      * written again. */
     if (dir >= 0 && !c->o->dry_run && !merged)
     {
-        kept = in_place(dir, name, e);
+        kept = in_place(c, dir, name, e);
     }
     if (dir == -1)
     {
@@ -700,52 +847,68 @@ static void finish_dirs(struct ctx *c)
     }
 }
 
-/* Hard links: every path of one file, made a link to the first put back. */
+/*
+ * Hard links: every path of one file, made a link to the first put back. A
+ * name that is a link to it already is left as it is.
+ */
 static void link_files(struct ctx *c)
 {
-    size_t i;
-    size_t j;
+    size_t from = 0;
 
-    for (i = 0; i < c->ix->count; i++)
+    while (from < c->nlinked)
     {
-        const struct rs_entry *a = &c->ix->entries[i];
+        size_t to = group_end(c, from);
+        size_t i = from;
+        size_t j;
 
-        if (a->type != 'f' || a->nlink < 2 || !c->done[i])
+        while (i < to && !c->done[c->linked[i].i])
         {
-            continue;
+            i++;
         }
-        for (j = i + 1; j < c->ix->count; j++)
+        for (j = i + 1; j < to; j++)
         {
-            const struct rs_entry *b = &c->ix->entries[j];
+            const struct rs_entry *a = &c->ix->entries[c->linked[i].i];
+            const struct rs_entry *b = &c->ix->entries[c->linked[j].i];
             const char            *an;
             const char            *bn;
             int                    ad;
             int                    bd;
-            char                  *tmp;
+            struct stat            as;
+            struct stat            bs;
 
-            if (b->type != 'f' || b->dev != a->dev || b->ino != a->ino || excluded(c, b->path))
+            if (excluded(c, b->path))
             {
                 continue;
             }
             /* Linked to this one, whether it was put back on its own or not. */
-            c->done[j] = false;
+            c->done[c->linked[j].i] = false;
             c->st->links++;
-            said(c, "link", b->path);
             if (c->o->dry_run)
             {
+                said(c, "link", b->path);
                 continue;
             }
             ad = open_parent(c, a->path, &an);
             bd = open_parent(c, b->path, &bn);
-            tmp = temp_name(c);
-            if (ad < 0 || bd < 0 || linkat(ad, an, bd, tmp, 0) != 0)
+            if (ad >= 0 && bd >= 0 && fstatat(ad, an, &as, AT_SYMLINK_NOFOLLOW) == 0 &&
+                fstatat(bd, bn, &bs, AT_SYMLINK_NOFOLLOW) == 0 && as.st_dev == bs.st_dev &&
+                as.st_ino == bs.st_ino)
             {
-                failed(c, b->path, strerror(errno));
+                said(c, "leave as it is", b->path);
             } else
             {
-                (void)put_in_place(c, bd, tmp, bn, b->path);
+                char *tmp = temp_name(c);
+
+                said(c, "link", b->path);
+                if (ad < 0 || bd < 0 || linkat(ad, an, bd, tmp, 0) != 0)
+                {
+                    failed(c, b->path, strerror(errno));
+                } else
+                {
+                    (void)put_in_place(c, bd, tmp, bn, b->path);
+                }
+                free(tmp);
             }
-            free(tmp);
             if (ad >= 0)
             {
                 (void)close(ad);
@@ -755,6 +918,7 @@ static void link_files(struct ctx *c)
                 (void)close(bd);
             }
         }
+        from = to;
     }
 }
 
@@ -1035,6 +1199,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     }
     c.done = rs_xcalloc(ix->count + 1, sizeof(*c.done));
     c.seen = rs_xcalloc(ix->count + 1, sizeof(*c.seen));
+    group_links(&c);
     for (i = 0; i < ix->count; i++)
     {
         if (ix->entries[i].type == 'f' && ix->entries[i].stored && !o->kit)
@@ -1099,6 +1264,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     }
     free(c.done);
     free(c.seen);
+    free(c.linked);
     rs_accounts_free(&c.accounts);
     (void)close(c.root);
     return ok;

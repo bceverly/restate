@@ -96,6 +96,10 @@ RS_OPT(OPT_EXCLUDE, "exclude",        required_argument, "PATTERN",
 RS_OPT(OPT_NUMERIC_OWNER, "numeric-owner", no_argument,     NULL,
        "restore: owners by the numbers the index records, and the image's own account "
        "files, rather than by name through the image's accounts merged with the system's")
+RS_OPT(OPT_IMAGE_FSTAB, "image-fstab", no_argument,     NULL,
+       "restore: put back the image's /etc/fstab and /etc/crypttab even where they name "
+       "disks this machine does not have; by default the machine's own are kept then, "
+       "so that it still boots")
 RS_OPT(OPT_PACKAGES, "packages",       no_argument,       NULL,
        "diff: say which packages were installed, removed and upgraded, and leave out the "
        "file changes they account for. restore: put the image's packages back first -- its "

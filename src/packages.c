@@ -2005,7 +2005,10 @@ static void decide(struct rs_buf *out, const char *indent, const char *extra, co
                    bool snapshot)
 {
     rs_buf_addf(out, "%s  name=${want%%%%=*}\n", indent);
-    rs_buf_addf(out, "%s  if apt-get -s install %s\"$want\" > /dev/null 2>&1; then\n", indent,
+    rs_buf_addf(out, "%s  if installed_newer \"$want\"; then\n", indent);
+    rs_buf_addf(out, "%s    ok=\"$ok $name\"\n", indent);
+    rs_buf_addf(out, "%s    kept=\"$kept $name\"\n", indent);
+    rs_buf_addf(out, "%s  elif apt-get -s install %s\"$want\" > /dev/null 2>&1; then\n", indent,
                 extra);
     rs_buf_addf(out, "%s    ok=\"$ok $want\"\n", indent);
     rs_buf_addf(out, "%s  elif apt-get -s install %s\"$name\" > /dev/null 2>&1; then\n", indent,
@@ -2145,7 +2148,19 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "ok=''\n"
                   "newer=''\n"
                   "gone=''\n"
-                  "retry=''\n");
+                  "retry=''\n"
+                  "kept=''\n"
+                  "# Installed already at a newer version than the one recorded -- a\n"
+                  "# security update since the capture, or the installer's own: left at\n"
+                  "# it. Taking it back would have apt take back, or remove, everything\n"
+                  "# that needs the newer one.\n"
+                  "installed_newer() {\n"
+                  "  case $1 in *=*) ;; *) return 1 ;; esac\n"
+                  "  have=$(dpkg-query -W -f='${db:Status-Status} ${Version}' \"${1%%=*}\" "
+                  "2> /dev/null) || return 1\n"
+                  "  case $have in installed\\ ?*) ;; *) return 1 ;; esac\n"
+                  "  dpkg --compare-versions \"${have#installed }\" gt \"${1#*=}\" 2> /dev/null\n"
+                  "}\n");
     if (snap)
     {
         rs_buf_addf(out,
@@ -2187,6 +2202,10 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "if [ -n \"$gone\" ]; then\n"
                   "  echo \"restate: apt cannot install these (no repository has them, or what\" \\\n"
                   "       \"they need):$gone\" >&2\n"
+                  "fi\n"
+                  "if [ -n \"$kept\" ]; then\n"
+                  "  echo \"restate: installed already at a newer version than the one\" \\\n"
+                  "       \"recorded, so left at it:$kept\" >&2\n"
                   "fi\n"
                   "# Together if apt will; one at a time if it will not.\n"
                   "# shellcheck disable=SC2086\n"

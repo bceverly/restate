@@ -34,6 +34,10 @@ run on them again:
 The tests' record ignores the prose (`*.md`, `docs/`), which no test reads;
 lint's and the security scan's cover everything.
 
+The hooks are copies in `.git/hooks/`, so a change to `.githooks/` does nothing
+until `make install-hooks` runs again. `make check`, and so `make release`,
+installs them first whenever they differ.
+
 `RESTATE_SKIP_HOOK=1` bypasses either hook, for the rare honest reason.
 
 ## The bar

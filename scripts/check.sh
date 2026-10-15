@@ -29,6 +29,24 @@ cd "$REPO_ROOT" || exit 1
 die() { printf '\n\033[91m✗ %s\033[0m\n\n' "$*" >&2; exit 1; }
 
 git rev-parse --git-dir > /dev/null 2>&1 || die "make check records what passed with git: this is not a git repository"
+
+# The hooks are copies, so editing .githooks/ changes nothing until they are
+# installed again -- and a stale pre-push hook refuses what this records, at
+# the end of a release, with the checks all passed. Whatever git would run is
+# made to match what is in the tree before anything else.
+STALE_HOOKS=()
+if [ -d .git ]; then
+  for hook in .githooks/*; do
+    [ -f "$hook" ] || continue
+    cmp -s "$hook" ".git/hooks/$(basename "$hook")" || STALE_HOOKS+=("$(basename "$hook")")
+  done
+fi
+if [ "${#STALE_HOOKS[@]}" -gt 0 ]; then
+  printf '\n\033[1;95m■ the git hooks\033[0m\n'
+  printf '  \033[93m!\033[0m not as .githooks/ has them: %s\n' "${STALE_HOOKS[*]}"
+  scripts/install-hooks.sh || die "could not install the git hooks"
+fi
+
 START=$SECONDS
 RAN=()
 

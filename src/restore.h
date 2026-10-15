@@ -17,12 +17,12 @@
  * file is created beside its destination and renamed.
  *
  * A file already in place as the index records it -- a regular file of the
- * same size and modification time, with no other name, whose content hashes
- * to the index's digest -- is not written again, only given the index's
- * owner, attributes, mode and times: a restore run again, or onto a copy of
- * the machine, then needs no room beside a large file for a second copy of
- * it, and none of the time to write it. The image's copy is still read
- * through and checked.
+ * same size and modification time, with the index's names for it and no
+ * others, whose content hashes to the index's digest -- is not written
+ * again, only given the index's owner, attributes, mode and times: a
+ * restore run again, or onto a copy of the machine, then needs no room
+ * beside a large file for a second copy of it, and none of the time to
+ * write it. The image's copy is still read through and checked.
  *
  * Then what tar does loosely: owners, modes and times (to the nanosecond)
  * from the index, extended attributes -- POSIX ACLs and file capabilities

@@ -187,6 +187,9 @@ restore: leave out PATTERN (written as in a rules file, everything beneath it to
 \-\-numeric\-owner
 restore: owners by the numbers the index records, and the image's own account files, rather than by name through the image's accounts merged with the system's
 .TP
+\-\-image\-fstab
+restore: put back the image's /etc/fstab and /etc/crypttab even where they name disks this machine does not have; by default the machine's own are kept then, so that it still boots
+.TP
 \fB\-\-packages\fR
 diff: say which packages were installed, removed and upgraded, and leave out the file changes they account for. restore: put the image's packages back first \-\- its repositories and keys, its packages at their versions (from the baseline cache where fetched), what was installed by hand and what as a dependency \-\- and remove what it did not have; root only, onto the running system
 .TP

@@ -381,6 +381,10 @@ Options:
       --numeric-owner     restore: owners by the numbers the index records, and
                           the image's own account files, rather than by name
                           through the image's accounts merged with the system's
+      --image-fstab       restore: put back the image's /etc/fstab and
+                          /etc/crypttab even where they name disks this machine
+                          does not have; by default the machine's own are kept
+                          then, so that it still boots
       --packages          diff: say which packages were installed, removed and
                           upgraded, and leave out the file changes they account
                           for. restore: put the image's packages back first --
@@ -628,7 +632,10 @@ the installer chose for the new machine. A script looks each package up first,
 so one that cannot be had (a vendor that keeps only its newest version, a
 repository whose key has expired) does not stop all the others: the recorded
 version where it is still there, the current one where not, and a word about
-any no repository has. With `--exact-versions`, a version the archive has
+any no repository has. One installed already at a newer version than the one
+recorded -- a security update since the capture, or the installer's own -- is
+left at it: taking it back would have apt take back, or remove, whatever
+needs the newer one. With `--exact-versions`, a version the archive has
 moved on from comes from the archive's snapshot as of the capture instead
 (`apt-get --snapshot`: snapshot.ubuntu.com and snapshot.debian.org), where
 apt can reach one -- the machine as it was, rather than with the security
@@ -695,11 +702,23 @@ Smack labels and IMA and EVM signatures are left to the target's own policy
 and keys.
 
 A file already in place as the image has it -- the same size and
-modification time, no other name, and content that hashes to the index's
+modification time, the same names (a hard-linked file has to have all of the
+image's names for it, and no others), and content that hashes to the index's
 digest -- is not written again, only given its owner, mode, attributes and
 times. A restore run again, or onto a machine that has most of its files
 already, then needs no room beside a large file for a second copy and none
 of the time to write one.
+
+`/etc/fstab` and `/etc/crypttab` name disks. On the machine they came from,
+or one the [build sheet](#rebuilding) laid out with the old UUIDs, every disk
+they name is there. On a machine laid out afresh, by an installer, they name
+the old machine's: it stops in emergency mode at the next boot, unable to
+mount `/boot/efi`, and the next initramfs takes in a crypttab that unlocks
+nothing. So when the image's (as its machine description records them) name a
+disk this machine does not have -- leaving out what is marked `noauto` or
+`nofail`, and what names no disk -- and the root has its own, the root's own
+are kept, and restore says which disks were missing. `--image-fstab` puts the
+image's back all the same, for when the disks are about to be made to match.
 
 Owners are restored by name. A rebuilt machine's packages numbered their own
 users as they went in (postgres may be 128 where it was 125), so the image's
@@ -1285,6 +1304,8 @@ src/            the program: one module per concern
   sources.c     whether apt can still use each of its sources, and fetching an index
   baseline.c    the package baseline: each package at its version, fetched and checked
   reinstall.c   the script restore --packages runs
+  restore.c     putting an image's files back
+  fstab.c       whether an image's fstab and crypttab fit the machine
   pgp.c         encrypting, signing and checking signatures, through gpg
   machine.c     the machine description: hardware, disks, encryption
   packages.c    the package inventory: apt, snap, flatpak, pip, npm, cargo

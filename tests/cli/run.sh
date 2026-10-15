@@ -282,13 +282,13 @@ case "$ERR" in
        "a source apt cannot use is warned of" ;;
 esac
 check "the kept .deb is in the image, though /var/cache is left out" \
-  eval 'part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
+  eval 'part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -x "restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb" > /dev/null'
 check "and nothing else of /var/cache" \
-  eval '! part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -v by-hand_1.0_amd64.deb | grep -q "var/cache/apt/archives/"'
+  eval '! part kept.tar files.tar.gz | gzip -dc | tar -tf - | grep -v by-hand_1.0_amd64.deb | grep "var/cache/apt/archives/" > /dev/null'
 check "the kit holds it, and /etc/apt" \
-  eval 'part kept.tar kit.tar.gz | gzip -dc | tar -tf - | tr "\n" " " | grep -q "restate/files/etc/apt/sources.list .*restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb"'
+  eval 'part kept.tar kit.tar.gz | gzip -dc | tar -tf - | tr "\n" " " | grep "restate/files/etc/apt/sources.list .*restate/files/var/cache/apt/archives/by-hand_1.0_amd64.deb" > /dev/null'
 check "and nothing else" \
-  eval '! part kept.tar kit.tar.gz | gzip -dc | tar -tf - | grep -v -e etc/apt -e by-hand | grep -q .'
+  eval '! part kept.tar kit.tar.gz | gzip -dc | tar -tf - | grep -v -e etc/apt -e by-hand | grep . > /dev/null'
 expect 0 "verify the image with kept packages" -- "$BIN" verify --root pkgtree kept.tar
 lacks "$OUT" "by-hand_1.0_amd64.deb" "verify walks what the image kept, and finds it unchanged"
 expect 0 "packages of the image" -- "$BIN" packages kept.tar
@@ -566,9 +566,54 @@ expect 0 "verify finds the restored tree the same" -- "$BIN" verify --root rout 
 [ -z "$OUT" ] || printf '%s\n' "$OUT" | head -5 | sed 's/^/        verify: /'
 contains "$ERR" "0 added, 0 deleted, 0 modified" "nothing differs"
 key_inode=$(inode rout/etc/app/key)
+linked_inode=$(inode rout/var/lib/x/one)
 expect 0 "restore again, over itself" -- "$BIN" restore --allow-unverified --root rout rimg.tar
-contains "$ERR" "were in place already" "says what it left in place"
+contains "$ERR" "5 of those files were in place already" "says what it left in place"
 check "and leaves it, not writing it again" test "$(inode rout/etc/app/key)" = "$key_inode"
+check "a hard-linked file too, with both its names" \
+  test "$(inode rout/var/lib/x/two)" = "$linked_inode" -a "$(inode rout/var/lib/x/one)" = "$linked_inode"
+
+# An image whose fstab and crypttab name disks this machine does not have, as
+# when it goes onto a machine laid out afresh: the root's own are kept. A
+# capture of a tree records no machine description, so one is put in.
+mkdir -p ftree/etc
+printf 'UUID=restate-test-none /boot/efi vfat umask=0077 0 1\n' > ftree/etc/fstab
+printf 'crypt UUID=restate-test-gone none luks\n' > ftree/etc/crypttab
+echo motd > ftree/etc/motd
+expect 0 "capture for an fstab of other disks" -- "$BIN" capture -r ftree --os=linux -q -o fplain.tar
+mkdir -p fimg && ( cd fimg && tar -xf ../fplain.tar &&
+  gzip -dc restate/index.json.gz |
+    sed 's|^  "packages": {|  "machine": {"fstab": [{"spec": "UUID=restate-test-none", "file": "/boot/efi", "type": "vfat", "options": "umask=0077"}, {"spec": "/dev/null", "file": "/x", "type": "none", "options": "bind"}], "crypttab": [{"name": "crypt", "device": "UUID=restate-test-gone", "keyfile": "none", "options": "luks"}]}, "packages": {|' |
+    gzip -c > index.json.gz && mv index.json.gz restate/index.json.gz &&
+  tar -cf ../fimg.tar restate/index.json.gz restate/kit.tar.gz restate/files.tar.gz )
+mkdir -p fown/etc
+echo 'own fstab' > fown/etc/fstab
+expect 0 "restore an image whose fstab names other disks" -- \
+  "$BIN" restore --allow-unverified --root fown fimg.tar
+contains "$ERR" "keeping fown's own /etc/fstab and /etc/crypttab, not the image's" \
+  "says it keeps the root's own fstab and crypttab"
+contains "$ERR" "UUID=restate-test-none (/boot/efi), UUID=restate-test-gone (crypt)" \
+  "and names the disks that are not here"
+check "the root's own fstab is kept" test "$(cat fown/etc/fstab)" = "own fstab"
+check "the image's crypttab is not put in" test ! -e fown/etc/crypttab
+check "the rest is put back" test -f fown/etc/motd
+contains "$ERR" "left out 2 paths (--exclude, and the image's fstab and crypttab)" \
+  "counts them as left out"
+mkdir -p fdry/etc
+echo 'own fstab' > fdry/etc/fstab
+expect 0 "restore --dry-run, an fstab naming other disks" -- \
+  "$BIN" restore --allow-unverified --dry-run --root fdry fimg.tar
+contains "$ERR" "would keep fdry's own /etc/fstab" "a dry run says it would keep them"
+expect 0 "restore --image-fstab" -- \
+  "$BIN" restore --allow-unverified --image-fstab --root fown fimg.tar
+contains "$ERR" "put back all the same, as --image-fstab says" "--image-fstab warns"
+check "and puts the image's fstab back" cmp ftree/etc/fstab fown/etc/fstab
+check "and its crypttab" cmp ftree/etc/crypttab fown/etc/crypttab
+mkdir -p fnew
+expect 0 "restore onto a root with no fstab of its own" -- \
+  "$BIN" restore --allow-unverified --root fnew fimg.tar
+lacks "$ERR" "keeping" "keeps nothing where there is nothing to keep"
+check "and puts the image's fstab in" cmp ftree/etc/fstab fnew/etc/fstab
 
 mkdir -p rdry
 expect 0 "restore --dry-run" -- "$BIN" restore --allow-unverified --dry-run --root rdry rimg.tar
@@ -661,7 +706,7 @@ expect 0 "export a snapshot" -- "$BIN" export repo::20260101T000000Z -o exported
 mkdir -p expout
 expect 0 "restore what was exported" -- "$BIN" restore --allow-unverified --root expout exported.tar
 check "it is the snapshot's" test "$(cat expout/etc/hosts)" = "127.0.0.1 localhost"
-check "and keeps the kit" eval 'tar -tf exported.tar | grep -qx restate/kit.tar.gz'
+check "and keeps the kit" eval 'tar -tf exported.tar | grep -x restate/kit.tar.gz > /dev/null'
 expect 2 "buildsheet from a snapshot" -- "$BIN" buildsheet repo
 contains "$ERR" "export it first" "says to export it"
 expect 2 "autoinstall from a snapshot" -- "$BIN" autoinstall repo::20260101T000000Z
@@ -763,7 +808,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
 
   expect 0 "capture --sign-with" -- "$BIN" capture -r rtree --os=linux --sign-with signer.sec -o simg.tar
   contains "$ERR" "signed by restate test <signer@example.invalid>" "capture says who signed it"
-  check "the image carries the signature, last" eval 'tar -tf simg.tar | tail -1 | grep -qx restate/index.sig'
+  check "the image carries the signature, last" eval 'tar -tf simg.tar | tail -1 | grep -x restate/index.sig > /dev/null'
   mkdir -p sout
   expect 0 "restore --trusted-key" -- "$BIN" restore --trusted-key signer.pub --root sout simg.tar
   contains "$ERR" "simg.tar is signed by restate test <signer@example.invalid>" "restore says who signed it"
@@ -861,7 +906,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "capture into it" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
     "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo
-  check "its packs' indexes are encrypted" sh -c '! cat erepo/packs/*.idx | grep -q restate-pack'
+  check "its packs' indexes are encrypted" sh -c '! cat erepo/packs/*.idx | grep restate-pack > /dev/null'
   check "and its snapshots' indexes" sh -c '! gzip -t erepo/snapshots/*/index.json.gz 2> /dev/null'
   expect 0 "capture into it again, with no secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
@@ -902,7 +947,7 @@ if [ "$(uname -s)" = Linux ] && [ -r /proc/self/exe ]; then
   expect 0 "capture of / with nothing kept" -- "$BIN" capture -N -R nothing.rules -q -o self.tar
   # Called through check.
   # shellcheck disable=SC2317,SC2329
-  kit_holds() { part self.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx "restate/files$1"; }
+  kit_holds() { part self.tar kit.tar.gz | gzip -dc | tar -tf - | grep -x "restate/files$1" > /dev/null; }
   check "the kit holds the restate binary" kit_holds "$(readlink -f "$BIN")"
 fi
 
@@ -995,7 +1040,7 @@ printf '%s:%s:1:0:99999:7:::\n' "$me" "\$6\$oldhash" > atree/etc/shadow
 echo note > atree/home/me/note
 expect 0 "capture a tree with accounts" -- "$BIN" capture -r atree --os=linux -q -o aimg.tar
 check "the kit holds the accounts" \
-  eval 'part aimg.tar kit.tar.gz | gzip -dc | tar -tf - | grep -qx restate/files/etc/passwd'
+  eval 'part aimg.tar kit.tar.gz | gzip -dc | tar -tf - | grep -x restate/files/etc/passwd > /dev/null'
 mkdir -p aout/etc
 printf '%s:x:%s:%s:Installer:/home/me:/bin/sh\n' "$me" "$myuid" "$mygid" > aout/etc/passwd
 printf '%s:x:%s:\n' "$mygroup" "$mygid" > aout/etc/group

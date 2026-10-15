@@ -943,6 +943,63 @@ static void test_apt_words(void)
         free(t);
     }
 
+    TEST_CASE("packages: the install script leaves a package newer than recorded at its version");
+    {
+        /* libx11-6 has had a security update since the capture, which what
+         * needs it needs too: asking for the old version would have apt take
+         * it back, or remove them. vim is older than recorded, and is put at
+         * the recorded version as before. */
+        static const char list[] =
+            "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
+            "{\"name\": \"libx11-6\", \"architecture\": \"amd64\", \"version\": \"2:1.8.13-1\","
+            " \"manual\": true},"
+            "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"9\","
+            " \"manual\": true}]}}";
+        char          *t = rs_test_tmpdir();
+        char          *cmd;
+        struct rs_buf  script;
+        struct rs_buf  got;
+
+        memset(&pk, 0, sizeof(pk));
+        rs_buf_init(&err);
+        rs_json_init(&jp, list, sizeof(list) - 1, &err);
+        CHECK(rs_json_value(&jp, &pk));
+        rs_buf_free(&err);
+        rs_buf_init(&script);
+        rs_packages_apt_script(&pk, NULL, NULL, &script);
+        rs_test_write(t, "install.sh", script.data, 0755);
+        rs_test_write(t, "apt-get",
+                      "#!/bin/sh\n"
+                      "case \" $* \" in *' libx11-6=2:1.8.13-1 '*) exit 100 ;; esac\n"
+                      "[ \"$1\" = -s ] || echo \"$*\" >> \"$LOG\"\n", 0755);
+        rs_test_write(t, "dpkg-query",
+                      "#!/bin/sh\n"
+                      "case \"$*\" in\n"
+                      "  *Version*libx11-6) printf 'installed 2:1.8.13-1ubuntu0.1' ;;\n"
+                      "  *Version*vim) printf 'installed 8' ;;\n"
+                      "  *) printf installed ;;\n"
+                      "esac\n", 0755);
+        rs_test_write(t, "dpkg",
+                      "#!/bin/sh\n"
+                      "[ \"$*\" = '--compare-versions 2:1.8.13-1ubuntu0.1 gt 2:1.8.13-1' ]\n", 0755);
+        cmd = rs_xasprintf("cd '%s' && LOG=log PATH='%s':/usr/bin:/bin sh install.sh > out 2>&1",
+                           t, t);
+        CHECK(system(cmd) == 0);
+        CHECK(rs_read_beneath(t, "/log", 4096, &got));
+        CHECK_STR(got.data ? got.data : "", "install -y libx11-6 vim=9\n");
+        rs_buf_free(&got);
+        CHECK(rs_read_beneath(t, "/out", 4096, &got));
+        CHECK_CONTAINS(got.data ? got.data : "", "installed already at a newer version than the "
+                       "one recorded, so left at it: libx11-6");
+        CHECK(strstr(got.data ? got.data : "", "the current one instead") == NULL);
+        rs_buf_free(&got);
+        free(cmd);
+        rs_buf_free(&script);
+        rs_jval_free(&pk);
+        rs_test_rmtree(t);
+        free(t);
+    }
+
     TEST_CASE("packages: --exact-versions, from the archive's snapshot");
     {
         /* openssh-server's version has gone from the archive, and is in the
