@@ -315,9 +315,11 @@ void test_reinstall(void)
         rs_reinstall_script(&pk, &o, &script);
         CHECK(strstr(script.data, "--snapshot") == NULL);
 
-        /* Run only where it would be: an Ubuntu has sha256sum, and the
-         * BSDs and macOS have it by other names. */
-        if (system("command -v sha256sum > /dev/null 2>&1") != 0)
+        /* Run only where it would be: on the PATH the script sets, as an
+         * Ubuntu has it. FreeBSD keeps it in /sbin; macOS has it only from
+         * Homebrew, which that PATH leaves out. */
+        if (system("PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v sha256sum > /dev/null 2>&1") !=
+            0)
         {
             (void)printf("  (the offline script is not run: it needs sha256sum)\n");
             goto offline_done;
@@ -331,7 +333,8 @@ void test_reinstall(void)
         CHECK(at != NULL);
         if (at)
         {
-            char *fixed = rs_xasprintf("%.*sPATH=%s:/usr/bin:/bin\n%s", (int)(at - body), body, t,
+            char *fixed = rs_xasprintf("%.*sPATH=%s:/usr/sbin:/usr/bin:/sbin:/bin\n%s",
+                                       (int)(at - body), body, t,
                                        at + strlen("PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"));
 
             free(body);
