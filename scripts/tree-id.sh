@@ -32,19 +32,45 @@ if [ "${1:-}" = "--tree" ]; then
 fi
 PHASE="${1:?usage: tree-id.sh [--tree TREE] lint|test|security}"
 
-if [ -z "$TREE" ]; then
-  # A name, not a file: git writes the index itself, and takes an empty file
-  # there for a broken one.
-  INDEX="$(mktemp "${TMPDIR:-/tmp}/restate-index.XXXXXX")"
-  rm -f "$INDEX"
-  trap 'rm -f "$INDEX"' EXIT
+# A name, not a file: git writes the index itself, and takes an empty file
+# there for a broken one.
+INDEX="$(mktemp "${TMPDIR:-/tmp}/restate-index.XXXXXX")"
+rm -f "$INDEX"
+trap 'rm -f "$INDEX"' EXIT
+export GIT_INDEX_FILE="$INDEX"
+
+if [ -n "$TREE" ]; then
+  git read-tree "$TREE"
+else
   # From HEAD, so a file committed although a pattern in .gitignore matches
   # it is still counted, as a commit would keep it; a repository with no
   # commits yet starts from nothing.
-  GIT_INDEX_FILE="$INDEX" git read-tree HEAD 2> /dev/null || rm -f "$INDEX"
-  GIT_INDEX_FILE="$INDEX" git add -A .
-  TREE="$(GIT_INDEX_FILE="$INDEX" git write-tree)"
+  git read-tree HEAD 2> /dev/null || rm -f "$INDEX"
+  git add -A .
 fi
+
+# The version number does not count. A release writes the next one into
+# VERSION and the manpage's .TH line, then runs the checks: counted, it would
+# make stale every check already passed on the tree being released, and each
+# release would run them all again. Left out only while the two agree, so a
+# manpage not regenerated after VERSION changed is still a change, which lint
+# then finds. The .TH line's date goes with it: the release regenerates the
+# page, and the date is not something any check reads.
+plain() {
+  local path="$1" mode
+  mode="$(git ls-files -s -- "$path" | awk '{print $1}')"
+  git update-index --cacheinfo "$mode,$(git hash-object --stdin),$path"
+}
+VERSION_NOW="$(git cat-file blob :VERSION 2> /dev/null)" || VERSION_NOW=""
+TH_VERSION="$(git cat-file blob :man/restate.8 2> /dev/null |
+              sed -n 's/^\.TH RESTATE 8 "[^"]*" "restate \([^"]*\)".*/\1/p' | head -1)" || TH_VERSION=""
+if [ -n "$VERSION_NOW" ] && [ "$TH_VERSION" = "$VERSION_NOW" ]; then
+  echo - | plain VERSION
+  git cat-file blob :man/restate.8 |
+    sed 's/^\(\.TH RESTATE 8\) "[^"]*" "restate [^"]*"/\1 "-" "restate -"/' |
+    plain man/restate.8
+fi
+TREE="$(git write-tree --missing-ok)"
 
 case "$PHASE" in
   lint | security)

@@ -32,7 +32,10 @@ run on them again:
   checks, is caught before it leaves the machine.
 
 The tests' record ignores the prose (`*.md`, `docs/`), which no test reads;
-lint's and the security scan's cover everything.
+lint's and the security scan's cover everything. None of them counts the
+version number, in `VERSION` and the manpage's `.TH` line, while the two
+agree: `make release` writes the next one before it runs `make check`, so the
+checks already passed on what is being released are not run again.
 
 The hooks are copies in `.git/hooks/`, so a change to `.githooks/` does nothing
 until `make install-hooks` runs again. `make check`, and so `make release`,
