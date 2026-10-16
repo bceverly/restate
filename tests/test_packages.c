@@ -224,6 +224,9 @@ static void make_apt(const char *t)
     put(t, "etc/apt/trusted.gpg", "\x98\x33key");
     put(t, "etc/apt/trusted.gpg.d/extra.asc",
         "\n-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQINBGT\n-----END PGP PUBLIC KEY BLOCK-----\n");
+    /* What add-apt-repository leaves beside the key it adds, and apt does
+     * not read. */
+    put(t, "etc/apt/trusted.gpg.d/extra.gpg~", "");
     put(t, "etc/apt/keyrings/", "");
     put(t, "var/lib/apt/lists/archive.example.com_ubuntu_dists_stable_main_binary-amd64_Packages",
         "Package: vim\n"
@@ -356,6 +359,7 @@ static void test_apt(void)
     CHECK(rs_jobject_str(k, "sha256") != NULL);
     CHECK(find(keys, "path", "/etc/apt/trusted.gpg") != NULL);
     CHECK(find(keys, "path", "/etc/apt/trusted.gpg.d/extra.asc") != NULL);
+    CHECK(find(keys, "path", "/etc/apt/trusted.gpg.d/extra.gpg~") == NULL);
     k = find(keys, "path", "/usr/share/keyrings/missing.gpg");
     CHECK(is_true(k, "missing"));
 

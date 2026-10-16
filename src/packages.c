@@ -1139,7 +1139,9 @@ static size_t read_lists(const char *root, const struct repos *rs, struct apt *a
 /* apt: keys                                                                  */
 /* ------------------------------------------------------------------------- */
 
-/* Every key apt trusts, beside the ones the repositories name. */
+/* Every key apt trusts, beside the ones the repositories name. In
+ * trusted.gpg.d, only the .gpg and .asc files: apt reads nothing else there,
+ * and add-apt-repository leaves an empty NAME.gpg~ beside the key it adds. */
 static void trusted_keys(const char *root, struct repos *rs)
 {
     static const char *const dirs[] = { "/etc/apt/trusted.gpg.d", "/etc/apt/keyrings" };
@@ -1158,8 +1160,13 @@ static void trusted_keys(const char *root, struct repos *rs)
         names = list_dir(root, dirs[d], &n);
         for (i = 0; i < n; i++)
         {
-            char *path = rs_xasprintf("%s/%s", dirs[d], names[i]);
+            char *path;
 
+            if (d == 0 && !ends_with(names[i], ".gpg") && !ends_with(names[i], ".asc"))
+            {
+                continue;
+            }
+            path = rs_xasprintf("%s/%s", dirs[d], names[i]);
             add_key_path(rs, path);
             free(path);
         }
