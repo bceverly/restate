@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "October 15, 2026" "restate 1.4.0.6" "System Manager's Manual"
+.TH RESTATE 8 "October 16, 2026" "restate 1.4.0.6" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -189,6 +189,9 @@ restore: owners by the numbers the index records, and the image's own account fi
 .TP
 \-\-image\-fstab
 restore: put back the image's /etc/fstab and /etc/crypttab even where they name disks this machine does not have; by default the machine's own are kept then, so that it still boots
+.TP
+\fB\-\-offline\fR
+restore \-\-packages: with no network at all \-\- every apt package from the baseline cache (restate baseline fetch) and the image's kept .deb files, which apt is given as its only repository; snaps, flatpaks and the Python, npm and Ruby packages are left out, but for the snaps the image keeps
 .TP
 \fB\-\-packages\fR
 diff: say which packages were installed, removed and upgraded, and leave out the file changes they account for. restore: put the image's packages back first \-\- its repositories and keys, its packages at their versions (from the baseline cache where fetched), what was installed by hand and what as a dependency \-\- and remove what it did not have; root only, onto the running system

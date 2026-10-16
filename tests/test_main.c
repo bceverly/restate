@@ -49,6 +49,22 @@ void rs_test_fail(const char *file, int line, const char *fmt, ...)
     (void)fflush(out);
 }
 
+static bool installed(const char *name)
+{
+    char *a = rs_xasprintf("/usr/bin/%s", name);
+    char *b = rs_xasprintf("/usr/local/bin/%s", name);
+    bool  ok = access(a, X_OK) == 0 || access(b, X_OK) == 0;
+
+    free(a);
+    free(b);
+    return ok;
+}
+
+bool rs_test_have_gpg(void)
+{
+    return installed("gpg") && installed("gpgconf") && installed("gpg-agent");
+}
+
 char *rs_test_tmpdir(void)
 {
     const char *base = getenv("TMPDIR");

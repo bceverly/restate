@@ -32,6 +32,17 @@
  *   installs the snaps, the system's flatpaks, and the Python, npm and Ruby
  *     packages installed system-wide, and sets the alternatives chosen by hand
  *
+ * Offline, with no network at all, apt is given one repository in place of
+ * every source it has: one made in the script's own directory of the
+ * baseline cache's packages and the kept .deb files, indexed there by
+ * dpkg-deb, with lists of its own, so nothing is fetched and the system's
+ * lists are left as they were. Its packages are the ones baseline fetch
+ * checked against their vendors' signed indexes, in a cache only root can
+ * write, and the kept ones are from the kit restore checked -- so it is
+ * marked trusted, unsigned. The snaps, flatpaks and language packages need
+ * their stores, so are left out, and said to be; but for a snap the image
+ * keeps, installed from its file.
+ *
  * Every name and version is checked against what its package manager allows
  * before it goes into the script, and every other word is quoted, so the
  * script runs nothing the captured tree wrote.
@@ -39,12 +50,15 @@
 #ifndef RESTATE_REINSTALL_H
 #define RESTATE_REINSTALL_H
 
+#include <stdbool.h>
+
 #include "json.h"
 #include "util.h"
 
 struct rs_reinstall_opts {
     const char *snapshot;   /* --exact-versions: the capture's snapshot ID, or NULL */
     const char *cache;      /* the baseline cache to install from, or NULL */
+    bool        offline;    /* --offline: no network (below) */
 };
 
 /* The script, into `out`, for the inventory `packages`. */

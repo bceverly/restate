@@ -1,0 +1,9 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate reads dpkg's database -- the status file, each package's md5sums
+# and conffiles, the diversions -- because that is the work: telling a file a
+# package installed unmodified from one the machine changed, and recording
+# which packages it had. It reads; it never writes there, and installs and
+# removes packages only through apt and dpkg themselves.
+restate: uses-dpkg-database-directly [usr/sbin/restate]

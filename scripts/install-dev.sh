@@ -119,6 +119,11 @@ PACKAGES=(
   # a separate package from clang, and easy not to notice is missing until the
   # first crash.
   llvm                     # llvm-symbolizer
+  # --- the Launchpad packages (make deb, deb-source) ----------------------
+  debhelper
+  dput
+  lintian
+  fakeroot
   # --- what this script itself needs ---------------------------------------
   curl                     # fetching the pinned gitleaks and actionlint releases
   pipx                     # semgrep is Python, and apt has no current package

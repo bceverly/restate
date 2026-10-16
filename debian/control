@@ -1,0 +1,66 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+Source: restate
+Section: admin
+Priority: optional
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+# Deliberately short. restate links nothing but libc: there is nothing to
+# vendor and nothing to fetch, and a Launchpad builder -- which has no
+# network -- builds it from the source package alone. What it runs (gzip,
+# gpgv, gpg, curl, pigz) it runs as separate processes, so those are runtime
+# dependencies, below, and none of them is needed to build.
+Build-Depends:
+ debhelper-compat (= 13),
+Standards-Version: 4.7.0
+Homepage: https://github.com/bceverly/restate
+Vcs-Git: https://github.com/bceverly/restate.git
+Vcs-Browser: https://github.com/bceverly/restate
+Rules-Requires-Root: no
+
+Package: restate
+# A compiled C program, so tied to an architecture; "any", because nothing in
+# it is particular to one.
+Architecture: any
+# gpgv is a Depends: restore refuses an image whose signature it cannot check,
+# and gpgv is what checks it. It is priority important rather than essential,
+# so a minimal system can be without it. gzip and tar are Essential, and so
+# not named: depending on one is a Policy violation lintian reports.
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ gpgv,
+# gpg encrypts and signs images (--encrypt-to, --sign-with); curl fetches
+# installers and the package baseline; pigz compresses on every core. restate
+# says plainly which is missing when it needs one.
+Recommends:
+ curl,
+ gpg,
+ pigz,
+# dpkg-repack rebuilds a .deb that apt's cache no longer holds, for
+# capture --keep-local-packages.
+Suggests:
+ dpkg-repack,
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.

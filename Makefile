@@ -284,6 +284,48 @@ install: build ## Install into $(prefix) (default /usr/local), asking for sudo/d
 uninstall: ## Remove what `make install` installed
 	@scripts/install.sh --uninstall
 
+##@ Packaging
+
+.PHONY: deb
+deb: build ## Build the binary .deb into the parent directory
+	@scripts/build-deb.sh
+
+.PHONY: deb-source
+deb-source: build ## Build the signed source package for a Launchpad upload
+	@scripts/build-deb.sh --source
+
+.PHONY: deb-sbuild
+deb-sbuild: build ## Build in a clean chroot with no network, as a Launchpad builder does
+	@scripts/build-deb.sh --sbuild
+
+# The staged install debian/rules runs.
+#
+# Not `make install`, which puts files on a live system: under /usr/local so as
+# not to collide with what dpkg owns, asking for privileges if it has to, and
+# refreshing the man database. This assembles a directory that is about to be
+# a package -- wherever DESTDIR says, with the prefix debian/rules gives,
+# never asking for privileges, and leaving the man database alone, which
+# indexing a staging tree would point at a filesystem that does not exist.
+# The hooks go where the program looks for them: libexec/restate/hooks beside
+# the sbin it is in.
+.PHONY: install-tree
+install-tree: build ## Install into DESTDIR, for the package build
+	@$(INSTALL) -d $(DESTDIR)$(sbindir) $(DESTDIR)$(mandir)/man8 \
+	              $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks
+	@$(INSTALL) -m 0755 $(BIN_DIR)/$(PROG) $(DESTDIR)$(sbindir)/$(PROG)
+	@$(INSTALL) -m 0644 $(MAN_PAGE) $(DESTDIR)$(mandir)/man8/$(PROG).8
+	@$(INSTALL) -m 0755 hooks/* $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks/
+	@printf '  \033[92m✓\033[0m installed into %s\n' "$(DESTDIR)$(prefix)"
+
+.PHONY: deb-clean
+deb-clean: ## Remove what the package builds left behind
+	@rm -rf debian/$(PROG) debian/.debhelper debian/files debian/changelog
+	@rm -f debian/*.substvars debian/*.debhelper debian/*.debhelper.log
+	@rm -f debian/debhelper-build-stamp
+	@rm -f ../$(PROG)_*.deb ../$(PROG)-dbgsym_*.ddeb ../$(PROG)_*.changes \
+	       ../$(PROG)_*.buildinfo ../$(PROG)_*.build ../$(PROG)_*.dsc \
+	       ../$(PROG)_*.tar.* ../$(PROG)_*.upload 2>/dev/null || true
+
 ##@ Release
 
 .PHONY: release

@@ -317,6 +317,33 @@ check "the script is sh" sh -n out.txt
 expect 2 "restore --packages onto another root" -- \
   "$BIN" restore --packages --allow-unverified --root rp kept.tar
 contains "$ERR" "installs onto the running system" "is refused: it installs onto this one"
+expect 2 "restore --offline without --packages" -- \
+  "$BIN" restore --offline --dry-run --allow-unverified --root rp kept.tar
+contains "$ERR" "give --packages too" "is refused"
+expect 2 "restore --offline --exact-versions" -- \
+  "$BIN" restore --packages --offline --exact-versions --dry-run --allow-unverified --root rp kept.tar
+contains "$ERR" "the archive's snapshot is on the network" "is refused"
+expect 2 "restore --offline with no baseline cache" -- \
+  "$BIN" restore --packages --offline --cache "$PWD/no-cache" --dry-run --allow-unverified \
+    --root rp kept.tar
+contains "$ERR" "run restate baseline fetch" "says how to make one"
+mkdir -p loose-cache && chmod 0775 loose-cache
+expect 2 "restore --offline from a cache others can write" -- \
+  "$BIN" restore --packages --offline --cache "$PWD/loose-cache" --dry-run --allow-unverified \
+    --root rp kept.tar
+contains "$ERR" "not root's alone" "is refused: what is in it is installed as root"
+if [ "$(id -u)" = 0 ]; then
+  mkdir -p offline-cache && chmod 0755 offline-cache
+  printf deb > offline-cache/hello_2.10-3_amd64.deb
+  expect 0 "restore --packages --offline --dry-run" -- \
+    "$BIN" restore --packages --offline --cache "$PWD/offline-cache" --dry-run \
+      --allow-unverified --root rp kept.tar
+  contains "$ERR" "offline: 1 of the image's 1 packages from repositories are in" \
+    "says how much of the baseline the cache has"
+  contains "$OUT" "deb [trusted=yes] file:" "gives apt the cache as its one repository"
+  contains "$OUT" "hello_2.10-3_amd64.deb" "with the package in it"
+  check "the offline script is sh" sh -n out.txt
+fi
 sed 's/^Version: 2.10-3$/Version: 2.11-1/' pkgtree/var/lib/dpkg/status > status.new &&
   mv status.new pkgtree/var/lib/dpkg/status
 expect 0 "capture after an upgrade" -- \

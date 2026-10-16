@@ -186,6 +186,42 @@ static char *slurp(const char *path, size_t max, size_t *len)
     return rs_buf_detach(&b);
 }
 
+/*
+ * A file a process's command line names, read only if that process's own
+ * user could read it: its owner's, with the owner's read bit, or anyone's
+ * readable by all -- or whatever it is, for a process run as root. Its
+ * command line is any user's to write, and restate runs as root: without
+ * this, `mongod --config /etc/shadow` would have restate read the file
+ * for them.
+ */
+static char *slurp_as(const char *path, unsigned long uid, size_t max)
+{
+    struct rs_buf b;
+    struct stat   st;
+    char          chunk[4096];
+    ssize_t       n;
+    int           fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        !(uid == 0 || (st.st_uid == uid && (st.st_mode & S_IRUSR)) || (st.st_mode & S_IROTH)))
+    {
+        (void)close(fd);
+        return NULL;
+    }
+    rs_buf_init(&b);
+    while (b.len < max && (n = read(fd, chunk, sizeof(chunk))) > 0)
+    {
+        rs_buf_add(&b, chunk, (size_t)n);
+    }
+    (void)close(fd);
+    rs_buf_add(&b, "", 0);
+    return rs_buf_detach(&b);
+}
+
 /* What a symlink in /proc points at -- cwd, fd/N -- if it is a path. */
 static char *proc_link(const char *path)
 {
@@ -539,7 +575,7 @@ static void mongodb(const struct proc *p, struct found *f)
     }
     if (!d && conf && conf[0] == '/')
     {
-        char *text = slurp(conf, CONFIG_MAX, NULL);
+        char *text = slurp_as(conf, p->uid, CONFIG_MAX);
 
         from_conf = text ? rs_live_mongo_dbpath(text) : NULL;
         free(text);

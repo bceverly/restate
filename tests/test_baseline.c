@@ -400,7 +400,7 @@ static void fetching(void)
     struct rs_baseline_opts  o;
     struct rs_baseline_stats st;
 
-    if ((access("/usr/bin/gpg", X_OK) != 0 && access("/usr/local/bin/gpg", X_OK) != 0) ||
+    if (!rs_test_have_gpg() ||
         !rs_program_path(RS_PROG_GPGV) || !rs_program_path(RS_PROG_CURL))
     {
         (void)printf("  (baseline fetches skipped: they need gpg, gpgv and curl)\n");

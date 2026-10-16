@@ -415,7 +415,7 @@ void test_installer(void)
 
     /* The fetch tests need gpg to make a signing key, and gpgv and curl to
      * run; on a system without them they are skipped, not failed. */
-    if ((access("/usr/bin/gpg", X_OK) != 0 && access("/usr/local/bin/gpg", X_OK) != 0) ||
+    if (!rs_test_have_gpg() ||
         !rs_program_path(RS_PROG_GPGV) || !rs_program_path(RS_PROG_CURL))
     {
         (void)printf("  (installer fetch tests skipped: they need gpg, gpgv and curl)\n");

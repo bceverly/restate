@@ -1,0 +1,49 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# What must NOT go into the source package.
+#
+# `3.0 (native)` tars the whole directory, and a working checkout gathers
+# build output, coverage, sanitizer logs, the records of what passed and a
+# fuzzing corpus -- none of which belongs in a source package, and none of
+# which dpkg-source can know about by itself. What does belong is everything
+# a Launchpad builder needs to build from nothing: the sources, the Makefile,
+# the scripts, the hooks, the tests and the generated manpage.
+tar-ignore = .git
+tar-ignore = .git/*
+tar-ignore = .github
+tar-ignore = .github/*
+tar-ignore = .githooks
+tar-ignore = .githooks/*
+tar-ignore = bin
+tar-ignore = bin/*
+tar-ignore = obj
+tar-ignore = obj/*
+tar-ignore = dist
+tar-ignore = dist/*
+tar-ignore = .coverage
+tar-ignore = .coverage/*
+tar-ignore = .sanitize*
+tar-ignore = .lint
+tar-ignore = .lint/*
+tar-ignore = .passed
+tar-ignore = .passed/*
+tar-ignore = .fuzz
+tar-ignore = .fuzz/*
+tar-ignore = .security-reports
+tar-ignore = .security-reports/*
+tar-ignore = .cache
+tar-ignore = .cache/*
+tar-ignore = *.o
+tar-ignore = *.d
+tar-ignore = *.gcno
+tar-ignore = *.gcda
+tar-ignore = *.gcov
+tar-ignore = debian/restate
+tar-ignore = debian/restate/*
+tar-ignore = debian/.debhelper
+tar-ignore = debian/.debhelper/*
+tar-ignore = debian/files
+tar-ignore = debian/*.substvars
+tar-ignore = debian/*.debhelper.log
+tar-ignore = debian/debhelper-build-stamp

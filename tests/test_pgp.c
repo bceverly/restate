@@ -100,7 +100,7 @@ void test_pgp(void)
     detect_cases();
     failure_cases(dir);
 
-    if (!rs_program_path(RS_PROG_GPG) || access("/usr/bin/gpgconf", X_OK) != 0)
+    if (!rs_program_path(RS_PROG_GPG) || !rs_test_have_gpg())
     {
         (void)printf("  (image encryption tests skipped: they need gpg)\n");
         goto done;

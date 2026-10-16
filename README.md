@@ -16,7 +16,7 @@ system — so after a reinstall, the difference can be put back.**
 [![Language: C11](https://img.shields.io/badge/language-C11-0A2240.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Links: libc only](https://img.shields.io/badge/links-libc%20only-1e7a46.svg)](#security)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%C2%B7%20FreeBSD%20%C2%B7%20OpenBSD%20%C2%B7%20NetBSD%20%C2%B7%20macOS-0A2240.svg)](#installing)
-[![Ubuntu 26.04](https://img.shields.io/badge/ubuntu-26.04-E95420.svg)](#installing-on-ubuntu-2604)
+[![Ubuntu 26.04](https://img.shields.io/badge/ubuntu-26.04-E95420.svg)](#installing)
 
 [![cppcheck](https://img.shields.io/badge/cppcheck-clean-1e7a46.svg)](#security)
 [![clang-tidy](https://img.shields.io/badge/clang--tidy-clean-1e7a46.svg)](#security)
@@ -205,8 +205,6 @@ These need the pieces still on the [roadmap](ROADMAP.md):
 - **Turning a hand-built server into code.** The package inventory and the
   autoinstall file are a starting point for automating a machine that was
   only ever configured by hand.
-- **Air-gapped rebuilds**, from a downloaded installer, the baseline and kept
-  packages, with no network at all.
 
 ## Quick start
 
@@ -385,6 +383,12 @@ Options:
                           /etc/crypttab even where they name disks this machine
                           does not have; by default the machine's own are kept
                           then, so that it still boots
+      --offline           restore --packages: with no network at all -- every
+                          apt package from the baseline cache (restate baseline
+                          fetch) and the image's kept .deb files, which apt is
+                          given as its only repository; snaps, flatpaks and the
+                          Python, npm and Ruby packages are left out, but for
+                          the snaps the image keeps
       --packages          diff: say which packages were installed, removed and
                           upgraded, and leave out the file changes they account
                           for. restore: put the image's packages back first --
@@ -763,6 +767,32 @@ $ sudo restate restore --packages --dry-run -o packages.sh --trusted-key backup.
 $ sudo restate restore --packages --trusted-key backup.pub web01.tar
 ```
 
+**With no network at all**, `restore --packages --offline` installs every apt
+package from the [baseline](#the-package-baseline) and the `.deb` files the
+image kept, and from nothing else. Fetch the baseline while there is a
+network, carry the image and `/var/cache/restate/baseline` across with the
+installer, and restore on the far side:
+
+```console
+$ sudo restate baseline fetch --trusted-key backup.pub web01.tar     # connected
+$ sudo restate restore --packages --offline --trusted-key backup.pub web01.tar
+restate: offline: 3180 of the image's 3180 packages from repositories are in /var/cache/restate/baseline; the 5 installed from .deb files come from the image where it keeps them
+restate: offline: apt installs from 3185 packages, and nothing else
+```
+
+apt is given one repository in place of every source it has: one the script
+makes in a directory of its own, of the baseline's packages and the kept
+ones, indexed there from each package's own fields with `dpkg-deb`, and with
+lists of its own, so nothing is fetched and the system's lists are left as
+they were. The repository is unsigned and marked trusted: its packages are
+the ones `baseline fetch` checked against their vendors' signed indexes, in a
+cache only root can write, and the kept ones are from the image's kit,
+checked against its index. Every package is at the version recorded, so
+`--exact-versions` has nothing to add, and is refused with it. Snaps,
+flatpaks and the Python, npm and Ruby packages come from stores on the
+network, so they are left out and said to be -- but for a snap the image
+keeps, which is installed from its file.
+
 **Only a signed image is restored**, unless told otherwise. `restore` checks
 the signature before it reads anything else, and refuses -- exit status 4 --
 an image that is unsigned, badly signed, or signed by a key not given with
@@ -1109,12 +1139,24 @@ them all, each with its reason.
 
 ## Installing
 
-Distribution packages come later — a Launchpad PPA for Ubuntu first; see the
-[roadmap](ROADMAP.md). For now restate is built from source and installed into
-`/usr/local`, which is the place for software the administrator installs by
-hand and is never touched by the package manager.
+On Ubuntu 22.04, 24.04 and 26.04, from the PPA, which Launchpad builds from
+each release for every architecture it has:
 
-### Installing on Ubuntu 26.04
+```bash
+sudo add-apt-repository ppa:bceverly/restate
+sudo apt install restate
+```
+
+That puts `restate` in `/usr/sbin`, its manual in section 8 and its
+[hooks](#live-services) in `/usr/libexec/restate/hooks`, and brings `gpgv`,
+which checks an image's signature, with it; `curl`, `gpg` and `pigz` come as
+recommendations. Packages for the BSDs and macOS come later; see the
+[roadmap](ROADMAP.md). Everywhere else, and for what is not released yet,
+restate is built from source and installed into `/usr/local`, which is the
+place for software the administrator installs by hand and is never touched by
+the package manager.
+
+### Installing on Ubuntu 26.04 from source
 
 ```bash
 sudo apt update
@@ -1244,6 +1286,8 @@ Run `make` with no arguments for the full list.
 | `make security` | the security scanners, sanitizers, a fuzz run, gitleaks, Lucky 13 (`gcc -fanalyzer` is `make lint`'s) |
 | `make fuzz` | fuzz every parser |
 | `make install` / `make uninstall` | into / out of `$(prefix)`, default `/usr/local` |
+| `make deb` / `make deb-source` | the binary `.deb`, or the signed source package Launchpad builds from |
+| `make deb-sbuild` | build the package in a clean chroot with no network, as a Launchpad builder does |
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
 | `make install-dev` | the development tools and the git hooks |
 | `make man` | regenerate the manpage and the README's Usage block |
@@ -1269,6 +1313,23 @@ sha256sum -c SHA256SUMS
 gh attestation verify restate-0.1.0.0.tar.gz --repo bceverly/restate
 ```
 
+Beside it the workflow builds the Debian package, has lintian check it,
+installs it with apt on clean Ubuntu 24.04 and 26.04 containers, uses it and
+removes it (`scripts/verify-deb.sh`) -- and only then uploads a signed source
+package for each LTS series to the [PPA](#installing), where Launchpad builds
+it for every architecture. An upload cannot be taken back, so nothing goes
+that has not installed. The signing key is pinned by its fingerprint in
+`debian/signing-fingerprint`; the workflow refuses a secret holding any
+other.
+
+To build the packages by hand:
+
+```bash
+make deb             # ../restate_<version>~<series>1_<arch>.deb, unsigned
+make deb-source      # the signed source package, and the dput that uploads it
+make deb-sbuild      # in a clean chroot with no network, as Launchpad builds it
+```
+
 ## GitHub configuration
 
 Settings that live in the repository rather than in it, and that the workflows
@@ -1282,6 +1343,10 @@ and the Scorecard expect:
   workflow asks for exactly what it needs.
 - **Dependabot:** alerts and security updates on; `dependabot.yml` keeps the
   actions current.
+- **Secrets → Actions:** `LAUNCHPAD_GPG_PRIVATE_KEY`, the armored secret key
+  `debian/signing-fingerprint` names, registered on the Launchpad account,
+  and `LAUNCHPAD_GPG_PASSPHRASE`, its passphrase. The upload runs in the
+  `launchpad` environment, which can be given a required reviewer.
 
 ## Project layout
 
@@ -1320,6 +1385,7 @@ hooks/          the hooks capture --quiesce runs, installed in libexec/restate/h
 tests/          unit tests; cli/ end-to-end; fuzz/ the fuzz target
 scripts/        everything make runs
 man/restate.8   generated from --help; do not edit
+debian/         the Debian packaging the PPA builds from
 .github/        CI, security, CodeQL, Scorecard and release workflows
 ```
 

@@ -14,6 +14,7 @@
 #ifndef RESTATE_TEST_H
 #define RESTATE_TEST_H
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +32,10 @@ void rs_test_fail(const char *file, int line, const char *fmt, ...)
  * returned string is the caller's to free. */
 char *rs_test_tmpdir(void);
 void  rs_test_rmtree(const char *path);
+/* Whether gpg can make the tests a key: gpg itself, gpgconf, and the
+ * gpg-agent that holds a secret key -- which a system can be without even
+ * where gpg is installed, a package build's chroot among them. */
+bool  rs_test_have_gpg(void);
 /* Writes `text` to `dir`/`name`, creating it with `mode`. */
 void  rs_test_write(const char *dir, const char *name, const char *text, unsigned mode);
 /* Runs `fn` with stdout and stderr sent to files, and returns what it

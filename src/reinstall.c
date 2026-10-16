@@ -194,6 +194,95 @@ static size_t copy_baseline(const struct rs_jval *pkgs, const char *cache, struc
     return n;
 }
 
+/* Whether `kept`, an inventory's path to a kept .deb, is one the script can
+ * name without quoting. */
+static bool kept_path(const char *kept)
+{
+    size_t n = kept ? strlen(kept) : 0;
+
+    return kept && kept[0] == '/' && rs_path_is_clean(kept) && n >= 5 &&
+           strcmp(kept + n - 4, ".deb") == 0 &&
+           only(kept, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._+~%:-");
+}
+
+/*
+ * Offline: apt's only repository, made in "$work/repo" of the baseline's
+ * packages and the kept .deb files, and APT_CONFIG naming it alone, with
+ * lists of its own -- for every apt-get the script runs after this.
+ */
+static void offline_repo(const struct rs_jval *pkgs, const char *cache, struct rs_buf *out)
+{
+    size_t i;
+
+    rs_buf_addstr(out, "# Offline: apt's one repository, made here of the baseline's packages and\n"
+                       "# the image's kept .deb files. Trusted unsigned: baseline fetch checked\n"
+                       "# each against its vendor's signed index, into a cache only root can\n"
+                       "# write, and restore checked the kept ones against the image's index.\n"
+                       "repo=\"$work/repo\"\n"
+                       "mkdir -p \"$repo\" \"$work/lists/partial\" \"$work/parts\"\n"
+                       ": > \"$repo/Packages\"\n"
+                       "# Each one's own fields, its Filename the repository's, and its size\n"
+                       "# and digest, as apt checks them.\n"
+                       "index() {\n"
+                       "  fields=$(dpkg-deb -f \"$repo/$1\" 2> /dev/null | grep -v '^Filename:') "
+                       "|| return 0\n"
+                       "  printf '%s\\nFilename: ./%s\\nSize: %s\\nSHA256: %s\\n\\n' \"$fields\" "
+                       "\"$1\" \\\n"
+                       "    \"$(wc -c < \"$repo/$1\" | tr -d ' ')\" "
+                       "\"$(sha256sum < \"$repo/$1\" | cut -d ' ' -f 1)\" >> \"$repo/Packages\"\n"
+                       "}\n"
+                       "cache=");
+    rs_shell_word(out, cache);
+    rs_buf_addstr(out, "\nwhile read -r f; do\n"
+                       "  [ -f \"$cache/$f\" ] && ln -s \"$cache/$f\" \"$repo/$f\" 2> /dev/null && "
+                       "index \"$f\"\n"
+                       "done <<'CACHED'\n");
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const struct rs_jval *p = &pkgs->items[i];
+        char                 *deb = rs_baseline_deb_name(rs_jobject_str(p, "name"),
+                                                         rs_jobject_str(p, "version"),
+                                                         rs_jobject_str(p, "architecture"));
+
+        if (cached(cache, deb))
+        {
+            rs_buf_addf(out, "%s\n", deb);
+        }
+        free(deb);
+    }
+    rs_buf_addstr(out, "CACHED\n"
+                       "while read -r f; do\n"
+                       "  [ -f \"$f\" ] && ln -s \"$f\" \"$repo/${f##*/}\" 2> /dev/null && "
+                       "index \"${f##*/}\"\n"
+                       "done <<'KEPT'\n");
+    for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
+    {
+        const char *kept = rs_jobject_str(&pkgs->items[i], "kept");
+
+        if (kept_path(kept))
+        {
+            rs_buf_addf(out, "%s\n", kept);
+        }
+    }
+    rs_buf_addstr(out,
+                  "KEPT\n"
+                  "printf 'Date: %s\\nSHA256:\\n %s %s Packages\\n' \"$(LC_ALL=C date -Ru)\" \\\n"
+                  "  \"$(sha256sum < \"$repo/Packages\" | cut -d ' ' -f 1)\" "
+                  "\"$(wc -c < \"$repo/Packages\" | tr -d ' ')\" > \"$repo/Release\"\n"
+                  "echo \"deb [trusted=yes] file:$repo ./\" > \"$work/sources.list\"\n"
+                  "cat > \"$work/apt.conf\" <<CONF\n"
+                  "Dir::Etc::SourceList \"$work/sources.list\";\n"
+                  "Dir::Etc::SourceParts \"$work/parts\";\n"
+                  "Dir::State::Lists \"$work/lists/\";\n"
+                  "APT::Sandbox::User \"root\";\n"
+                  "Acquire::Languages \"none\";\n"
+                  "CONF\n"
+                  "APT_CONFIG=\"$work/apt.conf\"\n"
+                  "export APT_CONFIG\n"
+                  "echo \"restate: offline: apt installs from $(grep -c '^Package:' "
+                  "\"$repo/Packages\") packages, and nothing else\" >&2\n");
+}
+
 /* The apt script, without its first line, which is the shebang. */
 static void apt_install(const struct rs_jval *packages, const char *snapshot, struct rs_buf *out)
 {
@@ -232,13 +321,9 @@ static void kept_debs(const struct rs_jval *pkgs, struct rs_buf *out)
     for (i = 0; pkgs && pkgs->type == RS_JARRAY && i < pkgs->n; i++)
     {
         const char *kept = rs_jobject_str(&pkgs->items[i], "kept");
-        size_t      n = kept ? strlen(kept) : 0;
 
         /* Only names that need no quoting, since they go into a list. */
-        if (!kept || kept[0] != '/' || !rs_path_is_clean(kept) || n < 5 ||
-            strcmp(kept + n - 4, ".deb") != 0 ||
-            !only(kept, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-                        "/._+~%:-"))
+        if (!kept_path(kept))
         {
             continue;
         }
@@ -403,7 +488,7 @@ static void marks(const struct rs_jval *pkgs, const char *native, struct rs_buf 
                 "fi\n", native, native);
 }
 
-static void snaps(const struct rs_jval *arr, struct rs_buf *out)
+static void snaps(const struct rs_jval *arr, bool offline, struct rs_buf *out)
 {
     static const char *const implied[] = { "base", "core", "os", "snapd", "gadget", "kernel" };
     size_t                   i;
@@ -431,6 +516,13 @@ static void snaps(const struct rs_jval *arr, struct rs_buf *out)
         }
         if (skip || (flag(sn, "local") && (!kept || kept[0] != '/' || !rs_path_is_clean(kept))))
         {
+            continue;
+        }
+        if (offline && !flag(sn, "local"))
+        {
+            /* From the store, which offline there is none of. */
+            rs_buf_addf(out, "echo 'restate: offline, so the snap %s is not put back' >&2\n",
+                        name);
             continue;
         }
         if (!any)
@@ -566,6 +658,47 @@ static void language(const struct rs_jval *arr, const char *cmd, const char *sep
     free(words);
 }
 
+/* How many of `arr` the script would install: the system-wide ones. */
+static size_t system_wide(const struct rs_jval *arr, const char *not_where)
+{
+    size_t n = 0;
+    size_t i;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        const char *where = rs_jobject_str(&arr->items[i], "where");
+
+        if (rs_jobject_str(&arr->items[i], "name") && where && !rs_starts_with(where, "/home/") &&
+            !rs_starts_with(where, "/root") && !(not_where && eq(where, not_where)))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Offline: what needs a store or an index on the network, said and left. */
+static void offline_left_out(const struct rs_jval *packages, struct rs_buf *out)
+{
+    const struct rs_jval *apps = rs_jobject_get(rs_jobject_get(packages, "flatpak"), "apps");
+    size_t                flat = 0;
+    size_t                n[3];
+    size_t                i;
+
+    for (i = 0; apps && apps->type == RS_JARRAY && i < apps->n; i++)
+    {
+        flat += eq(rs_jobject_str(&apps->items[i], "scope"), "system") ? 1 : 0;
+    }
+    n[0] = system_wide(rs_jobject_get(packages, "pip"), NULL);
+    n[1] = system_wide(rs_jobject_get(packages, "npm"), "/usr/lib/node_modules");
+    n[2] = system_wide(rs_jobject_get(packages, "gem"), NULL);
+    if (flat + n[0] + n[1] + n[2] > 0)
+    {
+        rs_buf_addf(out, "echo 'restate: offline, so not put back: %zu flatpaks, %zu Python, %zu "
+                    "npm and %zu Ruby packages' >&2\n", flat, n[0], n[1], n[2]);
+    }
+}
+
 static void alternatives(const struct rs_jval *alts, struct rs_buf *out)
 {
     size_t i;
@@ -597,23 +730,40 @@ void rs_reinstall_script(const struct rs_jval *packages, const struct rs_reinsta
     if (apt)
     {
         keys(apt, out);
-        (void)copy_baseline(pkgs, o->cache, out);
+        if (o->offline && o->cache)
+        {
+            /* The baseline is the repository, so nothing to copy, and
+             * nothing left to install from it after. */
+            offline_repo(pkgs, o->cache, out);
+        } else
+        {
+            (void)copy_baseline(pkgs, o->cache, out);
+        }
         rs_buf_addstr(out, "apt-get update || echo 'restate: apt-get update failed; going on with "
                            "the lists apt has' >&2\n");
-        apt_install(packages, o->snapshot, out);
+        apt_install(packages, o->offline ? NULL : o->snapshot, out);
         kept_debs(pkgs, out);
-        from_baseline(pkgs, o->cache, native, o->snapshot != NULL, out);
+        if (!o->offline)
+        {
+            from_baseline(pkgs, o->cache, native, o->snapshot != NULL, out);
+        }
         holds(pkgs, native, out);
         marks(pkgs, native, out);
     }
-    snaps(rs_jobject_get(packages, "snap"), out);
-    flatpaks(rs_jobject_get(packages, "flatpak"), out);
-    language(rs_jobject_get(packages, "pip"), "pip install --break-system-packages", "==", NULL,
-             "the Python packages did not all install", out);
-    language(rs_jobject_get(packages, "npm"), "npm install -g", "@", "/usr/lib/node_modules",
-             "the npm packages did not all install", out);
-    language(rs_jobject_get(packages, "gem"), "gem install", ":", NULL,
-             "the gems did not all install", out);
+    snaps(rs_jobject_get(packages, "snap"), o->offline, out);
+    if (o->offline)
+    {
+        offline_left_out(packages, out);
+    } else
+    {
+        flatpaks(rs_jobject_get(packages, "flatpak"), out);
+        language(rs_jobject_get(packages, "pip"), "pip install --break-system-packages", "==",
+                 NULL, "the Python packages did not all install", out);
+        language(rs_jobject_get(packages, "npm"), "npm install -g", "@", "/usr/lib/node_modules",
+                 "the npm packages did not all install", out);
+        language(rs_jobject_get(packages, "gem"), "gem install", ":", NULL,
+                 "the gems did not all install", out);
+    }
     alternatives(rs_jobject_get(packages, "alternatives"), out);
     rs_buf_addstr(out, "exit 0\n");
 }

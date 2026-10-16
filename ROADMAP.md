@@ -184,7 +184,7 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       UUIDs; how to drive the installer onto that layout; then the restore
 - [x] **Unattended rebuilds:** a generated Ubuntu autoinstall file — storage,
       locale, keyboard, time zone, identity, network, SSH server
-- [ ] The autoinstall file's packages: PPAs and keys, the recorded packages,
+- [x] The autoinstall file's packages: PPAs and keys, the recorded packages,
       `restate restore` at the end (with the package baseline, above)
 - [ ] `bsdinstall` and OpenBSD `install.conf` equivalents
 - [x] **Moving between bare metal and a virtual machine**: `buildsheet` and
@@ -268,10 +268,21 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       macOS xattrs, FreeBSD and NetBSD extattrs), set after the owner, with
       an ACL's users and groups mapped by name; hard links as links; users
       and groups the image's owners depend on
-- [ ] ACLs that are not extended attributes: macOS's, and NFSv4 ACLs on ZFS
-- [ ] Air-gapped rebuilds: `restore --packages` with no network at all, every
-      package from the baseline and the kept `.deb` files, apt given a local
-      repository of them in place of its sources
+- [x] Every ACL Ubuntu has: POSIX ACLs, on ext4, XFS, Btrfs and ZFS
+      (`acltype=posix`), all of them extended attributes, above. OpenZFS on
+      Linux has no NFSv4 ACLs (`acltype=nfsv4` is FreeBSD's alone)
+- [ ] ACLs that are not extended attributes, on the other systems: macOS's,
+      and NFSv4 ACLs on ZFS -- FreeBSD's, and Linux's once OpenZFS has them
+- [x] **Air-gapped rebuilds:** `restore --packages --offline`, with no network
+      at all -- every apt package from the baseline and the kept `.deb`
+      files, apt given a repository of them, indexed with `dpkg-deb`, in
+      place of every source it has, with lists of its own; the snaps the
+      image keeps from their files, and what needs a store said and left out
+- [x] **A restore onto a machine laid out afresh:** the machine's own
+      `/etc/fstab` and `/etc/crypttab` kept where the image's name disks it
+      does not have (`--image-fstab` to put them back all the same); a
+      package installed already at a newer version than recorded left at it;
+      a hard-linked file already in place under every name left as it is
 - [x] `status`: what has changed since the last capture, quickly -- verify's
       comparison, reading only what size, times and inode say changed
 
@@ -363,8 +374,10 @@ machine rather than N copies of one:
 
 ## Packaging
 
-- [ ] A Launchpad PPA for Ubuntu (26.04 first), built from signed source
-      packages by the release workflow, as `../tmd` does it
+- [x] A Launchpad PPA for Ubuntu (`ppa:bceverly/restate`): 22.04, 24.04 and
+      26.04, from signed source packages the release workflow uploads once
+      the package has installed on clean Ubuntu; `make deb`, `deb-source`
+      and `deb-sbuild` by hand
 - [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, Homebrew formula
 - [ ] Debian and RPM packages for other Linux distributions
 

@@ -1,0 +1,25 @@
+# PUBLIC DATA. An OpenPGP *fingerprint* -- an identifier, not key material:
+# the same string published at https://launchpad.net/~bceverly/+editpgpkeys
+# and served by keyserver.ubuntu.com to anyone who asks. Nothing here is
+# secret, and nothing here can sign anything.
+#
+# The private half lives in a password vault and in the
+# LAUNCHPAD_GPG_PRIVATE_KEY GitHub secret, and nowhere else. It is never
+# written into this repository in any form.
+#
+# ---------------------------------------------------------------------------
+#
+# Which key signs restate's source packages for the Launchpad PPA -- the one
+# tmd's are signed with, registered on the same Launchpad account.
+#
+# Pinned here, rather than taken from DEBSIGN_KEYID in the environment: that
+# variable is global to a shell, and on a machine that maintains several
+# packages it names whichever project was set up first. Which key signs this
+# project is a property of this project.
+#
+# To use another key for one build without editing this file:
+#     RESTATE_SIGNING_KEY=<fingerprint> make deb-source
+#
+# Format: one full 40-character fingerprint. Comments and blank lines ignored.
+
+C317E2A7C4820C0592D2570C0539F92B5FF53B4E

@@ -2057,6 +2057,37 @@ static int run_script(const char *script)
 }
 
 /*
+ * restore --packages --offline: what there is to install from, said, or why
+ * there is nothing -- the baseline cache is everything apt will be given.
+ */
+static bool offline_ready(const struct rs_options *o, const struct rs_index *ix,
+                          const char *cache)
+{
+    struct rs_baseline_stats st;
+    struct rs_buf            list;
+
+    if (!cache)
+    {
+        rs_error("--offline installs from the baseline cache, and there is none at %s: run "
+                 "restate baseline fetch on the image while there is a network",
+                 o->cache ? o->cache : rs_baseline_default_cache());
+        return false;
+    }
+    rs_buf_init(&list);
+    rs_baseline_list(&ix->packages, cache, &list, &st);
+    rs_buf_free(&list);
+    if (!o->quiet)
+    {
+        (void)fprintf(stderr, "restate: offline: %zu of the image's %zu packages from "
+                      "repositories are in %s; the %zu installed from .deb files come from the "
+                      "image where it keeps them%s\n", st.cached, st.wanted, cache, st.local,
+                      st.cached < st.wanted ? "; apt cannot install the rest, or what needs them"
+                                            : "");
+    }
+    return true;
+}
+
+/*
  * restore --packages, before the files: the kit -- /etc/apt and the kept
  * packages -- then the script that installs the packages (reinstall.h).
  * Dry, the script is written out instead, for reading.
@@ -2093,6 +2124,12 @@ static int restore_packages(const struct rs_options *o, const struct rs_index *i
     memset(&io, 0, sizeof(io));
     io.snapshot = snapshot;
     io.cache = baseline_cache(o);
+    io.offline = o->offline;
+    if (o->offline && !offline_ready(o, ix, io.cache))
+    {
+        free(snapshot);
+        return RESTATE_EXIT_TROUBLE;
+    }
     rs_buf_init(&script);
     rs_reinstall_script(&ix->packages, &io, &script);
     free(snapshot);
@@ -2189,6 +2226,17 @@ int rs_cmd_restore(const struct rs_options *o)
     bool                    keep_fstab;
     bool                    ok;
 
+    if (o->offline && !o->packages)
+    {
+        rs_error("--offline is how restore --packages installs them: give --packages too");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (o->offline && o->exact_versions)
+    {
+        rs_error("--offline and --exact-versions: the archive's snapshot is on the network, and "
+                 "offline every package is already at the version the baseline fetched");
+        return RESTATE_EXIT_TROUBLE;
+    }
     /* Before anything is written -- before the index is even read: whose
      * image it is. */
     status = trust_check(o, o->args[0], true, &tr);

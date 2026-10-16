@@ -294,6 +294,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_IMAGE_FSTAB:
             o->image_fstab = true;
             break;
+        case OPT_OFFLINE:
+            o->offline = true;
+            break;
         case OPT_NUMERIC_OWNER:
             o->numeric_owner = true;
             break;

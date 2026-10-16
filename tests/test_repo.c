@@ -1144,7 +1144,7 @@ static void test_encrypted(const char *dir)
     struct rs_repo_pruned  pr;
     bool                   busy;
 
-    if (!rs_program_path(RS_PROG_GPG) || access("/usr/bin/gpgconf", X_OK) != 0)
+    if (!rs_program_path(RS_PROG_GPG) || !rs_test_have_gpg())
     {
         (void)printf("  (encrypted repository tests skipped: they need gpg)\n");
         goto done;

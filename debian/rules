@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# =============================================================================
+# restate -- Debian packaging
+#
+# Very little here: the package is one program, its manpage and its hooks,
+# built from C with no dependencies. The overrides hand the work to the
+# project's own Makefile rather than letting debhelper guess, so a package
+# build and a developer's build are the same commands.
+# =============================================================================
+
+# Every hardening feature the distribution knows, and the CFLAGS, CPPFLAGS and
+# LDFLAGS that come of it, exported. The Makefile appends its own flags to
+# these rather than replacing them, so both apply.
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+include /usr/share/dpkg/buildflags.mk
+
+# The number the package is, passed explicitly so the binary carries it and
+# not the "-dev" scripts/version.sh gives a tree it cannot prove is the
+# release: a source package has no .git to prove it with.
+RESTATE_VERSION := $(shell cat VERSION)
+
+%:
+	dh $@
+
+# Nothing to configure: no autotools, no cmake, no generated headers.
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	$(MAKE) build VERSION=$(RESTATE_VERSION)
+
+# The unit tests: self-contained, and a few seconds. They catch a compiler or
+# libc difference on an architecture nobody develops on, which is what a build
+# on someone else's machine is for. Not the end-to-end tests, which run tar,
+# gzip and gpg to build their fixtures: a package build that depends on what
+# the builder happens to have fails for reasons that are not the package's.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(MAKE) test-unit VERSION=$(RESTATE_VERSION)
+endif
+
+override_dh_auto_install:
+	$(MAKE) install-tree DESTDIR=$(CURDIR)/debian/restate prefix=/usr \
+	        VERSION=$(RESTATE_VERSION)
+
+# Safe here: `make clean` in this project removes build output and nothing
+# else.
+override_dh_auto_clean:
+	$(MAKE) clean

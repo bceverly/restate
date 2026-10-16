@@ -100,6 +100,11 @@ RS_OPT(OPT_IMAGE_FSTAB, "image-fstab", no_argument,     NULL,
        "restore: put back the image's /etc/fstab and /etc/crypttab even where they name "
        "disks this machine does not have; by default the machine's own are kept then, "
        "so that it still boots")
+RS_OPT(OPT_OFFLINE, "offline",        no_argument,       NULL,
+       "restore --packages: with no network at all -- every apt package from the baseline "
+       "cache (restate baseline fetch) and the image's kept .deb files, which apt is given "
+       "as its only repository; snaps, flatpaks and the Python, npm and Ruby packages are "
+       "left out, but for the snaps the image keeps")
 RS_OPT(OPT_PACKAGES, "packages",       no_argument,       NULL,
        "diff: say which packages were installed, removed and upgraded, and leave out the "
        "file changes they account for. restore: put the image's packages back first -- its "

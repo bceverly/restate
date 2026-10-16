@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -261,6 +262,104 @@ void test_reinstall(void)
         CHECK(rs_read_beneath(t, "/out", 65536, &log));
         CHECK_CONTAINS(log.data, "this machine is not amd64");
         rs_buf_free(&log);
+    }
+
+    TEST_CASE("reinstall: offline, apt's one repository is the baseline");
+    {
+        /* apt-get, offline: logs the configuration it was given, and the
+         * repository's index, when it is told to update. */
+        static const char offline_apt_get[] =
+            "#!/bin/sh\n"
+            "[ \"$1\" = -s ] && exit 0\n"
+            "echo \"apt-get $*\" >> \"$LOG\"\n"
+            "if [ \"$1\" = update ] && [ -n \"$APT_CONFIG\" ]; then\n"
+            "  cat \"$APT_CONFIG\" \"${APT_CONFIG%/apt.conf}/sources.list\" \\\n"
+            "      \"${APT_CONFIG%/apt.conf}/repo/Packages\" \"${APT_CONFIG%/apt.conf}/repo/Release\" "
+            ">> \"$LOG\"\n"
+            "fi\n";
+        static const char fake_dpkg_deb[] =
+            "#!/bin/sh\n"
+            "[ \"$1\" = -f ] || exit 2\n"
+            "case $2 in\n"
+            "  */jq_1.7_amd64.deb) printf 'Package: jq\\nVersion: 1.7\\nArchitecture: amd64\\n"
+            "Depends: libjq1\\nFilename: lie\\n' ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n";
+        char *body;
+        char *cmd;
+        char *at;
+
+        memset(&o, 0, sizeof(o));
+        o.cache = cache;
+        o.offline = true;
+        rs_buf_reset(&script);
+        rs_reinstall_script(&pk, &o, &script);
+        /* The baseline is the repository: not copied into apt's cache, nor
+         * installed from after. */
+        CHECK_CONTAINS(script.data, "<<'CACHED'\njq_1.7_amd64.deb\nCACHED\n");
+        CHECK_CONTAINS(script.data, "<<'KEPT'\n/var/cache/apt/archives/zoom_6.0_amd64.deb\nKEPT\n");
+        CHECK(strstr(script.data, "cp \"$cache/$f\"") == NULL);
+        CHECK(strstr(script.data, "<<'BASELINE'") == NULL);
+        CHECK_CONTAINS(script.data, "export APT_CONFIG\n");
+        /* The stores are on the network: only the snap the image keeps. */
+        CHECK_CONTAINS(script.data, "snap install --dangerous /var/lib/snapd/snaps/mine_x1.snap ");
+        CHECK_CONTAINS(script.data, "offline, so the snap firefox is not put back");
+        CHECK(strstr(script.data, "snap install firefox") == NULL);
+        CHECK(strstr(script.data, "flatpak install") == NULL);
+        CHECK(strstr(script.data, "pip install") == NULL);
+        CHECK_CONTAINS(script.data, "offline, so not put back: 1 flatpaks, 1 Python, 1 npm and 1 "
+                                    "Ruby packages");
+        /* Not even with a snapshot asked for. */
+        o.snapshot = "20261010T000000Z";
+        rs_buf_reset(&script);
+        rs_reinstall_script(&pk, &o, &script);
+        CHECK(strstr(script.data, "--snapshot") == NULL);
+
+        /* Run only where it would be: an Ubuntu has sha256sum, and the
+         * BSDs and macOS have it by other names. */
+        if (system("command -v sha256sum > /dev/null 2>&1") != 0)
+        {
+            (void)printf("  (the offline script is not run: it needs sha256sum)\n");
+            goto offline_done;
+        }
+        rs_test_write(t, "apt-get", offline_apt_get, 0755);
+        rs_test_write(t, "dpkg-deb", fake_dpkg_deb, 0755);
+        rs_test_write(t, "dpkg", fake_dpkg, 0755);
+        rs_test_write(t, "log", "", 0644);
+        body = rs_xstrdup(script.data);
+        at = strstr(body, "PATH=/usr/sbin:/usr/bin:/sbin:/bin\n");
+        CHECK(at != NULL);
+        if (at)
+        {
+            char *fixed = rs_xasprintf("%.*sPATH=%s:/usr/bin:/bin\n%s", (int)(at - body), body, t,
+                                       at + strlen("PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"));
+
+            free(body);
+            body = fixed;
+        }
+        rs_test_write(t, "packages.sh", body, 0700);
+        free(body);
+        cmd = rs_xasprintf("cd '%s' && LOG='%s/log' sh packages.sh > out 2>&1", t, t);
+        CHECK(system(cmd) == 0);
+        free(cmd);
+        read_log(t, &log);
+        /* Its own sources and lists, and the index made from dpkg-deb's
+         * fields: the package's own Filename replaced, the size and digest
+         * the file's. */
+        CHECK_CONTAINS(log.data, "Dir::Etc::SourceParts \"");
+        CHECK_CONTAINS(log.data, "APT::Sandbox::User \"root\";\n");
+        CHECK_CONTAINS(log.data, "deb [trusted=yes] file:");
+        CHECK_CONTAINS(log.data, "Package: jq\nVersion: 1.7\nArchitecture: amd64\nDepends: libjq1\n"
+                                 "Filename: ./jq_1.7_amd64.deb\nSize: 3\nSHA256: "
+                                 "9cfa1468c93fc18652e34a000f0c6614b0fa18f6f4887477ad9b0d36ca6a7eaa\n");
+        CHECK(strstr(log.data, "lie") == NULL);
+        CHECK_CONTAINS(log.data, "\nSHA256:\n ");
+        CHECK_CONTAINS(log.data, "apt-get install -y jq=1.7 htop=3.3\n");
+        rs_buf_free(&log);
+        CHECK(rs_read_beneath(t, "/out", 65536, &log));
+        CHECK_CONTAINS(log.data, "restate: offline: apt installs from 1 packages, and nothing else");
+        rs_buf_free(&log);
+    offline_done:;
     }
 
     TEST_CASE("reinstall: an inventory with no apt, and no cache");

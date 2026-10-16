@@ -315,7 +315,7 @@ bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsign
     envp[nenv++] = rs_xstrdup("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"
                               "/snap/bin");
     envp[nenv++] = rs_xstrdup("LC_ALL=C");
-    for (i = 0; env && env[i] && i < HOOK_ENV_MAX; i++)
+    for (i = 0; env && i < HOOK_ENV_MAX && env[i]; i++)
     {
         envp[nenv++] = rs_xstrdup(env[i]);
     }

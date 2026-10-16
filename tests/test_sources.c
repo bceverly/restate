@@ -335,7 +335,7 @@ void test_sources(void)
 
     pieces();
 
-    if ((access("/usr/bin/gpg", X_OK) != 0 && access("/usr/local/bin/gpg", X_OK) != 0) ||
+    if (!rs_test_have_gpg() ||
         !rs_program_path(RS_PROG_GPGV))
     {
         (void)printf("  (apt source checks skipped: they need gpg and gpgv)\n");

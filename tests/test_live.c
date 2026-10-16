@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -457,6 +458,46 @@ void test_live(void)
         }
     }
     rs_live_free(l, n);
+
+    TEST_CASE("live: a mongod's --config is read only if its own user could read it");
+    {
+        char         *proc2 = rs_xasprintf("%s/proc2", dir);
+        char         *conf = rs_xasprintf("storage:\n  dbPath: %s/mongo\n", dir);
+        char         *d = rs_xasprintf("%s/private.conf", dir);
+        char         *want = rs_xasprintf("%s/mongo", dir);
+        int           pass;
+        struct rs_buf cmd;
+
+        rs_test_write(dir, "private.conf", conf, 0600);
+        /* Another user's mongod, then this user's own. */
+        for (pass = 0; pass < 2; pass++)
+        {
+            const struct rs_live *mo;
+            unsigned long         uid = pass == 0 ? (unsigned long)getuid() + 4242
+                                                  : (unsigned long)getuid();
+            mkdirs(dir, "proc2");
+            args(&cmd, "/usr/bin/mongod", "--config", d);
+            process(proc2, 10, 1, (unsigned)uid, "mongod", cmd.data, cmd.len);
+            rs_buf_free(&cmd);
+            rs_live_detect(proc2, &l, &n);
+            mo = find(l, n, "mongodb", "mongod");
+            /* Not read, it is looked for in the default place, which is
+             * not where the file says -- and here is not there at all. */
+            if (pass == 0)
+            {
+                CHECK(!mo || mo->npaths == 0 || strcmp(mo->paths[0], want) != 0);
+            } else
+            {
+                CHECK_STR(mo && mo->npaths == 1 ? mo->paths[0] : "", want);
+            }
+            rs_live_free(l, n);
+            rs_test_rmtree(proc2);
+        }
+        free(want);
+        free(d);
+        free(conf);
+        free(proc2);
+    }
 
     TEST_CASE("live: a Debian cluster is named as its unit is, a root VM by system");
     {
