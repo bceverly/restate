@@ -46,7 +46,10 @@ enum {
     OPT_PACKAGES,
     OPT_FIRMWARE,
     OPT_IMAGE_FSTAB,
-    OPT_OFFLINE
+    OPT_OFFLINE,
+    OPT_AS,
+    OPT_CLONES,
+    OPT_READ_ALL
 };
 
 enum rs_command {
@@ -101,6 +104,9 @@ struct rs_options {
                                      * they name */
     bool            offline;        /* restore --packages: no network */
     const char     *image_at;       /* --image-at */
+    const char     *as;             /* restore --as: the copy's host name */
+    const char     *clones;         /* autoinstall --clones: the CSV of copies */
+    bool            read_all;       /* check: every snapshot read, as restore would */
     bool            one_fs;
     bool            no_hash;
     bool            quiet;

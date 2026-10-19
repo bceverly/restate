@@ -118,7 +118,7 @@ struct rs_scan_opts {
 
 struct rs_scan_stats {
     uint64_t recorded;
-    uint64_t by_class[4];     /* indexed by enum rs_class */
+    uint64_t by_class[RS_CLASS_COUNT]; /* indexed by enum rs_class */
     uint64_t skipped_ephemeral;
     uint64_t skipped_expendable;
     uint64_t skipped_sockets;

@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -1267,6 +1268,17 @@ static void test_encrypted(const char *dir)
     rs_repo_close(r);
     rs_quiet = false;
 
+    TEST_CASE("repo: an encrypted repository is not checked without its key");
+    {
+        struct rs_repo_checked c;
+
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        CHECK(!rs_repo_check(r, &c, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "could not be decrypted, so it cannot be checked");
+        rs_buf_reset(&err);
+        rs_repo_close(r);
+    }
+
     TEST_CASE("repo: with the key again, the repository's chunking key is read back");
     (void)setenv("GNUPGHOME", home, 1);
     rs_test_rmtree(cache);
@@ -1302,6 +1314,18 @@ static void test_encrypted(const char *dir)
     rs_index_free(&ix);
     rs_repo_close(r);
 
+    TEST_CASE("repo: an encrypted repository checked, with its key");
+    {
+        struct rs_repo_checked c;
+
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        CHECK(rs_repo_check(r, &c, &err));
+        CHECK_INT(c.packs_bad, 0);
+        CHECK_INT(c.snapshots_bad, 0);
+        CHECK(c.chunks > 0);
+        rs_repo_close(r);
+    }
+
 out:
     rs_quiet = false;
     rs_repo_set_pack_size(0);
@@ -1334,6 +1358,218 @@ done:
     free(cache);
 }
 
+/* The first file in `dir` whose name ends in `ext`, as a path; NULL if none. */
+static char *a_file(const char *dir, const char *ext)
+{
+    DIR                 *d = opendir(dir);
+    const struct dirent *de;
+    char                *found = NULL;
+    char                *best = NULL;
+
+    while (d && (de = readdir(d)) != NULL)
+    {
+        size_t len = strlen(de->d_name);
+
+        if (len > strlen(ext) && strcmp(de->d_name + len - strlen(ext), ext) == 0 &&
+            (!best || strcmp(de->d_name, best) < 0))
+        {
+            free(best);
+            best = rs_xstrdup(de->d_name);
+        }
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    if (best)
+    {
+        found = rs_xasprintf("%s/%s", dir, best);
+        free(best);
+    }
+    return found;
+}
+
+/* What a check found, and what it warned of. */
+struct checked_run {
+    struct rs_repo        *r;
+    struct rs_repo_checked c;
+    bool                   ok;
+    char                  *said;
+    char                  *warned;
+};
+
+static int run_check(const void *arg)
+{
+    struct checked_run *run = (struct checked_run *)(uintptr_t)arg;
+    struct rs_buf       err;
+
+    rs_buf_init(&err);
+    run->ok = rs_repo_check(run->r, &run->c, &err);
+    run->said = rs_buf_detach(&err);
+    return run->ok ? 0 : 1;
+}
+
+/* `repo` copied to `dir`/`name`, with `how` done to it by sh in its packs
+ * directory ($idx and $pack the first pack's), then checked. */
+
+static void check_copy(const char *dir, const char *repo, const char *name, const char *how,
+                       struct checked_run *out)
+{
+    char           *copy = rs_xasprintf("%s/%s", dir, name);
+    char           *packs = rs_xasprintf("%s/packs", copy);
+    char           *cmd = rs_xasprintf("cp -R '%s' '%s'", repo, copy);
+    char           *idx;
+    char           *outs = NULL;
+    struct rs_buf   err;
+    bool            busy;
+
+    CHECK(quiet_system(cmd) == 0);
+    free(cmd);
+    idx = a_file(packs, ".idx");
+    if (idx && how)
+    {
+        size_t len = strlen(idx);
+
+        cmd = rs_xasprintf("cd '%s' && idx='%s' pack='%.*s.tar.gz' && { %s; }", packs, idx,
+                           (int)(len - 4), idx, how);
+        CHECK(quiet_system(cmd) == 0);
+        free(cmd);
+    }
+    free(idx);
+    memset(out, 0, sizeof(*out));
+    rs_buf_init(&err);
+    out->r = rs_repo_open(copy, RS_REPO_READ, &busy, &err);
+    CHECK(out->r != NULL);
+    if (out->r)
+    {
+        (void)rs_test_capture(run_check, out, &outs, &out->warned);
+        free(outs);
+        rs_repo_close(out->r);
+    }
+    rs_buf_free(&err);
+    free(packs);
+    free(copy);
+}
+
+static void test_checked(const char *dir)
+{
+    char                *repo = rs_xasprintf("%s/crepo", dir);
+    char                *tree = rs_xasprintf("%s/ctree", dir);
+    char                *name = NULL;
+    struct rs_scan_stats st;
+    struct rs_repo      *r;
+    struct rs_buf        err;
+    struct checked_run   run;
+    bool                 busy;
+
+    rs_buf_init(&err);
+    put(tree, "etc/small", "small\n", 0644);
+    put(tree, "home/u/notes", "notes\n", 0644);
+    big_file(tree, "home/u/big", 3 * RS_REPO_CHUNK_AVG, 7);
+    CHECK(rs_repo_init(repo, false, &err));
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    if (!r)
+    {
+        free(repo);
+        free(tree);
+        return;
+    }
+    CHECK(snap(r, tree, "2026-10-01T00:00:00.000000000Z", NULL, &st, &name));
+    free(name);
+    put(tree, "etc/small", "small, and changed\n", 0644);
+    CHECK(snap(r, tree, "2026-10-02T00:00:00.000000000Z", NULL, &st, &name));
+    free(name);
+    rs_repo_close(r);
+
+    TEST_CASE("repo: a repository checked, and whole");
+    check_copy(dir, repo, "c-whole", NULL, &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs, 2);
+    CHECK_INT(run.c.packs_bad, 0);
+    CHECK(run.c.chunks >= 4);
+    CHECK(run.c.bytes >= 3 * RS_REPO_CHUNK_AVG);
+    CHECK_INT(run.c.snapshots, 2);
+    CHECK_INT(run.c.snapshots_bad, 0);
+    CHECK_INT(run.c.files, 6);
+    CHECK_INT(run.c.missing, 0);
+    CHECK_INT(run.c.leftovers, 0);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a chunk not what its index says");
+    check_copy(dir, repo, "c-digest",
+               "sed '2s/^\\([0-9]* \\)./\\1x/' \"$idx\" > t && sed 's/ x/ 0/' t > \"$idx\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 1);
+    CHECK(run.c.missing >= 1);
+    CHECK(run.c.snapshots_bad >= 1);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a pack that has gone");
+    check_copy(dir, repo, "c-gone", "rm \"$pack\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs, 1);
+    CHECK_INT(run.c.packs_bad, 1);
+    CHECK_INT(run.c.snapshots_bad, 2);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a pack cut short");
+    check_copy(dir, repo, "c-short",
+               "head -c 2000 \"$pack\" > t && mv t \"$pack\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 1);
+    CHECK(run.c.missing >= 1);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a pack's index that is not one");
+    check_copy(dir, repo, "c-garbled", "echo nonsense > \"$idx\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 1);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, an index listing a member its pack has not");
+    check_copy(dir, repo, "c-more", "echo \"999 - 1\" >> \"$idx\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 1);
+    CHECK_INT(run.c.missing, 0);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a pack holding a member its index does not list");
+    check_copy(dir, repo, "c-less", "sed '2d' \"$idx\" > t && mv t \"$idx\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 1);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a snapshot whose index has gone, and a capture's leftover");
+    check_copy(dir, repo, "c-snap",
+               "rm ../snapshots/20261001T000000Z/index.json.gz && cp \"$pack\" left.tar.gz", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 0);
+    CHECK_INT(run.c.leftovers, 1);
+    CHECK_INT(run.c.snapshots, 2);
+    CHECK_INT(run.c.snapshots_bad, 1);
+    free(run.said);
+    free(run.warned);
+
+    TEST_CASE("repo: checked, a snapshot whose kit cannot be read");
+    check_copy(dir, repo, "c-kit", "rm ../snapshots/20261002T000000Z/kit", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.snapshots_bad, 1);
+    free(run.said);
+    free(run.warned);
+
+    rs_buf_free(&err);
+    free(repo);
+    free(tree);
+}
+
 void test_repo(void)
 {
     char *dir = rs_test_tmpdir();
@@ -1342,6 +1578,7 @@ void test_repo(void)
     test_made(dir);
     test_written(dir);
     test_chunks(dir);
+    test_checked(dir);
     test_encrypted(dir);
     rs_test_rmtree(dir);
     free(dir);

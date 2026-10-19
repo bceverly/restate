@@ -28,6 +28,7 @@ struct builtin {
 #define X RS_CLASS_EXPENDABLE
 #define B RS_CLASS_BASELINE
 #define S RS_CLASS_STATE
+#define I RS_CLASS_IDENTITY
 
 /*
  * The built-in rules.
@@ -57,6 +58,7 @@ static const struct builtin common_rules[] = {
     { S, "/var/mail",       "local mailboxes" },
     { X, "/var/log",        "useful, but not needed to rebuild the machine" },
     { X, "/var/cache",      "regenerated on demand" },
+    { I, "/etc/ssh/ssh_host_*", "SSH host keys: how clients know this machine" },
 };
 
 static const struct builtin linux_rules[] = {
@@ -147,6 +149,38 @@ static const struct builtin linux_rules[] = {
     { X, "/var/snap/lxd/common/lxd/images", "LXD's image cache; the containers themselves stay" },
     { X, "/usr/share/ollama/.ollama/models", "Ollama's model weights, pulled again" },
     { X, "/var/lib/kdump/initrd.img*", "kdump's initramfs images, made again for each kernel" },
+    /* What each copy of a machine needs its own of (restore --as): the
+     * names and keys other machines know it by. Last, so that nothing
+     * above takes them back. */
+    { I, "/etc/hostname",          "the host name" },
+    { I, "/etc/machine-id",        "the machine's ID: DHCP client IDs and more are made from it" },
+    { I, "/var/lib/dbus/machine-id", "D-Bus's copy of the machine's ID" },
+    { I, "/var/lib/systemd/random-seed", "the saved random seed: a copy must not start from the same" },
+    { I, "/var/lib/systemd/credential.secret", "the key systemd encrypts this machine's credentials with" },
+    { I, "/var/lib/cloud/data",    "cloud-init's record of which instance this is" },
+    { I, "/var/lib/cloud/instance", "cloud-init's state for this instance" },
+    { I, "/var/lib/cloud/instances", "cloud-init's state for each instance it has been" },
+    { I, "/var/lib/dhcp/*.lease*", "DHCP leases, and the client ID they were given to" },
+    { I, "/var/lib/NetworkManager/*.lease", "DHCP leases, and the client ID they were given to" },
+    { I, "/var/lib/NetworkManager/secret_key", "NetworkManager's key for this machine's stable addresses" },
+    { I, "/etc/iscsi/initiatorname.iscsi", "the iSCSI initiator name, unique to each machine" },
+    { I, "/etc/wireguard",         "WireGuard keys: each copy needs its own, made known to its peers" },
+    { I, "/var/lib/tailscale/tailscaled.state", "the Tailscale node key" },
+    { I, "/etc/docker/key.json",   "the Docker engine's ID" },
+    { I, "/var/lib/kubelet/pki",   "the kubelet's certificates, issued to this node" },
+    { I, "/etc/rancher/node",      "the k3s node password" },
+    { I, "/var/snap/lxd/common/lxd/server.*", "LXD's server certificate and key" },
+    { I, "/var/lib/incus/server.*", "Incus's server certificate and key" },
+    { I, "/var/lib/mysql/auto.cnf", "the MySQL server_uuid, which replication tells servers apart by" },
+    { I, "/var/lib/ubuntu-advantage/private", "the Ubuntu Pro machine token: each machine attaches" },
+    { I, "/etc/salt/minion_id",    "the Salt minion's ID" },
+    { I, "/etc/salt/pki/minion",   "the Salt minion's keys" },
+    { I, "/etc/puppetlabs/puppet/ssl", "the Puppet agent's certificate, issued to this node" },
+    { I, "/etc/chef/client.pem",   "the Chef client's key" },
+    { I, "/var/ossec/etc/client.keys", "the Wazuh agent's key" },
+    { I, "/var/lib/netdata/registry/netdata.public.unique.id", "the Netdata agent's ID" },
+    { I, "/var/lib/sysmanage-agent/agent.db", "the SysManage agent's registration" },
+    { I, "/var/snap/sysmanage-agent/common/agent.db", "the SysManage agent's registration" },
 };
 
 static const struct builtin freebsd_rules[] = {
@@ -391,6 +425,7 @@ static const struct builtin anywhere_rules[] = {
 #undef X
 #undef B
 #undef S
+#undef I
 
 struct os_table {
     const char           *name;
@@ -410,8 +445,8 @@ static const struct os_table os_tables[] = {
 
 #undef TABLE
 
-static const char *const class_names[] = {
-    "ephemeral", "expendable", "baseline", "state"
+static const char *const class_names[RS_CLASS_COUNT] = {
+    "ephemeral", "expendable", "baseline", "state", "identity"
 };
 
 const char *rs_class_name(enum rs_class cls)
@@ -619,7 +654,7 @@ bool rs_rules_parse(struct rs_rules *rs, const char *text, size_t len,
         if (!rs_class_parse(text + start, word_end - start, &cls))
         {
             rs_buf_addf(err, "%s:%zu: unknown class \"%.*s\" (expected ephemeral, "
-                        "expendable, baseline or state)", name, lineno,
+                        "expendable, baseline, state or identity)", name, lineno,
                         (int)(word_end - start > 40 ? 40 : word_end - start),
                         text + start);
             return false;

@@ -212,7 +212,7 @@ static void identity(struct gen *g)
         kv(g, 2, "timezone", tz);
     }
     rs_buf_addstr(g->out, "  identity:\n");
-    kv(g, 4, "hostname", host ? host : "restored");
+    kv(g, 4, "hostname", g->o->clones ? RS_AUTO_COPY : host ? host : "restored");
     {
         /* The old machine's first person, as the install's own account: the
          * restore's merged accounts then give them back their password,
@@ -259,12 +259,20 @@ static void identity(struct gen *g)
     }
 }
 
+/* Where the copies' configuration has the copy's own network. */
+#define NETWORK_HERE "@RESTATE-NETWORK@"
+
 static void network(struct gen *g)
 {
     const struct rs_jval *hw = rs_jobject_get(g->machine, "hardware");
     const struct rs_jval *net = rs_jobject_get(hw, "network");
     bool                  any = false;
 
+    if (g->o->clones)
+    {
+        rs_buf_addstr(g->out, "  " NETWORK_HERE "\n");
+        return;
+    }
     rs_buf_addstr(g->out, "  network:\n    version: 2\n");
     if (eq(rs_jobject_str(g->sys, "type"), "desktop"))
     {
@@ -1252,7 +1260,8 @@ static void late_packages(struct gen *g)
             late_comment(g, "Not checked for whom it was signed by: autoinstall was given no "
                             "--trusted-key.");
         }
-        rs_image_restore_command(&b, img, "/target", true, g->o->trust);
+        rs_image_restore_command(&b, img, "/target", true, g->o->trust,
+                                 g->o->clones ? RS_AUTO_COPY : NULL);
     }
     late(g, b.data);
     late(g, "curtin in-target -- update-initramfs -u -k all");
@@ -1325,6 +1334,194 @@ static void late_commands(struct gen *g)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Copies                                                                    */
+/* ------------------------------------------------------------------------- */
+
+/* A copy's network, as the installer's configuration has it at its top
+ * level: matched by the copy's MAC address where it has one, else every
+ * wired interface; on DHCP, or at the copy's address. */
+static void copy_network(const struct gen *g, const struct rs_clone *k, struct rs_buf *b)
+{
+    rs_buf_addstr(b, "network:\n  version: 2\n");
+    if (eq(rs_jobject_str(g->sys, "type"), "desktop"))
+    {
+        rs_buf_addstr(b, "  renderer: NetworkManager\n");
+    }
+    rs_buf_addstr(b, "  ethernets:\n    restate:\n      match:\n");
+    if (k->mac)
+    {
+        rs_buf_addstr(b, "        macaddress: ");
+        q(b, k->mac);
+    } else
+    {
+        rs_buf_addstr(b, "        name: \"en*\"");
+    }
+    rs_buf_addc(b, '\n');
+    if (!k->address)
+    {
+        rs_buf_addstr(b, "      dhcp4: true\n");
+    } else
+    {
+        rs_buf_addstr(b, "      dhcp4: false\n      dhcp6: false\n      addresses:\n        - ");
+        q(b, k->address);
+        rs_buf_addc(b, '\n');
+        if (k->gateway)
+        {
+            rs_buf_addstr(b, "      routes:\n        - to: default\n          via: ");
+            q(b, k->gateway);
+            rs_buf_addc(b, '\n');
+        }
+    }
+    if (k->ndns > 0)
+    {
+        size_t i;
+
+        rs_buf_addstr(b, "      nameservers:\n        addresses:\n");
+        for (i = 0; i < k->ndns; i++)
+        {
+            rs_buf_addstr(b, "          - ");
+            q(b, k->dns[i]);
+            rs_buf_addc(b, '\n');
+        }
+    }
+}
+
+/* `text` with each line indented by `n` more, into `out`. */
+static void indented(struct rs_buf *out, const char *text, int n)
+{
+    const char *p = text;
+
+    while (p && *p)
+    {
+        size_t len = strcspn(p, "\n");
+
+        if (len > 0)
+        {
+            rs_buf_addf(out, "%*s", n, "");
+        }
+        rs_buf_add(out, p, len);
+        rs_buf_addc(out, '\n');
+        p += len;
+        p += *p == '\n' ? 1 : 0;
+    }
+}
+
+/*
+ * The file for the copies: the header, the copies listed, and the
+ * early-command that picks this machine's out of them and writes its
+ * configuration over the installer's. `config` is that configuration, as
+ * the rest of this file writes it under "autoinstall:", with RS_AUTO_COPY
+ * for the copy's name and NETWORK_HERE for its network.
+ */
+static void copies_file(struct gen *g, const struct rs_buf *config)
+{
+    const struct rs_clones *c = g->o->clones;
+    const char             *body = config->data;
+    struct rs_buf           script;
+    size_t                  i;
+
+    rs_buf_init(&script);
+    rs_buf_addf(g->out,
+                "#\n"
+                "# One file for %zu copies of the machine, from %s. The installer finds which\n"
+                "# copy the machine it is on is, by a MAC address or disk serial, and installs\n"
+                "# that one: the configuration in the early-command below, with the copy's\n"
+                "# host name and network. A machine that is none of them stops the install\n"
+                "# before anything is written. The CHANGE-ME values are in that\n"
+                "# configuration.\n"
+                "#\n"
+                "%s"
+                "#\n"
+                "#   %-20s %-17s %-20s %s\n",
+                c->count, g->o->clones_from ? g->o->clones_from : "a list",
+                g->o->packages && g->o->image_at
+                    ? "# The restore is made with --as, so that each copy has an identity of its\n"
+                      "# own, and keeps the network the installer gave it.\n"
+                    : "# Restore each with restate restore --as NAME, so that it has an identity\n"
+                      "# of its own, and with --exclude /etc/netplan, to keep its network.\n",
+                "name", "mac", "serial", "address");
+    for (i = 0; i < c->count; i++)
+    {
+        const struct rs_clone *k = &c->items[i];
+
+        rs_buf_addf(g->out, "#   %-20s %-17s %-20s %s\n", k->name, k->mac ? k->mac : "-",
+                    k->serial ? k->serial : "-", k->address ? k->address : "DHCP");
+    }
+    rs_buf_addstr(&script,
+                  "# restate: which copy this machine is, and the installer's configuration\n"
+                  "# for it, which the installer reads again once this has run.\n"
+                  "set -u\n"
+                  "conf=${RESTATE_AUTOINSTALL:-/autoinstall.yaml}\n"
+                  "sys=${RESTATE_SYS:-/sys}\n"
+                  "macs=$(cat \"$sys\"/class/net/*/address 2>/dev/null | tr 'ABCDEF' 'abcdef')\n"
+                  "serials=$(lsblk -dno SERIAL 2>/dev/null)\n"
+                  "has() { [ \"$2\" != - ] && printf '%s\\n' \"$1\" | grep -qxF -- \"$2\"; }\n"
+                  "name=\n"
+                  "for copy in \\\n");
+    for (i = 0; i < c->count; i++)
+    {
+        const struct rs_clone *k = &c->items[i];
+
+        rs_buf_addf(&script, "  '%s %s %s' \\\n", k->name, k->mac ? k->mac : "-",
+                    k->serial ? k->serial : "-");
+    }
+    rs_buf_addstr(&script,
+                  "  ; do\n"
+                  "  set -- $copy\n"
+                  "  if has \"$macs\" \"$2\" || has \"$serials\" \"$3\"; then\n"
+                  "    name=$1\n"
+                  "    break\n"
+                  "  fi\n"
+                  "done\n"
+                  "if [ -z \"$name\" ]; then\n"
+                  "  echo 'restate: this machine is none of the copies this file installs; its MAC "
+                  "addresses:' $macs '; its disk serials:' $serials >&2\n"
+                  "  exit 1\n"
+                  "fi\n"
+                  "echo \"restate: installing the copy $name\"\n"
+                  "work=$(mktemp -d) || exit 1\n"
+                  "case $name in\n");
+    for (i = 0; i < c->count; i++)
+    {
+        struct rs_buf net;
+
+        rs_buf_init(&net);
+        copy_network(g, &c->items[i], &net);
+        rs_buf_addf(&script, "%s)\n  cat > \"$work/network\" <<'RESTATE-NETWORK'\n%s"
+                             "RESTATE-NETWORK\n  ;;\n",
+                    c->items[i].name, net.data);
+        rs_buf_free(&net);
+    }
+    rs_buf_addstr(&script, "esac\ncat > \"$work/config\" <<'RESTATE-CONFIG'\n");
+    /* The configuration as the installer reads it, without "autoinstall:"
+     * above it: each line two less indented. */
+    if (body && rs_starts_with(body, "autoinstall:\n"))
+    {
+        body += strlen("autoinstall:\n");
+    }
+    while (body && *body)
+    {
+        size_t len = strcspn(body, "\n");
+        size_t skip = (len >= 2 && body[0] == ' ' && body[1] == ' ') ? 2 : 0;
+
+        rs_buf_add(&script, body + skip, len - skip);
+        rs_buf_addc(&script, '\n');
+        body += len;
+        body += *body == '\n' ? 1 : 0;
+    }
+    rs_buf_addstr(&script,
+                  "RESTATE-CONFIG\n"
+                  "awk -v name=\"$name\" -v net=\"$work/network\" '\n"
+                  "  $0 == \"" NETWORK_HERE "\" { while ((getline line < net) > 0) print line; next }\n"
+                  "  { gsub(/" RS_AUTO_COPY "/, name); print }' \"$work/config\" > \"$work/out\" &&\n"
+                  "  cp \"$work/out\" \"$conf\" || exit 1\n"
+                  "rm -rf \"$work\"\n");
+    rs_buf_addstr(g->out, "autoinstall:\n  version: 1\n  early-commands:\n    - |\n");
+    indented(g->out, script.data, 6);
+    rs_buf_free(&script);
+}
+
 bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
                     struct rs_buf *out, struct rs_buf *err)
 {
@@ -1367,13 +1564,30 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     g.made = rs_xcalloc(g.l.nvols + 1, sizeof(*g.made));
     g.vg_made = rs_xcalloc(g.l.nvgs + 1, sizeof(*g.vg_made));
     header(&g);
-    identity(&g);
-    network(&g);
-    storage(&g);
-    rs_buf_init(&g.late);
-    extras(&g);
-    late_commands(&g);
-    rs_buf_free(&g.late);
+    {
+        /* The copies' configuration is written aside, to go in the
+         * early-command that chooses between them. */
+        struct rs_buf config;
+
+        rs_buf_init(&config);
+        if (o->clones)
+        {
+            g.out = &config;
+        }
+        identity(&g);
+        network(&g);
+        storage(&g);
+        rs_buf_init(&g.late);
+        extras(&g);
+        late_commands(&g);
+        rs_buf_free(&g.late);
+        g.out = out;
+        if (o->clones)
+        {
+            copies_file(&g, &config);
+        }
+        rs_buf_free(&config);
+    }
     free(g.made);
     free(g.vg_made);
     rs_layout_free(&g.l);

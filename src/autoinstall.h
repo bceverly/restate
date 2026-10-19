@@ -23,12 +23,23 @@
  * hand at their versions, the ones the image keeps, holds, flatpaks,
  * system-wide pip, npm and gems, the alternatives chosen by hand -- then the
  * image's files, and the initramfs and boot loader rebuilt over them.
+ *
+ * With copies (clones.h), one file installs any of them. The installer runs
+ * its early-commands before anything else and then reads its configuration
+ * again, so the file's one early-command finds which copy the machine is --
+ * by a MAC address the copy lists, or a disk serial -- and writes that copy's
+ * configuration where the installer reads it: the same as the others', but
+ * for its host name and its network (DHCP, or the copy's static address),
+ * and with the restore made with --as, so the copy comes up with an identity
+ * of its own and the network the installer gave it. A machine that is none of
+ * them stops the install before anything is touched.
  */
 #ifndef RESTATE_AUTOINSTALL_H
 #define RESTATE_AUTOINSTALL_H
 
 #include <stdbool.h>
 
+#include "clones.h"
 #include "json.h"
 #include "layout.h"
 #include "util.h"
@@ -50,7 +61,15 @@ struct rs_auto_opts {
      * archive has moved on from from (packages.h), or NULL. */
     const char           *snapshot;
     const char           *firmware;   /* "uefi" or "bios" to boot by, or NULL: as it did */
+    /* With --clones, the copies to install, and what to call where they came
+     * from in the file's header; NULL for the one machine. */
+    const struct rs_clones *clones;
+    const char             *clones_from;
 };
+
+/* What the configuration of the copies says where the copy's own name goes,
+ * until the installer knows which copy it is installing. */
+#define RS_AUTO_COPY "RESTATE-COPY"
 
 /* Where the autoinstall file puts the keyring restore checks the image
  * against, in the installer's own filesystem. */

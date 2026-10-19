@@ -81,6 +81,8 @@ if [ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ]; then
   seed repo3 13 'restate-repository 2\nid 0123456789abcdef0123456789abcdef\nencrypted\n'
   seed openpgp 14 '-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: x\n\nAAEC\n=abcd\n-----END PGP PUBLIC KEY BLOCK-----\n[GNUPG:] GOODSIG FC9CA96ACA026560 x\n[GNUPG:] VALIDSIG D55C0D1AC78A8D8126CB631CFC9CA96ACA026560 2026-10-08 1 0 4 0 1 8 01 D55C0D1AC78A8D8126CB631CFC9CA96ACA026560\nValid-Until: Sat, 17 Oct 2026 08:12:29 UTC\n'
   seed apt 15 '-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\nOrigin: Ubuntu\nSHA256:\n bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb       907381 main/binary-amd64/Packages.gz\n- -----x\n-----BEGIN PGP SIGNATURE-----\n\nabc\n-----END PGP SIGNATURE-----\n\0Package: hello\nVersion: 2:1.0\nArchitecture: amd64\nFilename: pool/h/hello_1.0_amd64.deb\nSize: 42\nSHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\n\0https://archive.ubuntu.com/ubuntu/ resolute-updates/main\0http://deb.debian.org/debian'
+  seed clones 16 '# the lab\nname,mac,serial,address,gateway,dns\nweb1,52:54:00:00:00:01,,10.0.0.11/24,10.0.0.1,10.0.0.2 10.0.0.3\nweb2,,S4EW-2,fd00::12/64,fd00::1,\n'
+  seed hosts 16 '127.0.0.1 localhost\n127.0.1.1\tweb1 web1.lan # web1\n::1 ip6-localhost\n'
   seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
   # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
   # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.

@@ -494,6 +494,19 @@ if command -v python3 > /dev/null 2>&1 && python3 -c 'import yaml' 2> /dev/null;
   check "the autoinstall file is valid YAML" \
     python3 -c 'import sys, yaml; assert "autoinstall" in yaml.safe_load(sys.stdin)' < out.txt
 fi
+printf 'name,mac,address,gateway\nweb1,52:54:00:00:00:01,10.0.0.11/24,10.0.0.1\nweb2,52:54:00:00:00:02,,\n' > lab.csv
+expect 0 "autoinstall --clones" -- "$BIN" autoinstall --clones lab.csv layout.json
+contains "$OUT" "# One file for 2 copies of the machine, from lab.csv." "autoinstall --clones says so"
+contains "$OUT" "  early-commands:" "and picks the copy in an early-command"
+if command -v python3 > /dev/null 2>&1 && python3 -c 'import yaml' 2> /dev/null; then
+  check "the copies' autoinstall file is valid YAML" \
+    python3 -c 'import sys, yaml; assert "early-commands" in yaml.safe_load(sys.stdin)["autoinstall"]' < out.txt
+fi
+printf 'name,mac\nweb1,52:54:00:00:00:01\nweb1,52:54:00:00:00:02\n' > twice.csv
+expect 2 "autoinstall --clones with a name twice" -- "$BIN" autoinstall --clones twice.csv layout.json
+contains "$ERR" "twice.csv:3: a name given to another copy already" "says where"
+expect 2 "autoinstall --clones with no such file" -- "$BIN" autoinstall --clones none.csv layout.json
+contains "$ERR" "--clones: none.csv" "says which"
 expect 0 "autoinstall --target=metal" -- "$BIN" autoinstall --target=metal layout.json
 contains "$OUT" "size: largest" "autoinstall on new hardware picks the largest disk"
 expect 2 "autoinstall for another system" -- "$BIN" autoinstall openbsd.json
@@ -654,6 +667,45 @@ check "and everything beneath it" test ! -e rex/etc/app/key
 check "but restores the rest" test -f rex/etc/hosts
 contains "$ERR" "left out 2 paths" "and says what it left out"
 
+# restore --as: a copy with an identity of its own.
+mkdir -p itree/etc/ssh itree/var/lib/tailscale itree/home/u
+echo 0123456789abcdef0123456789abcdef > itree/etc/machine-id
+echo oldbox > itree/etc/hostname
+echo KEY > itree/etc/ssh/ssh_host_ed25519_key
+echo node > itree/var/lib/tailscale/tailscaled.state
+echo doc > itree/home/u/doc
+expect 0 "capture a machine's identity" -- "$BIN" capture -r itree --os=linux -o iimg.tar
+contains "$ERR" " 4 identity," "capture counts what is identity"
+expect 2 "restore --as a name that is not a host name" -- \
+  "$BIN" restore --allow-unverified --as 'web 1' --root ifresh iimg.tar
+contains "$ERR" "is not a host name" "and says why"
+mkdir -p ifresh/etc
+echo ffffffffffffffffffffffffffffffff > ifresh/etc/machine-id
+expect 0 "restore --as onto a fresh install" -- \
+  "$BIN" restore --allow-unverified --as web1 --root ifresh iimg.tar
+contains "$ERR" "as web1: left out the image's identity (4 paths)" "says what it left out"
+check "keeps the machine's own machine-id" \
+  test "$(cat ifresh/etc/machine-id)" = ffffffffffffffffffffffffffffffff
+check "gives it the new host name" test "$(cat ifresh/etc/hostname)" = web1
+check "leaves out the image's node key" test ! -e ifresh/var/lib/tailscale/tailscaled.state
+check "and puts the rest back" test -f ifresh/home/u/doc
+cp -R itree icopy
+mkdir -p icopy/usr/sbin && : > icopy/usr/sbin/sshd
+if usable ssh-keygen; then keygen=0; else keygen=3; fi
+expect "$keygen" "restore --as onto a copy of the image's disk" -- \
+  "$BIN" restore --allow-unverified --as web2 --root icopy iimg.tar
+contains "$ERR" "of the image's own removed" "says what it removed"
+check "a new machine-id" \
+  test "$(cat icopy/etc/machine-id)" != 0123456789abcdef0123456789abcdef
+check "the image's node key removed" test ! -e icopy/var/lib/tailscale/tailscaled.state
+check "the image's host key removed" \
+  test "$(cat icopy/etc/ssh/ssh_host_ed25519_key 2> /dev/null)" != KEY
+check "the new host name" test "$(cat icopy/etc/hostname)" = web2
+expect 0 "restore --as --dry-run" -- \
+  "$BIN" restore --allow-unverified --as web3 --dry-run --root icopy iimg.tar
+contains "$OUT" "would set the host name in /etc/hostname" "a dry run says what --as would do"
+check "and does not" test "$(cat icopy/etc/hostname)" = web2
+
 # A symlink where a directory should be is replaced, not followed.
 mkdir -p rtrap elsewhere
 ln -s "$WORK/elsewhere" rtrap/etc
@@ -762,6 +814,26 @@ expect 0 "prune" -- "$BIN" prune --keep-last 1 --syslog repo
 contains "$OUT" "dropped 20260101T000000Z" "drops the older"
 expect 0 "the one kept is whole" -- "$BIN" restore --allow-unverified --dry-run --root repout repo
 expect 2 "a snapshot dropped" -- "$BIN" status repo::20260101T000000Z
+expect 0 "check a repository" -- "$BIN" check repo
+contains "$ERR" "the repository is whole" "check finds it whole"
+expect 0 "check --read-all" -- "$BIN" check --read-all --syslog repo
+contains "$ERR" "read 1 snapshots in full, as restore would" "and reads every snapshot"
+expect 2 "check what is not a repository" -- "$BIN" check rtree
+# Damage: a pack's content changed, its index left as it was.
+cp -R repo crepo
+for p in crepo/packs/*.tar.gz; do
+  gzip -dc "$p" > cpack.tar
+  # A byte changed in the first member: its header or its content.
+  printf 'X' | dd of=cpack.tar bs=1 seek=512 conv=notrunc 2> /dev/null
+  gzip -c cpack.tar > "$p"
+  break
+done
+expect 3 "check a damaged repository" -- "$BIN" check crepo
+contains "$ERR" "crepo/packs/" "check names the damaged pack"
+contains "$ERR" "its content is not all in the repository" "and which files it breaks"
+contains "$ERR" "the repository is damaged" "and that it is damaged"
+expect 3 "check --read-all a damaged repository" -- "$BIN" check --read-all crepo
+contains "$ERR" "not as their indexes say" "the full read finds it too"
 
 # A member the index does not list.
 mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil

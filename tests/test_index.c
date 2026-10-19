@@ -7,6 +7,7 @@
 
 #include "image.h"
 #include "index.h"
+#include "packages.h"
 #include "test.h"
 
 #define HASH_A "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -139,6 +140,8 @@ void test_index(void)
 
         free(ix.host);
         ix.host = rs_xstrdup("h\x01\xff");
+        /* Identity goes out as state that says so, and comes back. */
+        ix.entries[2].cls = RS_CLASS_IDENTITY;
         CHECK(fp != NULL);
         if (fp)
         {
@@ -162,6 +165,15 @@ void test_index(void)
             CHECK(rs_time_equal(&b->atime, &a->atime));
             CHECK_INT(b->hash_state, a->hash_state);
             CHECK_INT(b->rdev, a->rdev);
+            CHECK_INT(b->cls, a->cls);
+        }
+        {
+            struct rs_buf json;
+
+            CHECK(rs_read_beneath(dir, "/ix.json", 1 << 20, &json));
+            CHECK_CONTAINS(json.data, "\"class\": \"state\", \"identity\": true,");
+            CHECK(strstr(json.data, "\"class\": \"identity\"") == NULL);
+            rs_buf_free(&json);
         }
         /* The host is not a path, so it goes through lossily. */
         CHECK_STR(back.host, "h\x01\xef\xbf\xbd");

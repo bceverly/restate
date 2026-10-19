@@ -43,6 +43,9 @@
  *      split out, the list's entries read, the origin split and the URI
  *      mapped to the archive's snapshot; the origin read as apt's
  *      credentials too
+ *  16  a list of copies, as autoinstall --clones reads it, and an /etc/hosts
+ *      given a copy's name: each name the copies parse to must be one --as
+ *      takes, and the hosts file given its own name back must be unchanged
  *
  * It is reached two ways:
  *
@@ -63,8 +66,10 @@
 
 #include "accounts.h"
 #include "baseline.h"
+#include "clones.h"
 #include "diff.h"
 #include "glob.h"
+#include "identity.h"
 #include "index.h"
 #include "installer.h"
 #include "json.h"
@@ -252,6 +257,38 @@ static void apt_entry(void *ctx, const struct rs_baseline_entry *e)
 }
 
 /* What baseline fetch reads of a repository, NUL-separated. */
+static void fuzz_clones(const char *text, size_t len)
+{
+    struct rs_clones c;
+    struct rs_buf    err;
+    struct rs_buf    out;
+
+    rs_buf_init(&err);
+    if (rs_clones_parse(&c, text, len, "fuzz", &err))
+    {
+        size_t i;
+
+        for (i = 0; i < c.count; i++)
+        {
+            if (!rs_identity_name_ok(c.items[i].name) || (!c.items[i].mac && !c.items[i].serial))
+            {
+                abort();
+            }
+        }
+    }
+    rs_clones_free(&c);
+    rs_buf_free(&err);
+    rs_buf_init(&out);
+    (void)rs_identity_hosts(text, len, "web1", "web1", &out);
+    if (out.len != len || (len > 0 && memcmp(out.data, text, len) != 0))
+    {
+        abort();
+    }
+    rs_buf_reset(&out);
+    (void)rs_identity_hosts(text, len, "a", "longer-name", &out);
+    rs_buf_free(&out);
+}
+
 static void fuzz_apt(const char *text, size_t len)
 {
     const char   *parts[4] = { "", "", "", "" };
@@ -947,7 +984,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 16)
+    switch (data[0] % 17)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -994,8 +1031,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 14:
         fuzz_openpgp(text, size - 1);
         break;
-    default:
+    case 15:
         fuzz_apt(text, size - 1);
+        break;
+    default:
+        fuzz_clones(text, size - 1);
         break;
     }
     return 0;
@@ -1130,7 +1170,7 @@ static void mutate(struct rs_buf *b, const unsigned char *other, size_t other_le
         default:  /* change which parser it goes to */
             if (b->len > 0)
             {
-                b->data[0] = (char)rnd(8);
+                b->data[0] = (char)rnd(17);
             }
             break;
         }

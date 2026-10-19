@@ -62,7 +62,7 @@ RS_OPT(OPT_QUIESCE, "quiesce",       no_argument,       NULL,
        "capture: pause each database, VM and container found running while its own "
        "files are copied, and resume it after, with the hooks for each (see LIVE SERVICES)")
 RS_OPT(OPT_SYSLOG, "syslog",        no_argument,       NULL,
-       "capture, prune: say how the run ended in the system log too, as one line of "
+       "capture, prune, check: say how the run ended in the system log too, as one line of "
        "key=value pairs a monitoring system can match on")
 RS_OPT(OPT_FETCH_SOURCES, "fetch-sources", no_argument, NULL,
        "capture, packages: also fetch each apt source's index as its repository serves "
@@ -90,9 +90,20 @@ RS_OPT(OPT_EXACT_VERSIONS, "exact-versions", no_argument, NULL,
 RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
        "autoinstall: where the installer will find the image (a mounted disk or "
        "share); the file then installs the packages and restores the files from it")
+RS_OPT(OPT_CLONES, "clones",          required_argument, "FILE",
+       "autoinstall: one file for the copies FILE lists, a CSV of name, mac, serial, "
+       "address, gateway and dns: the installer finds the machine it is on in FILE by a "
+       "MAC address or disk serial, and installs that copy, with its host name and network, "
+       "and restores it with --as (see COPIES)")
 RS_OPT(OPT_EXCLUDE, "exclude",        required_argument, "PATTERN",
        "restore: leave out PATTERN (written as in a rules file, everything beneath "
        "it too); repeatable")
+RS_OPT(OPT_AS, "as",                  required_argument, "NAME",
+       "restore: put the image back as a copy of its machine with an identity of its own, "
+       "named NAME: the image's identity (machine-id, SSH host keys, node keys and the rest "
+       "the rules class as identity) is left out, the machine's own is kept where it has "
+       "one, and where what it has is the image's own, a new one is made or the old removed "
+       "for its service to make anew; NAME becomes the host name (see COPIES)")
 RS_OPT(OPT_NUMERIC_OWNER, "numeric-owner", no_argument,     NULL,
        "restore: owners by the numbers the index records, and the image's own account "
        "files, rather than by name through the image's accounts merged with the system's")
@@ -117,6 +128,9 @@ RS_OPT(OPT_CHECK_FIRST, "check-first", no_argument,     NULL,
 RS_OPT(OPT_DRY_RUN, "dry-run",        no_argument,       NULL,
        "restore: check the image and say what would be put back, writing nothing; "
        "prune: say which snapshots would be dropped, dropping none")
+RS_OPT(OPT_READ_ALL, "read-all",     no_argument,       NULL,
+       "check: read every snapshot in full as well, as restore would, each file checked "
+       "against its index and nothing written: a test restore of every snapshot")
 RS_OPT(OPT_KEEP_LAST, "keep-last",    required_argument, "N",
        "prune: keep the newest N snapshots")
 RS_OPT(OPT_KEEP_DAILY, "keep-daily",  required_argument, "N",

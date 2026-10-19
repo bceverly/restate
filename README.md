@@ -64,6 +64,7 @@ restate: 1 added, 0 deleted, 1 modified
 - [Packages](#packages)
 - [The package baseline](#the-package-baseline)
 - [Restoring](#restoring)
+- [Copies](#copies)
 - [Repositories](#repositories)
 - [Images and indexes](#images-and-indexes)
 - [Classes and rules](#classes-and-rules)
@@ -194,14 +195,20 @@ unlocked by the old machine's TPM -- and, with `--firmware`, UEFI where it
 booted by BIOS, or the other way. For a VM, a ready-to-run definition of the
 virtual machine itself.
 
+**Stamping out copies.** Build one machine that does the thing — a load
+generator, a lab workstation — and [put it back as many](#copies), each with
+its own host name, address, machine-id and SSH host keys, so no two come up
+as the same machine on the network:
+
+```bash
+restate autoinstall --clones lab.csv --target vm --image-at /restate/lab.tar lab.tar -o user-data
+sudo restate restore --packages --as lab-07 --trusted-key backup-signing.pub lab.tar   # or by hand
+```
+
 ### Coming
 
 These need the pieces still on the [roadmap](ROADMAP.md):
 
-- **Stamping out copies.** Build one machine that does the thing — a load
-  generator, a lab workstation — and rebuild it as many machines, each with
-  its own host name, address, machine-id and SSH host keys, so no two come up
-  as the same machine on the network.
 - **Turning a hand-built server into code.** The package inventory and the
   autoinstall file are a starting point for automating a machine that was
   only ever configured by hand.
@@ -266,6 +273,11 @@ Commands:
   prune REPO              drop the snapshots --keep-last, --keep-daily,
                           --keep-weekly and --keep-monthly do not keep, and the
                           content nothing left refers to
+  check REPO              check a repository: read every pack through, each
+                          chunk against the digest its index gives, and check
+                          that every snapshot's index and kit can be read and
+                          the content of each of its files is whole; with
+                          --read-all, read every snapshot in full too
   export SNAPSHOT         write a snapshot as an image (-o FILE.tar) to take
                           elsewhere, encrypted and signed if asked
   restore IMAGE           put an image's files back under the root (--root,
@@ -344,9 +356,9 @@ Options:
       --quiesce           capture: pause each database, VM and container found
                           running while its own files are copied, and resume it
                           after, with the hooks for each (see LIVE SERVICES)
-      --syslog            capture, prune: say how the run ended in the system
-                          log too, as one line of key=value pairs a monitoring
-                          system can match on
+      --syslog            capture, prune, check: say how the run ended in the
+                          system log too, as one line of key=value pairs a
+                          monitoring system can match on
       --fetch-sources     capture, packages: also fetch each apt source's index
                           as its repository serves it now (with curl), and
                           check that against the source's keys
@@ -374,8 +386,22 @@ Options:
       --image-at=PATH     autoinstall: where the installer will find the image
                           (a mounted disk or share); the file then installs the
                           packages and restores the files from it
+      --clones=FILE       autoinstall: one file for the copies FILE lists, a
+                          CSV of name, mac, serial, address, gateway and dns:
+                          the installer finds the machine it is on in FILE by a
+                          MAC address or disk serial, and installs that copy,
+                          with its host name and network, and restores it with
+                          --as (see COPIES)
       --exclude=PATTERN   restore: leave out PATTERN (written as in a rules
                           file, everything beneath it too); repeatable
+      --as=NAME           restore: put the image back as a copy of its machine
+                          with an identity of its own, named NAME: the image's
+                          identity (machine-id, SSH host keys, node keys and
+                          the rest the rules class as identity) is left out,
+                          the machine's own is kept where it has one, and where
+                          what it has is the image's own, a new one is made or
+                          the old removed for its service to make anew; NAME
+                          becomes the host name (see COPIES)
       --numeric-owner     restore: owners by the numbers the index records, and
                           the image's own account files, rather than by name
                           through the image's accounts merged with the system's
@@ -403,6 +429,9 @@ Options:
       --dry-run           restore: check the image and say what would be put
                           back, writing nothing; prune: say which snapshots
                           would be dropped, dropping none
+      --read-all          check: read every snapshot in full as well, as
+                          restore would, each file checked against its index
+                          and nothing written: a test restore of every snapshot
       --keep-last=N       prune: keep the newest N snapshots
       --keep-daily=N      prune: keep the newest snapshot of each of the last N
                           days that have one
@@ -817,6 +846,71 @@ groups with no installer account on their number. Both pass restore
 restore names the same key files, and the autoinstall file carries the keys
 itself.
 
+## Copies
+
+One image can be put back as many machines — a lab, a classroom, a test of
+how a service scales — as long as each is made a machine of its own rather
+than one more of the same. Some of a machine's state is what other machines
+know it by: its machine-id (from which systemd-networkd and NetworkManager
+make the DHCP client ID, so copies that share one can be handed the same
+address), its SSH host keys, its host name, cloud-init's instance, DHCP
+leases, Tailscale and WireGuard keys, node certificates (kubelet, k3s, LXD,
+Incus, Puppet, Salt, Chef), MySQL's `server_uuid`, the Ubuntu Pro machine
+token, monitoring agents' IDs, the SysManage agent's included. The rules
+class it as **identity**. A capture keeps it, and an ordinary restore puts
+it back, so the same machine comes back as itself.
+
+`restate restore --as NAME` leaves the image's identity out instead, and then
+makes sure the machine has one of its own:
+
+- where the machine has its own — a fresh install made a machine-id, host
+  keys and the rest as it installed — that one is kept;
+- where what it has is the image's very own — the restore is onto the
+  machine the image was taken from, or onto a copy of its disk — a new one is
+  made where restate knows how (the machine-id and D-Bus's copy of it, the
+  random seed, and the SSH host keys with `ssh-keygen -A` where it has an SSH
+  server), and otherwise the
+  image's is removed, for its service to make anew when it next starts;
+- and `NAME` is the host name, in `/etc/hostname` and wherever `/etc/hosts`
+  gave the image's.
+
+```console
+$ sudo restate restore --packages --as lab-07 --trusted-key backup-signing.pub lab.tar
+...
+restate: as lab-07: left out the image's identity (31 paths); 6 of this machine's own kept, 1 made new, 2 of the image's own removed for their services to make anew
+restate: as lab-07: the host name is now lab-07, in /etc/hosts too
+restate: as lab-07: reboot, for every service to take up the new identity
+```
+
+Which paths are identity is decided by the rules for the system the image
+came from, as well as by the image, so one captured before the class existed
+is read as if it had it; an `identity PATTERN` line in a `--rules` file adds
+a site's own. Two things restate cannot make new: a WireGuard key has to be
+made known to the peers, so a copy has none until it is given one, and a
+PostgreSQL cluster's system identifier is fixed when the cluster is made
+(it matters only to replication).
+
+`restate autoinstall --clones FILE` writes **one** autoinstall file for every
+copy `FILE` lists:
+
+```
+# lab.csv
+name,mac,serial,address,gateway,dns
+lab-01,52:54:00:12:34:01,,10.0.0.11/24,10.0.0.1,10.0.0.2
+lab-02,52:54:00:12:34:02,,10.0.0.12/24,10.0.0.1,10.0.0.2
+lab-03,,S4EWNX0R123456,,,
+```
+
+Each copy has a host name and a MAC address or disk serial (as `lsblk` shows
+it) to find the machine by; an address with its prefix length, a gateway and
+name servers are optional, and a copy without an address takes DHCP. Every
+machine boots the same installer with the same file: its early-command finds
+which copy the machine is, writes that copy's configuration — the same as
+the others' but for its host name and network — where the installer reads
+it again, and a machine that is none of them stops before anything is
+written. With `--image-at`, the late-commands restore the image with `--as`
+the copy's name, keeping the network the installer gave it.
+
 ## Repositories
 
 An image holds everything it keeps, so a capture every night writes the whole
@@ -871,6 +965,30 @@ say they changed.
 `--keep-weekly N` ISO weeks and `--keep-monthly N` months that have one --
 then the chunks no snapshot left needs, rewriting a pack that is a quarter or
 more dead. `--dry-run` says which it would drop.
+
+**`check`** reads the whole repository through, as `restic check
+--read-data` does: every pack, every chunk checked against the digest its
+pack's index gives (the repository's own index, not this machine's cached
+copy), every snapshot's index and kit, and that the content of every file
+each snapshot needs is whole. What is wrong is named, by pack and by file, and
+the exit status is 3. Storage like ZFS finds bit rot; `check` finds a pack
+that was written wrong, or a file someone removed. `--read-all` goes on to read
+every snapshot in full exactly as a restore would, each file checked against
+its index, writing nothing: a test restore of every snapshot. Run both on a
+schedule, with `--syslog`:
+
+```console
+$ restate check --read-all /var/backups/web01
+restate: read 214 packs (6.6 GiB, 9811 chunks checked against their digests): 0 damaged
+restate: 30 snapshots, 13650213 files with content: 0 snapshots with something missing, 0 files not whole
+restate: read 30 snapshots in full, as restore would: 13650213 files, 0 not as their indexes say
+restate: the repository is whole
+```
+
+```text
+30 4 * * 0   root  restate check --syslog /var/backups/web01
+30 5 1 * *   root  restate check --read-all --syslog /var/backups/web01
+```
 
 **Run from cron.** One capture or prune runs on a repository at a time, and
 one `--quiesce` capture on a machine at a time: another that finds the lock
@@ -1057,6 +1175,11 @@ expendable /var/cache/apt       expendable /var/cache (built-in (linux))
 ephemeral  /run/sshd.pid        ephemeral *.pid (built-in (linux))
 expendable /home/me/.cache/x    expendable .cache (built-in (linux))
 ```
+
+Five classes: **ephemeral** (never recorded), **expendable** (recorded only
+with `--all`), **baseline** (recorded with digests, not kept), **state**
+(kept), and **identity**, state that must be unique to each machine (kept,
+and left out by [`restore --as`](#copies)).
 
 A rules file is `CLASS PATTERN` per line; the **last** matching rule wins, as
 in `.gitignore`, and a rule covers the path it names and everything below it.
@@ -1363,13 +1486,15 @@ src/            the program: one module per concern
   repo.c        repositories: packs, snapshots, the content stream, prune
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
-  run.c         running gzip, curl, gpg, sh and the hooks: fixed paths, posix_spawn
+  run.c         running gzip, curl, gpg, sh, ssh-keygen and the hooks: fixed paths, posix_spawn
   live.c        what is running, from /proc: databases, VMs, containers
   hooks.c       finding and running the hooks that pause them
   sources.c     whether apt can still use each of its sources, and fetching an index
   baseline.c    the package baseline: each package at its version, fetched and checked
   reinstall.c   the script restore --packages runs
   restore.c     putting an image's files back
+  identity.c    restore --as: a copy given an identity of its own
+  clones.c      the list of copies autoinstall --clones reads
   fstab.c       whether an image's fstab and crypttab fit the machine
   pgp.c         encrypting, signing and checking signatures, through gpg
   machine.c     the machine description: hardware, disks, encryption

@@ -5,7 +5,7 @@
 /*
  * The classification rules: what a path IS, as far as reconstruction goes.
  *
- * Every path on the machine falls into one of four classes:
+ * Every path on the machine falls into one of five classes:
  *
  *   ephemeral    runtime state with no meaning after a reboot: /proc, /run,
  *                /tmp, PID files. Never recorded, never descended into.
@@ -18,6 +18,11 @@
  *                that is still exactly what the vendor shipped.
  *   state        what makes this machine this machine: /etc, /home, /root,
  *                /var/lib, /usr/local. Always recorded.
+ *   identity     state that must be unique to each machine: /etc/machine-id,
+ *                the SSH host keys, the host name, node keys and agent IDs.
+ *                Recorded and restored as state is, so a restore brings the
+ *                same machine back; restore --as NAME leaves it out instead,
+ *                to make a copy that is a machine of its own (identity.h).
  *
  * Rules are "CLASS PATTERN" pairs, and the LAST rule that covers a path wins,
  * as in .gitignore -- so a site rules file appended after the built-ins can
@@ -42,8 +47,11 @@ enum rs_class {
     RS_CLASS_EPHEMERAL = 0,
     RS_CLASS_EXPENDABLE,
     RS_CLASS_BASELINE,
-    RS_CLASS_STATE
+    RS_CLASS_STATE,
+    RS_CLASS_IDENTITY
 };
+
+#define RS_CLASS_COUNT 5
 
 struct rs_rule {
     enum rs_class cls;

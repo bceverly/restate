@@ -262,6 +262,32 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
 void rs_repo_pruned_free(struct rs_repo_pruned *p);
 
 /* ------------------------------------------------------------------------- */
+/* Checking                                                                  */
+/* ------------------------------------------------------------------------- */
+
+struct rs_repo_checked {
+    size_t   packs;          /* read through */
+    size_t   packs_bad;      /* not what their indexes say, or unreadable */
+    uint64_t chunks;         /* checked against their digests */
+    uint64_t bytes;          /* of content read */
+    size_t   leftovers;      /* packs with no index: an interrupted capture's, which prune clears */
+    size_t   snapshots;
+    size_t   snapshots_bad;  /* an index or kit unreadable, or content not all there */
+    uint64_t files;          /* the files with content the snapshots need */
+    uint64_t missing;        /* of those, not whole in the repository */
+};
+
+/*
+ * Reads every pack through and checks every chunk in it against the digest
+ * its .idx gives -- the repository's own .idx, not this machine's copy --
+ * then every snapshot's index and kit, and that the content of every file
+ * each needs is whole among the chunks found good. What is wrong is warned
+ * of as it is found, and counted in `out`. False, with `err` set, only if it
+ * could not check at all: an encrypted repository it has no key for.
+ */
+bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf *err);
+
+/* ------------------------------------------------------------------------- */
 /* Exposed for the tests and the fuzzer                                      */
 /* ------------------------------------------------------------------------- */
 

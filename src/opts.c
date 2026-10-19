@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "identity.h"
 #include "rules.h"
 
 /* Descriptions start at this column in --help, and wrap to fit 80. */
@@ -337,6 +338,21 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->debs = rs_xreallocarray(o->debs, o->ndebs + 1, sizeof(*o->debs));
             o->debs[o->ndebs++] = optarg;
             break;
+        case OPT_AS:
+            if (!rs_identity_name_ok(optarg))
+            {
+                rs_buf_addf(err, "--as: \"%s\" is not a host name (letters, digits and "
+                            "hyphens, in labels of at most 63 separated by dots)", optarg);
+                return false;
+            }
+            o->as = optarg;
+            break;
+        case OPT_CLONES:
+            o->clones = optarg;
+            break;
+        case OPT_READ_ALL:
+            o->read_all = true;
+            break;
         case OPT_IMAGE_AT:
             if (optarg[0] != '/')
             {
@@ -515,7 +531,8 @@ void rs_print_help(FILE *out)
                        "  0  success; for diff and verify, no differences\n"
                        "  1  differences were found\n"
                        "  2  trouble: a usage error, a bad image, index or rules file, an I/O error\n"
-                       "  3  the scan finished, but some files could not be read\n"
+                       "  3  incomplete: some files could not be read or put back; for check, "
+                       "the\n     repository is damaged\n"
                        "  4  the image is not signed by a --trusted-key, and was not used\n"
                        "  5  busy: another capture or prune is running, and nothing was done\n"
                        "\n"
@@ -527,6 +544,8 @@ void rs_print_help(FILE *out)
                        "  restate verify /var/backups/web01.tar\n"
                        "  restate init /var/backups/repo && restate capture -o /var/backups/repo\n"
                        "  restate prune --keep-daily 7 --keep-weekly 4 /var/backups/repo\n"
+                       "  restate check --read-all /var/backups/repo\n"
+                       "  restate restore --as web02 --packages /var/backups/repo\n"
                        "  restate classify /etc/passwd /var/cache/apt /usr/bin/ls\n"
                        "  restate rules > site.rules && restate -N -R site.rules scan\n"
                        "\n"

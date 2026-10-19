@@ -35,6 +35,10 @@ RS_CMD(CMD_SNAPSHOTS, "snapshots", "REPO",     1,  1,
 RS_CMD(CMD_PRUNE,    "prune",    "REPO",       1,  1,
        "drop the snapshots --keep-last, --keep-daily, --keep-weekly and --keep-monthly do "
        "not keep, and the content nothing left refers to")
+RS_CMD(CMD_CHECK,    "check",    "REPO",       1,  1,
+       "check a repository: read every pack through, each chunk against the digest its index "
+       "gives, and check that every snapshot's index and kit can be read and the content of "
+       "each of its files is whole; with --read-all, read every snapshot in full too")
 RS_CMD(CMD_EXPORT,   "export",   "SNAPSHOT",   1,  1,
        "write a snapshot as an image (-o FILE.tar) to take elsewhere, encrypted and "
        "signed if asked")

@@ -20,9 +20,11 @@
 #include "autoinstall.h"
 #include "baseline.h"
 #include "buildsheet.h"
+#include "clones.h"
 #include "diff.h"
 #include "fstab.h"
 #include "hooks.h"
+#include "identity.h"
 #include "image.h"
 #include "index.h"
 #include "installer.h"
@@ -271,9 +273,10 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
     }
     (void)fflush(stdout);
     (void)fprintf(stderr, "restate: recorded %" PRIu64 " paths (%" PRIu64 " state, %" PRIu64
-                          " baseline, %" PRIu64 " expendable); kept the content of %" PRIu64 "\n",
-                  st->recorded, st->by_class[RS_CLASS_STATE], st->by_class[RS_CLASS_BASELINE],
-                  st->by_class[RS_CLASS_EXPENDABLE], st->stored);
+                          " identity, %" PRIu64 " baseline, %" PRIu64 " expendable); kept the "
+                          "content of %" PRIu64 "\n",
+                  st->recorded, st->by_class[RS_CLASS_STATE], st->by_class[RS_CLASS_IDENTITY],
+                  st->by_class[RS_CLASS_BASELINE], st->by_class[RS_CLASS_EXPENDABLE], st->stored);
     (void)fprintf(stderr, "restate: skipped %" PRIu64 " ephemeral, %" PRIu64 " expendable, %"
                           PRIu64 " sockets, %" PRIu64 " mount points\n",
                   st->skipped_ephemeral, st->skipped_expendable, st->skipped_sockets,
@@ -1692,6 +1695,156 @@ int rs_cmd_prune(const struct rs_options *o)
     return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
+/*
+ * check --read-all: the snapshot `ref` read in full, as restore reads it, into
+ * `empty`, a directory that stays empty: every file checked against its
+ * index, nothing written. Signed by a --trusted-key key too, where any are
+ * given. How many files were not what the index says, or not there, into
+ * *bad; false if it could not be read at all.
+ */
+static bool read_snapshot(const struct rs_options *o, const char *ref, const char *empty,
+                          uint64_t *files, uint64_t *bad)
+{
+    struct rs_index         ix;
+    struct rs_restore_opts  ro;
+    struct rs_restore_stats st;
+    struct rs_buf           err;
+    struct trust            tr;
+    bool                    ok;
+
+    memset(&tr, 0, sizeof(tr));
+    if (o->ntrusted > 0 && trust_check(o, ref, true, &tr) != RESTATE_EXIT_OK)
+    {
+        return false;
+    }
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    ok = rs_index_load(&ix, ref, &err) &&
+         (o->ntrusted == 0 || trust_matches(o, ref, &tr, &ix) == RESTATE_EXIT_OK);
+    if (ok)
+    {
+        memset(&ro, 0, sizeof(ro));
+        ro.root = empty;
+        ro.dry_run = true;
+        ro.quiet = true;
+        ro.numeric_owner = true;
+        ok = rs_restore(ref, &ix, &ro, &st, &err);
+        *files += st.files;
+        *bad += st.refused + st.missing;
+    }
+    if (!ok && err.len > 0)
+    {
+        rs_warn("%s", err.data);
+    }
+    rs_index_free(&ix);
+    rs_buf_free(&err);
+    return ok;
+}
+
+int rs_cmd_check(const struct rs_options *o)
+{
+    struct rs_repo_checked c;
+    struct rs_repo        *r;
+    struct rs_buf          err;
+    struct rs_buf          size;
+    time_t                 began = time(NULL);
+    uint64_t               read_files = 0;
+    uint64_t               read_bad = 0;
+    size_t                 unread = 0;
+    size_t                 n = 0;
+    bool                   busy;
+    bool                   ok;
+    int                    status;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(o->args[0], RS_REPO_READ, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        status = busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+        log_outcome(o, status, began, "repository=%s", o->args[0]);
+        return status;
+    }
+    ok = rs_repo_check(r, &c, &err);
+    if (ok && o->read_all)
+    {
+        /* Where the snapshots are restored to, in a dry run: an empty
+         * directory only this run knows, under /tmp as restate's others are,
+         * never where the environment says. */
+        char   empty[] = "/tmp/restate-check.XXXXXX";
+        char **names = rs_repo_snapshots(r, &n);
+        size_t i;
+
+        if (!mkdtemp(empty))
+        {
+            rs_error("%s: %s", empty, strerror(errno));
+            ok = false;
+        }
+        for (i = 0; ok && i < n; i++)
+        {
+            char    *ref = rs_xasprintf("%s" RS_REPO_SEP "%s", o->args[0], names[i]);
+            uint64_t before = read_bad;
+
+            if (!read_snapshot(o, ref, empty, &read_files, &read_bad) || read_bad > before)
+            {
+                unread++;
+            }
+            free(ref);
+        }
+        if (ok)
+        {
+            (void)rmdir(empty);
+        }
+        rs_repo_free_names(names, n);
+    }
+    rs_repo_close(r);
+    if (!ok)
+    {
+        if (err.len > 0)
+        {
+            rs_error("%s", err.data);
+        }
+        rs_buf_free(&err);
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    status = c.packs_bad + c.snapshots_bad + unread > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    if (!o->quiet)
+    {
+        rs_buf_init(&size);
+        human_size(&size, c.bytes);
+        (void)fflush(stdout);
+        (void)fprintf(stderr, "restate: read %zu packs (%s, %" PRIu64 " chunks checked against "
+                      "their digests): %zu damaged\n", c.packs, size.data, c.chunks, c.packs_bad);
+        (void)fprintf(stderr, "restate: %zu snapshots, %" PRIu64 " files with content: %zu "
+                      "snapshots with something missing, %" PRIu64 " files not whole\n",
+                      c.snapshots, c.files, c.snapshots_bad, c.missing);
+        if (o->read_all)
+        {
+            (void)fprintf(stderr, "restate: read %zu snapshots in full, as restore would: %"
+                          PRIu64 " files, %" PRIu64 " not as their indexes say\n", n, read_files,
+                          read_bad);
+        }
+        if (c.leftovers > 0)
+        {
+            (void)fprintf(stderr, "restate: %zu packs have no index: an interrupted capture's, "
+                          "which nothing refers to and prune removes\n", c.leftovers);
+        }
+        (void)fprintf(stderr, "restate: %s\n",
+                      status == RESTATE_EXIT_OK ? "the repository is whole"
+                                                : "the repository is damaged; see above");
+        rs_buf_free(&size);
+    }
+    log_outcome(o, status, began,
+                "repository=%s packs=%zu packs_damaged=%zu snapshots=%zu snapshots_damaged=%zu "
+                "files_missing=%" PRIu64 " read_all=%s",
+                o->args[0], c.packs, c.packs_bad, c.snapshots, c.snapshots_bad + unread,
+                c.missing, o->read_all ? "yes" : "no");
+    return status;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Comparing                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -2212,6 +2365,82 @@ static bool keep_own_fstab(const struct rs_options *o, const struct rs_index *ix
     return keep;
 }
 
+/*
+ * restore --as: which of the image's entries are its identity, by what the
+ * index records and by the rules for the system it was taken from, so an
+ * image from before the class is read as the class would have it. NULL,
+ * with the error said, if the rules cannot be read.
+ */
+static bool *identity_of(const struct rs_options *o, const struct rs_index *ix)
+{
+    struct rs_options with = *o;
+    struct rs_rules   rules;
+    const char       *os_used;
+    bool             *leave;
+
+    if (!with.os && ix->os && rs_rules_known_os(ix->os))
+    {
+        with.os = ix->os;
+    }
+    if (!load_rules(&with, &rules, &os_used))
+    {
+        return NULL;
+    }
+    leave = rs_xcalloc(ix->count + 1, sizeof(*leave));
+    (void)rs_identity_mark(ix, &rules, leave);
+    rs_rules_free(&rules);
+    return leave;
+}
+
+/* The host name the image's machine had, which its /etc/hosts gives: as
+ * its description records it, or, for a capture of the running system, as
+ * the capture found it. NULL for a tree captured from elsewhere. */
+static const char *image_host(const struct rs_index *ix)
+{
+    const char *name = rs_jobject_str(rs_jobject_get(&ix->machine, "system"), "hostname");
+
+    if (!name && ix->root && strcmp(ix->root, "/") == 0)
+    {
+        name = ix->host;
+    }
+    return name;
+}
+
+/* What restore --as did, after the files. Exit status as restore's. */
+static int renew_identity(const struct rs_options *o, const struct rs_index *ix, const bool *leave,
+                          const char *root, uint64_t left)
+{
+    struct rs_identity_stats is;
+    struct rs_buf            err;
+
+    rs_buf_init(&err);
+    if (!rs_identity_renew(root, ix, leave, o->as, image_host(ix), o->dry_run, o->verbose, &is,
+                           &err))
+    {
+        rs_error("--as: %s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    if (!o->quiet)
+    {
+        (void)fprintf(stderr, "restate: as %s: %s the image's identity (%" PRIu64 " paths); %"
+                      PRIu64 " of this machine's own kept, %" PRIu64 " made new%s, %" PRIu64
+                      " of the image's own removed for their services to make anew\n",
+                      o->as, o->dry_run ? "would leave out" : "left out", left, is.kept, is.made,
+                      is.host_keys ? " and new SSH host keys" : "", is.removed);
+        (void)fprintf(stderr, "restate: as %s: the host name %s %s%s\n", o->as,
+                      o->dry_run ? "would be" : "is now", o->as,
+                      is.hosts > 0 ? ", in /etc/hosts too" : "");
+        if (!o->dry_run && strcmp(root, "/") == 0)
+        {
+            (void)fprintf(stderr, "restate: as %s: reboot, for every service to take up the "
+                          "new identity\n", o->as);
+        }
+    }
+    return is.failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+}
+
 int rs_cmd_restore(const struct rs_options *o)
 {
     struct rs_index         ix;
@@ -2221,8 +2450,10 @@ int rs_cmd_restore(const struct rs_options *o)
     struct trust            tr;
     int                     status;
     int                     packages = RESTATE_EXIT_OK;
+    int                     renewed = RESTATE_EXIT_OK;
     const char            **excludes = NULL;
     const char             *left_out = "--exclude";
+    bool                   *leave = NULL;
     bool                    keep_fstab;
     bool                    ok;
 
@@ -2267,6 +2498,17 @@ int rs_cmd_restore(const struct rs_options *o)
     ro.nexclude = o->nexcludes;
     ro.verbose = o->verbose;
     ro.numeric_owner = o->numeric_owner;
+    if (o->as)
+    {
+        leave = identity_of(o, &ix);
+        if (!leave)
+        {
+            rs_buf_free(&err);
+            rs_index_free(&ix);
+            return RESTATE_EXIT_TROUBLE;
+        }
+    }
+    ro.leave = leave;
     keep_fstab = keep_own_fstab(o, &ix, ro.root);
     if (o->check_first && !o->dry_run)
     {
@@ -2287,6 +2529,7 @@ int rs_cmd_restore(const struct rs_options *o)
             rs_error("%s; nothing was written (--check-first)", err.data);
             rs_buf_free(&err);
             rs_index_free(&ix);
+            free(leave);
             return RESTATE_EXIT_TROUBLE;
         }
         if (!o->quiet)
@@ -2303,6 +2546,7 @@ int rs_cmd_restore(const struct rs_options *o)
         {
             rs_buf_free(&err);
             rs_index_free(&ix);
+            free(leave);
             return packages;
         }
     }
@@ -2338,11 +2582,12 @@ int rs_cmd_restore(const struct rs_options *o)
     }
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     free(excludes);
-    rs_index_free(&ix);
     if (!ok)
     {
         rs_error("%s", err.data);
         rs_buf_free(&err);
+        rs_index_free(&ix);
+        free(leave);
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
@@ -2380,6 +2625,16 @@ int rs_cmd_restore(const struct rs_options *o)
                           "some need root, and some filesystems have none\n", st.xattrs);
         }
     }
+    if (leave)
+    {
+        renewed = renew_identity(o, &ix, leave, ro.root, st.identity);
+        free(leave);
+    }
+    rs_index_free(&ix);
+    if (renewed == RESTATE_EXIT_TROUBLE)
+    {
+        return renewed;
+    }
     if (st.refused + st.failed + st.missing > 0)
     {
         (void)fprintf(stderr, "restate: %" PRIu64 " refused, %" PRIu64 " not written, %" PRIu64
@@ -2387,7 +2642,7 @@ int rs_cmd_restore(const struct rs_options *o)
                       st.refused, st.failed, st.missing);
         return RESTATE_EXIT_INCOMPLETE;
     }
-    return packages;
+    return packages != RESTATE_EXIT_OK ? packages : renewed;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3063,11 +3318,27 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     char               *keyring = NULL;
     char               *created = NULL;
     char               *snapshot;
+    struct rs_clones    clones;
+    struct rs_buf       from;
     bool                ok;
 
     if (!from_a_file(image) || !firmware_ok(o))
     {
         return RESTATE_EXIT_TROUBLE;
+    }
+    rs_clones_init(&clones);
+    rs_buf_init(&from);
+    if (o->clones)
+    {
+        rs_buf_init(&err);
+        if (!rs_clones_load_file(&clones, o->clones, &err))
+        {
+            rs_error("--clones: %s", err.data);
+            rs_buf_free(&err);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        rs_buf_free(&err);
+        rs_escape(&from, o->clones);
     }
     if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
         !trust_for(o, knows, true, &trust, &keyring))
@@ -3075,6 +3346,8 @@ int rs_cmd_autoinstall(const struct rs_options *o)
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         free(created);
+        rs_clones_free(&clones);
+        rs_buf_free(&from);
         return RESTATE_EXIT_TROUBLE;
     }
     snapshot = o->exact_versions ? rs_repo_snapshot_name(created) : NULL;
@@ -3089,9 +3362,13 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     ao.version = RESTATE_VERSION;
     ao.packages = packages.type == RS_JOBJECT ? &packages : NULL;
     ao.image_at = o->image_at;
+    ao.clones = o->clones ? &clones : NULL;
+    ao.clones_from = from.data;
     rs_buf_init(&text);
     rs_buf_init(&err);
     ok = rs_autoinstall(&machine, &ao, &text, &err);
+    rs_clones_free(&clones);
+    rs_buf_free(&from);
     rs_jval_free(&machine);
     rs_jval_free(&packages);
     free(trust);
@@ -3229,6 +3506,8 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_snapshots(o);
     case CMD_PRUNE:
         return rs_cmd_prune(o);
+    case CMD_CHECK:
+        return rs_cmd_check(o);
     case CMD_EXPORT:
         return rs_cmd_export(o);
     case CMD_STATUS:

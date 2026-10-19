@@ -743,7 +743,7 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
 }
 
 void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
-                              bool fstab, const char *trust)
+                              bool fstab, const char *trust, const char *as)
 {
     const char *prefix = strcmp(dest, "/") == 0 ? "" : dest;
 
@@ -770,8 +770,20 @@ void rs_image_restore_command(struct rs_buf *out, const char *image, const char 
     {
         rs_buf_addf(out, " %s", trust);
     }
+    if (as)
+    {
+        rs_buf_addstr(out, " --as ");
+        rs_shell_word(out, as);
+        rs_buf_addstr(out, " --exclude /etc/netplan");
+    }
     rs_buf_addc(out, ' ');
     rs_shell_word(out, image);
+    if (as)
+    {
+        rs_buf_addstr(out, " || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image to "
+                           "restore with, and a copy needs restate restore --as' >&2; exit 1; fi");
+        return;
+    }
     rs_buf_addstr(out, " || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image to "
                        "restore with; tar instead, owners by number' >&2; ");
     rs_image_part_command(out, image, RS_IMAGE_FILES_PART, dest,

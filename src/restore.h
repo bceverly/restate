@@ -62,6 +62,9 @@ struct rs_restore_opts {
     bool               numeric_owner; /* the index's numbers, not names */
     bool               kit;        /* the kit alone -- /etc/apt and the kept
                                     * packages -- and not the account files */
+    const bool        *leave;      /* per index entry: left out, as restore --as
+                                    * leaves the image's identity (identity.h);
+                                    * or NULL */
 };
 
 struct rs_restore_stats {
@@ -73,6 +76,7 @@ struct rs_restore_stats {
     uint64_t other;       /* FIFOs and device nodes */
     uint64_t bytes;
     uint64_t excluded;
+    uint64_t identity;    /* left out by o->leave */
     uint64_t refused;     /* not in the index, or not what it says */
     uint64_t failed;      /* could not be written */
     uint64_t missing;     /* the index says stored; the image does not have it */

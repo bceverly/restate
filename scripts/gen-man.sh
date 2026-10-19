@@ -201,6 +201,26 @@ What makes this machine this machine:
 .IR /usr/local .
 Always recorded. A path that no rule covers is state: a file nobody meant to
 keep costs some space, a file nobody meant to lose costs the restore.
+.TP
+.B identity
+State that has to be unique to each machine, because other machines know it
+by it:
+.IR /etc/machine-id ,
+from which the DHCP client ID is made, the SSH host keys, the host name, the
+random seed, cloud-init's instance state, DHCP leases, WireGuard and
+Tailscale keys, node certificates and keys (kubelet, k3s, LXD, Incus,
+Puppet, Salt, Chef), MySQL's
+.IR auto.cnf ,
+the Ubuntu Pro machine token, and the IDs of monitoring agents (Wazuh,
+Netdata, SysManage).
+Recorded and restored as state is, so a restore brings the same machine
+back;
+.B restore \-\-as
+leaves it out instead (see
+.BR COPIES ).
+An image records it as state with an
+.B identity
+mark, which a restate older than the class reads as state.
 .SH RULES
 A rule is a class and a pattern, one per line:
 .PP
@@ -1105,6 +1125,78 @@ to it, unless they are made with
 then the build sheet's restore names the same key files, and the autoinstall
 file carries the keys itself, for the installer's restore to check the image
 against.
+.SH COPIES
+One image can be put back as many machines \- for a lab, a classroom, or a
+test of how a service scales \- as long as each is made a machine of its
+own rather than one more of the same.
+.B restate restore \-\-as
+.I NAME
+.I IMAGE
+leaves the image's identity out (see
+.BR CLASSES ),
+and then makes sure the machine has one of its own. Where the machine has
+its own \- a fresh install made a machine-id, SSH host keys and the rest
+when it installed \- that is kept. Where what it has is the image's very
+own, because the restore is onto the machine the image was taken from or
+onto a copy of its disk, restate makes a new one where it knows how: the
+machine-id and D-Bus's copy of it, the random seed, and, where it has an
+SSH server, the host keys, with
+.BR "ssh-keygen \-A" .
+Anything else of the image's is removed, for its service to make anew when
+it next starts: a Tailscale node key, MySQL's
+.IR auto.cnf ,
+an agent's registration.
+.I NAME
+becomes the host name, in
+.I /etc/hostname
+and wherever
+.I /etc/hosts
+gave the image's. Reboot afterwards, so that every service takes up the new
+identity.
+.PP
+Which paths are identity is decided by the rules for the system the image
+was taken from as well as by the image, so an image captured before the
+class existed is read as if it had it, and a site's
+.B identity
+rules, given with
+.BR \-\-rules ,
+apply at the restore. Two things cannot be made new by restate: a WireGuard
+key has to be made known to the peers, so a copy has none until it is
+given one, and a PostgreSQL cluster's system identifier is fixed when the
+cluster is made, which matters only to replication.
+.PP
+.B restate autoinstall \-\-clones
+.I FILE
+writes one autoinstall file for every copy
+.I FILE
+lists, a CSV file with a header line:
+.PP
+.RS
+.nf
+name,mac,serial,address,gateway,dns
+web1,52:54:00:12:34:01,,10.0.0.11/24,10.0.0.1,10.0.0.2
+web2,52:54:00:12:34:02,,10.0.0.12/24,10.0.0.1,10.0.0.2
+web3,,S4EWNX0R123456,,,
+.fi
+.RE
+.PP
+Each copy has a host name, and a MAC address or a disk serial (as
+.B lsblk
+shows it) to find the machine by; a static address with its prefix length,
+a gateway and name servers are optional, and without an address the copy
+takes DHCP. Lines starting with
+.B #
+are comments; no value needs quoting, and a quote is refused. Every machine
+boots the same installer with the same file. Its early-command finds which
+copy the machine is, by its MAC addresses and disk serials, and writes that
+copy's configuration where the installer reads it again: the same as the
+others', but for its host name and network. A machine that is none of them
+stops the install before anything is written. With
+.BR \-\-image\-at ,
+the restore is made with
+.B \-\-as
+the copy's name, and keeps the network the installer gave the copy
+.RI ( /etc/netplan ).
 .SH REPOSITORIES
 An image holds everything it keeps, so a capture every night writes the whole
 machine every night. A repository, made by
@@ -1199,13 +1291,30 @@ One capture or prune runs on a repository at a time, and one
 on a machine at a time; one that finds the lock taken does nothing, and exits
 with status 5. With
 .BR \-\-syslog ,
-capture and prune put one line in the system log as they end \- the command,
+capture, prune and check put one line in the system log as they end \- the command,
 .BR status= ,
 .BR exit= ,
 .B seconds=
 and the counts, as
 .I key=value
 pairs \- for a monitoring system to match on.
+.PP
+.B restate check
+.I REPO
+reads the whole repository through: every pack, each chunk checked against
+the digest its pack's index gives \- the repository's own index, never this
+machine's cached copy, which could hide damage \- then every snapshot's
+index and kit, and that the content of every file each snapshot needs is
+whole among the chunks found good. It names what is wrong, by pack and by
+file, and exits with status 3 if anything is. A filesystem that checksums
+its blocks finds bit rot; this finds a pack that was written wrong, cut
+short or removed.
+.B \-\-read\-all
+then reads every snapshot in full, as
+.B restore
+would, each file checked against its index and nothing written: a test
+restore of every snapshot. An encrypted repository is checked only with its
+secret key.
 .PP
 On disk a repository is plain files:
 .I packs/
@@ -1584,7 +1693,7 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs seven programs, each for something it should not do itself:
+runs eight programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
@@ -1593,20 +1702,24 @@ image where it is installed),
 .BR gpgv (1),
 .BR gpg (1),
 .BR gpgconf (1)
-(to stop the agent gpg starts when it signs) and
+(to stop the agent gpg starts when it signs),
 .BR sh (1)
 (the script
 .B restore \-\-packages
 writes, which runs apt, snap and the rest as a person would; every name and
 version in it is checked against what its package manager allows, and every
-other word quoted, so it runs nothing the image's tree wrote).
+other word quoted, so it runs nothing the image's tree wrote) and
+.BR ssh-keygen (1)
+(new SSH host keys, for
+.BR "restore \-\-as" ).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then
 .I /usr/local/bin
 for all but gzip, then
-.I /bin
-\- never through
+.IR /bin ;
+.I /bin/sh
+first for sh \- never through
 .BR PATH ,
 and only if root owns both the program and its directory and nobody else
 can write to them, because restate runs as root and a program another user

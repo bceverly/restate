@@ -51,13 +51,23 @@ static ssize_t read_stream(void *ctx, void *data, size_t n)
     return rs_image_read_files(ctx, data, n);
 }
 
-static bool excluded(const struct ctx *c, const char *path)
+static bool as_identity(const struct ctx *c, const struct rs_entry *e)
+{
+    return c->o->leave && c->o->leave[e - c->ix->entries];
+}
+
+/* Left out, by --exclude or as identity. */
+static bool excluded(const struct ctx *c, const struct rs_entry *e)
 {
     size_t i;
 
+    if (as_identity(c, e))
+    {
+        return true;
+    }
     for (i = 0; i < c->o->nexclude; i++)
     {
-        if (rs_glob_covers(c->o->exclude[i], path))
+        if (rs_glob_covers(c->o->exclude[i], e->path))
         {
             return true;
         }
@@ -454,7 +464,7 @@ static bool names_as_indexed(const struct ctx *c, const struct rs_entry *e, cons
         const struct rs_entry *b = &c->ix->entries[c->linked[k].i];
         struct stat            other;
 
-        if (excluded(c, b->path))
+        if (excluded(c, b))
         {
             continue;
         }
@@ -876,7 +886,7 @@ static void link_files(struct ctx *c)
             struct stat            as;
             struct stat            bs;
 
-            if (excluded(c, b->path))
+            if (excluded(c, b))
             {
                 continue;
             }
@@ -1002,7 +1012,12 @@ static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *
     {
         return true;
     }
-    if (excluded(c, e->path))
+    if (as_identity(c, e))
+    {
+        c->st->identity++;
+        return true;
+    }
+    if (excluded(c, e))
     {
         c->st->excluded++;
         return true;
@@ -1237,11 +1252,11 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
         {
             const struct rs_entry *e = &ix->entries[i];
 
-            if ((e->type == 'c' || e->type == 'b') && !excluded(&c, e->path))
+            if ((e->type == 'c' || e->type == 'b') && !excluded(&c, e))
             {
                 restore_special(&c, e);
             } else if (e->stored && !c.seen[i] && strcmp(e->path, "/") != 0 &&
-                       !excluded(&c, e->path))
+                       !excluded(&c, e))
             {
                 struct rs_buf b;
 

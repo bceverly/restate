@@ -347,6 +347,14 @@ night without the disk filling up.
       `capture --quiesce` on a machine at a time, and exit status 5 for a run
       that found the lock taken; `--syslog` for one key=value line a
       monitoring system can match on as each capture and prune ends
+- [x] **`restate check REPO`**, as `restic check --read-data`: every pack
+      read through and every chunk checked against its digest -- against the
+      repository's own pack indexes, never this machine's cached copies --
+      every snapshot's index and kit read, and every file each needs found
+      whole; damage said by pack and by file, exit status 3. `--read-all` reads
+      every snapshot in full as restore would, a test restore that writes
+      nothing; `--syslog` for cron and monitoring. ZFS finds bit rot on the
+      disk; this finds a pack that was written wrong
 
 ## Then — stamping out copies
 
@@ -354,23 +362,65 @@ A capture of one machine that does "the thing", rebuilt as N machines — for
 scalability tests, labs, classrooms. The work is in making each copy its own
 machine rather than N copies of one:
 
-- [ ] **An `identity` class**, with built-in rules for what must be unique per
+- [x] **An `identity` class**, with built-in rules for what must be unique per
       machine: the hostname; `/etc/machine-id` (systemd-networkd and
       NetworkManager derive the DHCP client identifier from it, so clones
       that share one can be handed the same address); SSH host keys; the
-      systemd random seed; cloud-init instance state; Tailscale and WireGuard
-      node keys; container runtime and orchestrator node IDs; database
-      identities (MySQL `server_uuid`, the PostgreSQL system identifier);
-      monitoring-agent IDs, the SysManage agent's included. Sites add their own.
+      systemd random seed and credential secret; cloud-init instance state;
+      DHCP leases; Tailscale and WireGuard node keys; container runtime and
+      orchestrator node IDs (Docker, kubelet, k3s, LXD, Incus); MySQL's
+      `server_uuid`; the Ubuntu Pro machine token; configuration-management
+      and monitoring-agent IDs (Puppet, Salt, Chef, Wazuh, Netdata, the
+      SysManage agent's). Sites add their own with `identity PATTERN`.
       Identity files are still captured, so an ordinary restore brings the
-      same machine back
-- [ ] **`restate restore --as NAME`**: regenerate the identity instead of
-      restoring it — a new machine-id, new SSH host keys, a new random seed,
-      instance state cleared — set the host name, and apply per-copy values
-      such as a static address
-- [ ] **`restate autoinstall IMAGE --clones clones.csv`**: one autoinstall file
-      per copy (host name, address, the MAC address or disk serial to match
-      on), so N machines boot one installer and each comes up as itself
+      same machine back; an image records them as state with an `identity`
+      mark, so an older restate still reads it
+- [x] **`restate restore --as NAME`**: leave the image's identity out, keep
+      the machine's own where it has one, and where what it has is the
+      image's (the same machine, or a copy of its disk) make a new
+      machine-id, random seed and SSH host keys and remove the rest for
+      their services to make anew; set the host name, in `/etc/hostname`
+      and `/etc/hosts`
+- [x] **`restate autoinstall IMAGE --clones clones.csv`**: one autoinstall
+      file for every copy (host name, address, gateway, name servers, the MAC
+      address or disk serial to match on); its early-command finds which copy
+      the machine is, so N machines boot one installer and each comes up as
+      itself
+- [ ] A PostgreSQL cluster's system identifier, which only `initdb` sets:
+      say so for a copy that replicates, since restate cannot change it
+
+## Then — other systems
+
+restate is Linux first, and Ubuntu first of all. The rest of it is the same
+program on each system, with what is particular to each kept in its own
+place:
+
+- [ ] **A repository format free of any system's assumptions**, so one
+      repository can hold captures of Linux, the BSDs, macOS and Windows, on
+      any storage, a NAS share among them. Packs and snapshots are already
+      plain files with names restate chooses (digests, sequence numbers and
+      UTC times, in letters, digits, `.`, `-` and `_`); paths, their bytes
+      and case, owners, modes, times and every other kind of metadata stay
+      data inside the index, never left to the filesystem the repository is
+      on. To be held to by a test: a repository on a case-insensitive
+      filesystem with short names and no Unix permissions (exFAT, SMB) reads
+      back bit for bit
+- [ ] **Each system's `--quiesce`**: a capture read from a snapshot of the
+      filesystem rather than from services paused one by one -- Volume
+      Shadow Copy on Windows, APFS local snapshots on macOS, ZFS and UFS
+      snapshots on the BSDs, ZFS on Linux too -- so everything is copied as
+      it was at one moment
+- [ ] **Each system's metadata**: NTFS ACLs (security descriptors) and
+      alternate data streams; macOS extended attributes (read and restored
+      already) and Full Disk Access, which restate needs to be granted to read
+      what macOS protects, said plainly when it has not been; BSD file flags
+      (`chflags`: `schg`, `uchg`, `nodump` and the rest), recorded and set
+      again last, since an immutable flag set early would refuse the rest of
+      the restore. NFSv4 and macOS ACLs are above, under putting it back
+- [ ] **Windows**: paths compared without case, as NTFS does, so two paths
+      captured elsewhere that differ only in case are said to collide rather
+      than one overwriting the other; long paths, past `MAX_PATH`, through
+      the `\\?\` prefix; and a Windows build of restate itself
 
 ## Packaging
 

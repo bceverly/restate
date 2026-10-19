@@ -29,6 +29,8 @@ static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz"
 static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin/gpgconf",
                                              "/bin/gpgconf" };
 static const char *const sh_paths[] = { "/bin/sh", "/usr/bin/sh" };
+static const char *const ssh_keygen_paths[] = { "/usr/bin/ssh-keygen", "/usr/local/bin/ssh-keygen",
+                                                "/bin/ssh-keygen" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -69,6 +71,7 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("pigz", pigz_paths, no_env),
     PROGRAM("gpgconf", gpgconf_paths, no_env),
     PROGRAM("sh", sh_paths, sh_env),
+    PROGRAM("ssh-keygen", ssh_keygen_paths, no_env),
 };
 
 #undef PROGRAM

@@ -241,6 +241,8 @@ int main(void)
     test_opts();
     test_reinstall();
     test_baseline();
+    test_identity();
+    test_clones();
     test_cmd();
 
     rs_name_cache_free();

@@ -110,5 +110,7 @@ void test_opts(void);
 void test_cmd(void);
 void test_reinstall(void);
 void test_baseline(void);
+void test_identity(void);
+void test_clones(void);
 
 #endif /* RESTATE_TEST_H */

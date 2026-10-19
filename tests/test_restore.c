@@ -388,6 +388,41 @@ void test_restore(void)
         free(root);
     }
 
+    TEST_CASE("restore: identity left out, a hard link to it too");
+    {
+        char  *root = at(dir, "as");
+        bool  *leave = rs_xcalloc(ix.count, sizeof(*leave));
+        size_t i;
+
+        for (i = 0; i < ix.count; i++)
+        {
+            leave[i] = strcmp(ix.entries[i].path, "/etc/app/key") == 0 ||
+                       strcmp(ix.entries[i].path, "/var/x/two") == 0;
+        }
+        CHECK(mkdir(root, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        r.o.leave = leave;
+        restore_into(&r, img, &ix, root, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.identity, 2);
+        CHECK_INT(r.st.excluded, 0);
+        CHECK_INT(r.st.links, 0);
+        p = at(root, "etc/app/key");
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        p = at(root, "var/x/two");
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        p = at(root, "var/x/one");
+        CHECK(access(p, F_OK) == 0);
+        free(p);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        free(leave);
+        free(root);
+    }
+
     TEST_CASE("restore: what is in the way");
     {
         char *root = at(dir, "way");

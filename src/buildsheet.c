@@ -1848,14 +1848,14 @@ static void restore(struct sheet *s)
         say(s, "%s", "to tar, which does the same without the checks:");
         say(s, "%s", "");
         rs_buf_init(&cmd);
-        rs_image_restore_command(&cmd, img, "/", false, s->o->trust);
+        rs_image_restore_command(&cmd, img, "/", false, s->o->trust, NULL);
         say(s, "    %s", cmd.data);
         say(s, "%s", "");
         say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
         say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
         say(s, "%s", "");
         rs_buf_reset(&cmd);
-        rs_image_restore_command(&cmd, img, "/", true, s->o->trust);
+        rs_image_restore_command(&cmd, img, "/", true, s->o->trust, NULL);
         say(s, "    %s", cmd.data);
         rs_buf_free(&cmd);
         say(s, "%s", "");

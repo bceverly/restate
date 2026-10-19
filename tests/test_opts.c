@@ -105,6 +105,12 @@ void test_opts(void)
     CHECK_STR(o.firmware, "bios");
     CHECK(parse_args(&o, &err, ARGS("restore", "--packages", "img.tar")));
     CHECK(o.packages);
+    CHECK(parse_args(&o, &err, ARGS("restore", "--as", "web-1.lab", "img.tar")));
+    CHECK_STR(o.as, "web-1.lab");
+    CHECK(!parse_args(&o, &err, ARGS("restore", "--as", "web_1", "img.tar")));
+    CHECK_CONTAINS(err.data, "--as: \"web_1\" is not a host name");
+    CHECK(parse_args(&o, &err, ARGS("autoinstall", "--clones", "lab.csv")));
+    CHECK_STR(o.clones, "lab.csv");
     CHECK(parse_args(&o, &err, ARGS("baseline", "fetch", "img.tar")));
     CHECK_INT(o.command, CMD_BASELINE);
     CHECK_INT(o.nargs, 2);

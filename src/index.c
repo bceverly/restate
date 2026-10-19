@@ -312,7 +312,15 @@ static void entry_json(struct rs_buf *b, const struct rs_entry *e)
     put_bytes(b, "path", e->path, &first);
     put_bytes(b, "name", (slash && slash[1] != '\0') ? slash + 1 : e->path, &first);
     put_str(b, "type", rs_type_name(e->type), &first);
-    put_str(b, "class", rs_class_name(e->cls), &first);
+    /* identity as state that says so: a restate from before the class
+     * reads the entry, and restores it, as it always did. */
+    put_str(b, "class", rs_class_name(e->cls == RS_CLASS_IDENTITY ? RS_CLASS_STATE : e->cls),
+            &first);
+    if (e->cls == RS_CLASS_IDENTITY)
+    {
+        put_key(b, "identity", &first);
+        rs_buf_addstr(b, "true");
+    }
     (void)snprintf(mode, sizeof(mode), "%04o", (unsigned)e->mode);
     put_str(b, "mode", mode, &first);
     put_u64(b, "uid", e->uid, &first);
@@ -614,6 +622,11 @@ static bool entry_from_json(const struct rs_jval *obj, struct rs_entry *e, const
     {
         *why = "missing or unknown \"class\"";
         return false;
+    }
+    v = rs_jobject_get(obj, "identity");
+    if (e->cls == RS_CLASS_STATE && v && v->type == RS_JBOOL && v->b)
+    {
+        e->cls = RS_CLASS_IDENTITY;
     }
     v = rs_jobject_get(obj, "mode");
     if (!v || v->type != RS_JSTRING || !parse_mode(v->s, &e->mode))

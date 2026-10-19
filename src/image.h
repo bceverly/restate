@@ -182,12 +182,15 @@ void rs_image_part_command(struct rs_buf *out, const char *image, const char *pa
  * merging of the accounts, and saying so. `fstab` leaves
  * /etc/fstab and /etc/crypttab out, for an installer that formatted the
  * volumes itself. `trust`, where given, goes on restore's command line as it
- * is: "--trusted-key /tmp/key.gpg", or "--allow-unverified". An incomplete
+ * is: "--trusted-key /tmp/key.gpg", or "--allow-unverified". `as`, where
+ * given, restores a copy of the machine named that (restore --as), keeping
+ * the network the installer gave it (/etc/netplan): tar cannot, so with no
+ * restate in the kit the command then fails, saying why. An incomplete
  * restore (some files refused, exit 3) is said, not taken as failure;
  * anything worse fails the command.
  */
 void rs_image_restore_command(struct rs_buf *out, const char *image, const char *dest,
-                              bool fstab, const char *trust);
+                              bool fstab, const char *trust, const char *as);
 
 /*
  * The index part of the image at `path` as stored, into `index_part`, and its

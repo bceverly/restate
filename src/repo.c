@@ -4299,3 +4299,469 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
     rs_repo_free_names(names, n);
     return ok;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Checking                                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* Warnings about one snapshot's files, before the rest are only counted. */
+#define CHECK_SAID 10
+
+/* A chunk checked against its digest: its size, where `sizes` keeps it. */
+struct checking {
+    struct rs_repo         *r;
+    struct rs_repo_checked *out;
+    struct objmap           good;      /* member: into sizes */
+    uint64_t               *sizes;
+    size_t                  nsizes;
+    struct list            *lists;     /* every list every .idx has */
+    size_t                  nlists;
+    unsigned char         (*chunks)[32];
+    size_t                  nchunks;
+};
+
+static void bad_pack(struct checking *k, const char *name, const char *why)
+{
+    rs_warn("%s/packs/%s: %s", k->r->dir, name, why);
+    k->out->packs_bad++;
+}
+
+static void keep_good(struct checking *k, const unsigned char d[32], uint64_t size)
+{
+    if (!map_find(&k->good, d))
+    {
+        k->sizes = rs_xreallocarray(k->sizes, k->nsizes + 1, sizeof(*k->sizes));
+        k->sizes[k->nsizes] = size;
+        (void)map_add(&k->good, d, 0, (uint32_t)k->nsizes++);
+    }
+}
+
+/* The lists of one .idx, kept to check the snapshots against. */
+static void keep_lists(struct checking *k, const struct rs_repo_idx *x)
+{
+    size_t i;
+
+    for (i = 0; i < x->nlists; i++)
+    {
+        const struct rs_repo_list *l = &x->lists[i];
+        struct list               *to;
+        size_t                     c;
+
+        k->lists = rs_xreallocarray(k->lists, k->nlists + 1, sizeof(*k->lists));
+        to = &k->lists[k->nlists];
+        if (!unhex(l->hash, to->d))
+        {
+            continue;
+        }
+        to->size = l->size;
+        to->first = k->nchunks;
+        to->n = l->n;
+        k->chunks = rs_xreallocarray(k->chunks, k->nchunks + l->n, sizeof(*k->chunks));
+        for (c = 0; c < l->n; c++)
+        {
+            if (!unhex(x->chunks[l->first + c], k->chunks[k->nchunks + c]))
+            {
+                memset(k->chunks[k->nchunks + c], 0, 32);
+            }
+        }
+        k->nchunks += l->n;
+        k->nlists++;
+    }
+}
+
+/* The first of what is wrong with a pack is what is said of it. */
+static void wrong(struct rs_buf *why, bool *damaged, const char *what)
+{
+    if (!*damaged)
+    {
+        rs_buf_reset(why);
+        rs_buf_addstr(why, what);
+    }
+    *damaged = true;
+}
+
+/*
+ * One pack, read through: each member is one its .idx lists, of the size
+ * it gives, whose content -- for a live one -- hashes to the digest it
+ * gives, and no member it lists is missing. What does hash right is good,
+ * even in a pack that is damaged after it.
+ */
+static void check_pack(struct checking *k, const char *name, const struct rs_repo_idx *x)
+{
+    char                *path = rs_xasprintf("%s/packs/%s.tar.gz", k->r->dir, name);
+    int                  fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct zin           z;
+    struct rs_tar_reader tr;
+    struct rs_tar_entry  te;
+    struct rs_buf        why;
+    struct rs_buf        terr;
+    unsigned char        chunk[65536];
+    size_t               at = 0;
+    bool                 damaged = false;
+    bool                 broken = false;
+    int                  more = 1;
+
+    rs_buf_init(&why);
+    if (fd < 0 || !zin_open(&z, fd, true, &why))
+    {
+        char *file = rs_xasprintf("%s.tar.gz", name);
+
+        bad_pack(k, file, fd < 0 ? strerror(errno) : why.data);
+        free(file);
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        rs_buf_free(&why);
+        free(path);
+        return;
+    }
+    (void)close(fd);
+    rs_buf_init(&terr);
+    rs_tar_reader_init(&tr, read_fd, &z.fd);
+    rs_tar_entry_init(&te);
+    /* A member that is wrong is said once, and the rest read on: what is
+     * whole in a damaged pack still counts. Only a pack that cannot be read
+     * further stops it. */
+    while (!broken && (more = rs_tar_next(&tr, &te, &terr)) > 0)
+    {
+        const char                  *p = te.name.data;
+        uint64_t                     num = 0;
+        const struct rs_repo_member *m;
+        struct rs_sha256             sha;
+        char                         hex[RS_SHA256_HEX_SIZE];
+        uint64_t                     got = 0;
+        ssize_t                      n;
+
+        if (te.typeflag != '0' || !number(&p, te.name.data + te.name.len, &num) || *p != '\0')
+        {
+            wrong(&why, &damaged, "a member that is not a chunk");
+            continue;
+        }
+        while (at < x->nmembers && x->members[at].member < num)
+        {
+            wrong(&why, &damaged, "it holds less than its index says");
+            at++;
+        }
+        m = at < x->nmembers && x->members[at].member == num ? &x->members[at] : NULL;
+        if (!m)
+        {
+            wrong(&why, &damaged, "a member that is not in its index");
+            continue;
+        }
+        at++;
+        rs_sha256_init(&sha);
+        while ((n = rs_tar_read(&tr, chunk, sizeof(chunk), &terr)) > 0)
+        {
+            rs_sha256_update(&sha, chunk, (size_t)n);
+            rs_progress_bytes((uint64_t)n);
+            got += (uint64_t)n;
+        }
+        rs_sha256_final(&sha, hex);
+        k->out->bytes += got;
+        if (n < 0)
+        {
+            wrong(&why, &damaged, terr.len ? terr.data : "it could not be read to its end");
+            broken = true;
+        } else if (got != m->size || (m->live && strcmp(hex, m->hash) != 0))
+        {
+            wrong(&why, &damaged, "a chunk that is not what its index says");
+        } else if (m->live)
+        {
+            unsigned char d[32];
+
+            if (unhex(hex, d))
+            {
+                keep_good(k, d, got);
+            }
+            k->out->chunks++;
+        }
+    }
+    if (more < 0)
+    {
+        wrong(&why, &damaged, terr.len ? terr.data : "it could not be read to its end");
+    } else if (!broken && at < x->nmembers)
+    {
+        wrong(&why, &damaged, "it holds less than its index says");
+    }
+    rs_tar_entry_free(&te);
+    rs_buf_free(&terr);
+    {
+        struct rs_buf closing;
+
+        rs_buf_init(&closing);
+        if (!zin_close(&z, damaged, &closing) && !damaged)
+        {
+            rs_buf_addstr(&why, closing.len ? closing.data : "it could not be read to its end");
+            damaged = true;
+        }
+        rs_buf_free(&closing);
+    }
+    if (damaged)
+    {
+        char *file = rs_xasprintf("%s.tar.gz", name);
+
+        bad_pack(k, file, why.len ? why.data : "it could not be read");
+        free(file);
+    }
+    rs_buf_free(&why);
+    free(path);
+}
+
+/* An .idx whose pack is gone, or a pack with no .idx: is_pack passes them
+ * over, so the first is damage nothing else would see. */
+static bool unpaired(const char *dir, const char *name, char **out)
+{
+    size_t      len = strlen(name);
+    struct stat st;
+    char       *other;
+    bool        found;
+
+    if (len > 4 && strcmp(name + len - 4, ".idx") == 0)
+    {
+        other = rs_xasprintf("%s/%.*s.tar.gz", dir, (int)(len - 4), name);
+    } else if (len > 7 && strcmp(name + len - 7, ".tar.gz") == 0)
+    {
+        other = rs_xasprintf("%s/%.*s.idx", dir, (int)(len - 7), name);
+    } else
+    {
+        return false;
+    }
+    found = lstat(other, &st) == 0;
+    free(other);
+    if (found || name[0] == '.')
+    {
+        return false;
+    }
+    *out = rs_xstrdup(name);
+    return true;
+}
+
+/* A snapshot directory, whether or not its index is there. */
+static bool any_snapshot(const char *dir, const char *name, char **out)
+{
+    char       *path = rs_xasprintf("%s/%s", dir, name);
+    struct stat st;
+    bool        ok = rs_repo_name_valid(name) && lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+
+    free(path);
+    if (ok)
+    {
+        *out = rs_xstrdup(name);
+    }
+    return ok;
+}
+
+/* Whether the content with the digest `hash`, of `size` bytes, is whole
+ * among the chunks found good: a chunk itself, or a list of them. */
+static bool is_whole(const struct checking *k, const char *hash, uint64_t size,
+                     const struct objmap *lists)
+{
+    unsigned char     d[32];
+    const struct obj *o;
+    uint64_t          sum = 0;
+    size_t            c;
+
+    if (!unhex(hash, d))
+    {
+        return false;
+    }
+    o = map_find(&k->good, d);
+    if (o)
+    {
+        return k->sizes[o->member] == size;
+    }
+    o = map_find(lists, d);
+    if (!o)
+    {
+        return false;
+    }
+    for (c = 0; c < k->lists[o->member].n; c++)
+    {
+        const struct obj *ch = map_find(&k->good, k->chunks[k->lists[o->member].first + c]);
+
+        if (!ch)
+        {
+            return false;
+        }
+        sum += k->sizes[ch->member];
+    }
+    return sum == size && k->lists[o->member].size == size;
+}
+
+static void check_snapshot(struct checking *k, const char *name, const struct objmap *lists)
+{
+    struct rs_index ix;
+    struct rs_buf   err;
+    char          **kit = NULL;
+    size_t          nkit = 0;
+    size_t          i;
+    uint64_t        missing = 0;
+
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    k->out->snapshots++;
+    if (!rs_repo_load_index(k->r, name, &ix, &err) || !rs_repo_kit(k->r, name, &kit, &nkit, &err))
+    {
+        rs_warn("%s::%s: %s", k->r->dir, name, err.data);
+        k->out->snapshots_bad++;
+        rs_index_free(&ix);
+        rs_buf_free(&err);
+        return;
+    }
+    rs_repo_free_names(kit, nkit);
+    for (i = 0; i < ix.count; i++)
+    {
+        const struct rs_entry *e = &ix.entries[i];
+
+        if (!e->stored || e->type != 'f' || e->hash_state != RS_HASH_PRESENT)
+        {
+            continue;
+        }
+        k->out->files++;
+        if (is_whole(k, e->hash, e->size, lists))
+        {
+            continue;
+        }
+        if (missing++ < CHECK_SAID)
+        {
+            struct rs_buf b;
+
+            rs_buf_init(&b);
+            rs_escape(&b, e->path);
+            rs_warn("%s::%s: %s: its content is not all in the repository", k->r->dir, name,
+                    b.data ? b.data : "");
+            rs_buf_free(&b);
+        }
+    }
+    if (missing > CHECK_SAID)
+    {
+        rs_warn("%s::%s: and %" PRIu64 " files more", k->r->dir, name, missing - CHECK_SAID);
+    }
+    if (missing > 0)
+    {
+        k->out->snapshots_bad++;
+        k->out->missing += missing;
+    }
+    rs_index_free(&ix);
+    rs_buf_free(&err);
+}
+
+bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf *err)
+{
+    struct checking k;
+    struct objmap   lists;
+    char          **names;
+    char          **odd;
+    char           *dir;
+    size_t          n;
+    size_t          nodd;
+    size_t          i;
+
+    memset(out, 0, sizeof(*out));
+    memset(&k, 0, sizeof(k));
+    memset(&lists, 0, sizeof(lists));
+    k.r = r;
+    k.out = out;
+    /* The snapshots first, then the packs: a capture that finishes in
+     * between wrote its packs before its snapshot, so every pack a listed
+     * snapshot needs is in the list. */
+    names = rs_repo_snapshots(r, &n);
+    list_packs(r);
+    for (i = 0; i < r->npacks; i++)
+    {
+        char              *path = rs_xasprintf("%s/packs/%s.idx", r->dir, r->packs[i]);
+        struct rs_buf      text;
+        struct rs_buf      why;
+        struct rs_repo_idx x;
+        bool               sealed = false;
+
+        rs_buf_init(&why);
+        memset(&x, 0, sizeof(x));
+        /* The repository's own .idx, never this machine's copy of it: that
+         * could hide damage here. */
+        if (!read_sealed(path, SMALL_MAX, true, &text, &sealed, &why))
+        {
+            if (sealed && i == 0)
+            {
+                rs_buf_addf(err, "%s: its packs' indexes could not be decrypted, so it cannot be "
+                            "checked: the secret key is not in this user's GnuPG home, or its "
+                            "passphrase was not given", r->dir);
+                rs_buf_free(&why);
+                rs_buf_free(&text);
+                free(path);
+                rs_repo_free_names(names, n);
+                map_free(&k.good);
+                free(k.sizes);
+                return false;
+            }
+            bad_pack(&k, r->packs[i], why.data);
+        } else if (!rs_repo_parse_idx(text.data, text.len, &x))
+        {
+            char *file = rs_xasprintf("%s.idx", r->packs[i]);
+
+            bad_pack(&k, file, "not a pack index restate wrote");
+            free(file);
+        } else
+        {
+            keep_lists(&k, &x);
+            check_pack(&k, r->packs[i], &x);
+        }
+        out->packs++;
+        rs_repo_idx_free(&x);
+        rs_buf_free(&text);
+        rs_buf_free(&why);
+        free(path);
+    }
+    dir = rs_xasprintf("%s/packs", r->dir);
+    odd = list_dir(dir, unpaired, &nodd);
+    for (i = 0; i < nodd; i++)
+    {
+        size_t len = strlen(odd[i]);
+
+        if (strcmp(odd[i] + len - 4, ".idx") == 0)
+        {
+            bad_pack(&k, odd[i], "its pack is not there");
+        } else
+        {
+            out->leftovers++;
+        }
+    }
+    rs_repo_free_names(odd, nodd);
+    free(dir);
+    for (i = 0; i < k.nlists; i++)
+    {
+        if (!map_find(&lists, k.lists[i].d))
+        {
+            (void)map_add(&lists, k.lists[i].d, 0, (uint32_t)i);
+        }
+    }
+    for (i = 0; i < n; i++)
+    {
+        check_snapshot(&k, names[i], &lists);
+    }
+    rs_repo_free_names(names, n);
+    dir = rs_xasprintf("%s/snapshots", r->dir);
+    odd = list_dir(dir, any_snapshot, &nodd);
+    for (i = 0; i < nodd; i++)
+    {
+        char       *index = rs_xasprintf("%s/%s/index.json.gz", dir, odd[i]);
+        struct stat st;
+
+        if (lstat(index, &st) != 0)
+        {
+            rs_warn("%s::%s: its index is not there", r->dir, odd[i]);
+            out->snapshots++;
+            out->snapshots_bad++;
+        }
+        free(index);
+    }
+    rs_repo_free_names(odd, nodd);
+    free(dir);
+    map_free(&lists);
+    map_free(&k.good);
+    free(k.sizes);
+    free(k.lists);
+    free(k.chunks);
+    return true;
+}

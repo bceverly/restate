@@ -2,13 +2,18 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "autoinstall.h"
 #include "buildsheet.h"
+#include "clones.h"
 #include "cmd.h"
 #include "json.h"
 #include "layout.h"
+#include "packages.h"
 #include "test.h"
 
 /*
@@ -1001,7 +1006,7 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL, NULL, NULL };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL, NULL, NULL, NULL, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 
@@ -1204,6 +1209,207 @@ static void firmware_cases(void)
     rs_jval_free(&m);
 }
 
+/* The early-command of a file for copies, as the installer gives it to sh:
+ * the literal block, less its indentation. */
+static char *early_script(const char *s)
+{
+    const char   *p = s ? strstr(s, "  early-commands:\n    - |\n") : NULL;
+    struct rs_buf b;
+
+    rs_buf_init(&b);
+    rs_buf_add(&b, "", 0);
+    for (p = p ? p + strlen("  early-commands:\n    - |\n") : ""; *p;)
+    {
+        size_t len = strcspn(p, "\n");
+
+        if (len > 0 && strncmp(p, "      ", 6) != 0)
+        {
+            break;
+        }
+        if (len >= 6)
+        {
+            rs_buf_add(&b, p + 6, len - 6);
+        }
+        rs_buf_addc(&b, '\n');
+        p += len;
+        p += *p == '\n' ? 1 : 0;
+    }
+    return rs_buf_detach(&b);
+}
+
+/* Runs the early-command in `dir`, on a machine with the MAC address `mac`
+ * and the disk serials lsblk prints as `serials`; its configuration, as it
+ * wrote it, or NULL. */
+static char *pick(const char *dir, const char *script, const char *mac, const char *serials,
+                  int *code)
+{
+    char         *cmd;
+    char         *lsblk = rs_xasprintf("#!/bin/sh\nprintf '%s'\n", serials);
+    char         *net = rs_xasprintf("%s/sys/class/net/eth0", dir);
+    char         *conf = rs_xasprintf("%s/autoinstall.yaml", dir);
+    char         *mkdirs = rs_xasprintf("mkdir -p '%s' '%s/bin'", net, dir);
+    char         *text;
+    struct rs_buf b;
+    int           st;
+
+    st = system(mkdirs);
+    CHECK(st == 0);
+    free(mkdirs);
+    rs_test_write(net, "address", mac, 0644);
+    rs_test_write(dir, "bin/lsblk", lsblk, 0755);
+    rs_test_write(dir, "pick.sh", script, 0644);
+    (void)unlink(conf);
+    cmd = rs_xasprintf("cd '%s' && PATH='%s/bin':/usr/bin:/bin RESTATE_SYS='%s/sys' "
+                       "RESTATE_AUTOINSTALL='%s' sh pick.sh > out 2>&1",
+                       dir, dir, dir, conf);
+    st = system(cmd);
+    *code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    free(cmd);
+    text = NULL;
+    {
+        FILE *fp = fopen(conf, "r");
+
+        if (fp)
+        {
+            char   chunk[4096];
+            size_t n;
+
+            rs_buf_init(&b);
+            while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0)
+            {
+                rs_buf_add(&b, chunk, n);
+            }
+            rs_buf_add(&b, "", 0);
+            (void)fclose(fp);
+            text = rs_buf_detach(&b);
+        }
+    }
+    free(lsblk);
+    free(net);
+    free(conf);
+    return text;
+}
+
+static void clones_cases(void)
+{
+    struct rs_jval      m;
+    struct rs_jval      pk;
+    struct rs_clones    c;
+    struct rs_buf       text;
+    struct rs_buf       err;
+    struct rs_auto_opts o;
+    char               *s;
+    char               *script;
+    char               *conf;
+    char               *dir = rs_test_tmpdir();
+    size_t              i;
+    int                 code = 0;
+    static const char   list[] = "name,mac,serial,address,gateway,dns\n"
+                                 "web1,52:54:00:00:00:01,,10.0.0.11/24,10.0.0.1,10.0.0.2\n"
+                                 "web2,,SER-2,,,\n";
+
+    server(&m);
+    rs_buf_init(&text);
+    for (i = 0; packages_json[i]; i++)
+    {
+        rs_buf_addstr(&text, packages_json[i]);
+    }
+    parse(text.data, &pk);
+    rs_buf_free(&text);
+    rs_buf_init(&err);
+    CHECK(rs_clones_parse(&c, list, strlen(list), "lab.csv", &err));
+    memset(&o, 0, sizeof(o));
+    o.target = RS_TARGET_VM;
+    o.version = "9.9";
+    o.packages = &pk;
+    o.image_at = "/cdrom/web.tar";
+    o.clones = &c;
+    o.clones_from = "lab.csv";
+    rs_buf_init(&text);
+
+    TEST_CASE("autoinstall: one file for the copies, which picks this machine's");
+    CHECK(rs_autoinstall(&m, &o, &text, &err));
+    s = text.data;
+    CHECK_CONTAINS(s, "#cloud-config\n");
+    CHECK_CONTAINS(s, "# One file for 2 copies of the machine, from lab.csv.");
+    CHECK_CONTAINS(s, "#   web1                 52:54:00:00:00:01 -                    10.0.0.11/24\n");
+    CHECK_CONTAINS(s, "#   web2                 -                 SER-2                DHCP\n");
+    CHECK_CONTAINS(s, "# The restore is made with --as");
+    CHECK_CONTAINS(s, "\nautoinstall:\n  version: 1\n  early-commands:\n    - |\n");
+    /* Nothing of the copies' configuration outside the early-command. */
+    CHECK(strstr(s, "\n  storage:") == NULL);
+    CHECK(strstr(s, "\n  identity:") == NULL);
+    CHECK_CONTAINS(s, "\n      storage:\n");
+    CHECK_CONTAINS(s, "        hostname: \"" RS_AUTO_COPY "\"");
+    CHECK_CONTAINS(s, "--as " RS_AUTO_COPY " --exclude /etc/netplan");
+    script = early_script(s);
+
+    TEST_CASE("autoinstall: the copy found by its MAC address, at its own address");
+    conf = pick(dir, script, "52:54:00:00:00:01\n", "OTHER\n", &code);
+    CHECK_INT(code, 0);
+    CHECK(conf != NULL);
+    CHECK(conf && strncmp(conf, "version: 1\n", 11) == 0);
+    CHECK_CONTAINS(conf, "\nidentity:\n  hostname: \"web1\"\n");
+    CHECK_CONTAINS(conf, "\nnetwork:\n  version: 2\n  ethernets:\n    restate:\n      match:\n"
+                         "        macaddress: \"52:54:00:00:00:01\"\n      dhcp4: false\n"
+                         "      dhcp6: false\n      addresses:\n        - \"10.0.0.11/24\"\n"
+                         "      routes:\n        - to: default\n          via: \"10.0.0.1\"\n"
+                         "      nameservers:\n        addresses:\n          - \"10.0.0.2\"\n"
+                         "storage:\n");
+    CHECK_CONTAINS(conf, "--as web1 --exclude /etc/netplan");
+    CHECK(strstr(conf ? conf : "", RS_AUTO_COPY) == NULL);
+    CHECK(strstr(conf ? conf : "", "@RESTATE") == NULL);
+    free(conf);
+
+    TEST_CASE("autoinstall: the copy found by a disk serial, on DHCP");
+    conf = pick(dir, script, "11:22:33:44:55:66\n", "SER-1\nSER-2\n", &code);
+    CHECK_INT(code, 0);
+    CHECK_CONTAINS(conf, "\nidentity:\n  hostname: \"web2\"\n");
+    CHECK_CONTAINS(conf, "      match:\n        name: \"en*\"\n      dhcp4: true\nstorage:\n");
+    free(conf);
+
+    TEST_CASE("autoinstall: a machine that is none of the copies");
+    conf = pick(dir, script, "11:22:33:44:55:66\n", "SER-9\n", &code);
+    CHECK_INT(code, 1);
+    CHECK(conf == NULL);
+    free(conf);
+    {
+        struct rs_buf said;
+
+        CHECK(rs_read_beneath(dir, "/out", 65536, &said));
+        CHECK_CONTAINS(said.data, "none of the copies this file installs");
+        CHECK_CONTAINS(said.data, "11:22:33:44:55:66");
+        rs_buf_free(&said);
+    }
+    free(script);
+
+    TEST_CASE("autoinstall: copies with no image to restore from, on a desktop");
+    rs_jval_free(&m);
+    parse("{\"system\": {\"id\": \"ubuntu\", \"type\": \"desktop\", \"hostname\": \"d\"},"
+          " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": "
+          "\"gpt\"}, \"partitions\": [{\"name\": \"vda1\", \"number\": 1, \"start\": 1048576,"
+          " \"size\": 20000000000, \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+          " \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"r\"}}]}],"
+          " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"}]}",
+          &m);
+    o.image_at = NULL;
+    o.clones_from = NULL;
+    rs_buf_reset(&text);
+    CHECK(rs_autoinstall(&m, &o, &text, &err));
+    CHECK_CONTAINS(text.data, "from a list.");
+    CHECK_CONTAINS(text.data, "# Restore each with restate restore --as NAME");
+    CHECK(strstr(text.data, "--as " RS_AUTO_COPY) == NULL);
+    CHECK_CONTAINS(text.data, "  renderer: NetworkManager\n");
+
+    rs_buf_free(&text);
+    rs_buf_free(&err);
+    rs_clones_free(&c);
+    rs_jval_free(&pk);
+    rs_jval_free(&m);
+    rs_test_rmtree(dir);
+    free(dir);
+}
+
 void test_rebuild(void)
 {
     package_cases();
@@ -1212,4 +1418,5 @@ void test_rebuild(void)
     layout_cases();
     sheet_cases();
     autoinstall_cases();
+    clones_cases();
 }
