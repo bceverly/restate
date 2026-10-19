@@ -136,7 +136,8 @@ void test_pgp(void)
                                   "'restate/index.json.gz.gpg restate/kit.tar.gz.gpg "
                                   "restate/files.tar.gz.gpg '", img);
         char *head = rs_xasprintf("cd '%s' && tar -xf '%s' restate/files.tar.gz.gpg && "
-                                  "head -c 2 restate/files.tar.gz.gpg | od -An -tx1 | "
+                                  "dd if=restate/files.tar.gz.gpg bs=2 count=1 2> /dev/null | "
+                                  "od -An -tx1 | "
                                   "grep -qv '1f 8b'", dir, img);
 
         CHECK(system(list) == 0);

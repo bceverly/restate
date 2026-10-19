@@ -1518,7 +1518,7 @@ static void test_checked(const char *dir)
 
     TEST_CASE("repo: checked, a pack cut short");
     check_copy(dir, repo, "c-short",
-               "head -c 2000 \"$pack\" > t && mv t \"$pack\"", &run);
+               "dd if=\"$pack\" of=t bs=2000 count=1 2> /dev/null && mv t \"$pack\"", &run);
     CHECK(run.ok);
     CHECK_INT(run.c.packs_bad, 1);
     CHECK(run.c.missing >= 1);
