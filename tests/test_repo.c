@@ -14,6 +14,7 @@
 
 #include "image.h"
 #include "pgp.h"
+#include "progress.h"
 #include "repo.h"
 #include "rules.h"
 #include "run.h"
@@ -1923,7 +1924,36 @@ static void test_storage(const char *dir)
     CHECK(r2 == NULL && busy);
     rs_buf_reset(&err);
 
-    CHECK(snap(r, tree, "2026-05-01T00:00:00.000000000Z", NULL, &st, &a));
+    TEST_CASE("repo: a capture's progress counts what it reads, not the packs it writes");
+    {
+        FILE              *fp = tmpfile();
+        char               line[512];
+        unsigned long long read_bytes = 0;
+
+        CHECK(fp != NULL);
+        rs_progress_json(fp);
+        rs_progress_phase("walking", 0);
+        CHECK(snap(r, tree, "2026-05-01T00:00:00.000000000Z", NULL, &st, &a));
+        rs_progress_done();
+        rs_progress_json(NULL);
+        if (fp)
+        {
+            rewind(fp);
+            while (fgets(line, sizeof(line), fp))
+            {
+                const char *at = strstr(line, "\"read_bytes\": ");
+
+                if (at)
+                {
+                    read_bytes = strtoull(at + strlen("\"read_bytes\": "), NULL, 10);
+                }
+            }
+            (void)fclose(fp);
+        }
+        /* The .sums are of what was written, not read back for them. */
+        CHECK(st.bytes_hashed > 2 * RS_REPO_CHUNK_AVG);
+        CHECK_INT((long long)read_bytes, (long long)st.bytes_hashed);
+    }
     big_file(tree, "data/new", 2 * RS_REPO_CHUNK_AVG, 22);
     CHECK(snap(r, tree, "2026-05-02T00:00:00.000000000Z", NULL, &st, &b));
     rs_repo_close(r);
@@ -2151,6 +2181,50 @@ static void test_storage(const char *dir)
         CHECK_CONTAINS(c.nchanged ? c.changed[0] : "", "removed snapshots/");
         rs_repo_checked_free(&c);
         free(errs);
+
+        TEST_CASE("repo: a pack new to the record is recorded as its .sum says, not read for it");
+        {
+            const char           *base = strrchr(pack, '/') + 1;
+            char                 *sum = rs_xasprintf("%s/%.*s.sum", packs,
+                                                     (int)(strlen(base) - strlen(".tar.gz")),
+                                                     base);
+            char                 *rel = rs_xasprintf("packs/%s", base);
+            char                  want[RS_SHA256_HEX_SIZE];
+            uint64_t              size = 0;
+            struct rs_buf         text;
+            struct rs_repo_record rec;
+
+            rs_buf_init(&text);
+            CHECK(slurp(sum, &text) && rs_repo_parse_sum(text.data, text.len, want, &size));
+            rs_buf_free(&text);
+            CHECK(unlink(record) == 0);
+            r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+            CHECK(r && rs_repo_record_update(r, record, &err));
+            rs_repo_close(r);
+            rs_buf_init(&text);
+            CHECK(slurp(record, &text) && rs_repo_parse_record(text.data, text.len, &rec));
+            {
+                const struct rs_repo_record_entry *e = NULL;
+                size_t                             i;
+
+                for (i = 0; i < rec.n; i++)
+                {
+                    e = strcmp(rec.entries[i].path, rel) == 0 ? &rec.entries[i] : e;
+                }
+                /* The pack was changed after it was written: what was
+                 * written is what is recorded, for a check to tell. */
+                CHECK_STR(e ? e->hash : "", want);
+                CHECK_INT(e ? (long long)e->size : -1, (long long)size);
+            }
+            rs_repo_record_free(&rec);
+            rs_buf_free(&text);
+            storage_check(repo, true, record, &c, &errs);
+            CHECK(c.nchanged >= 1);
+            rs_repo_checked_free(&c);
+            free(errs);
+            free(rel);
+            free(sum);
+        }
         free(pack);
         free(packs);
     }

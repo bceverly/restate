@@ -153,6 +153,16 @@ char *rs_image_member_name(const char *path)
  * zeros to the promised size and its digest marked unreadable, because what
  * is stored then is not the file.
  */
+/* What rs_image_copy_file also hands what it copies to, while one is set. */
+static void (*copy_tap)(void *ctx, const void *data, size_t n);
+static void *copy_tap_ctx;
+
+void rs_image_copy_tap(void (*tap)(void *ctx, const void *data, size_t n), void *ctx)
+{
+    copy_tap = tap;
+    copy_tap_ctx = ctx;
+}
+
 bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, uint64_t size)
 {
     static const unsigned char zero[4096];
@@ -191,6 +201,10 @@ bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, u
             break;
         }
         rs_sha256_update(&ctx, chunk, (size_t)n);
+        if (copy_tap)
+        {
+            copy_tap(copy_tap_ctx, chunk, (size_t)n);
+        }
         if (!rs_tar_data(tar, chunk, (size_t)n))
         {
             return false;

@@ -29,6 +29,8 @@ static time_t         started;
 static struct rs_jval root;          /* the command's own members */
 static struct rs_jval warnings;      /* the first RS_RESULT_WARNINGS */
 static uint64_t       nwarnings;
+static struct rs_jval errors;        /* the first RS_RESULT_ERRORS */
+static uint64_t       nerrors;
 static struct rs_jval unreadable;    /* the first RS_RESULT_UNREADABLE */
 static uint64_t       nunreadable;
 static struct rs_jval quiesce;
@@ -47,25 +49,45 @@ static void collect_warning(const char *msg)
     nwarnings++;
 }
 
+static void collect_error(const char *msg)
+{
+    if (!collecting)
+    {
+        return;
+    }
+    if (nerrors < RS_RESULT_ERRORS)
+    {
+        rs_jval_set_string(rs_jarr_add(&errors), msg);
+    }
+    nerrors++;
+}
+
 void rs_result_end(void)
 {
     rs_jval_free(&root);
     rs_jval_free(&warnings);
+    rs_jval_free(&errors);
     rs_jval_free(&unreadable);
     rs_jval_free(&quiesce);
     memset(&root, 0, sizeof(root));
     memset(&warnings, 0, sizeof(warnings));
+    memset(&errors, 0, sizeof(errors));
     memset(&unreadable, 0, sizeof(unreadable));
     memset(&quiesce, 0, sizeof(quiesce));
     free(command);
     command = NULL;
     nwarnings = 0;
+    nerrors = 0;
     nunreadable = 0;
     quiesce_failed = 0;
     collecting = false;
     if (rs_warn_hook == collect_warning)
     {
         rs_warn_hook = NULL;
+    }
+    if (rs_error_hook == collect_error)
+    {
+        rs_error_hook = NULL;
     }
 }
 
@@ -77,9 +99,11 @@ void rs_result_begin(const char *cmd)
     started = time(NULL);
     rs_jval_set_object(&root);
     rs_jval_set_array(&warnings);
+    rs_jval_set_array(&errors);
     rs_jval_set_array(&unreadable);
     rs_jval_set_array(&quiesce);
     rs_warn_hook = collect_warning;
+    rs_error_hook = collect_error;
 }
 
 struct rs_jval *rs_result(void)
@@ -268,6 +292,10 @@ bool rs_result_write(int status, const char *path, const char *group)
     *v = warnings;
     memset(&warnings, 0, sizeof(warnings));
     rs_jobj_u64(&out, "warnings_count", nwarnings);
+    v = rs_jobj_add(&out, "errors");
+    *v = errors;
+    memset(&errors, 0, sizeof(errors));
+    rs_jobj_u64(&out, "errors_count", nerrors);
     rs_buf_init(&text);
     rs_json_write(&text, &out, 2, 0);
     rs_buf_addc(&text, '\n');

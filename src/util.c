@@ -252,10 +252,22 @@ void rs_warn(const char *fmt, ...)
     va_end(ap);
 }
 
+void (*rs_error_hook)(const char *msg);
+
 void rs_error(const char *fmt, ...)
 {
     va_list ap;
 
+    if (rs_error_hook)
+    {
+        char *msg;
+
+        va_start(ap, fmt);
+        msg = rs_xvasprintf(fmt, ap);
+        va_end(ap);
+        rs_error_hook(msg);
+        free(msg);
+    }
     va_start(ap, fmt);
     vreport("", fmt, ap);
     va_end(ap);

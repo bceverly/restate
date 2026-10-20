@@ -925,6 +925,16 @@ and
 while a hook pauses something, which it names; and
 .B finish
 at the end.
+.B read_bytes
+is what has been read of the files themselves, never what restate writes or
+reads back of its own.
+.B total_bytes
+is
+.B null
+where there is no total; in the walk it is what the count found to read, so
+it is an estimate: a file that grows, or appears, after the count is read
+all the same. Show a percentage of it no higher than 99 until
+.BR finish .
 .SH REBUILDING
 .B restate buildsheet
 writes a plain-text runbook for rebuilding the machine onto a blank disk:
@@ -1834,7 +1844,7 @@ this run's whole result or the last one's:
  "unreadable": {"count": 1, "first": [{"path": "/srv/x", "reason": "..."}]},
  "quiesce": [{"kind": "postgresql", "name": "16\-main",
    "paused_at": "...", "resumed_at": "...", "status": "ok", "message": ""}],
- "warnings": ["..."], "warnings_count": 1}
+ "warnings": ["..."], "warnings_count": 1, "errors": [], "errors_count": 0}
 .fi
 .RE
 .PP
@@ -1853,8 +1863,9 @@ is the exit status as a word:
 .B busy
 (5). Every warning is collected,
 .B \-\-quiet
-or not \- the first 50 in full \- and every path a walk could not read, the
-first 100 with why. Each command adds what it did:
+or not \- the first 50 in full \- as is every error, the first 50 in full,
+so a run that failed says why in its result as well as on standard error; and
+every path a walk could not read, the first 100 with why. Each command adds what it did:
 .BR prune ,
 .B pruned
 and

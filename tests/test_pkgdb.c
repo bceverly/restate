@@ -4,11 +4,14 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "image.h"
 #include "md5.h"
 #include "pkgdb.h"
+#include "progress.h"
 #include "scan.h"
 #include "test.h"
 
@@ -206,6 +209,54 @@ static bool counting_store(void *ctx, struct rs_entry *e, int fd, const struct s
     return true;
 }
 
+static bool discard(void *ctx, const void *data, size_t n)
+{
+    (void)ctx;
+    (void)data;
+    (void)n;
+    return true;
+}
+
+/* A store that copies as the real ones do, through rs_image_copy_file. */
+static bool copying_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
+                          struct rs_buf *err)
+{
+    struct rs_tar_writer tw;
+
+    (void)ctx;
+    (void)err;
+    if (fd >= 0)
+    {
+        rs_tar_writer_init(&tw, discard, NULL);
+        if (!rs_image_copy_file(&tw, e, fd, (uint64_t)st->st_size))
+        {
+            return false;
+        }
+        stored_count++;
+    }
+    e->stored = rs_xstrdup("x");
+    return true;
+}
+
+/* The last read_bytes a progress file `fp` says. */
+static unsigned long long last_read_bytes(FILE *fp)
+{
+    char               line[512];
+    unsigned long long n = 0;
+
+    rewind(fp);
+    while (fgets(line, sizeof(line), fp))
+    {
+        const char *at = strstr(line, "\"read_bytes\": ");
+
+        if (at)
+        {
+            n = strtoull(at + strlen("\"read_bytes\": "), NULL, 10);
+        }
+    }
+    return n;
+}
+
 static bool have_all(const void *ctx, const char hash[RS_SHA256_HEX_SIZE])
 {
     (void)ctx;
@@ -366,6 +417,62 @@ void test_pkgdb(void)
     e = find(&m, "/etc/foo.conf");
     CHECK(e && !e->stored);
     rs_index_free(&m);
+
+    TEST_CASE("scan: with baseline content, a packaged file is compared in the read that keeps it");
+    {
+        FILE *fp = tmpfile();
+
+        CHECK(fp != NULL);
+        o.store = copying_store;
+        o.store_baseline = true;
+        stored_count = 0;
+        rs_progress_json(fp);
+        rs_progress_phase("walking", 0);
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        rs_progress_done();
+        rs_progress_json(NULL);
+        e = find(&m, "/usr/bin/ls");
+        CHECK(e && e->stored && e->cls == RS_CLASS_BASELINE && !e->modified);
+        CHECK_STR(e && e->package ? e->package : "", "coreutils");
+        e = find(&m, "/usr/bin/changed");
+        CHECK(e && e->stored && e->cls == RS_CLASS_STATE && e->modified);
+        e = find(&m, "/etc/edited.conf");
+        CHECK(e && e->stored && e->cls == RS_CLASS_STATE && e->modified);
+        CHECK_INT(st.pkg_unmodified, 5);
+        CHECK_INT(st.pkg_modified, 2);
+        /* Each file read once: as much read as kept. */
+        CHECK(st.bytes_hashed > 0);
+        CHECK_INT(fp ? (long long)last_read_bytes(fp) : -1, (long long)st.bytes_hashed);
+        if (fp)
+        {
+            (void)fclose(fp);
+        }
+        rs_index_free(&m);
+
+        /* A store that copies some other way: read again to compare. */
+        o.store = counting_store;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        e = find(&m, "/usr/bin/ls");
+        CHECK(e && e->stored && e->cls == RS_CLASS_BASELINE && !e->modified);
+        e = find(&m, "/usr/bin/changed");
+        CHECK(e && e->stored && e->cls == RS_CLASS_STATE && e->modified);
+        CHECK_INT(st.pkg_unmodified, 5);
+        CHECK_INT(st.pkg_modified, 2);
+        rs_index_free(&m);
+        o.store_baseline = false;
+
+        /* Without: what changed is copied from the file already open. */
+        o.store = copying_store;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        e = find(&m, "/usr/bin/changed");
+        CHECK(e && e->stored && e->cls == RS_CLASS_STATE && e->hash_state == RS_HASH_PRESENT);
+        e = find(&m, "/usr/bin/ls");
+        CHECK(e && !e->stored && e->cls == RS_CLASS_BASELINE);
+        rs_index_free(&m);
+    }
     o.store = NULL;
 
     TEST_CASE("scan: an incremental run takes what is unchanged from the last one");

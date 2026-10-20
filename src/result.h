@@ -17,7 +17,8 @@
  *    "unreadable": {"count": 2, "first": [{"path": ..., "reason": ...}]},
  *    "quiesce": [{"kind": "postgresql", "name": "16-main", "paused_at": ...,
  *                 "resumed_at": ..., "status": "ok", "message": ""}],
- *    "warnings": ["..."], "warnings_count": 7}
+ *    "warnings": ["..."], "warnings_count": 7,
+ *    "errors": ["..."], "errors_count": 1}
  *
  * The status is the exit status as a word: ok (0), different (1), failed
  * (2), incomplete (3), untrusted (4) or busy (5). What each command adds is
@@ -25,8 +26,10 @@
  * changes what one means without a new "schema".
  *
  * Every warning is collected, --quiet or not -- the first RS_RESULT_WARNINGS
- * of them in full -- as are the paths a walk could not read, the first
- * RS_RESULT_UNREADABLE with why.
+ * of them in full -- and every error, the first RS_RESULT_ERRORS in full,
+ * so that a run that failed says why there as well as on standard error; as
+ * are the paths a walk could not read, the first RS_RESULT_UNREADABLE with
+ * why.
  *
  * The file is its owner's alone, as everything restate writes is, unless a
  * group is given (--report-group): then it is that group's to read too.
@@ -42,6 +45,7 @@
 
 #define RS_RESULT_SCHEMA     1
 #define RS_RESULT_WARNINGS   50
+#define RS_RESULT_ERRORS     50
 #define RS_RESULT_UNREADABLE 100
 
 /* Starts collecting for `command`; the clock starts now. */

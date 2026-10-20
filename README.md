@@ -556,6 +556,11 @@ into a file: a line at each change of phase and every two seconds between.
 
 The phases are `count`, `walk`, `write`, `check`, `copy` and `read`; `hook`
 while a hook pauses something, which it names; and `finish` at the end.
+`read_bytes` is what has been read of the files themselves, never what
+restate writes or reads back of its own. `total_bytes` is `null` where there
+is no total; in the walk it is what the count found to read, so it is an
+estimate: a file that grows, or appears, after the count is read all the
+same. Show a percentage of it no higher than 99 until `finish`.
 
 ## Live services
 
@@ -1286,12 +1291,13 @@ into `FILE` when the run ends, replaced whole:
   "unreadable": {"count": 0, "first": []},
   "quiesce": [{"kind": "postgresql", "name": "18-main", "paused_at": "2026-10-20T03:12:40Z",
                "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "message": ""}],
-  "warnings": [], "warnings_count": 0
+  "warnings": [], "warnings_count": 0, "errors": [], "errors_count": 0
 }
 ```
 
-Every warning is collected, `--quiet` or not, and every path a walk could not
-read with why; prune, check, restore (its plan, in a dry run), copy, du,
+Every warning is collected, `--quiet` or not, every error -- so a run that
+failed says why in its result, not only on standard error -- and every path a
+walk could not read with why; prune, check, restore (its plan, in a dry run), copy, du,
 estimate and diff add what they did. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate

@@ -1335,6 +1335,8 @@ contains "$(cat est.json)" '"command": "estimate"' "and in the result"
 expect 2 "a failure, in the result" -- "$BIN" capture -N -r ptree --result fail.json
 contains "$(cat fail.json)" '"status": "failed"' "the status"
 contains "$(cat fail.json)" '"exit": 2' "and the exit status"
+contains "$(cat fail.json)" '"errors": ["capture writes an image to a file' "and why"
+contains "$(cat fail.json)" '"errors_count": 1' "counted"
 
 expect 0 "init a repository for programs" -- "$BIN" init -q prepo
 expect 0 "capture --result --progress-file" -- \

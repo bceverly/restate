@@ -51,6 +51,19 @@ static int warn_twice(const void *arg)
     return 0;
 }
 
+static int error_many(const void *arg)
+{
+    size_t i;
+
+    (void)arg;
+    rs_error("--append-only: %s is not a repository; an image is written whole", "/r");
+    for (i = 1; i < RS_RESULT_ERRORS + 3; i++)
+    {
+        rs_error("error %zu", i);
+    }
+    return 0;
+}
+
 /* A result written to `arg`, for a group there is not unless the path
  * cannot be written at all: 0 if it was refused. */
 static int write_to_group(const void *arg)
@@ -142,6 +155,37 @@ static void collecting(const char *dir)
     CHECK_INT(u64_of(&v, "warnings_count"), RS_RESULT_WARNINGS + 10);
     CHECK_INT(rs_jobject_get(&v, "warnings")->n, RS_RESULT_WARNINGS);
     CHECK_STR(rs_jobject_str(&v, "status"), "ok");
+    rs_jval_free(&v);
+
+    TEST_CASE("result: a run that failed says why, the first errors in full and all counted");
+    rs_result_begin("capture");
+    rs_quiet = true;   /* errors are said all the same */
+    (void)rs_test_capture(error_many, NULL, &out, &errs);
+    rs_quiet = quiet;
+    CHECK_CONTAINS(errs, "restate: --append-only: /r is not a repository");
+    free(out);
+    free(errs);
+    CHECK(rs_result_write(RESTATE_EXIT_TROUBLE, path, NULL));
+    CHECK(read_json(path, &v));
+    CHECK_STR(rs_jobject_str(&v, "status"), "failed");
+    CHECK_INT(u64_of(&v, "errors_count"), RS_RESULT_ERRORS + 3);
+    {
+        const struct rs_jval *e = rs_jobject_get(&v, "errors");
+
+        CHECK(e && e->type == RS_JARRAY && e->n == RS_RESULT_ERRORS);
+        CHECK_STR(e && e->n > 0 ? e->items[0].s : NULL,
+                  "--append-only: /r is not a repository; an image is written whole");
+    }
+    rs_jval_free(&v);
+    /* Once the result is written, errors are no longer collected. */
+    (void)rs_test_capture(error_many, NULL, &out, &errs);
+    free(out);
+    free(errs);
+    rs_result_begin("du");
+    CHECK(rs_result_write(RESTATE_EXIT_OK, path, NULL));
+    CHECK(read_json(path, &v));
+    CHECK_INT(u64_of(&v, "errors_count"), 0);
+    CHECK(rs_jobject_get(&v, "errors") && rs_jobject_get(&v, "errors")->n == 0);
     rs_jval_free(&v);
 
     TEST_CASE("result: readable by a group too, where one is given");

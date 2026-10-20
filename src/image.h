@@ -124,6 +124,10 @@ bool rs_image_member(const struct rs_entry *e, const char *name, uint64_t size,
  * marked unreadable. False only if `tar` could not be written.
  */
 bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, uint64_t size);
+/* Hands what rs_image_copy_file copies to `tap` as well, until it is called
+ * again with NULL: how a scan checks a file against its package in the same
+ * read that stores it. */
+void rs_image_copy_tap(void (*tap)(void *ctx, const void *data, size_t n), void *ctx);
 
 /* Writes the image: the index, then the content. Discards everything on
  * failure, and in every case releases the writer. */

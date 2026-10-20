@@ -54,7 +54,10 @@ bool rs_progress_enabled(void);
  *   {"phase": "walk", "paths": 812, "read_bytes": 1048576, "new_bytes": 4096,
  *    "total_bytes": 9437184, "hook": null, "at": "2026-10-20T03:00:02Z"}
  * -- the phases count, walk, write, check, read and copy, hook while one
- * pauses something, and finish at the end. NULL turns it off.
+ * pauses something, and finish at the end. read_bytes is of the files read,
+ * never of what restate writes or reads back of its own; total_bytes, where
+ * there is one, is an estimate, made by a count before the walk. NULL turns
+ * it off.
  */
 void rs_progress_json(FILE *fp);
 /* Counts bytes new to the repository or image. */

@@ -61,6 +61,8 @@ extern bool rs_quiet;
 /* Called with each warning's text, said or not -- --quiet silences it on
  * standard error, not in a run's result (result.h). NULL by default. */
 extern void (*rs_warn_hook)(const char *msg);
+/* Called with each error's text, as it is said. NULL by default. */
+extern void (*rs_error_hook)(const char *msg);
 void rs_warn(const char *fmt, ...) RESTATE_PRINTF(1, 2);
 void rs_error(const char *fmt, ...) RESTATE_PRINTF(1, 2);
 

@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "image.h"
 #include "md5.h"
 #include "meta.h"
 #include "progress.h"
@@ -417,6 +418,34 @@ static char **list_names(int dirfd, size_t *count, int *err)
     return names;
 }
 
+/* An open regular file handed to the store, and what the copy found said.
+ * False only when the store failed and the scan must stop. */
+static bool keep_from(struct walk *w, int fd, const struct stat *st, struct rs_entry *e)
+{
+    if (!w->opts->store(w->opts->store_ctx, e, fd, st, w->err))
+    {
+        return false;
+    }
+    w->stats->stored++;
+    if (e->hash_state == RS_HASH_PRESENT)
+    {
+        w->stats->bytes_hashed += e->size;
+        if (e->copy == RS_COPY_GREW)
+        {
+            grew(w, e->path);
+        }
+    } else if (e->copy == RS_COPY_SHRANK)
+    {
+        /* Truncated while read: ESTALE's "stale file" is the nearest
+         * the system's own messages come, so say it plainly instead. */
+        unreadable_because(w, e->path, "cut short while it was being copied");
+    } else
+    {
+        unreadable(w, e->path, e->copy_errno ? e->copy_errno : EIO);
+    }
+    return true;
+}
+
 /* A regular file's content: hashed, and handed to the store if it is kept.
  * Returns false only when the store failed and the scan must stop. */
 static bool file_content(struct walk *w, int dirfd, const char *name,
@@ -438,31 +467,10 @@ static bool file_content(struct walk *w, int dirfd, const char *name,
     }
     if (keep)
     {
-        bool ok = w->opts->store(w->opts->store_ctx, e, fd, st, w->err);
+        bool ok = keep_from(w, fd, st, e);
 
         (void)close(fd);
-        if (!ok)
-        {
-            return false;
-        }
-        w->stats->stored++;
-        if (e->hash_state == RS_HASH_PRESENT)
-        {
-            w->stats->bytes_hashed += e->size;
-            if (e->copy == RS_COPY_GREW)
-            {
-                grew(w, e->path);
-            }
-        } else if (e->copy == RS_COPY_SHRANK)
-        {
-            /* Truncated while read: ESTALE's "stale file" is the nearest
-             * the system's own messages come, so say it plainly instead. */
-            unreadable_because(w, e->path, "cut short while it was being copied");
-        } else
-        {
-            unreadable(w, e->path, e->copy_errno ? e->copy_errno : EIO);
-        }
-        return true;
+        return ok;
     }
     if (rs_hash_fd(fd, e->hash, &w->stats->bytes_hashed))
     {
@@ -506,26 +514,97 @@ static void name_package(const struct walk *w, struct rs_entry *e, const struct 
     e->package = rs_xstrndup(pkg, len);
 }
 
+/* The MD5 of what a store copies, and how much of it there was. */
+struct md5_tapped {
+    struct rs_md5 md5;
+    uint64_t      bytes;
+};
+
+static void md5_tap(void *ctx, const void *data, size_t n)
+{
+    struct md5_tapped *t = ctx;
+
+    rs_md5_update(&t->md5, data, n);
+    t->bytes += n;
+}
+
+/* The MD5 of the open file `fd`, read again from its start. */
+static bool md5_again(int fd, unsigned char got[RS_MD5_SIZE])
+{
+    struct rs_md5 md5;
+    unsigned char chunk[65536];
+    ssize_t       n;
+
+    if (lseek(fd, 0, SEEK_SET) != 0)
+    {
+        return false;
+    }
+    rs_md5_init(&md5);
+    while ((n = read(fd, chunk, sizeof(chunk))) != 0)
+    {
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n < 0)
+        {
+            return false;
+        }
+        rs_md5_update(&md5, chunk, (size_t)n);
+        rs_progress_bytes((uint64_t)n);
+    }
+    rs_md5_final(&md5, got);
+    return true;
+}
+
+/* A file whose content has MD5 `got`, classified by the `n` packaged files
+ * at its path: baseline if it is what one of them installed, else state. */
+static void classify_by(struct walk *w, struct rs_entry *e, const struct rs_pkgfile *f,
+                        size_t n, const unsigned char got[RS_MD5_SIZE])
+{
+    const struct rs_pkgfile *match = NULL;
+    size_t                   i;
+
+    for (i = 0; i < n && !match; i++)
+    {
+        if ((f[i].flags & RS_PKGFILE_MD5) && memcmp(f[i].md5, got, RS_MD5_SIZE) == 0)
+        {
+            match = &f[i];
+        }
+    }
+    name_package(w, e, match ? match : with_digest(f, n));
+    if (match)
+    {
+        e->cls = RS_CLASS_BASELINE;
+        w->stats->pkg_unmodified++;
+    } else
+    {
+        e->cls = RS_CLASS_STATE;
+        e->modified = true;
+        w->stats->pkg_modified++;
+    }
+}
+
 /*
  * A regular file checked against the package that installed it, and
- * classified as rs_scan_opts says. True if its content has been dealt with
- * here -- read, and its digest set where the scan hashes -- so file_content
- * need not read it again; false if file_content still has it to do, to keep
- * it or because it was not read here.
+ * classified as rs_scan_opts says -- in one read of it, where it is kept,
+ * whatever it turns out to be. True if its content has been dealt with here
+ * -- read, its digest set where the scan hashes, and kept where it is to be
+ * -- so file_content need not read it again; false if file_content still
+ * has it to do, because it was not read here. A store that fails sets
+ * w->failed.
  */
 static bool check_package(struct walk *w, int dirfd, const char *name,
                           const struct stat *st, struct rs_entry *e)
 {
     const struct rs_pkgfile *f;
     const struct rs_pkgfile *first;
-    const struct rs_pkgfile *match = NULL;
     size_t                   n = rs_pkgdb_lookup(w->opts->pkgdb, e->path, &f);
     struct rs_md5            md5;
     struct rs_sha256         sha;
     unsigned char            got[RS_MD5_SIZE];
     unsigned char            chunk[65536];
     uint64_t                 bytes = 0;
-    size_t                   i;
     int                      fd;
 
     if (n == 0)
@@ -549,6 +628,40 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
     {
         unreadable(w, e->path, errno);
         e->hash_state = RS_HASH_UNREADABLE;
+        return true;
+    }
+    if (w->opts->store && w->opts->store_baseline)
+    {
+        /* Kept whatever it is: compared in the same read that keeps it --
+         * or, from a store that does not copy through rs_image_copy_file,
+         * read again to compare. */
+        struct md5_tapped t;
+        bool              ok;
+
+        rs_md5_init(&t.md5);
+        t.bytes = 0;
+        rs_image_copy_tap(md5_tap, &t);
+        ok = keep_from(w, fd, st, e);
+        rs_image_copy_tap(NULL, NULL);
+        if (!ok)
+        {
+            w->failed = true;
+        } else if (e->hash_state == RS_HASH_PRESENT)
+        {
+            if (t.bytes == (uint64_t)st->st_size)
+            {
+                rs_md5_final(&t.md5, got);
+                classify_by(w, e, f, n, got);
+            } else if (md5_again(fd, got))
+            {
+                classify_by(w, e, f, n, got);
+            } else
+            {
+                unreadable(w, e->path, errno);
+                e->hash_state = RS_HASH_UNREADABLE;
+            }
+        }
+        (void)close(fd);
         return true;
     }
     rs_md5_init(&md5);
@@ -581,28 +694,21 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
         bytes += (uint64_t)got_n;
     }
     rs_md5_final(&md5, got);
-    for (i = 0; i < n && !match; i++)
-    {
-        if ((f[i].flags & RS_PKGFILE_MD5) && memcmp(f[i].md5, got, sizeof(got)) == 0)
-        {
-            match = &f[i];
-        }
-    }
-    name_package(w, e, match ? match : first);
-    if (match)
-    {
-        e->cls = RS_CLASS_BASELINE;
-        w->stats->pkg_unmodified++;
-    } else
-    {
-        e->cls = RS_CLASS_STATE;
-        e->modified = true;
-        w->stats->pkg_modified++;
-    }
+    classify_by(w, e, f, n, got);
     if (storing(w, e))
     {
+        /* Changed from its package, so kept: copied from the descriptor
+         * already open, which the system has just read into its cache,
+         * rather than opened and looked up again. */
+        bool ok = lseek(fd, 0, SEEK_SET) == 0;
+
+        ok = ok && keep_from(w, fd, st, e);
         (void)close(fd);
-        return false;
+        if (!ok)
+        {
+            w->failed = true;
+        }
+        return true;
     }
     if (w->opts->hash)
     {
@@ -830,7 +936,7 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
             }
             checked = checked ||
                       (package_checked(w, type, cls) && check_package(w, dirfd, name, &st, &e));
-            if (!checked && !file_content(w, dirfd, name, &st, &e))
+            if (w->failed || (!checked && !file_content(w, dirfd, name, &st, &e)))
             {
                 w->failed = true;
                 rs_entry_free(&e);

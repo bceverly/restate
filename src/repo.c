@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,11 +87,6 @@ static bool write_all(int fd, const void *data, size_t n)
         n -= (size_t)w;
     }
     return true;
-}
-
-static bool tar_to_fd(void *ctx, const void *data, size_t n)
-{
-    return write_all(*(const int *)ctx, data, n);
 }
 
 static bool to_buf(void *ctx, const void *data, size_t n)
@@ -345,23 +341,27 @@ bool rs_repo_parse_sum(const char *text, size_t len, char hex[RS_SHA256_HEX_SIZE
 
 /* A pack's .sum: what its content's file is as written -- its digest and
  * size -- so that it can be checked whole without decrypting it. */
+static bool put_sum(const char *dir, const char *pack, const char *hex, uint64_t size,
+                    struct rs_buf *err)
+{
+    char *sum = rs_xasprintf("%s/packs/%s.sum", dir, pack);
+    char *text = rs_xasprintf(SUM_FORMAT "sha256 %s\nsize %" PRIu64 "\n", hex, size);
+    bool  ok = replace_file(sum, text, strlen(text), err);
+
+    free(text);
+    free(sum);
+    return ok;
+}
+
+/* The .sum of a pack already written, read whole to make it. */
 static bool write_sum(const char *dir, const char *pack, struct rs_buf *err)
 {
     char    *content = rs_xasprintf("%s/packs/%s.tar.gz", dir, pack);
-    char    *sum = rs_xasprintf("%s/packs/%s.sum", dir, pack);
     char     hex[RS_SHA256_HEX_SIZE];
     uint64_t size = 0;
-    bool     ok = file_digest(content, hex, &size, err);
+    bool     ok = file_digest(content, hex, &size, err) && put_sum(dir, pack, hex, size, err);
 
-    if (ok)
-    {
-        char *text = rs_xasprintf(SUM_FORMAT "sha256 %s\nsize %" PRIu64 "\n", hex, size);
-
-        ok = replace_file(sum, text, strlen(text), err);
-        free(text);
-    }
     free(content);
-    free(sum);
     return ok;
 }
 
@@ -2368,11 +2368,21 @@ void rs_repo_set_pack_size(uint64_t bytes)
     pack_size = bytes ? bytes : RS_REPO_PACK_SIZE;
 }
 
+/*
+ * A pack being written. gzip (and gpg) write it into a pipe, `tap`, rather
+ * than into the file: restate reads the pipe into the file, digesting what it
+ * writes as it goes, so the pack's .sum needs no second read of the whole of
+ * it -- which, over NFS, would be as much I/O again as writing it.
+ */
 struct pack_out {
     bool                 open;
     char                *name;   /* without ".tar.gz" */
     char                *tmp;    /* its content, until it is complete */
     int                  fd;
+    int                  tap;    /* what gzip or gpg writes; -1 at its end */
+    int                  write_errno; /* the first write into `fd` that failed */
+    struct rs_sha256     sha;    /* of what is written into `fd` */
+    uint64_t             written;
     struct zout          z;
     struct rs_tar_writer tar;
     struct rs_buf        idx;
@@ -2418,8 +2428,131 @@ static char *pack_name(const struct rs_repo *r)
     }
 }
 
+/*
+ * What gzip or gpg has written so far, into the pack's file and its digest:
+ * all there is now, or, if `to_end`, all until they close it. False once it
+ * is at its end. A write into the file that fails is remembered, and the
+ * rest read all the same, so that gzip is never left blocked on a full pipe.
+ */
+static bool pack_take(struct pack_out *pk, bool to_end)
+{
+    unsigned char chunk[65536];
+
+    while (pk->tap >= 0)
+    {
+        ssize_t n = read(pk->tap, chunk, sizeof(chunk));
+
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n < 0 && errno == EAGAIN && to_end)
+        {
+            struct pollfd fd = { pk->tap, POLLIN, 0 };
+
+            (void)poll(&fd, 1, -1);
+            continue;
+        }
+        if (n < 0 && errno == EAGAIN)
+        {
+            return true;
+        }
+        if (n <= 0)
+        {
+            if (n < 0 && pk->write_errno == 0)
+            {
+                pk->write_errno = errno;
+            }
+            (void)close(pk->tap);
+            pk->tap = -1;
+            break;
+        }
+        rs_sha256_update(&pk->sha, chunk, (size_t)n);
+        pk->written += (uint64_t)n;
+        if (pk->write_errno == 0 && !write_all(pk->fd, chunk, (size_t)n))
+        {
+            pk->write_errno = errno;
+        }
+    }
+    return false;
+}
+
+/* The tar writer's output, into gzip -- taking what gzip has written while
+ * waiting for room, as neither can wait on the other. */
+static bool pack_feed(void *ctx, const void *data, size_t n)
+{
+    struct pack_out *pk = ctx;
+    const char      *p = data;
+
+    while (n > 0)
+    {
+        struct pollfd fds[2];
+        nfds_t        nfds = 1;
+        ssize_t       w;
+
+        fds[0].fd = pk->z.fd;
+        fds[0].events = POLLOUT;
+        fds[0].revents = 0;
+        if (pk->tap >= 0)
+        {
+            fds[1].fd = pk->tap;
+            fds[1].events = POLLIN;
+            fds[1].revents = 0;
+            nfds = 2;
+        }
+        if (poll(fds, nfds, -1) < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        if (nfds == 2 && fds[1].revents != 0)
+        {
+            (void)pack_take(pk, false);
+        }
+        if (fds[0].revents == 0)
+        {
+            continue;
+        }
+        w = write(pk->z.fd, p, n);
+        if (w < 0 && (errno == EAGAIN || errno == EINTR))
+        {
+            continue;
+        }
+        if (w < 0)
+        {
+            return false;
+        }
+        p += w;
+        n -= (size_t)w;
+    }
+    return true;
+}
+
+/* The pipe gzip or gpg writes the pack into, read by pack_take. */
+static bool pack_pipe(int p[2], struct rs_buf *err)
+{
+    int i;
+
+    if (pipe(p) < 0)
+    {
+        rs_buf_addf(err, "pipe: %s", strerror(errno));
+        return false;
+    }
+    for (i = 0; i < 2; i++)
+    {
+        (void)fcntl(p[i], F_SETFD, FD_CLOEXEC);
+    }
+    (void)fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+    return true;
+}
+
 static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err)
 {
+    int p[2];
+
     memset(pk, 0, sizeof(*pk));
     pk->name = pack_name(r);
     pk->tmp = rs_xasprintf("%s/packs/.%s.tar.gz.tmp", r->dir, pk->name);
@@ -2432,7 +2565,7 @@ static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err
         memset(pk, 0, sizeof(*pk));
         return false;
     }
-    if (!zout_open(&pk->z, pk->fd, true, r->recips, seal_n(r), err))
+    if (!pack_pipe(p, err))
     {
         (void)close(pk->fd);
         (void)unlink(pk->tmp);
@@ -2441,7 +2574,23 @@ static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err
         memset(pk, 0, sizeof(*pk));
         return false;
     }
-    rs_tar_writer_init(&pk->tar, tar_to_fd, &pk->z.fd);
+    if (!zout_open(&pk->z, p[1], true, r->recips, seal_n(r), err))
+    {
+        (void)close(p[0]);
+        (void)close(p[1]);
+        (void)close(pk->fd);
+        (void)unlink(pk->tmp);
+        free(pk->name);
+        free(pk->tmp);
+        memset(pk, 0, sizeof(*pk));
+        return false;
+    }
+    /* gzip or gpg has the pipe now: with our copy closed, its end is theirs. */
+    (void)close(p[1]);
+    pk->tap = p[0];
+    rs_sha256_init(&pk->sha);
+    (void)fcntl(pk->z.fd, F_SETFL, fcntl(pk->z.fd, F_GETFL) | O_NONBLOCK);
+    rs_tar_writer_init(&pk->tar, pack_feed, pk);
     rs_buf_init(&pk->idx);
     rs_buf_addstr(&pk->idx, PACK_FORMAT);
     pk->open = true;
@@ -2455,6 +2604,13 @@ static void pack_discard(struct pack_out *pk)
     if (!pk->open)
     {
         return;
+    }
+    /* Closed first, so that gzip or gpg, writing, is stopped rather than
+     * left blocked on a pipe nobody reads. */
+    if (pk->tap >= 0)
+    {
+        (void)close(pk->tap);
+        pk->tap = -1;
     }
     rs_buf_init(&ignore);
     (void)zout_close(&pk->z, true, &ignore);
@@ -2475,11 +2631,32 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
     char *idx = rs_xasprintf("%s/packs/.%s.idx.tmp", r->dir, pk->name);
     char *idx_final = rs_xasprintf("%s/packs/%s.idx", r->dir, pk->name);
     bool  ok = rs_tar_finish(&pk->tar);
+    char  hex[RS_SHA256_HEX_SIZE];
 
+    if (ok)
+    {
+        /* The end of gzip's input; then the rest of what it writes, to its
+         * end, before waiting for it -- which would otherwise wait forever on
+         * a gzip blocked writing into a full pipe. */
+        (void)close(pk->z.fd);
+        pk->z.gz.fd = -1;
+        pk->z.fd = -1;
+        (void)pack_take(pk, true);
+    } else if (pk->tap >= 0)
+    {
+        (void)close(pk->tap);
+        pk->tap = -1;
+    }
     if (!zout_close(&pk->z, !ok, err))
     {
         ok = false;
     }
+    if (ok && pk->write_errno != 0)
+    {
+        rs_buf_addf(err, "%s: %s", pk->tmp, strerror(pk->write_errno));
+        ok = false;
+    }
+    rs_sha256_final(&pk->sha, hex);
     if (ok && fsync(pk->fd) != 0)
     {
         ok = false;
@@ -2498,7 +2675,7 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
         ok = false;
     }
     /* Its .sum before its .idx: a pack that counts has one. */
-    ok = ok && write_sum(r->dir, pk->name, err);
+    ok = ok && put_sum(r->dir, pk->name, hex, pk->written, err);
     ok = ok && write_out(idx, pk->idx.data, pk->idx.len, false, r->recips, seal_n(r), err);
     if (ok && rename(idx, idx_final) != 0)
     {
@@ -6011,15 +6188,22 @@ bool rs_repo_record_update(struct rs_repo *r, const char *record, struct rs_buf 
     memset(&cur, 0, sizeof(cur));
     list_packs(r);
     /* A pack's content never changes under its name: what the record had
-     * for it stands. Only what prune wrote is new. */
+     * for it stands. One new since -- a capture's, or what prune wrote -- is
+     * recorded as its .sum says it was written, rather than read whole for
+     * it: a check reads it against both, and says if it is not that. */
     for (i = 0; r->packs && i < r->npacks; i++)
     {
         char                              *rel = rs_xasprintf("packs/%s.tar.gz", r->packs[i]);
         const struct rs_repo_record_entry *e = record_find(&old, rel);
+        char                               hex[RS_SHA256_HEX_SIZE];
+        uint64_t                           size = 0;
 
         if (e)
         {
             record_add(&cur, rel, e->hash, e->size);
+        } else if (read_sum(r->dir, r->packs[i], hex, &size))
+        {
+            record_add(&cur, rel, hex, size);
         } else
         {
             record_file(r, &cur, rel);
