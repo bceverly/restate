@@ -13,9 +13,11 @@ Thank you. A few things make a change easy to take.
 make install-dev    # compilers, analyzers, valgrind, fuzzing tools, git hooks
 ```
 
-The pre-commit hook runs `make lint` and refuses a commit if anything fails
-*or is skipped* — a scanner that is not installed passes by doing nothing,
-which proves nothing.
+Commits are not checked: commit as often as you like, work in progress
+included. A push is. The pre-push hook refuses one unless `make test`,
+`make lint` and `make security` have each passed on exactly what is pushed
+*with nothing skipped* — a scanner that is not installed passes by doing
+nothing, which proves nothing.
 
 `make test`, `make lint` and `make security` each record, in `.passed/`, the
 content they passed on — only when they pass with nothing skipped, and the
@@ -24,12 +26,11 @@ timestamps: touching a file changes nothing, editing one does. A check run by
 hand therefore counts, and nothing that has passed on exactly these files is
 run on them again:
 
-- the pre-commit hook skips lint that has passed on them;
 - `make check` runs whichever of test, lint and security has not;
 - the pre-push hook runs nothing — GitHub drops a push whose hook runs for
   minutes — but refuses a commit whose files all three have not passed on.
-  A commit made with the pre-commit hook bypassed, or a file edited after the
-  checks, is caught before it leaves the machine.
+  A file edited after the checks, or left out of the commit, is caught
+  before it leaves the machine.
 
 The tests' record ignores the prose (`*.md`, `docs/`), which no test reads;
 lint's and the security scan's cover everything. None of them counts the
@@ -41,7 +42,7 @@ The hooks are copies in `.git/hooks/`, so a change to `.githooks/` does nothing
 until `make install-hooks` runs again. `make check`, and so `make release`,
 installs them first whenever they differ.
 
-`RESTATE_SKIP_HOOK=1` bypasses either hook, for the rare honest reason.
+`RESTATE_SKIP_HOOK=1` bypasses the hook, for the rare honest reason.
 
 ## The bar
 
@@ -66,7 +67,7 @@ installs them first whenever they differ.
 ## House style
 
 The C is written in the style of [tmd](https://github.com/bceverly/tmd), and
-`make style` (part of `make lint`, so the pre-commit hook runs it) checks it:
+`make style` (part of `make lint`, so a push needs it) checks it:
 
 - Four spaces a level, never a tab. `case` and `default` sit at the column of
   their `switch`.

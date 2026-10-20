@@ -90,9 +90,9 @@ fi
 # `VERSION := $(shell scripts/version.sh)`, the string compiled into the binary,
 # and an override replaces it. So the rebuild further down stamped a bare
 # "1.2.3.4" instead of the "1.2.3.4-dev" this tree actually builds (the bump is
-# not committed and the tag does not exist yet), and then the pre-commit hook's
-# `make lint` — which derives the version for itself and so was never fooled —
-# refused to commit the release it had just prepared. A plain `make release`
+# not committed and the tag does not exist yet), and then `make lint` — which
+# derives the version for itself and so was never fooled — refused the release
+# it had just prepared. A plain `make release`
 # never hit it, because there was no override to propagate.
 #
 # The argument has been read by the time the next line runs, so the make
@@ -225,7 +225,7 @@ ok "man/restate.8 names $NEXT"
 
 # And check what `make lint` is about to check, with the same comparison, so the
 # two can never disagree. Catching a mismatch here names it plainly; catching it
-# in the pre-commit hook aborts a release that is already half prepared.
+# in `make check` below aborts a release that is already half prepared.
 EXPECTED="$(scripts/version.sh)"
 [ "$BUILT" = "$EXPECTED" ] || die "The rebuilt binary reports $BUILT, but this
        tree builds $EXPECTED — 'make lint' would reject the commit. Nothing was
@@ -248,9 +248,8 @@ git remote get-url origin > /dev/null 2>&1 \
 # `make check` -- test, lint and security, what the pre-push hook holds every
 # push to -- on the files about to be committed, before anything is committed
 # or pushed, so a failure leaves nothing done. Each records what it passed on:
-# the commit below is exactly those files, so the pre-commit hook does not
-# lint it again and the pre-push hook lets it through without running
-# anything.
+# the commit below is exactly those files, so the pre-push hook lets it
+# through without running anything.
 bold "Checking"
 make --no-print-directory check < /dev/null \
   || die "make check failed; nothing was committed or pushed."

@@ -1569,9 +1569,33 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
     return st->unreadable + st->pause_failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
+/* The keys to encrypt to can be read, and gpg is there to use them. */
+static bool recipients_usable(const struct rs_options *o)
+{
+    size_t k;
+
+    if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
+    {
+        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
+        return false;
+    }
+    for (k = 0; k < o->nrecipients; k++)
+    {
+        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
+            return false;
+        }
+        (void)close(fd);
+    }
+    return true;
+}
+
 /* What a capture did, in its result. */
 static void capture_result(const struct rs_options *o, const struct rs_scan_stats *st,
-                           const char *where, uint64_t new_bytes)
+                           const char *where, uint64_t new_bytes, bool created)
 {
     struct rs_jval *res = rs_result();
     struct rs_jval *by;
@@ -1582,6 +1606,7 @@ static void capture_result(const struct rs_options *o, const struct rs_scan_stat
         return;
     }
     rs_jobj_str(res, repo ? "repository" : "image", o->output);
+    rs_jobj_bool(res, "created_repository", created);
     rs_jobj_str(res, "snapshot", where);
     rs_jobj_u64(res, "paths", st->recorded);
     rs_jobj_u64(res, "kept", st->stored);
@@ -1633,6 +1658,7 @@ int rs_cmd_capture(const struct rs_options *o)
     int                  lock = -1;
     int                  status;
     bool                 busy = false;
+    bool                 created = false;
 
     memset(&st, 0, sizeof(st));
     if (!o->output || strcmp(o->output, "-") == 0)
@@ -1650,6 +1676,31 @@ int rs_cmd_capture(const struct rs_options *o)
     }
     /* Before the scan, which can take a long time to find out at the end. */
     status = RESTATE_EXIT_OK;
+    if (o->create && !rs_repo_is(o->output))
+    {
+        struct rs_buf err;
+
+        /* Only new files, in a directory with nothing else in it: an
+         * --append-only capture can make its repository too. */
+        rs_buf_init(&err);
+        if (!recipients_usable(o))
+        {
+            status = RESTATE_EXIT_TROUBLE;
+        } else if (!rs_repo_init(o->output, o->nrecipients > 0, &err))
+        {
+            rs_error("--create: %s", err.data);
+            status = RESTATE_EXIT_TROUBLE;
+        } else
+        {
+            created = true;
+            if (!o->quiet)
+            {
+                (void)fprintf(stderr, "restate: made the %srepository %s\n",
+                              o->nrecipients > 0 ? "encrypted " : "", o->output);
+            }
+        }
+        rs_buf_free(&err);
+    }
     if (o->nrecipients == 0 && rs_repo_is(o->output) && rs_repo_dir_encrypted(o->output))
     {
         rs_error("%s is an encrypted repository: give the public keys to encrypt to with "
@@ -1708,7 +1759,7 @@ int rs_cmd_capture(const struct rs_options *o)
     {
         (void)close(lock);
     }
-    capture_result(o, &st, where, new_bytes);
+    capture_result(o, &st, where, new_bytes, created);
     log_outcome(o, status, began, "output=%s paths=%" PRIu64 " kept=%" PRIu64 " read=%" PRIu64
                 " reused=%" PRIu64 " unreadable=%" PRIu64, where ? where : o->output,
                 st.recorded, st.stored, st.bytes_hashed, st.reused, st.unreadable);
@@ -1719,30 +1770,6 @@ int rs_cmd_capture(const struct rs_options *o)
 /* ------------------------------------------------------------------------- */
 /* Repositories                                                              */
 /* ------------------------------------------------------------------------- */
-
-/* The keys to encrypt to can be read, and gpg is there to use them. */
-static bool recipients_usable(const struct rs_options *o)
-{
-    size_t k;
-
-    if (o->nrecipients > 0 && !rs_program_path(RS_PROG_GPG))
-    {
-        rs_error("--encrypt-to needs gpg, which is not installed (or not owned by root)");
-        return false;
-    }
-    for (k = 0; k < o->nrecipients; k++)
-    {
-        int fd = open(o->recipients[k], O_RDONLY | O_CLOEXEC);
-
-        if (fd < 0)
-        {
-            rs_error("--encrypt-to %s: %s", o->recipients[k], strerror(errno));
-            return false;
-        }
-        (void)close(fd);
-    }
-    return true;
-}
 
 int rs_cmd_init(const struct rs_options *o)
 {

@@ -493,6 +493,34 @@ void test_live(void)
             rs_live_free(l, n);
             rs_test_rmtree(proc2);
         }
+        /* A device, a symlink and a file that is not there are not read --
+         * a device not even opened to be read, which can do something. */
+        {
+            static const char *const not_read[] = { "/dev/null", "link.conf", "gone.conf" };
+            char                    *link = rs_xasprintf("%s/link.conf", dir);
+            size_t                   i;
+
+            CHECK(symlink(d, link) == 0);
+            free(link);
+            for (i = 0; i < sizeof(not_read) / sizeof(not_read[0]); i++)
+            {
+                const struct rs_live *mo;
+                char                 *c = not_read[i][0] == '/'
+                                              ? rs_xstrdup(not_read[i])
+                                              : rs_xasprintf("%s/%s", dir, not_read[i]);
+
+                mkdirs(dir, "proc2");
+                args(&cmd, "/usr/bin/mongod", "--config", c);
+                process(proc2, 10, 1, (unsigned)getuid(), "mongod", cmd.data, cmd.len);
+                rs_buf_free(&cmd);
+                rs_live_detect(proc2, &l, &n);
+                mo = find(l, n, "mongodb", "mongod");
+                CHECK(!mo || mo->npaths == 0 || strcmp(mo->paths[0], want) != 0);
+                rs_live_free(l, n);
+                rs_test_rmtree(proc2);
+                free(c);
+            }
+        }
         free(want);
         free(d);
         free(conf);

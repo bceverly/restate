@@ -418,6 +418,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_APPEND_ONLY:
             o->append_only = true;
             break;
+        case OPT_CREATE:
+            o->create = true;
+            break;
         case OPT_RESULT:
             o->result = optarg;
             break;

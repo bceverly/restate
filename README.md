@@ -397,6 +397,11 @@ Options:
       --append-only       capture: into a repository only by adding files,
                           never changing one already there; refused where that
                           cannot be done (see STORAGE)
+      --create            capture: make -o a repository first if it is not one
+                          -- a directory not there yet (its parent must be), or
+                          an empty one -- as restate init would, encrypted with
+                          --encrypt-to; one with anything else in it is
+                          refused, and nothing is written
       --syslog            capture, prune, check, copy: say how the run ended in
                           the system log too, as one line of key=value pairs a
                           monitoring system can match on
@@ -1198,6 +1203,14 @@ restate du /srv/restate/web01
   taken over -- that machine is root, and has the share -- so the NAS has to:
   with a ZFS snapshot after each capture, or by making what each capture
   wrote immutable.
+- **A machine can make its own repository.** `capture --create` (a job's
+  `create = true`) makes the repository first where there is none: a
+  directory not there yet, under a parent that is, or an empty one -- as
+  `restate init` would, encrypted with `--encrypt-to`. It is the machine's
+  own, so over a share that maps it to one user, that user owns it. A
+  directory with anything else in it is refused, with nothing written; a
+  repository already there is captured into as ever, and the result says
+  which with `"created_repository"`.
 - **Checked without the keys.** Each pack's `.sum` is the digest of its file
   as written, and each snapshot's `packs` file the packs it needs; neither
   is encrypted, and neither says anything of what is in them. `check
@@ -1235,6 +1248,7 @@ quiesce      = true
 quiesce_with = unifi
 encrypt_to   = /etc/restate/keys/backup.asc
 append_only  = true
+create       = true
 result       = /var/lib/restate/nightly.json
 progress     = /var/lib/restate/nightly.progress
 report_group = restate-report
@@ -1264,7 +1278,7 @@ into `FILE` when the run ends, replaced whole:
 {
   "schema": 1, "command": "capture", "status": "ok", "exit": 0,
   "started_at": "2026-10-20T03:00:00Z", "seconds": 812,
-  "repository": "/mnt/nas/restate/web01",
+  "repository": "/mnt/nas/restate/web01", "created_repository": false,
   "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
   "paths": 821158, "kept": 455640, "read_bytes": 2254857216,
   "reused": 454431, "reused_bytes": 167503724544, "new_bytes": 431996928,
@@ -1635,7 +1649,7 @@ make lucky13         # MITRE's thirteen unforgivable vulnerability classes, one 
 the CERT C rules, the clang static analyzer, flawfinder, semgrep, the
 sanitizers, a fuzz run, gitleaks over the whole history, MITRE's "Lucky 13",
 and confirms the binary links nothing beyond libc. `gcc -fanalyzer` runs in
-`make lint`, at every commit. CodeQL (`security-extended`) and the OpenSSF
+`make lint`, which every push needs. CodeQL (`security-extended`) and the OpenSSF
 Scorecard run in CI.
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report a

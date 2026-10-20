@@ -1455,6 +1455,22 @@ machine is root, and has the share \- so the storage has to: by taking a
 filesystem snapshot after each capture (ZFS's), or by marking what each
 capture wrote immutable.
 .PP
+.B A machine makes its own.
+.B capture \-\-create
+(a job's
+.BR "create = true" )
+makes the repository first where there is none: a directory not there yet,
+under a parent that is, or an empty one \- as
+.B restate init
+would, encrypted with
+.BR \-\-encrypt\-to .
+Made by the machine, it is the machine's: over a share that maps it to one
+user, that user owns it. A directory with anything else in it is refused, and
+nothing is written; a repository already there is captured into as ever, and
+the result's
+.B created_repository
+says which.
+.PP
 .B Checking without the keys.
 Each pack's
 .I .sum
@@ -1605,7 +1621,7 @@ capture and estimate, and restore: the tree.
 .BR rules " (repeatable), " all ", " baseline_content ", " one_file_system
 capture, estimate (rules for restore too).
 .TP
-.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " sign_with ", " tmpdir
+.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " create ", " sign_with ", " tmpdir
 capture.
 .TP
 .BR encrypt_to " (repeatable)"
@@ -1683,7 +1699,7 @@ this run's whole result or the last one's:
 .nf
 {"schema": 1, "command": "capture", "status": "incomplete", "exit": 3,
  "started_at": "2026\-10\-20T03:00:00Z", "seconds": 812,
- "repository": "/mnt/nas/restate/web01",
+ "repository": "/mnt/nas/restate/web01", "created_repository": false,
  "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
  "paths": 812345, "kept": 20311, "read_bytes": 1048576, "reused": 811902,
  "reused_bytes": 9876543210, "new_bytes": 4096, "repository_bytes": 123456789,

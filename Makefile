@@ -271,7 +271,7 @@ man-check: build ## Fail if the committed manpage or README Usage block is out o
 	@scripts/gen-readme-usage.sh --check ./$(BIN_DIR)/$(PROG) README.md
 
 .PHONY: install-hooks
-install-hooks: ## Install the git pre-commit (lint) and pre-push (make check passed) hooks
+install-hooks: ## Install the git pre-push hook (make check passed on what is pushed)
 	@scripts/install-hooks.sh
 
 ##@ Installing

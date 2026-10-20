@@ -71,6 +71,7 @@ enum key_id {
     KEY_TRUSTED_KEY,
     KEY_ALLOW_UNVERIFIED,
     KEY_APPEND_ONLY,
+    KEY_CREATE,
     KEY_KEEP_LAST,
     KEY_KEEP_DAILY,
     KEY_KEEP_WEEKLY,
@@ -114,6 +115,7 @@ static const struct key {
     [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true, J_RESTORE | J_CHECK },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
+    [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
     [KEY_KEEP_LAST] = { "keep_last", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_DAILY] = { "keep_daily", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_WEEKLY] = { "keep_weekly", K_COUNT, false, J_PRUNE },
@@ -423,6 +425,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     case KEY_APPEND_ONLY:
         o->append_only = b;
         break;
+    case KEY_CREATE:
+        o->create = b;
+        break;
     case KEY_KEEP_LAST:
         o->keep_last = u;
         break;
@@ -707,7 +712,7 @@ static bool only_reporting(const struct rs_options *o)
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
                 o->as || o->clones || o->read_all || o->metadata_only || o->record ||
-                o->whole_packs || o->nquiesce_with || o->append_only || o->json ||
+                o->whole_packs || o->nquiesce_with || o->append_only || o->create || o->json ||
                 o->nincludes || o->tmpdir || o->one_fs || o->no_hash;
 
     return !said;

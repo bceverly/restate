@@ -40,6 +40,12 @@ if [ -d .git ]; then
     [ -f "$hook" ] || continue
     cmp -s "$hook" ".git/hooks/$(basename "$hook")" || STALE_HOOKS+=("$(basename "$hook")")
   done
+  # And one of ours that .githooks/ no longer has, which git would still run.
+  for hook in .git/hooks/*; do
+    [ -f "$hook" ] && [ ! -e ".githooks/$(basename "$hook")" ] || continue
+    grep -qF "# restate — installed by scripts/install-hooks.sh" "$hook" 2>/dev/null \
+      && STALE_HOOKS+=("$(basename "$hook")")
+  done
 fi
 if [ "${#STALE_HOOKS[@]}" -gt 0 ]; then
   printf '\n\033[1;95m■ the git hooks\033[0m\n'

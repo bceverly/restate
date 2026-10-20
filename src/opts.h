@@ -52,6 +52,7 @@ enum {
     OPT_READ_ALL,
     OPT_QUIESCE_WITH,
     OPT_APPEND_ONLY,
+    OPT_CREATE,
     OPT_RESULT,
     OPT_REPORT_GROUP,
     OPT_JSON,
@@ -125,6 +126,7 @@ struct rs_options {
     const char    **quiesce_with;   /* --quiesce-with NAME, each */
     size_t          nquiesce_with;
     bool            append_only;    /* capture: add files only */
+    bool            create;         /* capture: init the repository if need be */
     const char     *result;         /* --result FILE */
     const char     *report_group;   /* --report-group GROUP */
     bool            json;           /* --json */

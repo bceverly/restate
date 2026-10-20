@@ -186,28 +186,67 @@ static char *slurp(const char *path, size_t max, size_t *len)
     return rs_buf_detach(&b);
 }
 
+/* Whether `st` is a regular file the user `uid` could read: its owner's,
+ * with the owner's read bit, or anyone's readable by all -- or any, for root. */
+static bool readable_by(const struct stat *st, unsigned long uid)
+{
+    return S_ISREG(st->st_mode) &&
+           (uid == 0 || (st->st_uid == uid && (st->st_mode & S_IRUSR)) || (st->st_mode & S_IROTH));
+}
+
 /*
  * A file a process's command line names, read only if that process's own
- * user could read it: its owner's, with the owner's read bit, or anyone's
- * readable by all -- or whatever it is, for a process run as root. Its
- * command line is any user's to write, and restate runs as root: without
- * this, `mongod --config /etc/shadow` would have restate read the file
- * for them.
+ * user could read it (readable_by). Its command line is any user's to write,
+ * and restate runs as root: without this, `mongod --config /etc/shadow`
+ * would have restate read the file for them.
+ *
+ * And looked at before it is opened to be read, not only after: opening a
+ * device can do something -- rewind a tape, raise a serial line -- so
+ * `--config /dev/nst0` must not have root open it. On Linux an O_PATH
+ * descriptor is looked at and then opened again through /proc/self/fd, the
+ * same file whatever happens to the path between; elsewhere lstat comes
+ * first, and fstat makes sure the file opened is the one it looked at.
  */
 static char *slurp_as(const char *path, unsigned long uid, size_t max)
 {
     struct rs_buf b;
     struct stat   st;
+    struct stat   was;
     char          chunk[4096];
     ssize_t       n;
-    int           fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int           fd;
 
+#if defined(O_PATH) && defined(__linux__)
+    {
+        int   pfd = open(path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+        char *again;
+
+        if (pfd < 0 || fstat(pfd, &was) != 0 || !readable_by(&was, uid))
+        {
+            if (pfd >= 0)
+            {
+                (void)close(pfd);
+            }
+            return NULL;
+        }
+        again = rs_xasprintf("/proc/self/fd/%d", pfd);
+        fd = open(again, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        free(again);
+        (void)close(pfd);
+    }
+#else
+    if (lstat(path, &was) != 0 || !readable_by(&was, uid))
+    {
+        return NULL;
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+#endif
     if (fd < 0)
     {
         return NULL;
     }
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        !(uid == 0 || (st.st_uid == uid && (st.st_mode & S_IRUSR)) || (st.st_mode & S_IROTH)))
+    if (fstat(fd, &st) != 0 || st.st_dev != was.st_dev || st.st_ino != was.st_ino ||
+        !readable_by(&st, uid))
     {
         (void)close(fd);
         return NULL;

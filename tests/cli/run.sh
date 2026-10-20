@@ -1041,6 +1041,14 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "init an encrypted repository" -- "$BIN" init --encrypt-to enc.pub erepo
   contains "$ERR" "made the encrypted repository erepo" "says it is encrypted"
   expect 2 "init --encrypt-to a key that is not there" -- "$BIN" init --encrypt-to no-such.pub erepo2
+  expect 0 "capture --create --encrypt-to" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o ecrepo --create
+  contains "$ERR" "made the encrypted repository ecrepo" "makes an encrypted one"
+  check "encrypted, as init would make it" sh -c '! gzip -t ecrepo/snapshots/*/index.json.gz 2> /dev/null'
+  expect 2 "capture --create --encrypt-to a key that is not there" -- \
+    "$BIN" capture -r rtree --os=linux --encrypt-to no-such.pub -o ecrepo2 --create
+  check "makes nothing" test ! -e ecrepo2
   expect 2 "capture into it with no keys" -- "$BIN" capture -r rtree --os=linux -o erepo
   contains "$ERR" "is an encrypted repository: give the public keys" "is refused, saying why"
   expect 0 "capture into it" -- \
@@ -1349,6 +1357,28 @@ expect 2 "--progress=something else" -- "$BIN" capture -N -r ptree -o prepo --pr
 expect 0 "capture --append-only" -- "$BIN" capture -N -r ptree -q -o prepo --append-only
 expect 2 "capture --append-only into an image" -- "$BIN" capture -N -r ptree -o pa.tar --append-only
 contains "$ERR" "an image is written whole" "is refused"
+expect 0 "capture --create, where there is no repository" -- \
+  "$BIN" capture -N -r ptree -q -o newrepo --create --result cr1.json
+check "makes one" test -f newrepo/restate-repository
+check "its owner's alone" test "$(file_mode newrepo)" = 700
+contains "$(cat cr1.json)" '"created_repository": true' "and says so in the result"
+contains "$(cat cr1.json)" '"snapshot": "' "and captures into it"
+expect 0 "capture --create, where there is one" -- \
+  "$BIN" capture -N -r ptree -q -o newrepo --create --result cr2.json
+contains "$(cat cr2.json)" '"created_repository": false' "makes nothing"
+mkdir -m 700 cempty
+expect 0 "capture --create --append-only into an empty directory" -- \
+  "$BIN" capture -N -r ptree -q -o cempty --create --append-only
+check "makes one there" test -f cempty/restate-repository
+mkdir cfull
+printf 'mine\n' > cfull/notes
+expect 2 "capture --create into a directory with something else in it" -- \
+  "$BIN" capture -N -r ptree -q -o cfull --create
+contains "$ERR" "--create: " "is refused"
+check "and writes nothing there" test "$(ls -A cfull)" = notes
+expect 2 "capture --create where the parent is not there" -- \
+  "$BIN" capture -N -r ptree -q -o cnone/repo --create
+check "makes no parent" test ! -e cnone
 expect 0 "capture --tmpdir" -- "$BIN" capture -N -r ptree -q -o pt.tar --tmpdir "$WORK/pstage"
 check "nothing is left where it was staged" rmdir pstage
 
@@ -1437,6 +1467,12 @@ printf 'command = capture\nrepository = %s/prepo\nroot = %s/ptree\nrules = %s/no
   "$WORK" "$WORK" "$WORK" > jobs/cap.conf
 chmod 644 jobs/cap.conf
 expect 2 "run a capture job whose rules are not there" -- "$BIN" run "$WORK/jobs/cap.conf"
+printf 'command = capture\nrepository = %s/jrepo\nroot = %s/ptree\ncreate = true\nresult = %s/jcr.json\n' \
+  "$WORK" "$WORK" "$WORK" > jobs/create.conf
+chmod 644 jobs/create.conf
+expect 0 "run a capture job that makes its repository" -- "$BIN" run -q "$WORK/jobs/create.conf"
+check "makes it" test -f jrepo/restate-repository
+contains "$(cat jcr.json)" '"created_repository": true' "and says so in the result"
 
 # ---------------------------------------------------------------------------
 # classify and rules

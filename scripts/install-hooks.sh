@@ -13,6 +13,10 @@
 #
 # A hook that is already there and is not ours is left alone: someone else's
 # pre-push is theirs, and silently replacing it is not this script's business.
+# One that is ours and that .githooks/ no longer has is removed: the
+# pre-commit hook, which linted every commit, is gone -- commits are save
+# points, and the pre-push hook holds what is pushed -- and a copy left in
+# .git/hooks/ would go on running.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +59,15 @@ for source in "$SOURCE_DIR"/*; do
   chmod +x "$target"
   installed=$((installed + 1))
   ok "$name"
+done
+
+for target in "$TARGET_DIR"/*; do
+  [ -f "$target" ] || continue
+  name="$(basename "$target")"
+  if [ ! -e "$SOURCE_DIR/$name" ] && grep -qF "$MARKER" "$target" 2>/dev/null; then
+    rm -f "$target"
+    ok "$name removed: restate no longer has it"
+  fi
 done
 
 if [ "$installed" -eq 0 ]; then
