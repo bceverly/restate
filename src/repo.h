@@ -104,7 +104,11 @@ enum rs_repo_lock {
     RS_REPO_LOOK = 0,   /* the index and the list of snapshots only */
     RS_REPO_READ,
     RS_REPO_WRITE,
-    RS_REPO_PRUNE
+    RS_REPO_PRUNE,
+    /* As RS_REPO_WRITE, for capture --append-only: refused where adding a
+     * snapshot would mean changing a file already there (making a version 1
+     * repository version 2). A capture otherwise only ever adds files. */
+    RS_REPO_APPEND
 };
 
 struct rs_repo;
@@ -256,14 +260,80 @@ struct rs_repo_pruned {
 
 /* Drops the snapshots `keep` does not keep, then the content no remaining
  * one refers to; with `dry_run`, only says which. A pack whose .idx cannot
- * be read stops it removing any content. */
+ * be read stops it removing any content. It writes each remaining snapshot's
+ * pack list again, and a .sum for each pack that has none. */
 bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
                    struct rs_repo_pruned *out, struct rs_buf *err);
+/*
+ * The same without reading any index -- so without the secret key of an
+ * encrypted repository, or this machine's cache of it: the snapshots are
+ * dropped, and then each pack that no snapshot left lists in its pack list,
+ * whole. A pack only partly needed is kept as it is. Refused, with nothing
+ * removed, if a snapshot that is kept has no pack list.
+ */
+bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
+                         struct rs_repo_pruned *out, struct rs_buf *err);
 void rs_repo_pruned_free(struct rs_repo_pruned *p);
+
+/* ------------------------------------------------------------------------- */
+/* Usage, and copying                                                        */
+/* ------------------------------------------------------------------------- */
+
+struct rs_repo_snapshot_usage {
+    char    *name;
+    bool     listed;         /* it has a pack list; without one, nothing below is known */
+    uint64_t bytes;          /* the packs it needs, on disk */
+    uint64_t unique_bytes;   /* of those, the packs no other snapshot needs: what dropping it frees */
+    uint64_t new_bytes;      /* of those, the packs no older snapshot needs: what it added */
+};
+
+struct rs_repo_usage {
+    uint64_t                       bytes;        /* everything in the repository, on disk */
+    uint64_t                       pack_bytes;   /* of that, the packs */
+    size_t                         packs;
+    struct rs_repo_snapshot_usage *snapshots;    /* oldest first */
+    size_t                         nsnapshots;
+};
+
+/* What the repository holds, and what each snapshot needs of it, from the
+ * sizes of its files and the snapshots' pack lists alone: no pack or index
+ * is read, so no key is needed. */
+void rs_repo_du(struct rs_repo *r, struct rs_repo_usage *out);
+void rs_repo_usage_free(struct rs_repo_usage *u);
+
+struct rs_repo_copied {
+    char    *name;            /* the snapshot */
+    bool     already;         /* the destination had it, the same */
+    bool     made;            /* the destination was made, as a repository like the source */
+    size_t   packs_copied;
+    size_t   packs_there;     /* the destination had them already */
+    uint64_t bytes;           /* copied */
+};
+
+/*
+ * Copies the snapshot `name` (NULL: the newest) of `r` into the repository
+ * at `dest` -- made, encrypted or not as `r` is, if it is not there -- with
+ * the packs it needs that `dest` has not got: every file as it is, so an
+ * encrypted one stays encrypted and nothing is decrypted. `dest` is locked
+ * as a capture locks it. The packs are those the snapshot's pack list
+ * names, or, for a snapshot without one, those its index needs, which then
+ * has to be readable here.
+ */
+bool rs_repo_copy(struct rs_repo *r, const char *name, const char *dest,
+                  struct rs_repo_copied *out, bool *busy, struct rs_buf *err);
+void rs_repo_copied_free(struct rs_repo_copied *c);
 
 /* ------------------------------------------------------------------------- */
 /* Checking                                                                  */
 /* ------------------------------------------------------------------------- */
+
+/* How to check. */
+struct rs_repo_check_opts {
+    bool        metadata_only;  /* no index read, no key needed: each pack against its .sum,
+                                 * each snapshot's files and the packs its list names */
+    const char *record;         /* a file of what was there at the last check, to report
+                                 * what has been removed or changed since; then updated */
+};
 
 struct rs_repo_checked {
     size_t   packs;          /* read through */
@@ -275,7 +345,13 @@ struct rs_repo_checked {
     size_t   snapshots_bad;  /* an index or kit unreadable, or content not all there */
     uint64_t files;          /* the files with content the snapshots need */
     uint64_t missing;        /* of those, not whole in the repository */
+    size_t   unsummed;       /* packs with no .sum: written before restate 2.0 */
+    size_t   unlisted;       /* snapshots with no pack list: likewise */
+    char   **changed;        /* with a record: "removed PATH" or "changed PATH" */
+    size_t   nchanged;
 };
+
+void rs_repo_checked_free(struct rs_repo_checked *c);
 
 /*
  * Reads every pack through and checks every chunk in it against the digest
@@ -285,7 +361,12 @@ struct rs_repo_checked {
  * of as it is found, and counted in `out`. False, with `err` set, only if it
  * could not check at all: an encrypted repository it has no key for.
  */
-bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf *err);
+bool rs_repo_check(struct rs_repo *r, const struct rs_repo_check_opts *opts,
+                   struct rs_repo_checked *out, struct rs_buf *err);
+
+/* With a record (rs_repo_check_opts), prune updates it too: what prune
+ * removes is no longer expected, and what it writes is. */
+bool rs_repo_record_update(struct rs_repo *r, const char *record, struct rs_buf *err);
 
 /* ------------------------------------------------------------------------- */
 /* Exposed for the tests and the fuzzer                                      */
@@ -315,6 +396,25 @@ struct rs_repo_idx {
     char                 (*chunks)[RS_SHA256_HEX_SIZE];
     size_t                 nchunks;
 };
+
+/* A pack's .sum: its content file's digest and size. */
+bool rs_repo_parse_sum(const char *text, size_t len, char hex[RS_SHA256_HEX_SIZE], uint64_t *size);
+/* A snapshot's pack list: the names, in order, each once. */
+bool rs_repo_parse_pack_list(const char *text, size_t len, char ***names, size_t *n);
+/* A check's record: "restate-record 1", then "PATH SHA256 SIZE" per file,
+ * each path once and in order; freed with rs_repo_record_free. */
+struct rs_repo_record_entry {
+    char    *path;                       /* relative to the repository */
+    char     hash[RS_SHA256_HEX_SIZE];
+    uint64_t size;
+};
+
+struct rs_repo_record {
+    struct rs_repo_record_entry *entries;   /* by path */
+    size_t                       n;
+};
+bool rs_repo_parse_record(const char *text, size_t len, struct rs_repo_record *out);
+void rs_repo_record_free(struct rs_repo_record *rec);
 
 /* Parses a pack's .idx, version 1 or 2; members must be numbered upward, and
  * a list has two chunks at least. */

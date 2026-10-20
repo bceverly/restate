@@ -45,7 +45,24 @@ struct rs_progress_state {
 
 /* Turns progress on or off; off by default. */
 void rs_progress_enable(bool on);
+/* Whether either kind of progress is on. */
 bool rs_progress_enabled(void);
+/*
+ * Progress for a program as well, or instead (--progress=json,
+ * --progress-file): into `fp`, one JSON object a line, at each change of
+ * phase and every two seconds --
+ *   {"phase": "walk", "paths": 812, "read_bytes": 1048576, "new_bytes": 4096,
+ *    "total_bytes": 9437184, "hook": null, "at": "2026-10-20T03:00:02Z"}
+ * -- the phases count, walk, write, check, read and copy, hook while one
+ * pauses something, and finish at the end. NULL turns it off.
+ */
+void rs_progress_json(FILE *fp);
+/* Counts bytes new to the repository or image. */
+void rs_progress_new_bytes(uint64_t n);
+/* Names the hook now pausing something, or NULL once it is done. */
+void rs_progress_hook(const char *name);
+/* The last line, phase "finish". */
+void rs_progress_finish(void);
 
 /* Starts a phase with `total` bytes to go, or 0 if that is not known. */
 void rs_progress_phase(const char *phase, uint64_t total);

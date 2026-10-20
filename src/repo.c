@@ -40,6 +40,13 @@
 #define REPO_FORMAT_2  RS_REPO_MARKER " 2\n"
 #define PACK_FORMAT_1  "restate-pack 1\n"
 #define PACK_FORMAT    "restate-pack 2\n"
+/* A pack's .sum, and a snapshot's list of the packs it needs: neither is
+ * encrypted, and neither says anything of what is in them, so the storage
+ * the repository is on can check and prune it without its keys. */
+#define SUM_FORMAT     "restate-sum 1\n"
+#define PACKS_FORMAT   "restate-packs 1\n"
+/* A pack list names a few thousand packs at most. */
+#define SMALL_MAX_LIST ((size_t)16 * 1024 * 1024)
 /* A pack's .idx, a snapshot's kit and its info are small; anything larger is
  * not one restate wrote. */
 #define SMALL_MAX      ((size_t)256 * 1024 * 1024)
@@ -215,6 +222,218 @@ static void to_hex(const unsigned char d[32], char hex[RS_SHA256_HEX_SIZE])
         hex[2 * i + 1] = digits[d[i] & 15];
     }
     hex[64] = '\0';
+}
+
+/* `len` bytes as the file `path`, in place of whatever was there: written
+ * beside it and renamed over it. */
+static bool replace_file(const char *path, const void *data, size_t len, struct rs_buf *err)
+{
+    const char *slash = strrchr(path, '/');
+    char       *tmp = slash ? rs_xasprintf("%.*s/.%s.%ld.tmp", (int)(slash - path), path, slash + 1,
+                                           (long)getpid())
+                            : rs_xasprintf(".%s.%ld.tmp", path, (long)getpid());
+    bool        ok;
+
+    (void)unlink(tmp);
+    ok = write_new(tmp, data, len, err);
+    if (ok && rename(tmp, path) != 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        (void)unlink(tmp);
+        ok = false;
+    }
+    free(tmp);
+    return ok;
+}
+
+/* The digest and size of the file `path` as it is stored. */
+static bool file_digest(const char *path, char hex[RS_SHA256_HEX_SIZE], uint64_t *size,
+                        struct rs_buf *err)
+{
+    int              fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct rs_sha256 sha;
+    unsigned char    chunk[65536];
+    ssize_t          n;
+
+    *size = 0;
+    if (fd < 0)
+    {
+        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        return false;
+    }
+    rs_sha256_init(&sha);
+    while ((n = read(fd, chunk, sizeof(chunk))) != 0)
+    {
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n < 0)
+        {
+            rs_buf_addf(err, "%s: %s", path, strerror(errno));
+            (void)close(fd);
+            return false;
+        }
+        rs_sha256_update(&sha, chunk, (size_t)n);
+        rs_progress_bytes((uint64_t)n);
+        *size += (uint64_t)n;
+    }
+    (void)close(fd);
+    rs_sha256_final(&sha, hex);
+    return true;
+}
+
+bool rs_repo_parse_sum(const char *text, size_t len, char hex[RS_SHA256_HEX_SIZE], uint64_t *size)
+{
+    const char *p = text;
+    const char *end = text + len;
+    size_t      i;
+
+    *size = 0;
+    if (len < strlen(SUM_FORMAT) || memcmp(text, SUM_FORMAT, strlen(SUM_FORMAT)) != 0)
+    {
+        return false;
+    }
+    p += strlen(SUM_FORMAT);
+    if (end - p < 7 + 64 + 1 || memcmp(p, "sha256 ", 7) != 0)
+    {
+        return false;
+    }
+    p += 7;
+    for (i = 0; i < 64; i++)
+    {
+        unsigned v;
+
+        if (!hex_digit(p[i], &v))
+        {
+            return false;
+        }
+        hex[i] = p[i];
+    }
+    hex[64] = '\0';
+    p += 64;
+    if (*p != '\n' || end - p < 7 || memcmp(p + 1, "size ", 5) != 0)
+    {
+        return false;
+    }
+    p += 6;
+    if (p >= end || *p < '0' || *p > '9' || (*p == '0' && p + 1 < end && p[1] != '\n'))
+    {
+        return false;
+    }
+    while (p < end && *p >= '0' && *p <= '9')
+    {
+        uint64_t digit = (uint64_t)(*p - '0');
+
+        if (*size > (UINT64_MAX - digit) / 10)
+        {
+            return false;
+        }
+        *size = *size * 10 + digit;
+        p++;
+    }
+    return p + 1 == end && *p == '\n';
+}
+
+/* A pack's .sum: what its content's file is as written -- its digest and
+ * size -- so that it can be checked whole without decrypting it. */
+static bool write_sum(const char *dir, const char *pack, struct rs_buf *err)
+{
+    char    *content = rs_xasprintf("%s/packs/%s.tar.gz", dir, pack);
+    char    *sum = rs_xasprintf("%s/packs/%s.sum", dir, pack);
+    char     hex[RS_SHA256_HEX_SIZE];
+    uint64_t size = 0;
+    bool     ok = file_digest(content, hex, &size, err);
+
+    if (ok)
+    {
+        char *text = rs_xasprintf(SUM_FORMAT "sha256 %s\nsize %" PRIu64 "\n", hex, size);
+
+        ok = replace_file(sum, text, strlen(text), err);
+        free(text);
+    }
+    free(content);
+    free(sum);
+    return ok;
+}
+
+/* The .sum of pack `pack`: false if it has none, or it is not one. */
+static bool read_sum(const char *dir, const char *pack, char hex[RS_SHA256_HEX_SIZE],
+                     uint64_t *size)
+{
+    char         *path = rs_xasprintf("%s/packs/%s.sum", dir, pack);
+    struct rs_buf text;
+    struct rs_buf ignore;
+    bool          ok;
+
+    rs_buf_init(&ignore);
+    ok = read_file(path, 4096, &text, &ignore) && rs_repo_parse_sum(text.data, text.len, hex, size);
+    rs_buf_free(&text);
+    rs_buf_free(&ignore);
+    free(path);
+    return ok;
+}
+
+bool rs_repo_parse_pack_list(const char *text, size_t len, char ***names, size_t *n)
+{
+    const char *p = text;
+    const char *end = text + len;
+
+    *names = NULL;
+    *n = 0;
+    if (len < strlen(PACKS_FORMAT) || memcmp(text, PACKS_FORMAT, strlen(PACKS_FORMAT)) != 0)
+    {
+        return false;
+    }
+    p += strlen(PACKS_FORMAT);
+    while (p < end)
+    {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        char       *name;
+
+        if (!nl)
+        {
+            break;
+        }
+        name = rs_xstrndup(p, (size_t)(nl - p));
+        /* Strictly in order, each once: the order they are written in. */
+        if (!rs_repo_name_valid(name) || (*n > 0 && strcmp((*names)[*n - 1], name) >= 0))
+        {
+            free(name);
+            break;
+        }
+        *names = rs_xreallocarray(*names, *n + 1, sizeof(**names));
+        (*names)[(*n)++] = name;
+        p = nl + 1;
+    }
+    if (p != end)
+    {
+        rs_repo_free_names(*names, *n);
+        *names = NULL;
+        *n = 0;
+        return false;
+    }
+    return true;
+}
+
+/* The packs snapshot `name` needs, as its pack list says: false if it has
+ * none -- one written before restate 2.0 -- or it is not one. */
+static bool read_pack_list(const char *dir, const char *name, char ***names, size_t *n)
+{
+    char         *path = rs_xasprintf("%s/snapshots/%s/packs", dir, name);
+    struct rs_buf text;
+    struct rs_buf ignore;
+    bool          ok;
+
+    *names = NULL;
+    *n = 0;
+    rs_buf_init(&ignore);
+    ok = read_file(path, SMALL_MAX_LIST, &text, &ignore) &&
+         rs_repo_parse_pack_list(text.data, text.len, names, n);
+    rs_buf_free(&text);
+    rs_buf_free(&ignore);
+    free(path);
+    return ok;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -928,8 +1147,44 @@ const char *rs_repo_dir(const struct rs_repo *r)
     return r->dir;
 }
 
-/* Takes the lock file `name` as `how` says, without waiting. */
-static int take(const char *dir, const char *name, int how, bool *busy, struct rs_buf *err)
+/*
+ * Locks the whole of `fd`, shared or not, without waiting: 0, or -1 with
+ * errno EWOULDBLOCK if something else holds it.
+ *
+ * Two locks, where there are open file description locks (Linux's
+ * F_OFD_SETLK). An OFD lock is a POSIX record lock, which an NFS client takes
+ * on the server, so a prune run on the file server itself sees a capture's
+ * lock taken over NFS, and the capture sees the prune's; flock(2) on the
+ * server does not conflict with those. Like flock, and unlike F_SETLK, it
+ * belongs to the open file, so two opens in one process conflict, and closing
+ * some other descriptor on the file does not drop it. And flock(2) as well,
+ * which is what everything else on a machine -- flock(1) in a script, restate
+ * 1 -- takes. Over NFS the two are one lock: the client takes both on the
+ * server for the same open file. Elsewhere flock(2) alone, which the BSDs and
+ * macOS implement as the same locks as fcntl's.
+ */
+static int lock_whole(int fd, bool shared)
+{
+#ifdef F_OFD_SETLK
+    struct flock fl;
+
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = shared ? F_RDLCK : F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    if (fcntl(fd, F_OFD_SETLK, &fl) != 0)
+    {
+        if (errno == EAGAIN || errno == EACCES)
+        {
+            errno = EWOULDBLOCK;
+        }
+        return -1;
+    }
+#endif
+    return flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB);
+}
+
+/* Takes the lock file `name`, shared or not, without waiting. */
+static int take(const char *dir, const char *name, bool shared, bool *busy, struct rs_buf *err)
 {
     char *path = rs_xasprintf("%s/%s", dir, name);
     int   fd = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
@@ -940,7 +1195,7 @@ static int take(const char *dir, const char *name, int how, bool *busy, struct r
         free(path);
         return -1;
     }
-    if (flock(fd, how | LOCK_NB) != 0)
+    if (lock_whole(fd, shared) != 0)
     {
         if (errno == EWOULDBLOCK)
         {
@@ -990,7 +1245,7 @@ static char **list_dir(const char *dir, bool (*keep)(const char *dir, const char
         }
     }
     (void)closedir(d);
-    if (*n > 1)
+    if (names && *n > 1)
     {
         qsort(names, *n, sizeof(*names), by_name);
     }
@@ -1230,14 +1485,21 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
         ok = false;
     }
     rs_buf_free(&text);
-    if (ok && (lock == RS_REPO_WRITE || lock == RS_REPO_PRUNE))
+    if (ok && lock == RS_REPO_APPEND && r->version == 1)
     {
-        r->lock_fd = take(dir, "lock", LOCK_EX, busy, err);
+        rs_buf_addf(err, "%s: made by restate 1.3 or older, and adding to it would change its "
+                    "marker, which --append-only does not; capture into it once without "
+                    "--append-only", dir);
+        ok = false;
+    }
+    if (ok && (lock == RS_REPO_WRITE || lock == RS_REPO_PRUNE || lock == RS_REPO_APPEND))
+    {
+        r->lock_fd = take(dir, "lock", false, busy, err);
         ok = r->lock_fd >= 0;
     }
     if (ok && (lock == RS_REPO_READ || lock == RS_REPO_PRUNE))
     {
-        r->readers_fd = take(dir, "readers", lock == RS_REPO_PRUNE ? LOCK_EX : LOCK_SH, busy, err);
+        r->readers_fd = take(dir, "readers", lock != RS_REPO_PRUNE, busy, err);
         ok = r->readers_fd >= 0;
     }
     if (ok && r->version == 1 && (lock == RS_REPO_WRITE || lock == RS_REPO_PRUNE))
@@ -1616,6 +1878,92 @@ static void load_objects(struct rs_repo *r)
             (void)map_add(&r->listed, l->d, l->pack, (uint32_t)i);
         }
     }
+}
+
+/* Marks, in `used` (per pack of r->packs), the packs the content with digest
+ * `d` is in: its chunk, or its list and that list's chunks. Content added by
+ * a writer that has not finished yet has no pack to mark. */
+static void mark_content(const struct rs_repo *r, const unsigned char d[32], bool *used)
+{
+    const struct obj *o = map_find(&r->objects, d);
+    const struct obj *l = map_find(&r->listed, d);
+
+    if (o && o->pack < r->npacks)
+    {
+        used[o->pack] = true;
+    }
+    if (l && l->pack < r->npacks && l->member < r->nlists)
+    {
+        const struct list *li = &r->lists[l->member];
+        size_t             c;
+
+        used[l->pack] = true;
+        for (c = 0; c < li->n; c++)
+        {
+            const struct obj *ch = map_find(&r->objects, r->chunks[li->first + c]);
+
+            if (ch && ch->pack < r->npacks)
+            {
+                used[ch->pack] = true;
+            }
+        }
+    }
+}
+
+/* Marks the packs every file with content in `ix` needs. */
+static void mark_index(const struct rs_repo *r, const struct rs_index *ix, bool *used)
+{
+    size_t i;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+        unsigned char          d[32];
+
+        if (e->stored && e->type == 'f' && e->hash_state == RS_HASH_PRESENT && unhex(e->hash, d))
+        {
+            mark_content(r, d, used);
+        }
+    }
+}
+
+/* A pack list naming the packs `used` marks of r->packs, and `more`: in
+ * order, each once. */
+static char *pack_list_text(const struct rs_repo *r, const bool *used, char *const *more,
+                            size_t nmore, size_t *len)
+{
+    char        **all = rs_xcalloc(r->npacks + nmore + 1, sizeof(*all));
+    size_t        n = 0;
+    size_t        i;
+    struct rs_buf text;
+
+    for (i = 0; i < r->npacks; i++)
+    {
+        if (used[i])
+        {
+            all[n++] = r->packs[i];
+        }
+    }
+    for (i = 0; i < nmore; i++)
+    {
+        all[n++] = more[i];
+    }
+    if (n > 1)
+    {
+        qsort(all, n, sizeof(*all), by_name);
+    }
+    rs_buf_init(&text);
+    rs_buf_addstr(&text, PACKS_FORMAT);
+    for (i = 0; i < n; i++)
+    {
+        if (i == 0 || strcmp(all[i], all[i - 1]) != 0)
+        {
+            rs_buf_addf(&text, "%s\n", all[i]);
+        }
+    }
+    free(all);
+    *len = text.len;
+    return rs_buf_detach(&text);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2061,6 +2409,8 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
         rs_buf_addf(err, "%s: %s", final, strerror(errno));
         ok = false;
     }
+    /* Its .sum before its .idx: a pack that counts has one. */
+    ok = ok && write_sum(r->dir, pk->name, err);
     ok = ok && write_out(idx, pk->idx.data, pk->idx.len, false, r->recips, seal_n(r), err);
     if (ok && rename(idx, idx_final) != 0)
     {
@@ -2076,9 +2426,13 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
     }
     if (!ok)
     {
+        char *sum = rs_xasprintf("%s/packs/%s.sum", r->dir, pk->name);
+
         (void)unlink(pk->tmp);
         (void)unlink(final);
         (void)unlink(idx);
+        (void)unlink(sum);
+        free(sum);
     }
     free(final);
     free(idx);
@@ -2256,6 +2610,8 @@ struct rs_repo_writer {
     struct pack_out   pk;
     char            **made;     /* packs finished, removed again on abort */
     size_t            nmade;
+    bool             *used;     /* per pack there before: the snapshot needs it */
+    size_t            nused;
     char            **kit;
     size_t            nkit;
     uint64_t          objects;  /* files that added content */
@@ -2412,6 +2768,8 @@ struct rs_repo_writer *rs_repo_writer_begin(struct rs_repo *r, struct rs_buf *er
     w->r = r;
     w->buf = rs_xmalloc(RS_REPO_CHUNK_MAX);
     load_objects(r);
+    w->nused = r->npacks;
+    w->used = rs_xcalloc(r->npacks + 1, sizeof(*w->used));
     if (r->encrypted && !r->gear)
     {
         chunk_key(r);
@@ -2483,9 +2841,17 @@ static bool put_chunk(struct rs_repo_writer *w, const unsigned char *p, size_t l
         w->flist = rs_xreallocarray(w->flist, w->flist_cap, sizeof(*w->flist));
     }
     memcpy(w->flist[w->nflist++], d, 32);
-    if (map_find(&w->r->objects, d))
     {
-        return true;
+        const struct obj *o = map_find(&w->r->objects, d);
+
+        if (o)
+        {
+            if (o->pack < w->nused)
+            {
+                w->used[o->pack] = true;
+            }
+            return true;
+        }
     }
     if (!ensure_pack(w, w->err) || !pack_header(&w->pk, len) || !rs_tar_data(&w->pk.tar, p, len) ||
         !rs_tar_pad(&w->pk.tar))
@@ -2501,6 +2867,7 @@ static bool put_chunk(struct rs_repo_writer *w, const unsigned char *p, size_t l
     (void)map_add(&w->r->objects, d, UINT32_MAX, 0);
     w->added = true;
     w->bytes += len;
+    rs_progress_new_bytes(len);
     if (!maybe_close(w, w->err))
     {
         w->failed = true;
@@ -2765,7 +3132,7 @@ static bool write_kit(const char *path, const struct rs_repo_writer *w, struct r
  * restate puts there, so nothing else is removed by mistake. */
 static bool remove_snapshot_dir(const char *dir)
 {
-    static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info" };
+    static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info", "packs" };
     size_t                   i;
 
     for (i = 0; i < sizeof(files) / sizeof(files[0]); i++)
@@ -2783,6 +3150,7 @@ static void writer_free(struct rs_repo_writer *w)
     (void)sigaction(SIGPIPE, &w->saved, NULL);
     rs_repo_free_names(w->made, w->nmade);
     rs_repo_free_names(w->kit, w->nkit);
+    free(w->used);
     free(w->buf);
     free(w->flist);
     free(w);
@@ -2857,11 +3225,14 @@ void rs_repo_writer_abort(struct rs_repo_writer *w)
     {
         char *idx = rs_xasprintf("%s/packs/%s.idx", w->r->dir, w->made[i]);
         char *content = rs_xasprintf("%s/packs/%s.tar.gz", w->r->dir, w->made[i]);
+        char *sum = rs_xasprintf("%s/packs/%s.sum", w->r->dir, w->made[i]);
 
         (void)unlink(idx);
         (void)unlink(content);
+        (void)unlink(sum);
         free(idx);
         free(content);
+        free(sum);
     }
     writer_free(w);
 }
@@ -2949,6 +3320,21 @@ bool rs_repo_writer_finish(struct rs_repo_writer *w, const struct rs_index *ix,
         path = rs_xasprintf("%s/info", tmp);
         ok = write_info(path, ix, name, w, err);
         free(path);
+    }
+    if (ok)
+    {
+        /* Which packs it needs, for whatever cannot read its index: the
+         * packs this capture wrote, and those before it that hold content
+         * it uses. */
+        size_t len = 0;
+        char  *text;
+
+        mark_index(w->r, ix, w->used);
+        text = pack_list_text(w->r, w->used, w->made, w->nmade, &len);
+        path = rs_xasprintf("%s/packs", tmp);
+        ok = write_new(path, text, len, err);
+        free(path);
+        free(text);
     }
     if (ok)
     {
@@ -3917,12 +4303,15 @@ static uint64_t remove_pack(const struct rs_repo *r, const char *name)
 {
     char    *idx = rs_xasprintf("%s/packs/%s.idx", r->dir, name);
     char    *content = rs_xasprintf("%s/packs/%s.tar.gz", r->dir, name);
-    uint64_t freed = disk_size(idx) + disk_size(content);
+    char    *sum = rs_xasprintf("%s/packs/%s.sum", r->dir, name);
+    uint64_t freed = disk_size(idx) + disk_size(content) + disk_size(sum);
 
     (void)unlink(idx);
     (void)unlink(content);
+    (void)unlink(sum);
     free(idx);
     free(content);
+    free(sum);
     return freed;
 }
 
@@ -4071,6 +4460,17 @@ static void clear_leftovers(const struct rs_repo *r)
                 (void)unlink(path);
             }
             free(idx);
+        } else if (len > 4 && strcmp(de->d_name + len - 4, ".sum") == 0)
+        {
+            char       *idx = rs_xasprintf("%s/%.*s.idx", packs, (int)(len - 4), de->d_name);
+            struct stat st;
+
+            /* A .sum is a pack's only while its .idx is there. */
+            if (lstat(idx, &st) != 0)
+            {
+                (void)unlink(path);
+            }
+            free(idx);
         }
         free(path);
     }
@@ -4154,6 +4554,76 @@ static bool live_content(struct rs_repo *r, char *const *names, size_t n, struct
         rs_index_free(&ix);
     }
     return true;
+}
+
+/*
+ * The pack lists of the snapshots `names`, written again after a prune
+ * moved their content into new packs -- and written for the first time for
+ * snapshots restate 1 made, which have none. One that cannot be worked out
+ * loses its list rather than keep one that may be wrong: a prune that goes
+ * by the lists then refuses to run, instead of removing what it needs.
+ */
+static void refresh_pack_lists(struct rs_repo *r, char *const *names, size_t n)
+{
+    size_t i;
+
+    load_objects(r);
+    for (i = 0; i < n; i++)
+    {
+        char           *path = snapshot_file(r, names[i], "packs");
+        bool           *used = rs_xcalloc(r->npacks + 1, sizeof(*used));
+        struct rs_index ix;
+        struct rs_buf   err;
+        bool            ok;
+
+        rs_index_init(&ix);
+        rs_buf_init(&err);
+        ok = r->unreadable == 0 && rs_repo_load_index_cached(r, names[i], &ix, &err);
+        if (ok)
+        {
+            size_t len = 0;
+            char  *text;
+
+            mark_index(r, &ix, used);
+            text = pack_list_text(r, used, NULL, 0, &len);
+            ok = replace_file(path, text, len, &err);
+            free(text);
+        }
+        if (!ok)
+        {
+            (void)unlink(path);
+        }
+        rs_index_free(&ix);
+        rs_buf_free(&err);
+        free(used);
+        free(path);
+    }
+}
+
+/* A .sum for each pack restate 1 wrote, which has none. One that is there
+ * but wrong is left as it is, for check to report. */
+static void add_sums(const struct rs_repo *r)
+{
+    size_t i;
+
+    for (i = 0; i < r->npacks; i++)
+    {
+        char       *path = rs_xasprintf("%s/packs/%s.sum", r->dir, r->packs[i]);
+        struct stat st;
+
+        if (lstat(path, &st) != 0 && errno == ENOENT)
+        {
+            struct rs_buf err;
+
+            rs_buf_init(&err);
+            if (!write_sum(r->dir, r->packs[i], &err))
+            {
+                rs_warn("%s", err.data);
+            }
+            rs_buf_free(&err);
+        }
+        free(path);
+    }
 }
 
 /* Whether the digest `hash` is one `live` has, and this is the first copy of
@@ -4288,6 +4758,8 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         clear_leftovers(r);
         list_packs(r);
         unload(r);
+        refresh_pack_lists(r, left, nleft);
+        add_sums(r);
         tidy_cache(r);
         sync_dir(packs);
         free(packs);
@@ -4300,6 +4772,547 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
     return ok;
 }
 
+/* Whether `name` is among `names`, which are in order. */
+static bool listed_in(char *const *names, size_t n, const char *name)
+{
+    return n > 0 && bsearch(&name, names, n, sizeof(*names), by_name) != NULL;
+}
+
+bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
+                         struct rs_repo_pruned *out, struct rs_buf *err)
+{
+    size_t  n;
+    char  **names = rs_repo_snapshots(r, &n);
+    bool   *kept = rs_xcalloc(n + 1, sizeof(*kept));
+    char  **need = NULL;
+    size_t  nneed = 0;
+    size_t  i;
+    bool    ok = true;
+
+    memset(out, 0, sizeof(*out));
+    rs_repo_choose(names, n, keep, kept);
+    /* Every snapshot kept has to say what it needs before anything goes. */
+    for (i = 0; ok && i < n; i++)
+    {
+        char **list;
+        size_t nlist;
+
+        if (!kept[i])
+        {
+            out->dropped = rs_xreallocarray(out->dropped, out->ndropped + 1,
+                                            sizeof(*out->dropped));
+            out->dropped[out->ndropped++] = rs_xstrdup(names[i]);
+            continue;
+        }
+        if (!read_pack_list(r->dir, names[i], &list, &nlist))
+        {
+            rs_buf_addf(err, "%s" RS_REPO_SEP "%s has no list of the packs it needs (restate "
+                        "2.0 writes one; a prune with the secret key adds one to an older "
+                        "snapshot), so what it needs is not known; nothing was removed",
+                        r->dir, names[i]);
+            ok = false;
+            continue;
+        }
+        need = rs_xreallocarray(need, nneed + nlist + 1, sizeof(*need));
+        memcpy(need + nneed, list, nlist * sizeof(*list));
+        nneed += nlist;
+        free(list);
+    }
+    if (nneed > 1)
+    {
+        qsort(need, nneed, sizeof(*need), by_name);
+    }
+    if (ok && !dry_run)
+    {
+        for (i = 0; i < out->ndropped; i++)
+        {
+            char *dir = rs_xasprintf("%s/snapshots/%s", r->dir, out->dropped[i]);
+
+            if (!remove_snapshot_dir(dir))
+            {
+                rs_warn("%s: %s; left as it is", dir, strerror(errno));
+            }
+            free(dir);
+        }
+        sync_dir(r->dir);
+        for (i = 0; i < r->npacks; i++)
+        {
+            if (!listed_in(need, nneed, r->packs[i]))
+            {
+                out->bytes_freed += remove_pack(r, r->packs[i]);
+                out->packs_removed++;
+            }
+        }
+        clear_leftovers(r);
+        list_packs(r);
+        unload(r);
+        tidy_cache(r);
+        {
+            char *packs = rs_xasprintf("%s/packs", r->dir);
+
+            sync_dir(packs);
+            free(packs);
+        }
+    }
+    if (!ok)
+    {
+        rs_repo_free_names(out->dropped, out->ndropped);
+        out->dropped = NULL;
+        out->ndropped = 0;
+    }
+    rs_repo_free_names(need, nneed);
+    free(kept);
+    rs_repo_free_names(names, n);
+    return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Usage                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/* A pack's files on disk: its content, its .idx and its .sum. */
+static uint64_t pack_disk(const struct rs_repo *r, const char *name)
+{
+    static const char *const ext[] = { "tar.gz", "idx", "sum" };
+    uint64_t                 total = 0;
+    size_t                   i;
+
+    for (i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/packs/%s.%s", r->dir, name, ext[i]);
+
+        total += disk_size(path);
+        free(path);
+    }
+    return total;
+}
+
+void rs_repo_du(struct rs_repo *r, struct rs_repo_usage *out)
+{
+    static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info", "packs" };
+    uint64_t                *size;
+    unsigned                *users;     /* per pack: how many snapshots list it */
+    bool                    *seen;      /* per pack: listed by an older snapshot */
+    char                  ***lists;
+    size_t                  *nlists;
+    char                   **names;
+    size_t                   n;
+    size_t                   i;
+    size_t                   k;
+
+    memset(out, 0, sizeof(*out));
+    list_packs(r);
+    names = rs_repo_snapshots(r, &n);
+    size = rs_xcalloc(r->npacks + 1, sizeof(*size));
+    users = rs_xcalloc(r->npacks + 1, sizeof(*users));
+    seen = rs_xcalloc(r->npacks + 1, sizeof(*seen));
+    lists = rs_xcalloc(n + 1, sizeof(*lists));
+    nlists = rs_xcalloc(n + 1, sizeof(*nlists));
+    out->packs = r->npacks;
+    for (i = 0; i < r->npacks; i++)
+    {
+        size[i] = pack_disk(r, r->packs[i]);
+        out->pack_bytes += size[i];
+    }
+    out->bytes = out->pack_bytes;
+    out->snapshots = rs_xcalloc(n + 1, sizeof(*out->snapshots));
+    out->nsnapshots = n;
+    for (i = 0; i < n; i++)
+    {
+        struct rs_repo_snapshot_usage *u = &out->snapshots[i];
+
+        u->name = rs_xstrdup(names[i]);
+        for (k = 0; k < sizeof(files) / sizeof(files[0]); k++)
+        {
+            char *path = snapshot_file(r, names[i], files[k]);
+
+            out->bytes += disk_size(path);
+            free(path);
+        }
+        u->listed = read_pack_list(r->dir, names[i], &lists[i], &nlists[i]);
+        for (k = 0; u->listed && k < nlists[i]; k++)
+        {
+            char *const *at = bsearch(&lists[i][k], r->packs, r->npacks, sizeof(*r->packs),
+                                      by_name);
+
+            if (at)
+            {
+                users[at - r->packs]++;
+            }
+        }
+    }
+    /* Oldest first: a pack is new in the first snapshot to list it. */
+    for (i = 0; i < n; i++)
+    {
+        struct rs_repo_snapshot_usage *u = &out->snapshots[i];
+
+        for (k = 0; u->listed && k < nlists[i]; k++)
+        {
+            char *const *at = bsearch(&lists[i][k], r->packs, r->npacks, sizeof(*r->packs),
+                                      by_name);
+            size_t       p;
+
+            if (!at)
+            {
+                continue;
+            }
+            p = (size_t)(at - r->packs);
+            u->bytes += size[p];
+            u->unique_bytes += users[p] == 1 ? size[p] : 0;
+            u->new_bytes += seen[p] ? 0 : size[p];
+            seen[p] = true;
+        }
+        rs_repo_free_names(lists[i], nlists[i]);
+    }
+    free(lists);
+    free(nlists);
+    free(size);
+    free(users);
+    free(seen);
+    rs_repo_free_names(names, n);
+}
+
+void rs_repo_usage_free(struct rs_repo_usage *u)
+{
+    size_t i;
+
+    for (i = 0; i < u->nsnapshots; i++)
+    {
+        free(u->snapshots[i].name);
+    }
+    free(u->snapshots);
+    memset(u, 0, sizeof(*u));
+}
+
+/* ------------------------------------------------------------------------- */
+/* Copying a snapshot to another repository                                  */
+/* ------------------------------------------------------------------------- */
+
+/* The file `from`, byte for byte, as the new file `to`: written beside it
+ * and renamed into place. How many bytes into *bytes. */
+static bool copy_file(const char *from, const char *to, uint64_t *bytes, struct rs_buf *err)
+{
+    const char   *slash = strrchr(to, '/');
+    char         *tmp = rs_xasprintf("%.*s/.%s.%ld.tmp", (int)(slash ? slash - to : 0), to,
+                                     slash ? slash + 1 : to, (long)getpid());
+    int           in = open(from, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int           out = -1;
+    unsigned char chunk[65536];
+    ssize_t       n = 0;
+    bool          ok = in >= 0;
+
+    if (!ok)
+    {
+        rs_buf_addf(err, "%s: %s", from, strerror(errno));
+        free(tmp);
+        return false;
+    }
+    (void)unlink(tmp);
+    out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    ok = out >= 0;
+    while (ok && (n = read(in, chunk, sizeof(chunk))) != 0)
+    {
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        ok = n > 0 && write_all(out, chunk, (size_t)n);
+        if (ok)
+        {
+            *bytes += (uint64_t)n;
+            rs_progress_bytes((uint64_t)n);
+        }
+    }
+    ok = ok && fsync(out) == 0;
+    if (out >= 0 && close(out) != 0)
+    {
+        ok = false;
+    }
+    (void)close(in);
+    if (ok && rename(tmp, to) != 0)
+    {
+        ok = false;
+    }
+    if (!ok)
+    {
+        rs_buf_addf(err, "copying %s to %s: %s", from, to, strerror(errno));
+        (void)unlink(tmp);
+    }
+    free(tmp);
+    return ok;
+}
+
+/* The packs snapshot `name` needs: its pack list, or what its index needs. */
+static bool packs_needed(struct rs_repo *r, const char *name, char ***list, size_t *n,
+                         struct rs_buf *err)
+{
+    struct rs_index ix;
+    bool           *used;
+    bool            ok;
+
+    if (read_pack_list(r->dir, name, list, n))
+    {
+        return true;
+    }
+    load_objects(r);
+    if (r->unreadable > 0)
+    {
+        rs_buf_addf(err, "%s" RS_REPO_SEP "%s has no pack list, and %zu packs' indexes could not "
+                    "be read here, so which packs it needs is not known", r->dir, name,
+                    r->unreadable);
+        return false;
+    }
+    rs_index_init(&ix);
+    ok = rs_repo_load_index_cached(r, name, &ix, err);
+    used = rs_xcalloc(r->npacks + 1, sizeof(*used));
+    if (ok)
+    {
+        size_t i;
+
+        mark_index(r, &ix, used);
+        for (i = 0; i < r->npacks; i++)
+        {
+            if (used[i])
+            {
+                *list = rs_xreallocarray(*list, *n + 1, sizeof(**list));
+                (*list)[(*n)++] = rs_xstrdup(r->packs[i]);
+            }
+        }
+    }
+    free(used);
+    rs_index_free(&ix);
+    return ok;
+}
+
+/* Copies pack `pack` from `r` to `dest`, unless dest has it: the content, its
+ * .sum, then its .idx, which makes it count there. */
+static bool copy_pack(const struct rs_repo *r, const struct rs_repo *dest, const char *pack,
+                      struct rs_repo_copied *out, struct rs_buf *err)
+{
+    static const char *const ext[] = { "tar.gz", "sum", "idx" };
+    size_t                   i;
+    bool                     ok = true;
+
+    if (listed_in(dest->packs, dest->npacks, pack))
+    {
+        char     want[RS_SHA256_HEX_SIZE];
+        char     have[RS_SHA256_HEX_SIZE];
+        uint64_t wsize = 0;
+        uint64_t hsize = 0;
+
+        if (read_sum(r->dir, pack, want, &wsize) && read_sum(dest->dir, pack, have, &hsize) &&
+            (strcmp(want, have) != 0 || wsize != hsize))
+        {
+            rs_buf_addf(err, "%s/packs/%s: there already, and not the same as %s's", dest->dir,
+                        pack, r->dir);
+            return false;
+        }
+        out->packs_there++;
+        return true;
+    }
+    for (i = 0; ok && i < sizeof(ext) / sizeof(ext[0]); i++)
+    {
+        char       *from = rs_xasprintf("%s/packs/%s.%s", r->dir, pack, ext[i]);
+        char       *to = rs_xasprintf("%s/packs/%s.%s", dest->dir, pack, ext[i]);
+        struct stat st;
+
+        if (i == 1 && lstat(from, &st) != 0)
+        {
+            /* One restate 1 wrote: given a .sum on the way. */
+            ok = write_sum(dest->dir, pack, err);
+        } else
+        {
+            ok = copy_file(from, to, &out->bytes, err);
+        }
+        free(from);
+        free(to);
+    }
+    if (ok)
+    {
+        out->packs_copied++;
+    }
+    return ok;
+}
+
+/* Copies the snapshot directory `name` into `dest`, whole, as a capture
+ * puts one there: beside its name, then renamed into place. */
+static bool copy_snapshot_dir(const struct rs_repo *r, const struct rs_repo *dest,
+                              const char *name, char *const *list, size_t nlist,
+                              struct rs_repo_copied *out, struct rs_buf *err)
+{
+    static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info", "packs" };
+    char                    *final = rs_xasprintf("%s/snapshots/%s", dest->dir, name);
+    char                    *tmp = rs_xasprintf("%s/snapshots/.%s.XXXXXX", dest->dir, name);
+    size_t                   i;
+    bool                     made = mkdtemp(tmp) != NULL;
+    bool                     ok = made;
+
+    if (!made)
+    {
+        rs_buf_addf(err, "%s: %s", tmp, strerror(errno));
+    }
+    for (i = 0; ok && i < sizeof(files) / sizeof(files[0]); i++)
+    {
+        char       *from = snapshot_file(r, name, files[i]);
+        char       *to = rs_xasprintf("%s/%s", tmp, files[i]);
+        struct stat st;
+
+        if (lstat(from, &st) == 0)
+        {
+            ok = copy_file(from, to, &out->bytes, err);
+        } else if (strcmp(files[i], "packs") == 0)
+        {
+            /* One restate 1 wrote: given its list on the way. */
+            struct rs_buf text;
+            size_t        k;
+
+            rs_buf_init(&text);
+            rs_buf_addstr(&text, PACKS_FORMAT);
+            for (k = 0; k < nlist; k++)
+            {
+                rs_buf_addf(&text, "%s\n", list[k]);
+            }
+            ok = write_new(to, text.data, text.len, err);
+            rs_buf_free(&text);
+        }
+        free(from);
+        free(to);
+    }
+    if (ok)
+    {
+        sync_dir(tmp);
+        if (rename(tmp, final) != 0)
+        {
+            rs_buf_addf(err, "%s: %s", final, strerror(errno));
+            ok = false;
+        }
+    }
+    if (!ok && made)
+    {
+        (void)remove_snapshot_dir(tmp);
+    }
+    free(tmp);
+    free(final);
+    return ok;
+}
+
+/* Whether the snapshot `name` in `dest` is the one in `r`: the same index. */
+static bool same_snapshot(const struct rs_repo *r, const struct rs_repo *dest, const char *name)
+{
+    char         *a = snapshot_file(r, name, "index.json.gz");
+    char         *b = snapshot_file(dest, name, "index.json.gz");
+    char          ha[RS_SHA256_HEX_SIZE];
+    char          hb[RS_SHA256_HEX_SIZE];
+    uint64_t      sa = 0;
+    uint64_t      sb = 0;
+    bool          same;
+    struct rs_buf ignore;
+
+    rs_buf_init(&ignore);
+    same = file_digest(a, ha, &sa, &ignore) && file_digest(b, hb, &sb, &ignore) &&
+           strcmp(ha, hb) == 0 && sa == sb;
+    rs_buf_free(&ignore);
+    free(a);
+    free(b);
+    return same;
+}
+
+void rs_repo_copied_free(struct rs_repo_copied *c)
+{
+    free(c->name);
+    memset(c, 0, sizeof(*c));
+}
+
+bool rs_repo_copy(struct rs_repo *r, const char *name, const char *dest_dir,
+                  struct rs_repo_copied *out, bool *busy, struct rs_buf *err)
+{
+    struct rs_repo *dest = NULL;
+    char          **list = NULL;
+    size_t          nlist = 0;
+    char           *snap;
+    struct stat     st;
+    size_t          i;
+    bool            ok;
+
+    memset(out, 0, sizeof(*out));
+    *busy = false;
+    snap = rs_repo_resolve(r, name, err);
+    if (!snap)
+    {
+        return false;
+    }
+    out->name = snap;
+    ok = packs_needed(r, snap, &list, &nlist, err);
+    if (ok && lstat(dest_dir, &st) != 0 && errno == ENOENT)
+    {
+        ok = rs_repo_init(dest_dir, r->encrypted, err);
+        out->made = ok;
+    }
+    if (ok)
+    {
+        dest = rs_repo_open(dest_dir, RS_REPO_WRITE, busy, err);
+        ok = dest != NULL;
+    }
+    if (ok && dest->encrypted != r->encrypted)
+    {
+        rs_buf_addf(err, "%s: %s, and %s is %s; a copy is the same kind as what it is a copy of",
+                    dest_dir, dest->encrypted ? "it is encrypted" : "it is not encrypted",
+                    r->dir, r->encrypted ? "encrypted" : "not");
+        ok = false;
+    }
+    /* Its chunking key goes with it, as it is: encrypted to the same keys. */
+    if (ok && r->encrypted)
+    {
+        char *from = rs_xasprintf("%s/%s", r->dir, RS_REPO_CHUNK_KEY);
+        char *to = rs_xasprintf("%s/%s", dest->dir, RS_REPO_CHUNK_KEY);
+
+        if (lstat(from, &st) == 0 && lstat(to, &st) != 0)
+        {
+            ok = copy_file(from, to, &out->bytes, err);
+        }
+        free(from);
+        free(to);
+    }
+    if (ok)
+    {
+        char *there = snapshot_file(dest, snap, "index.json.gz");
+
+        if (lstat(there, &st) == 0)
+        {
+            out->already = same_snapshot(r, dest, snap);
+            if (!out->already)
+            {
+                rs_buf_addf(err, "%s" RS_REPO_SEP "%s: there already, and not the same snapshot",
+                            dest_dir, snap);
+                ok = false;
+            }
+        }
+        free(there);
+    }
+    for (i = 0; ok && !out->already && i < nlist; i++)
+    {
+        ok = copy_pack(r, dest, list[i], out, err);
+    }
+    if (ok && !out->already)
+    {
+        char *packs = rs_xasprintf("%s/packs", dest->dir);
+
+        sync_dir(packs);
+        free(packs);
+        ok = copy_snapshot_dir(r, dest, snap, list, nlist, out, err);
+    }
+    if (ok && !out->already)
+    {
+        char *snaps = rs_xasprintf("%s/snapshots", dest->dir);
+
+        sync_dir(snaps);
+        free(snaps);
+    }
+    rs_repo_free_names(list, nlist);
+    rs_repo_close(dest);
+    return ok;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Checking                                                                  */
 /* ------------------------------------------------------------------------- */
@@ -4309,13 +5322,14 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
 
 /* A chunk checked against its digest: its size, where `sizes` keeps it. */
 struct checking {
-    struct rs_repo         *r;
-    struct rs_repo_checked *out;
-    struct objmap           good;      /* member: into sizes */
-    uint64_t               *sizes;
-    size_t                  nsizes;
-    struct list            *lists;     /* every list every .idx has */
-    size_t                  nlists;
+    struct rs_repo                  *r;
+    const struct rs_repo_check_opts *opts;
+    struct rs_repo_checked          *out;
+    struct objmap                    good;      /* member: into sizes */
+    uint64_t                        *sizes;
+    size_t                           nsizes;
+    struct list                     *lists;     /* every list every .idx has */
+    size_t                           nlists;
     unsigned char         (*chunks)[32];
     size_t                  nchunks;
 };
@@ -4647,22 +5661,464 @@ static void check_snapshot(struct checking *k, const char *name, const struct ob
     rs_buf_free(&err);
 }
 
-bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf *err)
+/* ------------------------------------------------------------------------- */
+/* What was there: a check's record                                          */
+/* ------------------------------------------------------------------------- */
+
+#define RECORD_FORMAT "restate-record 1\n"
+/* A record lists every file in a repository: a few per pack and snapshot. */
+#define RECORD_MAX    ((size_t)256 * 1024 * 1024)
+
+void rs_repo_record_free(struct rs_repo_record *rec)
 {
-    struct checking k;
-    struct objmap   lists;
-    char          **names;
-    char          **odd;
-    char           *dir;
-    size_t          n;
-    size_t          nodd;
-    size_t          i;
+    size_t i;
+
+    for (i = 0; i < rec->n; i++)
+    {
+        free(rec->entries[i].path);
+    }
+    free(rec->entries);
+    memset(rec, 0, sizeof(*rec));
+}
+
+/* A path in a record: the repository's own files' names, nothing more. */
+static bool record_path_ok(const char *p, size_t len)
+{
+    size_t i;
+
+    if (len == 0 || p[0] == '/' || p[0] == '.' || len > 512)
+    {
+        return false;
+    }
+    for (i = 0; i < len; i++)
+    {
+        char c = p[i];
+
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              c == '.' || c == '-' || c == '_' || c == '/'))
+        {
+            return false;
+        }
+        if (c == '/' && (i + 1 == len || p[i + 1] == '.' || p[i + 1] == '/'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void record_add(struct rs_repo_record *rec, const char *path, const char *hash,
+                       uint64_t size)
+{
+    struct rs_repo_record_entry *e;
+
+    rec->entries = rs_xreallocarray(rec->entries, rec->n + 1, sizeof(*rec->entries));
+    e = &rec->entries[rec->n++];
+    e->path = rs_xstrdup(path);
+    memcpy(e->hash, hash, RS_SHA256_HEX_SIZE);
+    e->size = size;
+}
+
+bool rs_repo_parse_record(const char *text, size_t len, struct rs_repo_record *out)
+{
+    const char *p = text;
+    const char *end = text + len;
+
+    memset(out, 0, sizeof(*out));
+    if (len < strlen(RECORD_FORMAT) || memcmp(text, RECORD_FORMAT, strlen(RECORD_FORMAT)) != 0)
+    {
+        return false;
+    }
+    p += strlen(RECORD_FORMAT);
+    while (p < end)
+    {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        const char *sp = nl ? memchr(p, ' ', (size_t)(nl - p)) : NULL;
+        const char *q;
+        char        hash[RS_SHA256_HEX_SIZE];
+        uint64_t    size = 0;
+        char       *path;
+        size_t      i;
+        bool        ok;
+
+        if (!sp || !record_path_ok(p, (size_t)(sp - p)) || nl - sp < 1 + 64 + 2 || sp[65] != ' ')
+        {
+            break;
+        }
+        q = sp + 1;
+        ok = true;
+        for (i = 0; ok && i < 64; i++)
+        {
+            unsigned v;
+
+            ok = hex_digit(q[i], &v);
+            hash[i] = q[i];
+        }
+        hash[64] = '\0';
+        q += 65;
+        ok = ok && number(&q, nl, &size) && q == nl;
+        path = ok ? rs_xstrndup(p, (size_t)(sp - p)) : NULL;
+        /* Each path once, and in order. */
+        if (!ok || (out->n > 0 && strcmp(out->entries[out->n - 1].path, path) >= 0))
+        {
+            free(path);
+            break;
+        }
+        record_add(out, path, hash, size);
+        free(path);
+        p = nl + 1;
+    }
+    if (p != end)
+    {
+        rs_repo_record_free(out);
+        return false;
+    }
+    return true;
+}
+
+static int by_record_path(const void *a, const void *b)
+{
+    return strcmp(((const struct rs_repo_record_entry *)a)->path,
+                  ((const struct rs_repo_record_entry *)b)->path);
+}
+
+/* The record entry for `path`, or NULL: the entries are in order. */
+static const struct rs_repo_record_entry *record_find(const struct rs_repo_record *rec,
+                                                      const char *path)
+{
+    size_t lo = 0;
+    size_t hi = rec->n;
+
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int    c = strcmp(path, rec->entries[mid].path);
+
+        if (c == 0)
+        {
+            return &rec->entries[mid];
+        }
+        if (c < 0)
+        {
+            hi = mid;
+        } else
+        {
+            lo = mid + 1;
+        }
+    }
+    return NULL;
+}
+
+/* The repository's file `rel`, hashed into the record, if it is there. */
+static void record_file(const struct rs_repo *r, struct rs_repo_record *rec, const char *rel)
+{
+    char         *path = rs_xasprintf("%s/%s", r->dir, rel);
+    struct stat   st;
+    char          hex[RS_SHA256_HEX_SIZE];
+    uint64_t      size = 0;
+    struct rs_buf ignore;
+
+    rs_buf_init(&ignore);
+    if (lstat(path, &st) == 0 && S_ISREG(st.st_mode) && file_digest(path, hex, &size, &ignore))
+    {
+        record_add(rec, rel, hex, size);
+    }
+    rs_buf_free(&ignore);
+    free(path);
+}
+
+/* Everything in the record but the packs' content: their .idx and .sum, and
+ * each snapshot's files. */
+static void record_rest(const struct rs_repo *r, struct rs_repo_record *rec)
+{
+    static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info", "packs" };
+    char                    *dir = rs_xasprintf("%s/snapshots", r->dir);
+    char                   **snaps;
+    size_t                   nsnaps;
+    size_t                   i;
+    size_t                   f;
+
+    for (i = 0; i < r->npacks; i++)
+    {
+        char *idx = rs_xasprintf("packs/%s.idx", r->packs[i]);
+        char *sum = rs_xasprintf("packs/%s.sum", r->packs[i]);
+
+        record_file(r, rec, idx);
+        record_file(r, rec, sum);
+        free(idx);
+        free(sum);
+    }
+    snaps = list_dir(dir, any_snapshot, &nsnaps);
+    for (i = 0; i < nsnaps; i++)
+    {
+        for (f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+            char *rel = rs_xasprintf("snapshots/%s/%s", snaps[i], files[f]);
+
+            record_file(r, rec, rel);
+            free(rel);
+        }
+    }
+    rs_repo_free_names(snaps, nsnaps);
+    free(dir);
+    if (rec->n > 1)
+    {
+        qsort(rec->entries, rec->n, sizeof(*rec->entries), by_record_path);
+    }
+}
+
+static bool read_record(const char *path, struct rs_repo_record *rec, bool *there,
+                        struct rs_buf *err)
+{
+    struct stat   st;
+    struct rs_buf text;
+    bool          ok;
+
+    memset(rec, 0, sizeof(*rec));
+    *there = lstat(path, &st) == 0;
+    if (!*there)
+    {
+        return true;
+    }
+    ok = read_file(path, RECORD_MAX, &text, err);
+    if (ok && !rs_repo_parse_record(text.data, text.len, rec))
+    {
+        rs_buf_addf(err, "%s: not a record restate wrote", path);
+        ok = false;
+    }
+    rs_buf_free(&text);
+    return ok;
+}
+
+static bool write_record(const char *path, const struct rs_repo_record *rec, struct rs_buf *err)
+{
+    struct rs_buf text;
+    size_t        i;
+    bool          ok;
+
+    rs_buf_init(&text);
+    rs_buf_addstr(&text, RECORD_FORMAT);
+    for (i = 0; i < rec->n; i++)
+    {
+        rs_buf_addf(&text, "%s %s %" PRIu64 "\n", rec->entries[i].path, rec->entries[i].hash,
+                    rec->entries[i].size);
+    }
+    ok = replace_file(path, text.data, text.len, err);
+    rs_buf_free(&text);
+    return ok;
+}
+
+bool rs_repo_record_update(struct rs_repo *r, const char *record, struct rs_buf *err)
+{
+    struct rs_repo_record old;
+    struct rs_repo_record cur;
+    bool                  there;
+    size_t                i;
+    bool                  ok;
+
+    if (!read_record(record, &old, &there, err))
+    {
+        return false;
+    }
+    memset(&cur, 0, sizeof(cur));
+    list_packs(r);
+    /* A pack's content never changes under its name: what the record had
+     * for it stands. Only what prune wrote is new. */
+    for (i = 0; r->packs && i < r->npacks; i++)
+    {
+        char                              *rel = rs_xasprintf("packs/%s.tar.gz", r->packs[i]);
+        const struct rs_repo_record_entry *e = record_find(&old, rel);
+
+        if (e)
+        {
+            record_add(&cur, rel, e->hash, e->size);
+        } else
+        {
+            record_file(r, &cur, rel);
+        }
+        free(rel);
+    }
+    record_rest(r, &cur);
+    ok = write_record(record, &cur, err);
+    rs_repo_record_free(&old);
+    rs_repo_record_free(&cur);
+    return ok;
+}
+
+/* What the record says has gone or changed since it was written: each said,
+ * and into out->changed. */
+static void record_compare(struct checking *k, const struct rs_repo_record *old,
+                           const struct rs_repo_record *cur)
+{
+    size_t i;
+
+    for (i = 0; i < old->n; i++)
+    {
+        const struct rs_repo_record_entry *was = &old->entries[i];
+        const struct rs_repo_record_entry *now = record_find(cur, was->path);
+        char                              *what;
+
+        if (now && strcmp(now->hash, was->hash) == 0 && now->size == was->size)
+        {
+            continue;
+        }
+        what = rs_xasprintf("%s %s", now ? "changed" : "removed", was->path);
+        rs_warn("%s/%s: %s since the last check", k->r->dir, was->path,
+                now ? "changed" : "removed");
+        k->out->changed = rs_xreallocarray(k->out->changed, k->out->nchanged + 1,
+                                           sizeof(*k->out->changed));
+        k->out->changed[k->out->nchanged++] = what;
+    }
+}
+
+/* A pack's content against its .sum; its digest into the record, where
+ * there is one. */
+static void check_sum(struct checking *k, const char *name, struct rs_repo_record *rec)
+{
+    char         *content = rs_xasprintf("%s/packs/%s.tar.gz", k->r->dir, name);
+    char         *rel = rs_xasprintf("packs/%s.tar.gz", name);
+    char          want[RS_SHA256_HEX_SIZE];
+    char          got[RS_SHA256_HEX_SIZE];
+    uint64_t      want_size = 0;
+    uint64_t      got_size = 0;
+    bool          summed = read_sum(k->r->dir, name, want, &want_size);
+    struct rs_buf why;
+
+    rs_buf_init(&why);
+    if (!summed)
+    {
+        char       *sum = rs_xasprintf("%s/packs/%s.sum", k->r->dir, name);
+        struct stat st;
+
+        if (lstat(sum, &st) == 0)
+        {
+            char *file = rs_xasprintf("%s.sum", name);
+
+            bad_pack(k, file, "not a .sum restate wrote");
+            free(file);
+        } else
+        {
+            k->out->unsummed++;
+        }
+        free(sum);
+    }
+    if (!file_digest(content, got, &got_size, &why))
+    {
+        char *file = rs_xasprintf("%s.tar.gz", name);
+
+        bad_pack(k, file, why.data);
+        free(file);
+    } else
+    {
+        if (summed && (strcmp(got, want) != 0 || got_size != want_size))
+        {
+            char *file = rs_xasprintf("%s.tar.gz", name);
+
+            bad_pack(k, file, "it is not what its .sum says: changed or damaged since it was "
+                              "written");
+            free(file);
+        }
+        if (k->opts->metadata_only)
+        {
+            k->out->bytes += got_size;
+        }
+        if (rec)
+        {
+            record_add(rec, rel, got, got_size);
+        }
+    }
+    rs_buf_free(&why);
+    free(rel);
+    free(content);
+}
+
+/* A snapshot read without its index: its files there, and every pack its
+ * list names. */
+static void check_snapshot_meta(struct checking *k, const char *name)
+{
+    char       *kit = snapshot_file(k->r, name, "kit");
+    char      **list = NULL;
+    size_t      nlist = 0;
+    size_t      i;
+    size_t      gone = 0;
+    struct stat st;
+
+    k->out->snapshots++;
+    if (lstat(kit, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        rs_warn("%s::%s: its kit is not there", k->r->dir, name);
+        k->out->snapshots_bad++;
+        free(kit);
+        return;
+    }
+    free(kit);
+    if (!read_pack_list(k->r->dir, name, &list, &nlist))
+    {
+        k->out->unlisted++;
+        return;
+    }
+    for (i = 0; i < nlist; i++)
+    {
+        if (!listed_in(k->r->packs, k->r->npacks, list[i]))
+        {
+            if (gone++ < CHECK_SAID)
+            {
+                rs_warn("%s::%s: it needs the pack %s, which is not there", k->r->dir, name,
+                        list[i]);
+            }
+        }
+    }
+    if (gone > CHECK_SAID)
+    {
+        rs_warn("%s::%s: and %zu packs more", k->r->dir, name, gone - CHECK_SAID);
+    }
+    if (gone > 0)
+    {
+        k->out->snapshots_bad++;
+    }
+    rs_repo_free_names(list, nlist);
+}
+
+void rs_repo_checked_free(struct rs_repo_checked *c)
+{
+    rs_repo_free_names(c->changed, c->nchanged);
+    c->changed = NULL;
+    c->nchanged = 0;
+}
+
+bool rs_repo_check(struct rs_repo *r, const struct rs_repo_check_opts *opts,
+                   struct rs_repo_checked *out, struct rs_buf *err)
+{
+    static const struct rs_repo_check_opts none;
+    struct checking                        k;
+    struct objmap                          lists;
+    struct rs_repo_record                  old;
+    struct rs_repo_record                  cur;
+    struct rs_repo_record                 *rec = NULL;
+    char                                 **names;
+    char                                 **odd;
+    char                                  *dir;
+    size_t                                 n;
+    size_t                                 nodd;
+    size_t                                 i;
+    bool                                   there = false;
 
     memset(out, 0, sizeof(*out));
     memset(&k, 0, sizeof(k));
     memset(&lists, 0, sizeof(lists));
+    memset(&cur, 0, sizeof(cur));
+    memset(&old, 0, sizeof(old));
     k.r = r;
     k.out = out;
+    k.opts = opts ? opts : &none;
+    if (k.opts->record)
+    {
+        if (!read_record(k.opts->record, &old, &there, err))
+        {
+            return false;
+        }
+        rec = &cur;
+    }
     /* The snapshots first, then the packs: a capture that finishes in
      * between wrote its packs before its snapshot, so every pack a listed
      * snapshot needs is in the list. */
@@ -4677,35 +6133,43 @@ bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf
         bool               sealed = false;
 
         rs_buf_init(&why);
+        rs_buf_init(&text);
         memset(&x, 0, sizeof(x));
         /* The repository's own .idx, never this machine's copy of it: that
-         * could hide damage here. */
-        if (!read_sealed(path, SMALL_MAX, true, &text, &sealed, &why))
+         * could hide damage here. None at all for the metadata alone: it may
+         * be encrypted. */
+        if (!k.opts->metadata_only && !read_sealed(path, SMALL_MAX, true, &text, &sealed, &why))
         {
             if (sealed && i == 0)
             {
                 rs_buf_addf(err, "%s: its packs' indexes could not be decrypted, so it cannot be "
                             "checked: the secret key is not in this user's GnuPG home, or its "
-                            "passphrase was not given", r->dir);
+                            "passphrase was not given (check --metadata-only needs no key)",
+                            r->dir);
                 rs_buf_free(&why);
                 rs_buf_free(&text);
                 free(path);
                 rs_repo_free_names(names, n);
                 map_free(&k.good);
                 free(k.sizes);
+                rs_repo_record_free(&old);
                 return false;
             }
             bad_pack(&k, r->packs[i], why.data);
-        } else if (!rs_repo_parse_idx(text.data, text.len, &x))
+        } else if (!k.opts->metadata_only && !rs_repo_parse_idx(text.data, text.len, &x))
         {
             char *file = rs_xasprintf("%s.idx", r->packs[i]);
 
             bad_pack(&k, file, "not a pack index restate wrote");
             free(file);
-        } else
+        } else if (!k.opts->metadata_only)
         {
             keep_lists(&k, &x);
             check_pack(&k, r->packs[i], &x);
+        }
+        if (k.opts->metadata_only || rec)
+        {
+            check_sum(&k, r->packs[i], rec);
         }
         out->packs++;
         rs_repo_idx_free(&x);
@@ -4738,7 +6202,13 @@ bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf
     }
     for (i = 0; i < n; i++)
     {
-        check_snapshot(&k, names[i], &lists);
+        if (k.opts->metadata_only)
+        {
+            check_snapshot_meta(&k, names[i]);
+        } else
+        {
+            check_snapshot(&k, names[i], &lists);
+        }
     }
     rs_repo_free_names(names, n);
     dir = rs_xasprintf("%s/snapshots", r->dir);
@@ -4758,6 +6228,21 @@ bool rs_repo_check(struct rs_repo *r, struct rs_repo_checked *out, struct rs_buf
     }
     rs_repo_free_names(odd, nodd);
     free(dir);
+    if (rec)
+    {
+        record_rest(r, rec);
+        if (there)
+        {
+            record_compare(&k, &old, rec);
+        }
+        if (!write_record(k.opts->record, rec, err))
+        {
+            rs_warn("%s", err->data);
+            rs_buf_reset(err);
+        }
+    }
+    rs_repo_record_free(&old);
+    rs_repo_record_free(&cur);
     map_free(&lists);
     map_free(&k.good);
     free(k.sizes);

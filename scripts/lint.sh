@@ -403,7 +403,7 @@ done < <(
     # kind of file (a suppressions list, an awk program, a hook with no
     # extension at all) is source the moment it is added, and an extension
     # list would let it in without a header.
-    find src include tests scripts .githooks hooks -type f 2>/dev/null
+    find src include tests scripts .githooks hooks systemd -type f 2>/dev/null
     # And the code outside them: the build, the CI and the repository's own
     # configuration. Prose (the Markdown) and data (VERSION, the generated
     # badge) are not code and carry no header.

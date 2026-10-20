@@ -16,6 +16,9 @@ RS_CMD(CMD_CAPTURE,  "capture",  "",           0,  0,
        "content of everything kept")
 RS_CMD(CMD_SCAN,     "scan",     "",           0,  0,
        "walk the tree and write its index alone, as JSON, with no content")
+RS_CMD(CMD_ESTIMATE, "estimate", "",           0,  0,
+       "walk the tree, reading no file, and say how much a first capture would keep, by "
+       "directory: what to exclude before a first capture that would not fit")
 RS_CMD(CMD_DIFF,     "diff",     "OLD NEW",    2,  2,
        "compare two images or indexes: A added, D deleted, M modified, and how")
 RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
@@ -24,8 +27,8 @@ RS_CMD(CMD_STATUS,   "status",   "IMAGE",      1,  1,
        "what has changed since a capture, quickly: as verify, but a file whose size, "
        "times and inode are unchanged is not read")
 RS_CMD(CMD_SIGN,     "sign",     "IMAGE",      1,  1,
-       "sign an image already written, with --sign-with: so a capture run unattended "
-       "needs no secret key on the machine")
+       "sign an image or snapshot already written, with --sign-with: so a capture run "
+       "unattended needs no secret key on the machine")
 RS_CMD(CMD_INIT,     "init",     "DIR",        1,  1,
        "make an empty repository at DIR: captures into it (-o DIR) are kept as snapshots, "
        "each file's content stored once, and only what changed is read")
@@ -39,6 +42,13 @@ RS_CMD(CMD_CHECK,    "check",    "REPO",       1,  1,
        "check a repository: read every pack through, each chunk against the digest its index "
        "gives, and check that every snapshot's index and kit can be read and the content of "
        "each of its files is whole; with --read-all, read every snapshot in full too")
+RS_CMD(CMD_COPY,     "copy",     "SNAPSHOT DEST", 2, 2,
+       "copy a snapshot, and the packs it needs that DEST has not got, to the repository "
+       "DEST -- made if it is not there -- exactly as they are: an encrypted repository's "
+       "copy is encrypted, and nothing is decrypted")
+RS_CMD(CMD_DU,       "du",       "REPO",       1,  1,
+       "say how much a repository holds, and what each snapshot needs of it, adds to it and "
+       "would free if it were dropped, without reading any pack or needing any key")
 RS_CMD(CMD_EXPORT,   "export",   "SNAPSHOT",   1,  1,
        "write a snapshot as an image (-o FILE.tar) to take elsewhere, encrypted and "
        "signed if asked")
@@ -68,3 +78,9 @@ RS_CMD(CMD_CLASSIFY, "classify", "PATH...",    1, -1,
        "show the class each path falls under, and the rule that decided it")
 RS_CMD(CMD_RULES,    "rules",    "",           0,  0,
        "print the rules in effect, in the format --rules reads")
+RS_CMD(CMD_RUN,      "run",      "JOBFILE",    1,  1,
+       "run the job JOBFILE describes -- a capture, prune, check, copy, restore and the rest, "
+       "with its options -- from a file only its owner can change (see JOBS)")
+RS_CMD(CMD_FEATURES, "features", "",           0,  0,
+       "list what this restate can do: its commands, options, job keys, result schema and "
+       "the hooks here, for a program to check before it asks for any of them")

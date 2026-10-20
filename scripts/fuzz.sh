@@ -60,7 +60,11 @@ INDEX='{"format": "restate-index", "version": 1, "root": "/", "os": "linux", "ha
 {"path": "/dev/x", "type": "char", "class": "state", "mode": "0600", "uid": 0, "gid": 0, "size": 0, "rdev": 259, "mtime": "2026-10-03T00:00:00.000000000Z", "unreadable": false}
 ]}'
 
-if [ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ]; then
+# The seeds are written every run, into a corpus kept from the last one too:
+# a seed added since -- a new parser's -- is in the run that first needs it.
+fresh=0
+[ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ] && fresh=1
+{
   printf '\000%s' "$INDEX" > "$WORK/corpus/index-full"
   seed index-min 0 '{"format": "restate-index", "version": 1, "entries": []}'
   seed rules-builtin 1 '# comment\nephemeral /proc\nstate /etc\nexpendable /var/cache   # why\nbaseline /usr/**/lib\nephemeral *.pid\nstate /a\\*b\n'
@@ -83,6 +87,9 @@ if [ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ]; then
   seed apt 15 '-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\nOrigin: Ubuntu\nSHA256:\n bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb       907381 main/binary-amd64/Packages.gz\n- -----x\n-----BEGIN PGP SIGNATURE-----\n\nabc\n-----END PGP SIGNATURE-----\n\0Package: hello\nVersion: 2:1.0\nArchitecture: amd64\nFilename: pool/h/hello_1.0_amd64.deb\nSize: 42\nSHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n\n\0https://archive.ubuntu.com/ubuntu/ resolute-updates/main\0http://deb.debian.org/debian'
   seed clones 16 '# the lab\nname,mac,serial,address,gateway,dns\nweb1,52:54:00:00:00:01,,10.0.0.11/24,10.0.0.1,10.0.0.2 10.0.0.3\nweb2,,S4EW-2,fd00::12/64,fd00::1,\n'
   seed hosts 16 '127.0.0.1 localhost\n127.0.1.1\tweb1 web1.lan # web1\n::1 ip6-localhost\n'
+  seed job 17 '# nightly\ncommand = capture\nrepository = /mnt/nas/r\nquiesce = true\nquiesce_with = unifi\nencrypt_to = /etc/restate/k.asc\nresult = /var/lib/restate/n.json\nreport_group = adm\n'
+  seed job-restore 17 'command = restore\nsnapshot = /r::20261020T030000Z\nrestore_root = /var/tmp/x\ninclude = /home/bob\ndry_run = yes\n'
+  seed storage 18 'restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 42\n\0restate-packs 1\n20261020T030000Z-1-0001\n20261020T030000Z-1-0002\n\0restate-record 1\npacks/a.idx 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 10\nsnapshots/x/kit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0\n'
   seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
   # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
   # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.
@@ -99,9 +106,11 @@ if [ -z "$(ls -A "$WORK/corpus" 2>/dev/null)" ]; then
   { printf '\003'; ( cd "$SEED_TREE" && tar -cf - restate/index.json 2>/dev/null ); } \
     > "$WORK/corpus/tar-index"
   rm -rf "$SEED_TREE"
+}
+if [ "$fresh" = 1 ]; then
   ok "built a seed corpus of $(find "$WORK/corpus" -type f | wc -l | tr -d ' ') inputs"
 else
-  ok "reusing the corpus in $WORK/corpus"
+  ok "reusing the corpus in $WORK/corpus, with the seeds written again"
 fi
 
 # Platform feature macros in one place; see scripts/features.sh.

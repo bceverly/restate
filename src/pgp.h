@@ -47,6 +47,13 @@ bool rs_pgp_detect(const unsigned char *head, size_t len);
 bool rs_pgp_encrypt(const char *const *recipients, size_t n, int out_fd, struct rs_pgp *pg,
                     struct rs_buf *err);
 
+/*
+ * The passphrase of the secret key, for every gpg restate runs after this
+ * to read from a pipe of its own (--passphrase-fd) rather than ask for it;
+ * NULL forgets it, wiping the copy held.
+ */
+void rs_pgp_set_passphrase(const char *text);
+
 /* Starts gpg decrypting from `in_fd`. */
 bool rs_pgp_decrypt(int in_fd, struct rs_pgp *pg, struct rs_buf *err);
 

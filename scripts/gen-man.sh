@@ -92,7 +92,7 @@ entries() {
     desc="$(printf '%s' "$line" | sed -E 's/^ +[^ ].*[^ ] {2,}//; s/^ +//' | escape_roff)"
     if [ "$kind" = "option" ]; then
       term="$(printf '%s' "$term" | escape_roff \
-              | sed -E 's/(\\-\\-[a-z-]+)=([A-Z]+)/\\fB\1\\fR=\\fI\2\\fR/; s/^(\\-[A-Za-z]),/\\fB\1\\fR,/; s/^(\\-\\-[a-z-]+)$/\\fB\1\\fR/')"
+              | sed -E 's/(\\-\\-[a-z-]+)=([A-Z]+)/\\fB\1\\fR=\\fI\2\\fR/; s/(\\-\\-[a-z-]+)\[=([a-z]+)\]/\\fB\1\\fR[=\\fB\2\\fR]/; s/^(\\-[A-Za-z]),/\\fB\1\\fR,/; s/^(\\-\\-[a-z-]+)$/\\fB\1\\fR/')"
     else
       local name args
       name="${term%% *}"
@@ -767,6 +767,36 @@ unless asked for, and
 .B \-\-quiet
 does not turn it off: one option asks for silence about everything else,
 the other for this.
+.PP
+For a program watching a run rather than a person,
+.B \-\-progress=json
+writes the same on standard error as one JSON object a line, and
+.BI \-\-progress\-file " FILE"
+into a file, made when the run starts and readable as
+.B \-\-result
+says (see
+.BR RESULTS ):
+a line at each change of phase and every two seconds between,
+.PP
+.RS
+.nf
+{"phase": "walk", "paths": 8123, "read_bytes": 1048576, "new_bytes": 4096,
+ "total_bytes": 9437184, "hook": null, "at": "2026-10-20T03:00:02Z"}
+.fi
+.RE
+.PP
+with the phases
+.BR count ,
+.BR walk ,
+.BR write ,
+.BR check ,
+.B copy
+and
+.BR read ;
+.B hook
+while a hook pauses something, which it names; and
+.B finish
+at the end.
 .SH REBUILDING
 .B restate buildsheet
 writes a plain-text runbook for rebuilding the machine onto a blank disk:
@@ -964,7 +994,9 @@ returns: the shipped database hooks put a dump there
 .BR mongodump ),
 which, unlike the data directory, can be loaded into another major version.
 A hook that fails to pause is warned of, and the files are copied as they
-are. A pause may take 30 minutes and a resume 10; then the hook is stopped.
+are; resume is run all the same, and the capture ends incomplete, with exit
+status 3, as one that fails to resume does. A pause may take 30 minutes and
+a resume 10; then the hook is stopped.
 .PP
 The shipped hooks stop a database's service and start it again, suspend a
 VM and resume it (through the user's own libvirt for a user's VM), freeze an
@@ -976,6 +1008,36 @@ the units listed in
 change what a hook does, copy it to
 .I /etc/restate/hooks.d
 and change the copy.
+.PP
+What
+.I /proc
+does not show as one of these \- a service with a database of its own, an
+application that wants to be told \- is named instead:
+.BI \-\-quiesce\-with " NAME"
+runs the hook
+.I NAME
+whether or not anything is found. It is asked first, as
+.I HOOK
+.B paths
+.IR NAME ,
+which paths it covers, one absolute path a line; those are left to the end
+and copied while it is paused, as above. A hook that names none, or does not
+know the question, is paused before the walk begins and resumed after it
+ends. Two are shipped for this:
+.B unifi
+dumps the database the UniFi Network application runs itself (port 27117)
+and stops its service, for
+.I /var/lib/unifi
+\- UniFi's own backups, in
+.IR /var/lib/unifi/backup/autobackup ,
+are in the capture too, and restore onto a new UniFi without restate \- and
+.B nextcloud
+puts Nextcloud in maintenance mode, for its own directory and its data
+directory, while its database is paused by its own hook with
+.BR \-\-quiesce .
+A mail store kept as Maildir needs neither: every message is a file of its
+own, written beside its name and renamed into place, so a copy taken while
+mail arrives misses at most what arrived meanwhile.
 .SH RESTORING
 .B restate restore
 .I IMAGE
@@ -1289,9 +1351,11 @@ files whole once more.
 One capture or prune runs on a repository at a time, and one
 .B capture \-\-quiesce
 on a machine at a time; one that finds the lock taken does nothing, and exits
-with status 5. With
+with status 5 (see
+.B STORAGE
+for a repository on a file server). With
 .BR \-\-syslog ,
-capture, prune and check put one line in the system log as they end \- the command,
+capture, prune, check and copy put one line in the system log as they end \- the command,
 .BR status= ,
 .BR exit= ,
 .B seconds=
@@ -1313,22 +1377,396 @@ short or removed.
 then reads every snapshot in full, as
 .B restore
 would, each file checked against its index and nothing written: a test
-restore of every snapshot. An encrypted repository is checked only with its
-secret key.
+restore of every snapshot. An encrypted repository is checked this way only
+with its secret key;
+.B \-\-metadata\-only
+checks one without (see
+.BR STORAGE ).
 .PP
 On disk a repository is plain files:
 .I packs/
 holds the chunks, in gzip'd tar files of about 32 MiB beside an index of
-what is in them, and each directory of
+what is in them and a
+.I .sum
+of the file as written, and each directory of
 .I snapshots/
-a capture's index, its kit's list, a summary and, if it is signed, the
-signature. Everything is written beside its final name and renamed into
+a capture's index, its kit's list, a summary, the list of the packs it needs
+and, if it is signed, the signature. Everything is written beside its final name and renamed into
 place, the snapshot last, so an interrupted capture leaves nothing that looks
 finished, and
 .B prune
 clears what it left. A repository made by restate 1.3.0, whose packs hold
 whole files, is read as it is, and the first capture or prune into it makes
 it the current kind.
+.SH STORAGE
+A repository can be kept on another machine \- a file server, a NAS \- that
+the one captured mounts, over NFS or SMB:
+.B restate
+opens no network connection of its own. What follows is what a repository
+needs of the storage it is on, and what the storage can do with it without
+the machine captured, or its keys.
+.PP
+.B Locks.
+A capture or prune locks the repository's
+.I lock
+file, and whatever reads a snapshot's content shares its
+.I readers
+file, with both
+.BR flock (2)
+and, on Linux, an open file description lock
+.RB ( fcntl (2)
+.BR F_OFD_SETLK ).
+An NFS client takes either on the server; on the server itself the two are
+different locks, and a prune run there sees a capture's lock, taken over NFS,
+only as the second kind. So a capture from the machine and a prune or check
+on the file server exclude each other as two on one machine do. NFS version
+3 locks only through its lock daemon; an NFSv3 share mounted
+.B nolock
+does not lock at all, and must not have two writers.
+.PP
+.B Owners and modes.
+Nothing in a repository is required to be root's: a share that maps every
+user to one of its own
+.RB ( all_squash )
+works, as long as that user can write it. What restate makes is its owner's
+alone, 0600 and 0700, where the share keeps modes.
+.PP
+.B Only adding.
+A capture only ever adds files: each pack, its
+.I .idx
+and
+.I .sum
+and each snapshot are written under a name of their own beside where they
+go, then renamed to a name nothing had; nothing already there is changed,
+renamed over or truncated, and the lock files are opened but never written.
+What it needs of the directory is to make files, write them, rename them to
+new names, remove its own unfinished ones, and lock.
+.B \-\-append\-only
+holds a capture to that, refusing the one thing it would otherwise change:
+the marker of a repository made by restate 1.3 or older. restate cannot make
+a repository append-only for a machine that has been taken over \- that
+machine is root, and has the share \- so the storage has to: by taking a
+filesystem snapshot after each capture (ZFS's), or by marking what each
+capture wrote immutable.
+.PP
+.B Checking without the keys.
+Each pack's
+.I .sum
+is the digest and size of its file as written, and each snapshot's
+.I packs
+the packs it needs: neither is encrypted, and neither says anything of what
+is in them.
+.B check \-\-metadata\-only
+reads no index, so it needs no key and no copy of one: it reads each pack and
+checks it against its
+.IR .sum ,
+and checks that every snapshot's files and every pack its list names are
+there. It says it could not check what is inside the packs, and never that
+the repository is whole.
+.BI \-\-record " FILE"
+compares the repository with what
+.I FILE
+says it held at the last check \- every file, by digest \- names each that
+has been removed or changed since, as damage, and records the repository as
+it is now: with the record kept where the machine captured cannot reach it,
+a pack or snapshot it removed or rewrote is found by the next check. A prune
+given the same record updates it with what the prune removed and wrote.
+.PP
+.B Pruning without the keys.
+.B prune \-\-whole\-packs
+reads no index either: it drops the snapshots it is not told to keep, then
+each pack no snapshot left names in its pack list, whole. A pack partly
+needed is kept as it is; a prune with the keys rewrites it. It refuses, and
+removes nothing, if a snapshot it keeps has no pack list \- one written
+before restate 2.0 \- and a prune that can read the indexes writes those.
+.PP
+.B Copies and usage.
+.B copy
+.I SNAPSHOT DEST
+copies a snapshot, and the packs it needs that
+.I DEST
+lacks, to another repository \- made, as the first is, if it is not there
+\- every file as it is: an encrypted repository's copy is encrypted, and no
+key is needed. A copy kept elsewhere is one a fire does not reach.
+.B du
+.I REPO
+says what a repository holds and, from the pack lists, what each snapshot
+needs of it, what it added when it was taken, and what dropping it alone
+would free, reading no pack.
+.PP
+.B Interrupted runs.
+A capture cut off \- the share gone, the machine off \- leaves only files
+that do not count: a pack with no
+.IR .idx ,
+a snapshot directory under a temporary name.
+.B check
+reports them as left over, not as damage, and the next
+.B prune
+removes them. Nothing is half written under a name that counts.
+.PP
+.B Images.
+An image's content is staged before the image is written, beside the
+image; on a share,
+.BI \-\-tmpdir " DIR"
+stages it on the machine instead, so the share holds only the image.
+.SH ENCRYPTION
+An image, a snapshot or a whole repository is encrypted to the OpenPGP
+public keys
+.B \-\-encrypt\-to
+names, as files exported with
+.BR "gpg \-\-export" ;
+restate never takes a key from a keyring. Encrypting needs only those.
+Decrypting \- restore, verify, export, check without
+.BR \-\-metadata\-only ,
+prune with a rewrite \- needs the secret key in the GnuPG home of whoever
+runs restate
+.RB ( GNUPGHOME ,
+or
+.I ~/.gnupg
+\- root's, under
+.BR sudo ).
+Signing
+.RB ( \-\-sign\-with )
+takes the secret key as a file, imported into a home of its own that is
+removed after.
+.PP
+A secret key with a passphrase asks for it, as gpg asks.
+.BI \-\-passphrase\-fd " N"
+reads it from file descriptor
+.I N
+instead \- once, to its end or its first line \- and gives it to every gpg
+the run starts, each through a pipe of its own: for a run with no one at a
+terminal. A program that keeps the key elsewhere can give it for one run
+and no longer: imported into a GnuPG home made for the run, with
+.B GNUPGHOME
+naming it, and the passphrase on a pipe.
+.SH JOBS
+.B restate run
+.I JOBFILE
+runs what the file says: which command, on what, with which options. A
+program that schedules restate, or a timer, then runs one fixed command, and
+what it does is decided by the file, which only its owner can change:
+.PP
+.RS
+.nf
+# /etc/restate/jobs.d/nightly.conf
+command      = capture
+repository   = /mnt/nas/restate/web01
+quiesce      = true
+quiesce_with = unifi
+encrypt_to   = /etc/restate/keys/backup.asc
+result       = /var/lib/restate/nightly.json
+report_group = restate\-report
+.fi
+.RE
+.PP
+One
+.I key
+=
+.I value
+a line; blank lines and lines starting with # are skipped. Booleans are
+.B true
+or
+.B false
+.RB ( yes ", " no );
+counts are decimal; paths are absolute, with no . or .. in them. The keys,
+and the commands each means something to:
+.TP
+.B command
+.BR capture ,
+.BR prune ,
+.BR check ,
+.BR copy ,
+.BR snapshots ,
+.BR restore ,
+.B estimate
+or
+.BR du .
+.TP
+.B repository
+the repository; every command but estimate.
+.TP
+.B snapshot
+restore, copy: the snapshot's name, or
+.IR REPO :: NAME
+in place of
+.BR repository ;
+the newest if not given.
+.TP
+.BR root ", " restore_root
+capture and estimate, and restore: the tree.
+.TP
+.BR rules " (repeatable), " all ", " baseline_content ", " one_file_system
+capture, estimate (rules for restore too).
+.TP
+.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " sign_with ", " tmpdir
+capture.
+.TP
+.BR encrypt_to " (repeatable)"
+capture and prune: key files.
+.TP
+.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " whole_packs
+prune;
+.B dry_run
+for prune and restore;
+.B record
+for prune and check.
+.TP
+.BR read_all ", " metadata_only
+check;
+.BR trusted_key " (repeatable)"
+for check and restore.
+.TP
+.BR include ", " exclude " (repeatable), " check_first ", " allow_unverified
+restore.
+.TP
+.B copy_to
+copy: where to.
+.TP
+.BR result ", " progress ", " report_group
+every command: where its result and its progress go, and the group that
+may read them (see
+.BR RESULTS );
+.B syslog
+for capture, prune, check and copy.
+.PP
+A key restate does not know, a key the command has no use for, a key given
+twice that is not repeatable, or a value of the wrong kind refuses the whole
+job, saying where. Nothing in a job can name a program to run, or a hook by
+path: a hook is a name, found as
+.B \-\-quiesce\-with
+finds it. The file has to be a regular file, not a symlink, and it and the
+directory it is in have to be root's \- or whoever runs it \- and writable
+by no one else. The command line can add
+.BR \-q ,
+.BR \-v ,
+.BR \-P ,
+.BR \-\-syslog ,
+.BR \-\-passphrase\-fd ,
+and where the result and progress go if the job does not say; anything else
+there is refused.
+.PP
+.B restate\-job@.service
+runs
+.BR "restate run /etc/restate/jobs.d/" \fINAME\fB.conf
+for the instance
+.IR NAME ,
+at a low priority and idle I/O, for up to a day, and when told to stop lets
+restate resume what it paused first;
+.B restate\-job@.timer
+runs it every night, at a time a little different on each machine, and on
+the next boot after a night it was off:
+.PP
+.RS
+.nf
+systemctl enable \-\-now restate\-job@nightly.timer
+systemctl start restate\-job@nightly      # once, now
+journalctl \-u restate\-job@nightly
+.fi
+.RE
+.SH RESULTS
+restate's messages are for people. A program running it reads its exit
+status, and, given
+.BI \-\-result " FILE" ,
+one JSON object written into
+.I FILE
+when the run ends \- beside it, then renamed into place, so a reader finds
+this run's whole result or the last one's:
+.PP
+.RS
+.nf
+{"schema": 1, "command": "capture", "status": "incomplete", "exit": 3,
+ "started_at": "2026\-10\-20T03:00:00Z", "seconds": 812,
+ "repository": "/mnt/nas/restate/web01",
+ "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
+ "paths": 812345, "kept": 20311, "read_bytes": 1048576, "reused": 811902,
+ "reused_bytes": 9876543210, "new_bytes": 4096, "repository_bytes": 123456789,
+ "unreadable": {"count": 1, "first": [{"path": "/srv/x", "reason": "..."}]},
+ "quiesce": [{"kind": "postgresql", "name": "16\-main",
+   "paused_at": "...", "resumed_at": "...", "status": "ok", "message": ""}],
+ "warnings": ["..."], "warnings_count": 1}
+.fi
+.RE
+.PP
+.B status
+is the exit status as a word:
+.B ok
+(0),
+.B different
+(1),
+.B failed
+(2),
+.B incomplete
+(3),
+.B untrusted
+(4) or
+.B busy
+(5). Every warning is collected,
+.B \-\-quiet
+or not \- the first 50 in full \- and every path a walk could not read, the
+first 100 with why. Each command adds what it did:
+.BR prune ,
+.B pruned
+and
+.B kept_snapshots
+and the packs it removed and rewrote;
+.BR check ,
+an object
+.B check
+with what it read and found, and what changed since a
+.BR \-\-record ;
+.BR restore ,
+an object
+.B restore
+with what it put back \- or would have, in a dry run \- and
+.BR plan ,
+the first 1000 of those paths; with
+.BR \-\-as ,
+an object
+.BR as ;
+.BR copy ,
+.BR du ,
+.B estimate
+and
+.BR diff ,
+objects of their own names; a job's,
+.BR job .
+.PP
+.B \-\-json
+writes the output itself as JSON for
+.BR snapshots ,
+.BR diff " (and " "diff \-\-packages" ),
+.BR verify ,
+.BR status ,
+.BR du ,
+.B estimate
+and
+.BR features .
+.B restate features \-\-json
+says what this restate can do \- its version, commands, options, the keys a
+job takes, the schemas, the hooks here and the programs it can use \- for a
+program to ask before it asks for any of them.
+.PP
+The result and the progress file are their owner's alone, as everything
+restate writes is;
+.BI \-\-report\-group " GROUP"
+makes them that group's to read too, for a program that is not root.
+.PP
+What a program reads is kept: the exit statuses, the members of a result,
+of
+.B \-\-json
+output and of
+.BR features ,
+and the keys a job takes are changed in meaning only with a new
+.B schema
+number
+.RB ( result_schema ,
+.BR job_schema );
+a later restate adds to them. The file
+.B autoinstall
+writes stays an Ubuntu autoinstall file of version 1, and the sheet
+.B buildsheet
+writes keeps its sections, for a provisioning system to use as they are.
 .SH IMAGES AND INDEXES
 An image is an ordinary POSIX tar archive of three parts, each compressed on
 its own:
@@ -1503,6 +1941,11 @@ CLASSES
     text="$(printf '%s' "$line" | sed -E 's/^ +[0-9]+ +//' | escape_roff)"
     printf '.TP\n.B %s\n%s\n' "$code" "$text"
   done
+  cat <<'EXITS'
+.PP
+These do not change: a program may act on them (see
+.BR RESULTS ).
+EXITS
 
   cat <<'ENVIRONMENT'
 .SH ENVIRONMENT
@@ -1665,6 +2108,20 @@ capture into the repository need no secret key. Anything here can be
 deleted; a capture without it decrypts what it needs if it can, and stores
 again what it cannot.
 .TP
+.I /etc/restate/jobs.d/
+Jobs, for
+.B restate run
+and
+.B restate\-job@.service
+(see
+.BR JOBS ).
+.TP
+.I /usr/lib/systemd/system/restate\-job@.service ", " restate\-job@.timer
+The unit that runs a job, and the timer that runs it every night
+.RI ( /usr/local/lib/systemd/system
+for a
+.BR "make install" ).
+.TP
 .I /run/restate/capture.lock
 Held by a
 .BR "capture \-\-quiesce" ,
@@ -1672,8 +2129,8 @@ so that only one runs on a machine at a time.
 .PP
 Otherwise
 .B restate
-keeps no files of its own: no configuration, no database, no directory of
-images. It writes only what
+keeps no files of its own: no configuration but the jobs a site writes, no
+database, no directory of images. It writes only what
 .B \-\-output
 names \- an image, or a snapshot in a repository it is given \- and reads only the tree it is given and the files named on its
 command line. A site's rules live wherever the administrator keeps them and
@@ -1797,16 +2254,13 @@ comes next.
 .PP
 What is running is found from
 .IR /proc ,
-on Linux alone. A restore checks every file against the signed index as it
-puts it in place, and refuses one that does not match, but does not read the
-whole image first: a damaged image is restored as far as it is whole.
-.PP
-A repository stores each file's content whole, so a large file that changes
-a little every night \- a virtual machine's disk \- is stored again every
-night; nothing yet splits a file into pieces to store only those that
-changed. Its locks are
-.BR flock (2)
-locks, which some network filesystems do not honor.
+on Linux alone; elsewhere,
+.B \-\-quiesce\-with
+names what to pause. A pack is pruned without its keys only whole, so a
+repository pruned only that way keeps what a partly needed pack holds until
+a prune with the keys rewrites it. A host reinstalled has no cache of an
+encrypted repository it captured into, so its first capture after stores
+everything again.
 .PP
 Report bugs at
 .UR https://github.com/bceverly/restate/issues

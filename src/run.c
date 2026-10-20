@@ -296,7 +296,7 @@ static bool wait_until(pid_t pid, time_t deadline, int *code, bool *late, struct
 }
 
 bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsigned timeout,
-                 int *code, struct rs_buf *err)
+                 int out_fd, int *code, struct rs_buf *err)
 {
     char           *envp[2 + HOOK_ENV_MAX + 1];
     size_t          nenv = 0;
@@ -323,7 +323,7 @@ bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsign
         envp[nenv++] = rs_xstrdup(env[i]);
     }
     envp[nenv] = NULL;
-    rc = spawn_one(path, argv, envp, -1, -1, -1, &pid);
+    rc = spawn_one(path, argv, envp, -1, out_fd, -1, &pid);
     for (i = 0; i < nenv; i++)
     {
         free(envp[i]);

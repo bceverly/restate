@@ -7,6 +7,7 @@
 
 #include "cmd.h"
 #include "progress.h"
+#include "repo.h"
 #include "test.h"
 #include "util.h"
 
@@ -197,6 +198,127 @@ void test_progress(void)
         rs_test_rmtree(dir);
         free(img);
         free(tree);
+        free(dir);
+    }
+
+    TEST_CASE("progress: for a program, a JSON object a line");
+    fp = tmpfile();
+    CHECK(fp != NULL);
+    if (!fp)
+    {
+        return;
+    }
+    rs_progress_enable(false);
+    rs_progress_set_output(NULL, false, fake_clock);
+    rs_progress_json(fp);
+    CHECK(rs_progress_enabled());
+    fake_now = 0;
+    rs_progress_phase("counting", 0);
+    rs_progress_found(100);
+    rs_progress_done();
+    rs_progress_phase("walking", 4096);
+    rs_progress_path("/a");
+    rs_progress_bytes(1024);
+    rs_progress_new_bytes(512);
+    fake_now = 3 * SEC;
+    rs_progress_path("/b");
+    rs_progress_hook("16-main");
+    rs_progress_hook(NULL);
+    rs_progress_done();
+    rs_progress_phase("checking", 0);
+    rs_progress_done();
+    rs_progress_finish();
+    text = contents(fp);
+    CHECK_CONTAINS(text, "{\"phase\": \"count\", \"paths\": 0, \"read_bytes\": 0, \"new_bytes\": 0, "
+                         "\"total_bytes\": null, \"hook\": null, \"at\": \"");
+    CHECK_CONTAINS(text, "\"phase\": \"walk\", \"paths\": 0, \"read_bytes\": 0, \"new_bytes\": 0, "
+                         "\"total_bytes\": 4096");
+    CHECK_CONTAINS(text, "\"phase\": \"walk\", \"paths\": 2, \"read_bytes\": 1024, \"new_bytes\": "
+                         "512, \"total_bytes\": 4096, \"hook\": null");
+    CHECK_CONTAINS(text, "\"phase\": \"hook\", \"paths\": 2, \"read_bytes\": 1024, \"new_bytes\": "
+                         "512, \"total_bytes\": 4096, \"hook\": \"16-main\"");
+    CHECK_CONTAINS(text, "\"phase\": \"check\"");
+    CHECK_CONTAINS(text, "\"phase\": \"finish\"");
+    {
+        /* Every line one object. */
+        const char *p = text;
+        size_t      n = 0;
+
+        while ((p = strchr(p, '\n')) != NULL)
+        {
+            n++;
+            p++;
+        }
+        CHECK(n >= 7);
+        CHECK(text[0] == '{' && strstr(text, "}\n{") != NULL);
+    }
+    free(text);
+    rs_progress_json(NULL);
+    (void)fclose(fp);
+
+    TEST_CASE("progress: a capture's progress file and result, as a program reads them");
+    {
+        char             *dir = rs_test_tmpdir();
+        char             *repo = rs_xasprintf("%s/repo", dir);
+        char             *tree = rs_xasprintf("%s/tree", dir);
+        char             *res = rs_xasprintf("%s/r.json", dir);
+        char             *prog = rs_xasprintf("%s/p.ndjson", dir);
+        struct rs_options o;
+        struct rs_buf     err;
+        char             *o_out = NULL;
+        char             *o_err = NULL;
+        FILE             *in;
+
+        (void)mkdir(tree, 0755);
+        rs_test_write(tree, "a", "some content\n", 0644);
+        rs_buf_init(&err);
+        CHECK(rs_repo_init(repo, false, &err));
+        rs_buf_free(&err);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CAPTURE;
+        o.root = tree;
+        o.output = repo;
+        o.no_default_rules = true;
+        o.quiet = true;
+        o.result = res;
+        o.progress_file = prog;
+        CHECK_INT(rs_test_capture(run, &o, &o_out, &o_err), RESTATE_EXIT_OK);
+        in = fopen(prog, "r");
+        text = in && fseek(in, 0, SEEK_END) == 0 ? contents(in) : NULL;
+        CHECK_CONTAINS(text, "\"phase\": \"walk\"");
+        CHECK_CONTAINS(text, "\"phase\": \"finish\"");
+        free(text);
+        if (in)
+        {
+            (void)fclose(in);
+        }
+        in = fopen(res, "r");
+        text = in && fseek(in, 0, SEEK_END) == 0 ? contents(in) : NULL;
+        CHECK_CONTAINS(text, "\"command\": \"capture\"");
+        CHECK_CONTAINS(text, "\"status\": \"ok\"");
+        CHECK_CONTAINS(text, "\"snapshot\": \"");
+        CHECK_CONTAINS(text, "\"repository_bytes\": ");
+        CHECK_CONTAINS(text, "\"quiesce\": []");
+        free(text);
+        if (in)
+        {
+            (void)fclose(in);
+        }
+        free(o_out);
+        free(o_err);
+
+        TEST_CASE("progress: a progress file that cannot be made stops the run");
+        o.progress_file = "/nonexistent/dir/p.ndjson";
+        o.result = NULL;
+        CHECK_INT(rs_test_capture(run, &o, &o_out, &o_err), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(o_err, "/nonexistent/dir/p.ndjson");
+        free(o_out);
+        free(o_err);
+        rs_test_rmtree(dir);
+        free(repo);
+        free(tree);
+        free(res);
+        free(prog);
         free(dir);
     }
 

@@ -992,6 +992,47 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 2 "sign it again" -- "$BIN" sign --sign-with signer.sec srepo
   contains "$ERR" "it is signed already" "is refused"
 
+  # A key with a passphrase, given on a file descriptor rather than asked for:
+  # for signing unattended, and for a restore a program runs.
+  mkdir -m 700 pgnupg pnokey
+  pk() { GNUPGHOME="$WORK/pgnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase pw "$@"; }
+  pk --quick-gen-key 'with pass <pass@example.invalid>' default default never 2> /dev/null
+  pk --export-secret-keys --armor pass@example.invalid > pass.sec 2> /dev/null
+  pk --export pass@example.invalid > pass.pub 2> /dev/null
+  printf 'pw\n' > pw.txt
+  # The command, with the passphrase readable on file descriptor 3. Called
+  # through expect.
+  # shellcheck disable=SC2317,SC2329
+  with_pw() { "$@" 3< "$WORK/pw.txt"; }
+  cp rimg.tar psigned.tar
+  expect 0 "sign with a key that has a passphrase, --passphrase-fd" -- \
+    with_pw "$BIN" sign --sign-with pass.sec --passphrase-fd 3 psigned.tar
+  expect 0 "and the signature holds" -- \
+    "$BIN" restore --dry-run --trusted-key pass.pub --root sout psigned.tar
+  expect 0 "an encrypted repository whose key has a passphrase" -- \
+    "$BIN" init -q --encrypt-to pass.pub prepo-enc
+  expect 0 "capture into it" -- \
+    env XDG_CACHE_HOME="$WORK/pcache" GNUPGHOME="$WORK/pnokey" \
+    "$BIN" capture -q -r rtree --os=linux --encrypt-to pass.pub -o prepo-enc
+  mkdir -p ppout
+  expect 0 "restore it, the passphrase on a file descriptor" -- \
+    with_pw env XDG_CACHE_HOME="$WORK/pcache2" GNUPGHOME="$WORK/pgnupg" \
+    "$BIN" restore -q --allow-unverified --passphrase-fd 3 --root ppout prepo-enc
+  check "and its files are back" cmp rtree/etc/app/key ppout/etc/app/key
+  expect 0 "check --metadata-only an encrypted repository, with no key at all" -- \
+    env XDG_CACHE_HOME="$WORK/pcache3" GNUPGHOME="$WORK/pnokey" \
+    "$BIN" check --metadata-only prepo-enc
+  expect 0 "copy an encrypted repository, with no key at all" -- \
+    env XDG_CACHE_HOME="$WORK/pcache3" GNUPGHOME="$WORK/pnokey" "$BIN" copy prepo-enc poff-enc
+  check "its copy is encrypted as it was" sh -c '! cat poff-enc/packs/*.idx | grep restate-pack > /dev/null'
+  expect 0 "and reads back with the key" -- \
+    with_pw env XDG_CACHE_HOME="$WORK/pcache4" GNUPGHOME="$WORK/pgnupg" \
+    "$BIN" check -q --passphrase-fd 3 poff-enc
+  expect 0 "prune --whole-packs an encrypted repository, with no key at all" -- \
+    env XDG_CACHE_HOME="$WORK/pcache3" GNUPGHOME="$WORK/pnokey" \
+    "$BIN" prune --whole-packs --keep-last 1 prepo-enc
+  GNUPGHOME="$WORK/pgnupg" gpgconf --kill gpg-agent 2> /dev/null || true
+
   # An encrypted repository: the keys given each time, a capture needing no
   # secret key, and a restore needing it.
   gk --quick-gen-key 'restate enc <enc@example.invalid>' default default never 2> /dev/null
@@ -1100,9 +1141,44 @@ HOOK
   # A script, written as it is: nothing to expand here.
   # shellcheck disable=SC2016
   printf '#!/bin/sh\n[ "$1" = pause ] && exit 3\nexit 0\n' > /etc/restate/hooks.d/redis
-  expect 0 "a hook that cannot pause" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
+  expect 3 "a hook that cannot pause" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar \
+    --result live.json
   contains "$ERR" "was not paused" "is warned about"
   contains "$ERR" "resumed Redis redis-server" "and resume is run anyway"
+  contains "$ERR" "the capture is incomplete" "and the capture is incomplete"
+  contains "$(cat live.json)" '"status": "failed"' "the result says the pause failed"
+  contains "$(cat live.json)" '"kind": "redis"' "and of what"
+
+  # A hook --quiesce-with names: run whether or not anything is found, for
+  # the paths it says it covers -- or, naming none, for the whole walk.
+  mkdir -p /srv/restate-named
+  echo named > /srv/restate-named/data
+  cat > /etc/restate/hooks.d/named <<HOOK
+#!/bin/sh
+case "\$1" in
+paths) echo /srv/restate-named ;;
+*) echo "\$1 \$2" >> "$WORK/named.log" ;;
+esac
+exit 0
+HOOK
+  chmod 0755 /etc/restate/hooks.d/named
+  expect 0 "capture --quiesce-with a hook" -- \
+    "$BIN" capture -N -R live.rules --quiesce-with named -o live.tar --result named.json
+  contains "$(cat "$WORK/named.log")" "pause named" "its hook pauses it"
+  contains "$(cat "$WORK/named.log")" "resume named" "and resumes it"
+  contains "$(cat named.json)" '"kind": "named"' "the result says what it paused"
+  contains "$(cat named.json)" '"status": "ok"' "and that it went well"
+  contains "$(part live.tar files.tar.gz | gzip -dc | tar -tf -)" "srv/restate-named/data" \
+    "and what it covers is in the image"
+  printf '#!/bin/sh\nexit 0\n' > /etc/restate/hooks.d/whole
+  chmod 0755 /etc/restate/hooks.d/whole
+  expect 0 "capture --quiesce-with a hook that names no paths" -- \
+    "$BIN" capture -N -R live.rules --quiesce-with whole -o live.tar
+  contains "$ERR" "pausing whole whole" "it is paused, for the whole walk"
+  expect 2 "capture --quiesce-with a hook there is not" -- \
+    "$BIN" capture -N -R live.rules --quiesce-with nosuch -o live.tar
+  contains "$ERR" "there is no hook by that name" "says so"
+  rm -rf /srv/restate-named
 
   chmod 0777 /etc/restate/hooks.d/redis
   expect 0 "a hook anyone could change" -- "$BIN" capture -N -R live.rules --quiesce -o live.tar
@@ -1218,6 +1294,149 @@ if [ "$(id -u)" != "0" ]; then
   expect 3 "capture with an unreadable file" -- "$BIN" capture -r tree --os=linux -o img4.tar
   chmod 600 tree/etc/locked
 fi
+
+# ---------------------------------------------------------------------------
+# For a program running restate: results, progress, JSON, jobs, and the
+# checks and prunes the storage can make without the keys
+# ---------------------------------------------------------------------------
+mkdir -p ptree/etc ptree/srv/data pstage
+echo one > ptree/etc/one
+echo two > ptree/srv/data/two
+dd if=/dev/zero bs=1000 count=300 2> /dev/null | tr '\0' 'x' > ptree/srv/data/big
+
+expect 0 "features" -- "$BIN" features
+contains "$OUT" "job schema 1, result schema 1" "says what it can do"
+expect 0 "features --json" -- "$BIN" features --json
+contains "$OUT" '"job_schema": 1' "as JSON: the job schema"
+contains "$OUT" '"result_schema": 1' "the result schema"
+contains "$OUT" '"run"' "its commands"
+contains "$OUT" '"quiesce_with"' "its options, as job keys spell them"
+contains "$OUT" '"job_keys": [' "the keys a job takes"
+contains "$OUT" '"programs": {' "and the programs it can use"
+
+expect 0 "estimate" -- "$BIN" estimate -N -r ptree
+contains "$OUT" "/srv/data" "says where the bytes are"
+contains "$OUT" "in 3 files a first capture would keep" "and how many files"
+expect 0 "estimate --json --result" -- "$BIN" estimate -N -r ptree --json --result est.json
+contains "$OUT" '"by_dir": {' "as JSON"
+contains "$(cat est.json)" '"command": "estimate"' "and in the result"
+
+expect 2 "a failure, in the result" -- "$BIN" capture -N -r ptree --result fail.json
+contains "$(cat fail.json)" '"status": "failed"' "the status"
+contains "$(cat fail.json)" '"exit": 2' "and the exit status"
+
+expect 0 "init a repository for programs" -- "$BIN" init -q prepo
+expect 0 "capture --result --progress-file" -- \
+  "$BIN" capture -N -r ptree -q -o prepo --result cap.json --progress-file cap.ndjson
+res="$(cat cap.json)"
+contains "$res" '"command": "capture"' "the result names the command"
+contains "$res" '"status": "ok"' "how it ended"
+contains "$res" '"snapshot": "prepo::' "the snapshot"
+contains "$res" '"new_bytes": ' "what was new"
+contains "$res" '"repository_bytes": ' "and what the repository holds now"
+check "the result is its owner's alone" test "$(file_mode cap.json)" = 600
+contains "$(cat cap.ndjson)" '"phase": "walk"' "progress, a line at a time"
+contains "$(cat cap.ndjson)" '"phase": "finish"' "to the end"
+expect 0 "capture --report-group" -- \
+  "$BIN" capture -N -r ptree -q -o prepo --result cap2.json --report-group "$(id -gn)"
+check "the result is the group's to read too" test "$(file_mode cap2.json)" = 640
+expect 2 "--report-group a group there is not" -- \
+  "$BIN" capture -N -r ptree -q -o prepo --result cap3.json --report-group no-such-group-here
+contains "$ERR" "there is no such group" "says so"
+expect 0 "--progress=json" -- "$BIN" capture -N -r ptree -q -o prepo --progress=json
+contains "$ERR" '{"phase": "walk"' "progress as JSON on standard error"
+expect 2 "--progress=something else" -- "$BIN" capture -N -r ptree -o prepo --progress=yes
+expect 0 "capture --append-only" -- "$BIN" capture -N -r ptree -q -o prepo --append-only
+expect 2 "capture --append-only into an image" -- "$BIN" capture -N -r ptree -o pa.tar --append-only
+contains "$ERR" "an image is written whole" "is refused"
+expect 0 "capture --tmpdir" -- "$BIN" capture -N -r ptree -q -o pt.tar --tmpdir "$WORK/pstage"
+check "nothing is left where it was staged" rmdir pstage
+
+expect 0 "snapshots --json" -- "$BIN" snapshots --json prepo
+contains "$OUT" '"snapshots": [' "lists them as JSON"
+contains "$OUT" '"signed": false' "with whether each is signed"
+expect 0 "du" -- "$BIN" du prepo
+contains "$OUT" "needs      alone      added" "says what each snapshot needs"
+expect 0 "du --json" -- "$BIN" du --json prepo
+contains "$OUT" '"pack_bytes": ' "as JSON"
+
+expect 0 "check --metadata-only" -- "$BIN" check --metadata-only prepo
+contains "$ERR" "as far as can be told without reading its indexes" "says what it checked"
+expect 2 "check --metadata-only --read-all" -- "$BIN" check --metadata-only --read-all prepo
+expect 0 "check --record, the first" -- "$BIN" check --metadata-only --record prec prepo
+expect 0 "check --record, again" -- "$BIN" check --record prec --result chk.json prepo
+contains "$ERR" "0 files removed or changed since the last check" "nothing changed"
+contains "$(cat chk.json)" '"recorded": true' "the result says so"
+cp -R prepo ptamper
+cp prec ptrec
+for pack in ptamper/packs/*.tar.gz; do
+  printf x >> "$pack"
+  break
+done
+expect 3 "check --record a pack changed since" -- "$BIN" check --metadata-only --record ptrec ptamper
+contains "$ERR" "changed since the last check" "says what changed"
+contains "$ERR" "not what its .sum says" "and that it is not what it was written as"
+
+expect 0 "copy" -- "$BIN" copy prepo poff
+contains "$ERR" "made for it" "makes the copy's repository"
+expect 0 "copy it again" -- "$BIN" copy prepo poff
+contains "$ERR" "is in poff already" "copies nothing twice"
+expect 0 "check the copy" -- "$BIN" check -q poff
+expect 2 "copy what is not a repository" -- "$BIN" copy ptree poff
+
+mkdir -p pout
+expect 0 "restore --include --dry-run --result" -- \
+  "$BIN" restore --allow-unverified --dry-run --include /etc --root pout --result rs.json prepo
+contains "$(cat rs.json)" '"plan": [' "the result holds the plan"
+contains "$(cat rs.json)" "/etc/one" "of what is included"
+lacks "$OUT" "/srv/data/two" "and nothing else"
+
+expect 0 "prune --whole-packs" -- \
+  "$BIN" prune --whole-packs --keep-last 1 --record prec --result pr.json prepo
+contains "$(cat pr.json)" '"pruned": [' "the result says what it dropped"
+contains "$(cat pr.json)" '"kept_snapshots": [' "and what it kept"
+expect 0 "check --record after the prune" -- "$BIN" check --record prec prepo
+contains "$ERR" "0 files removed or changed since the last check" "a prune with the record is expected"
+
+expect 0 "capture an image to compare" -- "$BIN" capture -N -r ptree -q -o pd1.tar
+echo three > ptree/etc/three
+expect 0 "and another, after a change" -- "$BIN" capture -N -r ptree -q -o pd2.tar
+expect 1 "diff --json" -- "$BIN" diff --json pd1.tar pd2.tar
+contains "$OUT" '"change": "A", "path": "/etc/three"' "a diff as JSON"
+expect 1 "verify --json" -- "$BIN" verify --json --root ptree pd1.tar
+contains "$OUT" '"changes": [' "as JSON"
+contains "$OUT" '"path": "' "each change a path"
+contains "$OUT" '"added": 1' "with the counts"
+expect 1 "status --json" -- "$BIN" status --json --root ptree pd1.tar
+contains "$OUT" '"change": "A"' "status as JSON too"
+
+# Jobs: the run, decided by a file only its owner can change.
+mkdir -m 755 jobs
+cat > jobs/check.conf <<JOB
+# a check, as a program would schedule one
+command = check
+repository = $WORK/prepo
+result = $WORK/job.json
+JOB
+chmod 644 jobs/check.conf
+expect 0 "run a job" -- "$BIN" run "$WORK/jobs/check.conf"
+contains "$(cat job.json)" '"command": "check"' "the job's result"
+contains "$(cat job.json)" '"job": "' "names the job"
+expect 2 "run a job with an option it does not take" -- "$BIN" run --root / "$WORK/jobs/check.conf"
+contains "$ERR" "what to do is the job's to say" "is refused"
+chmod 664 jobs/check.conf
+expect 2 "run a job others can change" -- "$BIN" run "$WORK/jobs/check.conf"
+contains "$ERR" "writable by no one else" "is refused"
+chmod 644 jobs/check.conf
+printf 'command = check\nrepository = %s/prepo\nshell = rm -rf /\n' "$WORK" > jobs/bad.conf
+chmod 644 jobs/bad.conf
+expect 2 "run a job with a key that is not one" -- "$BIN" run "$WORK/jobs/bad.conf"
+contains "$ERR" "is not a key a job can have" "says which"
+expect 2 "run a job that is not there" -- "$BIN" run "$WORK/jobs/none.conf"
+printf 'command = capture\nrepository = %s/prepo\nroot = %s/ptree\nrules = %s/nothing-at-all.rules\n' \
+  "$WORK" "$WORK" "$WORK" > jobs/cap.conf
+chmod 644 jobs/cap.conf
+expect 2 "run a capture job whose rules are not there" -- "$BIN" run "$WORK/jobs/cap.conf"
 
 # ---------------------------------------------------------------------------
 # classify and rules

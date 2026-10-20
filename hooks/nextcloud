@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: Nextcloud, for capture --quiesce-with nextcloud.
+#
+#   paths NAME    Nextcloud's own directory and its data directory, one a
+#                 line: what the capture copies while it is in maintenance mode
+#   pause NAME    put it in maintenance mode, so that no one changes a file
+#                 while it is copied
+#   resume NAME   take it out of maintenance mode
+#
+# Its database is a MySQL, MariaDB or PostgreSQL that capture --quiesce finds
+# running and pauses with that database's own hook. The snap's Nextcloud is
+# found too (nextcloud.occ), and so is one installed in /var/www/nextcloud;
+# for one elsewhere, set NEXTCLOUD below in a copy of this hook.
+#
+# To change what this does, copy it to /etc/restate/hooks.d/nextcloud (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+NEXTCLOUD=/var/www/nextcloud
+
+# occ, as the user Nextcloud's files belong to: the web server's.
+occ() {
+  if command -v nextcloud.occ > /dev/null 2>&1; then
+    nextcloud.occ "$@"
+    return
+  fi
+  owner="$(stat -c %U "$NEXTCLOUD/occ" 2> /dev/null || stat -f %Su "$NEXTCLOUD/occ")"
+  if command -v runuser > /dev/null 2>&1; then
+    runuser -u "$owner" -- php "$NEXTCLOUD/occ" "$@"
+  else
+    # The single quotes are the point: the shell su starts expands them, from
+    # the arguments after it, so nothing here is parsed twice.
+    # shellcheck disable=SC2016
+    su -s /bin/sh "$owner" -c 'php "$0" "$@"' "$NEXTCLOUD/occ" "$@"
+  fi
+}
+
+case "$action" in
+paths)
+  if command -v nextcloud.occ > /dev/null 2>&1; then
+    echo /var/snap/nextcloud/current
+    echo /var/snap/nextcloud/common
+  else
+    echo "$NEXTCLOUD"
+  fi
+  data="$(occ config:system:get datadirectory 2> /dev/null || true)"
+  if [ -n "$data" ] && [ -d "$data" ]; then
+    echo "$data"
+  fi
+  ;;
+pause)
+  occ maintenance:mode --on
+  ;;
+resume)
+  occ maintenance:mode --off
+  ;;
+*)
+  echo "usage: $0 paths|pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

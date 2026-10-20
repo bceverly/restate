@@ -46,6 +46,12 @@
  *  16  a list of copies, as autoinstall --clones reads it, and an /etc/hosts
  *      given a copy's name: each name the copies parse to must be one --as
  *      takes, and the hosts file given its own name back must be unchanged
+ *  17  a job file, as restate run reads it: what is accepted names a command,
+ *      with its arguments and every path in it absolute
+ *  18  what the storage checks a repository by without its keys -- a pack's
+ *      .sum, a snapshot's pack list and a check's record, between NULs --
+ *      each, accepted, holding what it says: lowercase digests, names in
+ *      order and each once
  *
  * It is reached two ways:
  *
@@ -72,6 +78,7 @@
 #include "identity.h"
 #include "index.h"
 #include "installer.h"
+#include "jobs.h"
 #include "json.h"
 #include "live.h"
 #include "machine.h"
@@ -287,6 +294,108 @@ static void fuzz_clones(const char *text, size_t len)
     rs_buf_reset(&out);
     (void)rs_identity_hosts(text, len, "a", "longer-name", &out);
     rs_buf_free(&out);
+}
+
+/* A job file: what is accepted names a command, its arguments are where the
+ * command wants them, and every path in it is absolute. */
+static void fuzz_jobs(const char *text, size_t len)
+{
+    struct rs_job job;
+    struct rs_buf err;
+
+    rs_job_init(&job);
+    rs_buf_init(&err);
+    if (rs_job_parse(text, len, "fuzz", &job, &err))
+    {
+        const struct rs_options *o = &job.opts;
+        size_t                   i;
+
+        if (o->command == CMD_NONE || (o->command == CMD_CAPTURE && (!o->output || o->output[0] != '/')))
+        {
+            abort();
+        }
+        for (i = 0; i < o->nargs; i++)
+        {
+            if (!o->args[i] || o->args[i][0] != '/')
+            {
+                abort();
+            }
+        }
+        for (i = 0; i < o->nrules_files; i++)
+        {
+            if (o->rules_files[i][0] != '/' || strstr(o->rules_files[i], "/../"))
+            {
+                abort();
+            }
+        }
+        for (i = 0; i < o->nquiesce_with; i++)
+        {
+            if (strchr(o->quiesce_with[i], '/'))
+            {
+                abort();
+            }
+        }
+    } else if (!err.data || !*err.data)
+    {
+        abort();   /* a job refused says why */
+    }
+    rs_job_free(&job);
+    rs_buf_free(&err);
+}
+
+/* A pack's .sum, a snapshot's pack list and a check's record, NUL-separated:
+ * what each accepts is what it says it is -- digests in lowercase hex, names
+ * in order and each once. */
+static void fuzz_storage(const char *text, size_t len)
+{
+    const char           *parts[3] = { "", "", "" };
+    size_t                lens[3] = { 0, 0, 0 };
+    size_t                k = 0;
+    size_t                i;
+    char                  hex[RS_SHA256_HEX_SIZE];
+    uint64_t              size;
+    char                **names;
+    size_t                n;
+    struct rs_repo_record rec;
+
+    parts[0] = text;
+    for (i = 0; i < len && k < 2; i++)
+    {
+        if (text[i] == '\0')
+        {
+            lens[k] = (size_t)(text + i - parts[k]);
+            parts[++k] = text + i + 1;
+        }
+    }
+    lens[k] = (size_t)(text + len - parts[k]);
+    if (rs_repo_parse_sum(parts[0], lens[0], hex, &size) && !all_hex(hex, 64))
+    {
+        abort();
+    }
+    if (rs_repo_parse_pack_list(parts[1], lens[1], &names, &n))
+    {
+        for (i = 0; i < n; i++)
+        {
+            if (!rs_repo_name_valid(names[i]) || (i > 0 && strcmp(names[i - 1], names[i]) >= 0))
+            {
+                abort();
+            }
+        }
+        rs_repo_free_names(names, n);
+    }
+    if (rs_repo_parse_record(parts[2], lens[2], &rec))
+    {
+        for (i = 0; i < rec.n; i++)
+        {
+            if (!all_hex(rec.entries[i].hash, 64) || rec.entries[i].path[0] == '/' ||
+                strstr(rec.entries[i].path, "..") ||
+                (i > 0 && strcmp(rec.entries[i - 1].path, rec.entries[i].path) >= 0))
+            {
+                abort();
+            }
+        }
+        rs_repo_record_free(&rec);
+    }
 }
 
 static void fuzz_apt(const char *text, size_t len)
@@ -984,7 +1093,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 17)
+    switch (data[0] % 19)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -1034,8 +1143,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 15:
         fuzz_apt(text, size - 1);
         break;
-    default:
+    case 16:
         fuzz_clones(text, size - 1);
+        break;
+    case 17:
+        fuzz_jobs(text, size - 1);
+        break;
+    default:
+        fuzz_storage(text, size - 1);
         break;
     }
     return 0;
@@ -1170,7 +1285,7 @@ static void mutate(struct rs_buf *b, const unsigned char *other, size_t other_le
         default:  /* change which parser it goes to */
             if (b->len > 0)
             {
-                b->data[0] = (char)rnd(17);
+                b->data[0] = (char)rnd(19);
             }
             break;
         }

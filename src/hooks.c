@@ -4,10 +4,12 @@
  */
 #include "hooks.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -25,6 +27,9 @@
 /* How long a hook may take, in seconds: a pause can be a large dump. */
 #define PAUSE_TIMEOUT  (30u * 60u)
 #define RESUME_TIMEOUT (10u * 60u)
+/* Saying which paths it covers is quick; and a few thousand of them at most. */
+#define PATHS_TIMEOUT  60u
+#define PATHS_MAX      ((size_t)1024 * 1024)
 
 static const char *const *test_dirs;
 static size_t             ntest_dirs;
@@ -108,6 +113,73 @@ char *rs_hook_find(const char *kind)
     }
     free(path);
     return NULL;
+}
+
+static int by_name(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* The names in `dir` that rs_hook_find would run, added to the list. */
+static void list_hooks(const char *dir, char ***names, size_t *n)
+{
+    DIR                 *d = opendir(dir);
+    const struct dirent *de;
+
+    while (d && (de = readdir(d)) != NULL)
+    {
+        char  *found;
+        size_t i;
+        bool   have = false;
+
+        if (!plain(de->d_name))
+        {
+            continue;
+        }
+        for (i = 0; *names && i < *n && !have; i++)
+        {
+            have = strcmp((*names)[i], de->d_name) == 0;
+        }
+        found = have ? NULL : rs_hook_find(de->d_name);
+        if (found)
+        {
+            *names = rs_xreallocarray(*names, *n + 1, sizeof(**names));
+            (*names)[(*n)++] = rs_xstrdup(de->d_name);
+            free(found);
+        }
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+}
+
+char **rs_hooks_list(size_t *n)
+{
+    char **names = NULL;
+
+    *n = 0;
+    if (test_dirs)
+    {
+        size_t i;
+
+        for (i = 0; i < ntest_dirs; i++)
+        {
+            list_hooks(test_dirs[i], &names, n);
+        }
+    } else
+    {
+        char *shipped = shipped_dir();
+
+        list_hooks(RS_HOOKS_SITE_DIR, &names, n);
+        list_hooks(shipped, &names, n);
+        free(shipped);
+    }
+    if (*n > 1)
+    {
+        qsort(names, *n, sizeof(*names), by_name);
+    }
+    return names;
 }
 
 /* "postgresql-18-main": the kind and name, as one file name. */
@@ -220,7 +292,7 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     argv[2] = rs_xstrdup(l->name);
     argv[3] = NULL;
     ok = rs_run_hook(hook, argv, env, strcmp(action, "pause") == 0 ? PAUSE_TIMEOUT : RESUME_TIMEOUT,
-                     &code, err);
+                     -1, &code, err);
     if (ok && code != 0)
     {
         rs_buf_addf(err, "%s %s %s exited %d", hook, action, l->name, code);
@@ -236,4 +308,80 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     }
     rs_buf_free(&paths);
     return ok;
+}
+
+bool rs_hook_paths(const char *hook, const char *name, char ***paths, size_t *n,
+                   struct rs_buf *err)
+{
+    FILE         *out = tmpfile();
+    char         *env[3];
+    char         *argv[4];
+    struct rs_buf text;
+    const char   *p;
+    int           code = -1;
+    bool          ok;
+    size_t        i;
+
+    *paths = NULL;
+    *n = 0;
+    if (!out)
+    {
+        rs_buf_addf(err, "a temporary file for %s paths: %s", hook, strerror(errno));
+        return false;
+    }
+    env[0] = rs_xstrdup("RESTATE_ACTION=paths");
+    env[1] = rs_xasprintf("RESTATE_NAME=%s", name);
+    env[2] = NULL;
+    argv[0] = rs_xstrdup(hook);
+    argv[1] = rs_xstrdup("paths");
+    argv[2] = rs_xstrdup(name);
+    argv[3] = NULL;
+    ok = rs_run_hook(hook, argv, env, PATHS_TIMEOUT, fileno(out), &code, err);
+    for (i = 0; i < 3; i++)
+    {
+        free(argv[i]);
+    }
+    free(env[0]);
+    free(env[1]);
+    /* One that does not know the question has no paths to give. */
+    if (!ok || code != 0)
+    {
+        (void)fclose(out);
+        return ok;
+    }
+    /* Read through the descriptor the hook wrote to: the stream's own
+     * buffer was never used. */
+    rs_buf_init(&text);
+    if (lseek(fileno(out), 0, SEEK_SET) == 0)
+    {
+        char    chunk[4096];
+        ssize_t got;
+
+        while ((got = read(fileno(out), chunk, sizeof(chunk))) > 0 && text.len < PATHS_MAX)
+        {
+            rs_buf_add(&text, chunk, (size_t)got);
+        }
+    }
+    (void)fclose(out);
+    for (p = text.data; p && *p; )
+    {
+        size_t len = strcspn(p, "\n");
+
+        /* Absolute paths alone, each as the walk would reach it. */
+        if (len > 1 && p[0] == '/' && len < PATH_MAX)
+        {
+            char *line = rs_xstrndup(p, len);
+            char *real = realpath(line, NULL); /* Flawfinder: ignore */
+
+            if (real)
+            {
+                *paths = rs_xreallocarray(*paths, *n + 1, sizeof(**paths));
+                (*paths)[(*n)++] = real;
+            }
+            free(line);
+        }
+        p += len + (p[len] == '\n' ? 1 : 0);
+    }
+    rs_buf_free(&text);
+    return true;
 }

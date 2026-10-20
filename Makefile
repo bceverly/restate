@@ -312,6 +312,7 @@ deb-sbuild: build ## Build in a clean chroot with no network, as a Launchpad bui
 install-tree: build ## Install into DESTDIR, for the package build
 	@$(INSTALL) -d $(DESTDIR)$(sbindir) $(DESTDIR)$(mandir)/man8 \
 	              $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks
+	@$(INSTALL) -d -m 0755 $(DESTDIR)/etc/$(PROG)/jobs.d
 	@$(INSTALL) -m 0755 $(BIN_DIR)/$(PROG) $(DESTDIR)$(sbindir)/$(PROG)
 	@$(INSTALL) -m 0644 $(MAN_PAGE) $(DESTDIR)$(mandir)/man8/$(PROG).8
 	@$(INSTALL) -m 0755 hooks/* $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks/
@@ -322,6 +323,7 @@ deb-clean: ## Remove what the package builds left behind
 	@rm -rf debian/$(PROG) debian/.debhelper debian/files debian/changelog
 	@rm -f debian/*.substvars debian/*.debhelper debian/*.debhelper.log
 	@rm -f debian/debhelper-build-stamp
+	@rm -f debian/restate.restate-job@.service debian/restate.restate-job@.timer
 	@rm -f ../$(PROG)_*.deb ../$(PROG)-dbgsym_*.ddeb ../$(PROG)_*.changes \
 	       ../$(PROG)_*.buildinfo ../$(PROG)_*.build ../$(PROG)_*.dsc \
 	       ../$(PROG)_*.tar.* ../$(PROG)_*.upload 2>/dev/null || true

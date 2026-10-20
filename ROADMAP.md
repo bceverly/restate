@@ -389,6 +389,40 @@ machine rather than N copies of one:
 - [ ] A PostgreSQL cluster's system identifier, which only `initdb` sets:
       say so for a copy that replicates, since restate cannot change it
 
+## Done — 2.0: run by other programs, stored on other machines
+
+restate is still a tool a person runs by hand or from cron. 2.0 adds what a
+program running it on many machines needs, all of it off unless asked for:
+
+- [x] **How a run ended, for a program:** `--result FILE`, one JSON object
+      written atomically when any command ends -- the status and exit status,
+      what it did, every path it could not read and why, every hook's pause
+      and resume, every warning -- and `--json` for `snapshots`, `diff`,
+      `verify`, `status`, `du`, `estimate` and `features`; the exit statuses
+      written down as a contract
+- [x] **Progress for a program:** `--progress=json` and `--progress-file`
+- [x] **Jobs:** `restate run JOBFILE`, a typed, root-owned file in place of a
+      command line, which can name no program; `restate-job@.service` and
+      `.timer` to run one, on a schedule or on demand
+- [x] **`restate features --json`:** what this restate can do
+- [x] **Repositories on a file server:** locks a capture over NFS and a prune
+      on the server both see; nothing required to be root's; a capture that
+      only adds files, and `--append-only` to hold it to that;
+      `--tmpdir` for an image's staging
+- [x] **The storage's own checks:** a `.sum` beside each pack and a list of
+      packs in each snapshot, neither saying anything of what is in them;
+      `check --metadata-only`, `prune --whole-packs`, `copy` and `du` without
+      any key; `check --record` to find what was removed or changed since
+- [x] **Quiescing what `/proc` does not show:** `--quiesce-with NAME`, a hook
+      asked which paths it covers; hooks for UniFi Network and Nextcloud; a
+      failed pause makes the capture incomplete
+- [x] **A file back without the whole machine:** `restore --include`, with
+      the plan in the result of a dry run
+- [x] **Keys, unattended:** `--passphrase-fd`, the passphrase given to each
+      gpg on a pipe of its own
+- [x] **`restate estimate`:** how much a first capture would keep, by
+      directory
+
 ## Then — other systems
 
 restate is Linux first, and Ubuntu first of all. The rest of it is the same
@@ -435,5 +469,8 @@ place:
 
 - [ ] A content-addressed store shared between machines, so identical files on
       a fleet are kept once
-- [ ] Integration with SysManage: scheduled captures, a fleet view of drift,
-      and bare-metal recovery from a boot image
+- [x] What a fleet manager -- SysManage among them -- needs to drive restate
+      (2.0, above); the scheduling, a fleet view of drift and bare-metal
+      recovery from a boot image are the fleet manager's to build on it
+- [ ] Keyed chunk ids, so that a store shared between machines tells no one
+      sharing it what another holds -- for the shared store above

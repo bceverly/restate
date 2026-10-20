@@ -243,6 +243,8 @@ int main(void)
     test_baseline();
     test_identity();
     test_clones();
+    test_jobs();
+    test_result();
     test_cmd();
 
     rs_name_cache_free();

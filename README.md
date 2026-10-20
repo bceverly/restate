@@ -66,6 +66,9 @@ restate: 1 added, 0 deleted, 1 modified
 - [Restoring](#restoring)
 - [Copies](#copies)
 - [Repositories](#repositories)
+- [Storage on a file server](#storage-on-a-file-server)
+- [Jobs](#jobs)
+- [Results, for programs](#results-for-programs)
 - [Images and indexes](#images-and-indexes)
 - [Classes and rules](#classes-and-rules)
 - [Installing](#installing)
@@ -205,6 +208,17 @@ restate autoinstall --clones lab.csv --target vm --image-at /restate/lab.tar lab
 sudo restate restore --packages --as lab-07 --trusted-key backup-signing.pub lab.tar   # or by hand
 ```
 
+**Backups a program runs.** A scheduler or a fleet manager runs one fixed
+command per machine -- `restate run` on a [job](#jobs) only root can change,
+from a systemd timer -- and reads back [how each run went](#results-for-programs)
+as JSON, while the file server the repositories live on [checks and prunes
+them without their keys](#storage-on-a-file-server):
+
+```bash
+sudo systemctl enable --now restate-job@nightly.timer          # on each machine
+restate check --metadata-only --record /var/lib/web01.record /srv/restate/web01   # on the NAS
+```
+
 ### Coming
 
 These need the pieces still on the [roadmap](ROADMAP.md):
@@ -254,6 +268,9 @@ Commands:
                           index.json and the content of everything kept
   scan                    walk the tree and write its index alone, as JSON,
                           with no content
+  estimate                walk the tree, reading no file, and say how much a
+                          first capture would keep, by directory: what to
+                          exclude before a first capture that would not fit
   diff OLD NEW            compare two images or indexes: A added, D deleted, M
                           modified, and how
   verify IMAGE            compare an image or index against the tree as it is
@@ -261,9 +278,9 @@ Commands:
   status IMAGE            what has changed since a capture, quickly: as verify,
                           but a file whose size, times and inode are unchanged
                           is not read
-  sign IMAGE              sign an image already written, with --sign-with: so a
-                          capture run unattended needs no secret key on the
-                          machine
+  sign IMAGE              sign an image or snapshot already written, with
+                          --sign-with: so a capture run unattended needs no
+                          secret key on the machine
   init DIR                make an empty repository at DIR: captures into it (-o
                           DIR) are kept as snapshots, each file's content
                           stored once, and only what changed is read
@@ -278,6 +295,15 @@ Commands:
                           that every snapshot's index and kit can be read and
                           the content of each of its files is whole; with
                           --read-all, read every snapshot in full too
+  copy SNAPSHOT DEST      copy a snapshot, and the packs it needs that DEST has
+                          not got, to the repository DEST -- made if it is not
+                          there -- exactly as they are: an encrypted
+                          repository's copy is encrypted, and nothing is
+                          decrypted
+  du REPO                 say how much a repository holds, and what each
+                          snapshot needs of it, adds to it and would free if it
+                          were dropped, without reading any pack or needing any
+                          key
   export SNAPSHOT         write a snapshot as an image (-o FILE.tar) to take
                           elsewhere, encrypted and signed if asked
   restore IMAGE           put an image's files back under the root (--root,
@@ -308,6 +334,12 @@ Commands:
                           that decided it
   rules                   print the rules in effect, in the format --rules
                           reads
+  run JOBFILE             run the job JOBFILE describes -- a capture, prune,
+                          check, copy, restore and the rest, with its options
+                          -- from a file only its owner can change (see JOBS)
+  features                list what this restate can do: its commands, options,
+                          job keys, result schema and the hooks here, for a
+                          program to check before it asks for any of them
 
 Options:
   -r, --root=DIR          treat DIR as the root of the tree to scan, verify, or
@@ -356,9 +388,27 @@ Options:
       --quiesce           capture: pause each database, VM and container found
                           running while its own files are copied, and resume it
                           after, with the hooks for each (see LIVE SERVICES)
-      --syslog            capture, prune, check: say how the run ended in the
-                          system log too, as one line of key=value pairs a
+      --quiesce-with=NAME
+                          capture: also run the hook NAME
+                          (/etc/restate/hooks.d/NAME, or one restate ships,
+                          such as unifi or nextcloud) around the walk, pausing
+                          what it names whether or not it is found running;
+                          repeatable (see LIVE SERVICES)
+      --append-only       capture: into a repository only by adding files,
+                          never changing one already there; refused where that
+                          cannot be done (see STORAGE)
+      --syslog            capture, prune, check, copy: say how the run ended in
+                          the system log too, as one line of key=value pairs a
                           monitoring system can match on
+      --result=FILE       when the command ends, write how it ended and what it
+                          did into FILE as one JSON object, replaced atomically
+                          (see RESULTS)
+      --report-group=GROUP
+                          make the --result and --progress-file files readable
+                          by GROUP too (0640), so a monitoring program that is
+                          not root can read them
+      --json              snapshots, diff, verify, status, du, estimate,
+                          features: write JSON rather than text (see RESULTS)
       --fetch-sources     capture, packages: also fetch each apt source's index
                           as its repository serves it now (with curl), and
                           check that against the source's keys
@@ -392,6 +442,9 @@ Options:
                           MAC address or disk serial, and installs that copy,
                           with its host name and network, and restores it with
                           --as (see COPIES)
+      --include=PATTERN   restore: put back only what PATTERN matches (written
+                          as in a rules file, everything beneath it too), and
+                          the directories it is in; repeatable
       --exclude=PATTERN   restore: leave out PATTERN (written as in a rules
                           file, everything beneath it too); repeatable
       --as=NAME           restore: put the image back as a copy of its machine
@@ -432,6 +485,16 @@ Options:
       --read-all          check: read every snapshot in full as well, as
                           restore would, each file checked against its index
                           and nothing written: a test restore of every snapshot
+      --metadata-only     check: read no index, so that no key is needed: each
+                          pack against the digest written beside it, and each
+                          snapshot's files and the packs it lists (see STORAGE)
+      --record=FILE       check: compare the repository with what FILE says it
+                          held at the last check, saying what has been removed
+                          or changed since, then record it as it is now; prune:
+                          record what it removed and wrote (see STORAGE)
+      --whole-packs       prune: read no index, so that no key is needed:
+                          remove only the packs no snapshot kept lists as
+                          needing, whole (see STORAGE)
       --keep-last=N       prune: keep the newest N snapshots
       --keep-daily=N      prune: keep the newest snapshot of each of the last N
                           days that have one
@@ -439,9 +502,19 @@ Options:
                           weeks that have one
       --keep-monthly=N    prune: keep the newest snapshot of each of the last N
                           months that have one
-  -P, --progress          show progress on standard error: paths and bytes so
+  -P, --progress[=json]   show progress on standard error: paths and bytes so
                           far while walking, a percentage and time left while
-                          writing an image or downloading
+                          writing an image or downloading; with =json, as one
+                          JSON object a line (see PROGRESS)
+      --progress-file=FILE
+                          write progress into FILE as it goes, one JSON object
+                          a line (see PROGRESS)
+      --tmpdir=DIR        capture, export: stage the image being written in DIR
+                          rather than beside it, so an image written to a
+                          network share is not staged there (see STORAGE)
+      --passphrase-fd=N   read the passphrase of the secret key --sign-with
+                          gives, or that decrypts, from file descriptor N
+                          rather than asking for it (see ENCRYPTION)
   -q, --quiet             no warnings and no summary; errors are still reported
   -v, --verbose           report every path the rules skip, and why
   -h, --help              print this help and exit
@@ -467,6 +540,17 @@ terminal's width, and is drawn on the terminal even when output is going to
 a log through `tee` -- each phase's final line goes to the log as well. With no
 terminal (cron), it writes a plain line every ten seconds instead. Off unless
 asked for; works alongside `--quiet`.
+
+For a program watching rather than a person, `--progress=json` writes the
+same on standard error as one JSON object a line, and `--progress-file FILE`
+into a file: a line at each change of phase and every two seconds between.
+
+```json
+{"phase": "walk", "paths": 8123, "read_bytes": 1048576, "new_bytes": 4096, "total_bytes": 9437184, "hook": null, "at": "2026-10-20T03:00:02Z"}
+```
+
+The phases are `count`, `walk`, `write`, `check`, `copy` and `read`; `hook`
+while a hook pauses something, which it names; and `finish` at the end.
 
 ## Live services
 
@@ -500,7 +584,33 @@ goes into the image beside the files) and stop the service; the others
 suspend the VM, freeze the container or pause Docker's containers. The
 PostgreSQL hook stops the units listed in `/etc/restate/also.d/postgresql`
 first -- services that write to the database -- and starts them after. To
-change a hook, copy it to `/etc/restate/hooks.d` and edit the copy.
+change a hook, copy it to `/etc/restate/hooks.d` and edit the copy. A hook
+that fails to pause or to resume makes the capture incomplete (exit status 3),
+and its result says which.
+
+What `/proc` does not show as one of these is named instead:
+`--quiesce-with NAME` runs the hook `NAME` whether or not anything is found.
+It is asked first, as `HOOK paths NAME`, which paths it covers, and those are
+copied while it is paused; a hook that names none is paused for the whole
+walk. Two are shipped for this:
+
+- **`unifi`** -- the UniFi Network application runs a MongoDB of its own,
+  started by its own service, which the `mongodb` hook cannot pause. This one
+  dumps it (`mongodump --port 27117`, where installed) and stops `unifi` while
+  `/var/lib/unifi` is copied. UniFi's own backups,
+  `/var/lib/unifi/backup/autobackup/*.unf`, are in the capture too, and
+  restore onto a new UniFi without restate.
+- **`nextcloud`** -- maintenance mode on, while Nextcloud's own directory and
+  its data directory are copied; its database is paused by its own hook with
+  `--quiesce`. The snap is found as well (`nextcloud.occ`).
+
+```bash
+sudo restate capture --quiesce --quiesce-with nextcloud -o /mnt/nas/restate/cloud01
+```
+
+A Maildir needs neither: every message is its own file, written beside its
+name and renamed into place, so a copy taken while mail arrives misses at
+most what arrived meanwhile.
 
 ## Packages
 
@@ -972,7 +1082,9 @@ pack's index gives (the repository's own index, not this machine's cached
 copy), every snapshot's index and kit, and that the content of every file
 each snapshot needs is whole. What is wrong is named, by pack and by file, and
 the exit status is 3. Storage like ZFS finds bit rot; `check` finds a pack
-that was written wrong, or a file someone removed. `--read-all` goes on to read
+that was written wrong, or a file someone removed. (`--metadata-only` checks
+without reading any index, so without any key -- see [Storage on a file
+server](#storage-on-a-file-server).) `--read-all` goes on to read
 every snapshot in full exactly as a restore would, each file checked against
 its index, writing nothing: a test restore of every snapshot. Run both on a
 schedule, with `--syslog`:
@@ -1038,13 +1150,142 @@ secret key. A machine with neither makes a key of its own, and stores its
 large files whole once more.
 
 On disk a repository is plain files: `packs/` holds the chunks, in gzip'd tar
-files of about 32 MiB each beside an index of what is in them, and each of
-`snapshots/` holds a capture's index, its kit's list, a summary and, if it is
-signed, the signature. Everything is written beside its final name and
+files of about 32 MiB each beside an index of what is in them and a `.sum`
+of the file as written, and each of `snapshots/` holds a capture's index, its
+kit's list, a summary, the list of packs it needs and, if it is signed, the
+signature. Everything is written beside its final name and
 renamed into place, the snapshot last, so an interrupted capture leaves
 nothing that looks finished; `prune` clears what it left. A repository made
 by restate 1.3.0, whose packs hold whole files, is read as it is, and the
 first capture or prune into it makes it the current kind.
+
+## Storage on a file server
+
+A repository can live on a NAS that each machine mounts over NFS or SMB --
+one directory per machine -- and restate opens no network connection of its
+own to get there. What it needs of that storage, and what the storage can do
+with it on its own:
+
+```bash
+# on web01, nightly: only ever adds files
+sudo restate capture --append-only --encrypt-to backup.pub -o /mnt/nas/restate/web01
+
+# on the NAS itself, against the same directory: no keys needed for any of it
+restate check --metadata-only --record /var/lib/restate/web01.record /srv/restate/web01
+restate prune --whole-packs --keep-daily 14 --keep-weekly 8 --record /var/lib/restate/web01.record /srv/restate/web01
+restate copy /srv/restate/web01 /mnt/offsite/web01       # a second copy, still encrypted
+restate du /srv/restate/web01
+```
+
+- **Locks hold between the machine and the NAS.** A capture or prune takes
+  both a `flock(2)` and, on Linux, an open file description lock on the
+  repository's `lock` file. An NFS client takes either on the server; on the
+  server the two are different locks, and a prune run there sees a capture's
+  NFS lock only as the second kind -- so restate takes both, and two writers,
+  one over NFS and one on the NAS, exclude each other. (NFSv3 mounted
+  `nolock` does not lock at all.)
+- **Nothing needs to be root's.** A share that maps every user to one of its
+  own (`all_squash`) works, as long as that user can write it.
+- **A capture only adds files.** Each pack, its index and `.sum`, and each
+  snapshot are written under a name of their own and renamed to a name
+  nothing had; nothing already there is changed. `--append-only` refuses the
+  one exception, the marker of a repository made by restate 1.3 or older.
+  restate cannot make a repository append-only for a machine that has been
+  taken over -- that machine is root, and has the share -- so the NAS has to:
+  with a ZFS snapshot after each capture, or by making what each capture
+  wrote immutable.
+- **Checked without the keys.** Each pack's `.sum` is the digest of its file
+  as written, and each snapshot's `packs` file the packs it needs; neither
+  is encrypted, and neither says anything of what is in them. `check
+  --metadata-only` checks every pack against its `.sum`, and every snapshot's
+  files and packs, and says it could not check inside them. `--record FILE`,
+  kept on the NAS where the machine cannot reach it, finds a pack or
+  snapshot removed or rewritten since the last check.
+- **Pruned without the keys.** `prune --whole-packs` drops snapshots, then
+  each pack no snapshot left lists, whole; a prune with the keys rewrites the
+  packs that are only partly needed.
+- **Copied without the keys.** `copy SNAPSHOT DEST` copies a snapshot and the
+  packs it needs that `DEST` lacks, exactly as they are, so an encrypted
+  repository's copy is encrypted.
+- **Interrupted runs.** A capture cut off leaves only files that do not count
+  yet -- a pack with no index, a snapshot directory under a temporary name.
+  `check` reports them as left over, not as damage, and the next `prune`
+  removes them.
+- **Images too.** `--tmpdir DIR` stages an image's content on the machine
+  rather than beside the image on the share.
+
+## Jobs
+
+`restate run JOBFILE` runs what a file says -- which command, on what, with
+which options -- so a scheduler or a fleet manager runs one fixed command and
+never builds a command line. The file has to be root's (or the user's running
+it) and writable by no one else, as must its directory; every key is one
+restate knows, of one type, allowed only for the commands it means something
+for, and nothing in it can name a program to run.
+
+```ini
+# /etc/restate/jobs.d/nightly.conf
+command      = capture
+repository   = /mnt/nas/restate/web01
+quiesce      = true
+quiesce_with = unifi
+encrypt_to   = /etc/restate/keys/backup.asc
+append_only  = true
+result       = /var/lib/restate/nightly.json
+progress     = /var/lib/restate/nightly.progress
+report_group = restate-report
+```
+
+`restate-job@.service` runs `/etc/restate/jobs.d/NAME.conf` for the instance
+`NAME` -- at a low priority and idle I/O, for up to a day, letting restate
+resume what it paused if it is stopped -- and `restate-job@.timer` runs it
+every night, at a time a little different on each machine:
+
+```bash
+sudo systemctl enable --now restate-job@nightly.timer
+sudo systemctl start restate-job@nightly         # once, now
+journalctl -u restate-job@nightly
+```
+
+The keys and the commands that take them are in `restate(8)`, under JOBS.
+
+## Results, for programs
+
+restate's messages are for people. A program reads its exit status -- which
+does not change: 0 ok, 1 differences, 2 trouble, 3 incomplete, 4 not signed by
+a trusted key, 5 busy -- and, given `--result FILE`, one JSON object written
+into `FILE` when the run ends, replaced whole:
+
+```json
+{
+  "schema": 1, "command": "capture", "status": "ok", "exit": 0,
+  "started_at": "2026-10-20T03:00:00Z", "seconds": 812,
+  "repository": "/mnt/nas/restate/web01",
+  "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
+  "paths": 821158, "kept": 455640, "read_bytes": 2254857216,
+  "reused": 454431, "reused_bytes": 167503724544, "new_bytes": 431996928,
+  "repository_bytes": 178241380352,
+  "unreadable": {"count": 0, "first": []},
+  "quiesce": [{"kind": "postgresql", "name": "18-main", "paused_at": "2026-10-20T03:12:40Z",
+               "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "message": ""}],
+  "warnings": [], "warnings_count": 0
+}
+```
+
+Every warning is collected, `--quiet` or not, and every path a walk could not
+read with why; prune, check, restore (its plan, in a dry run), copy, du,
+estimate and diff add what they did. `--json` writes the output itself as JSON
+for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
+`estimate` and `features`; `restate features --json` lists what this restate
+can do -- commands, options, job keys, schemas, the hooks here -- for a
+program to ask before it asks. The result and progress files are their
+owner's alone unless `--report-group GROUP` makes them that group's to read
+too. A later restate adds to all of this, and changes what something means
+only with a new schema number.
+
+`restate estimate` walks a machine reading no file and says how much a first
+capture would keep, by directory -- what to exclude before a first backup
+that would not fit.
 
 ## Images and indexes
 
@@ -1483,7 +1724,7 @@ src/            the program: one module per concern
   scan.c        the walk
   index.c       the index, to and from JSON
   image.c       images: assembling and reading back, and exporting snapshots
-  repo.c        repositories: packs, snapshots, the content stream, prune
+  repo.c        repositories: packs, snapshots, the content stream, prune, check, copy, du
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
   run.c         running gzip, curl, gpg, sh, ssh-keygen and the hooks: fixed paths, posix_spawn
@@ -1501,12 +1742,15 @@ src/            the program: one module per concern
   packages.c    the package inventory: apt, snap, flatpak, pip, npm, cargo
   installer.c   which installer rebuilds a machine, and fetching it
   keys.c        the vendors' signing keys, pinned by fingerprint
+  jobs.c        restate run: a job file, read and checked
+  result.c      --result: how a run ended, as JSON
   json.c        a strict JSON parser and writer
   meta.c        timestamps, birth times, user and group names
   diff.c        comparing two indexes
   sha256.c      FIPS 180-4
 include/        restate.h: the version, copyright and exit statuses
 hooks/          the hooks capture --quiesce runs, installed in libexec/restate/hooks
+systemd/        restate-job@.service and .timer, which run a job
 tests/          unit tests; cli/ end-to-end; fuzz/ the fuzz target
 scripts/        everything make runs
 man/restate.8   generated from --help; do not edit

@@ -15,6 +15,7 @@
 #include "md5.h"
 #include "meta.h"
 #include "progress.h"
+#include "result.h"
 
 /* O_DIRECTORY and O_NOFOLLOW are POSIX.1-2008, but be tolerant of a libc that
  * only exposes them under a feature macro this build did not ask for. */
@@ -207,6 +208,7 @@ static void unreadable_because(struct walk *w, const char *path, const char *why
         return;
     }
     w->stats->unreadable++;
+    rs_result_unreadable(path, why);
     rs_buf_init(&shown);
     rs_escape(&shown, path);
     rs_warn("%s: %s", shown.data, why);
@@ -223,6 +225,7 @@ static void unreadable(struct walk *w, const char *path, int err)
         return;
     }
     w->stats->unreadable++;
+    rs_result_unreadable(path, strerror(err));
     rs_buf_init(&shown);
     rs_escape(&shown, path);
     rs_warn("%s: %s", shown.data, strerror(err));

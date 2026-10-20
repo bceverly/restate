@@ -131,7 +131,7 @@ static int run_env(const void *arg)
 
     (void)arg;
     rs_buf_init(&err);
-    ok = rs_run_hook("/usr/bin/env", argv, env, 30, &code, &err);
+    ok = rs_run_hook("/usr/bin/env", argv, env, 30, -1, &code, &err);
     rs_buf_free(&err);
     return ok ? code : -1;
 }
@@ -536,6 +536,98 @@ void test_live(void)
         CHECK(rs_hook_find("../bin/true") == NULL);
         CHECK(rs_hook_find(".hidden") == NULL);
         CHECK(rs_hook_find("") == NULL);
+
+        TEST_CASE("live: the hooks there are, listed");
+        {
+            size_t nh = 0;
+            size_t i;
+            bool   found = false;
+            char **names = rs_hooks_list(&nh);
+
+            for (i = 0; i < nh; i++)
+            {
+                found = found || strcmp(names[i], "true") == 0;
+                free(names[i]);
+            }
+            free(names);
+            CHECK(found);
+            CHECK(nh >= 2);
+        }
+        rs_hooks_set_dirs(none, 1);
+        {
+            size_t nh = 7;
+            char **names = rs_hooks_list(&nh);
+
+            CHECK(nh == 0 && names == NULL);
+        }
+        rs_hooks_set_dirs(NULL, 0);
+        {
+            size_t nh = 0;
+            size_t i;
+            char **names = rs_hooks_list(&nh);
+
+            for (i = 0; i < nh; i++)
+            {
+                free(names[i]);
+            }
+            free(names);
+        }
+
+        TEST_CASE("live: the paths a hook named by --quiesce-with covers");
+        {
+            char        **paths = NULL;
+            size_t        nh = 5;
+            struct rs_buf perr;
+            const char   *t = rs_hook_usable("/usr/bin/true") ? "/usr/bin/true" : "/bin/true";
+            const char   *f = rs_hook_usable("/usr/bin/false") ? "/usr/bin/false" : "/bin/false";
+
+            rs_buf_init(&perr);
+            /* None said: paused for the whole walk. */
+            CHECK(rs_hook_paths(t, "x", &paths, &nh, &perr));
+            CHECK(nh == 0 && paths == NULL);
+            /* A hook that does not know the question has none either. */
+            CHECK(rs_hook_paths(f, "x", &paths, &nh, &perr));
+            CHECK(nh == 0);
+            /* One that cannot be run. */
+            CHECK(!rs_hook_paths("/nonexistent/hook", "x", &paths, &nh, &perr));
+            CHECK_CONTAINS(perr.data ? perr.data : "", "not run");
+            rs_buf_reset(&perr);
+            /* realpath, asked "paths x" where there are files of those
+             * names, prints two absolute paths: as a hook's would be. */
+            {
+                const char *rp = rs_hook_usable("/usr/bin/realpath") ? "/usr/bin/realpath"
+                                 : rs_hook_usable("/bin/realpath")    ? "/bin/realpath"
+                                                                      : NULL;
+                char       *here = realpath(".", NULL); /* Flawfinder: ignore */
+                char       *in = rs_test_tmpdir();
+                char       *want = NULL;
+
+                rs_test_write(in, "paths", "", 0644);
+                rs_test_write(in, "x", "", 0644);
+                if (rp && here && chdir(in) == 0)
+                {
+                    char *real = realpath(in, NULL); /* Flawfinder: ignore */
+
+                    want = real ? rs_xasprintf("%s/paths", real) : NULL;
+                    free(real);
+                    CHECK(rs_hook_paths(rp, "x", &paths, &nh, &perr));
+                    CHECK_INT(nh, 2);
+                    CHECK_STR(nh == 2 ? paths[0] : NULL, want);
+                    if (nh == 2)
+                    {
+                        free(paths[0]);
+                        free(paths[1]);
+                    }
+                    free(paths);
+                    CHECK(chdir(here) == 0);
+                }
+                free(want);
+                free(here);
+                rs_test_rmtree(in);
+                free(in);
+            }
+            rs_buf_free(&perr);
+        }
         rs_hooks_set_dirs(NULL, 0);
         /* The real directories: nothing called this is installed. */
         CHECK(rs_hook_find("restate-no-such-hook") == NULL);
@@ -580,7 +672,7 @@ void test_live(void)
 
             /* /bin/sleep on the BSDs and macOS, which have no /usr/bin/sleep. */
             CHECK(!rs_run_hook(rs_hook_usable("/bin/sleep") ? "/bin/sleep" : "/usr/bin/sleep", argv,
-                               NULL, 1, &code, &err));
+                               NULL, 1, -1, &code, &err));
             CHECK_CONTAINS(err.data ? err.data : "", "longer than 1 seconds");
             CHECK_INT(code, 128 + 15);
         }

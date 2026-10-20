@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-job@NAME.timer: runs restate-job@NAME.service every night, at a time
+# a little different on each machine, and on the next boot if a run was missed
+# while the machine was off.
+#
+#   systemctl enable --now restate-job@nightly.timer
+#
+# Another schedule: `systemctl edit restate-job@nightly.timer`, and in it
+#
+#   [Timer]
+#   OnCalendar=
+#   OnCalendar=*-*-* 02:30:00
+
+[Unit]
+Description=restate job %i, on a schedule
+Documentation=man:restate(8)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

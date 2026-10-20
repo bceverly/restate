@@ -68,6 +68,13 @@ MAN_TARGET="$DESTDIR$MANDIR/man8/$PROG.8"
 # there whatever the prefix -- /usr/local/sbin/restate finds
 # /usr/local/libexec/restate/hooks.
 HOOKS_TARGET="$DESTDIR$(dirname "$BINDIR")/libexec/$PROG/hooks"
+JOBS_TARGET="$DESTDIR/etc/$PROG/jobs.d"
+# The systemd units, on Linux: under the prefix, which systemd searches too
+# (/usr/local/lib/systemd/system).
+UNITS_TARGET=""
+if [ "$(uname -s)" = "Linux" ]; then
+  UNITS_TARGET="$DESTDIR$PREFIX/lib/systemd/system"
+fi
 
 ok()   { printf '  \033[92m✓\033[0m %s\n' "$*"; }
 note() { printf '    \033[2m%s\033[0m\n' "$*"; }
@@ -134,6 +141,11 @@ if [ "$UNINSTALL" = "1" ]; then
   done
   $SUDO rmdir "$HOOKS_TARGET" "$(dirname "$HOOKS_TARGET")" 2> /dev/null || true
   ok "removed $HOOKS_TARGET"
+  if [ -n "$UNITS_TARGET" ]; then
+    $SUDO rm -f "$UNITS_TARGET/restate-job@.service" "$UNITS_TARGET/restate-job@.timer"
+    ok "removed the restate-job@ units from $UNITS_TARGET"
+  fi
+  # The jobs in /etc/restate/jobs.d are the site's, and stay.
 else
   [ -x "bin/$PROG" ] || die "bin/$PROG is not built — run 'make build' first"
   [ -f "$MAN_PAGE" ] || die "$MAN_PAGE is missing — run 'make build' first"
@@ -153,6 +165,28 @@ else
     $SUDO install -m 0755 "$hook" "$HOOKS_TARGET/$(basename "$hook")"
   done
   ok "installed the hooks in $HOOKS_TARGET"
+
+  # Where jobs go (restate run): root's, and writable by no one else. An
+  # install into a prefix of one's own cannot make it, and has no need to.
+  if [ -n "$DESTDIR" ] || [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; then
+    $SUDO install -d -m 0755 "$JOBS_TARGET"
+    ok "made $JOBS_TARGET"
+  else
+    note "$JOBS_TARGET not made: that needs root"
+  fi
+
+  if [ -n "$UNITS_TARGET" ]; then
+    unit="$(mktemp)"
+    sed "s|@SBINDIR@|$BINDIR|" systemd/restate-job@.service.in > "$unit"
+    $SUDO install -d -m 0755 "$UNITS_TARGET"
+    $SUDO install -m 0644 "$unit" "$UNITS_TARGET/restate-job@.service"
+    $SUDO install -m 0644 systemd/restate-job@.timer "$UNITS_TARGET/restate-job@.timer"
+    rm -f "$unit"
+    ok "installed the restate-job@ units in $UNITS_TARGET"
+    if [ -z "$DESTDIR" ] && [ -d /run/systemd/system ]; then
+      $SUDO systemctl daemon-reload 2> /dev/null || true
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

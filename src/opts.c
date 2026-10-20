@@ -24,14 +24,15 @@ static const struct option long_options[] = {
 };
 
 struct option_help {
-    int         code;
     const char *name;
     const char *argname;
     const char *help;
+    int         code;
+    int         arg;
 };
 
 static const struct option_help option_help[] = {
-#define RS_OPT(code, name, arg, argname, help) { code, name, argname, help },
+#define RS_OPT(code, name, arg, argname, help) { name, argname, help, code, arg },
 #include "options.def"
 #undef RS_OPT
 };
@@ -62,14 +63,18 @@ static void short_options(char *out, size_t size)
     /* The leading ':' makes getopt report a missing argument as ':' rather
      * than '?', so the two errors can be told apart. */
     out[n++] = ':';
-    for (i = 0; i < COUNT(option_help) && n + 3 < size; i++)
+    for (i = 0; i < COUNT(option_help) && n + 4 < size; i++)
     {
         int code = option_help[i].code;
 
         if (code > 0 && code < 256)
         {
             out[n++] = (char)code;
-            if (option_help[i].argname)
+            if (option_help[i].arg != no_argument)
+            {
+                out[n++] = ':';
+            }
+            if (option_help[i].arg == optional_argument)
             {
                 out[n++] = ':';
             }
@@ -92,6 +97,16 @@ static void reset_getopt(void)
 #else
     optind = 0;
 #endif
+}
+
+const char *rs_option_name(size_t i)
+{
+    return i < COUNT(option_help) ? option_help[i].name : NULL;
+}
+
+const char *rs_command_name_at(size_t i)
+{
+    return i < COUNT(commands) ? commands[i].name : NULL;
 }
 
 const char *rs_command_name(enum rs_command cmd)
@@ -161,6 +176,33 @@ void rs_options_free(struct rs_options *o)
     free(o->excludes);
     o->excludes = NULL;
     o->nexcludes = 0;
+    free(o->includes);
+    o->includes = NULL;
+    o->nincludes = 0;
+    free(o->quiesce_with);
+    o->quiesce_with = NULL;
+    o->nquiesce_with = 0;
+}
+
+/* A hook's name: what a file in hooks.d can be called. */
+bool rs_hook_name_ok(const char *name)
+{
+    size_t i;
+
+    if (!name || name[0] == '\0' || name[0] == '.' || name[0] == '-' || strlen(name) > 64)
+    {
+        return false;
+    }
+    for (i = 0; name[i]; i++)
+    {
+        char c = name[i];
+
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* The most of anything prune is told to keep: far more than anyone means. */
@@ -194,7 +236,7 @@ static bool count_arg(const char *s, unsigned *out)
 
 bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf *err)
 {
-    char                       shortopts[2 * COUNT(option_help) + 2];
+    char                       shortopts[3 * COUNT(option_help) + 2];
     int                        c;
     size_t                     i;
     const struct command_info *cmd = NULL;
@@ -353,6 +395,66 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_READ_ALL:
             o->read_all = true;
             break;
+        case OPT_METADATA_ONLY:
+            o->metadata_only = true;
+            break;
+        case OPT_RECORD:
+            o->record = optarg;
+            break;
+        case OPT_WHOLE_PACKS:
+            o->whole_packs = true;
+            break;
+        case OPT_QUIESCE_WITH:
+            if (!rs_hook_name_ok(optarg))
+            {
+                rs_buf_addf(err, "--quiesce-with: \"%s\" is not a hook's name (lowercase letters, "
+                            "digits, '-' and '_')", optarg);
+                return false;
+            }
+            o->quiesce_with = rs_xreallocarray(o->quiesce_with, o->nquiesce_with + 1,
+                                               sizeof(*o->quiesce_with));
+            o->quiesce_with[o->nquiesce_with++] = optarg;
+            break;
+        case OPT_APPEND_ONLY:
+            o->append_only = true;
+            break;
+        case OPT_RESULT:
+            o->result = optarg;
+            break;
+        case OPT_REPORT_GROUP:
+            o->report_group = optarg;
+            break;
+        case OPT_JSON:
+            o->json = true;
+            break;
+        case OPT_INCLUDE:
+            o->includes = rs_xreallocarray(o->includes, o->nincludes + 1, sizeof(*o->includes));
+            o->includes[o->nincludes++] = optarg;
+            break;
+        case OPT_PROGRESS_FILE:
+            o->progress_file = optarg;
+            break;
+        case OPT_TMPDIR:
+            if (optarg[0] != '/')
+            {
+                rs_buf_addf(err, "--tmpdir: \"%s\" is not an absolute path", optarg);
+                return false;
+            }
+            o->tmpdir = optarg;
+            break;
+        case OPT_PASSPHRASE_FD:
+        {
+            unsigned fd = 0;
+
+            if (!count_arg(optarg, &fd) || fd > 1023)
+            {
+                rs_buf_addf(err, "--passphrase-fd: \"%s\" is not a file descriptor", optarg);
+                return false;
+            }
+            o->passphrase_fd = (int)fd;
+            o->passphrase_given = true;
+            break;
+        }
         case OPT_IMAGE_AT:
             if (optarg[0] != '/')
             {
@@ -374,7 +476,14 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->no_hash = true;
             break;
         case 'P':
-            o->progress = true;
+            if (optarg && strcmp(optarg, "json") != 0)
+            {
+                rs_buf_addf(err, "--progress: \"%s\" is not json; give --progress alone for "
+                            "lines people read", optarg);
+                return false;
+            }
+            o->progress = !optarg;
+            o->progress_json = optarg != NULL;
             break;
         case 'q':
             o->quiet = true;
@@ -515,7 +624,10 @@ void rs_print_help(FILE *out)
         const struct option_help *h = &option_help[i];
         int                       n;
 
-        if (h->code > 0 && h->code < 256)
+        if (h->arg == optional_argument)
+        {
+            n = fprintf(out, "  -%c, --%s[=%s]", h->code, h->name, h->argname);
+        } else if (h->code > 0 && h->code < 256)
         {
             n = fprintf(out, "  -%c, --%s%s%s", h->code, h->name,
                         h->argname ? "=" : "", h->argname ? h->argname : "");
@@ -531,8 +643,7 @@ void rs_print_help(FILE *out)
                        "  0  success; for diff and verify, no differences\n"
                        "  1  differences were found\n"
                        "  2  trouble: a usage error, a bad image, index or rules file, an I/O error\n"
-                       "  3  incomplete: some files could not be read or put back; for check, "
-                       "the\n     repository is damaged\n"
+                       "  3  incomplete: files unread or not put back; check: repository damaged\n"
                        "  4  the image is not signed by a --trusted-key, and was not used\n"
                        "  5  busy: another capture or prune is running, and nothing was done\n"
                        "\n"
@@ -545,6 +656,9 @@ void rs_print_help(FILE *out)
                        "  restate init /var/backups/repo && restate capture -o /var/backups/repo\n"
                        "  restate prune --keep-daily 7 --keep-weekly 4 /var/backups/repo\n"
                        "  restate check --read-all /var/backups/repo\n"
+                       "  restate check --metadata-only --record /var/lib/repo.record /srv/repo\n"
+                       "  restate copy /var/backups/repo /mnt/offsite/repo\n"
+                       "  restate run /etc/restate/jobs.d/nightly.conf\n"
                        "  restate restore --as web02 --packages /var/backups/repo\n"
                        "  restate classify /etc/passwd /var/cache/apt /usr/bin/ls\n"
                        "  restate rules > site.rules && restate -N -R site.rules scan\n"

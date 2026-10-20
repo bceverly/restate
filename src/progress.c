@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "json.h"
 #include "layout.h"
 
 #define NS_PER_SEC ((uint64_t)1000000000)
@@ -31,6 +32,13 @@ static uint64_t                 last_ns;
 static bool                     drawn;     /* the two-line display is on screen */
 static bool                     active;
 static char                     current[1024];
+/* --progress=json and --progress-file: lines for a program, every
+ * JSON_EVERY and at each change of phase. */
+#define JSON_EVERY (NS_PER_SEC * 2)
+static FILE                    *json_out;
+static uint64_t                 json_last;
+static uint64_t                 new_bytes;
+static char                     hook[128];
 
 static uint64_t real_clock(void)
 {
@@ -108,7 +116,106 @@ void rs_progress_enable(bool enable)
 
 bool rs_progress_enabled(void)
 {
-    return on;
+    return on || json_out;
+}
+
+void rs_progress_json(FILE *fp)
+{
+    json_out = fp;
+    json_last = 0;
+    new_bytes = 0;
+    hook[0] = '\0';
+}
+
+/* The phases' names as a program reads them. */
+static const char *json_phase(const char *phase)
+{
+    static const char *const names[][2] = {
+        { "counting", "count" }, { "walking", "walk" },  { "writing", "write" },
+        { "checking", "check" }, { "reading", "read" },  { "copying", "copy" },
+    };
+    size_t i;
+
+    for (i = 0; phase && i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        if (strcmp(phase, names[i][0]) == 0)
+        {
+            return names[i][1];
+        }
+    }
+    return phase ? phase : "start";
+}
+
+/* One line: what the phase has done so far, as JSON. */
+static void json_line(const char *phase)
+{
+    char      at[32];
+    struct tm tm;
+    time_t    t = time(NULL);
+
+    if (!json_out)
+    {
+        return;
+    }
+    if (!gmtime_r(&t, &tm) || strftime(at, sizeof(at), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
+    {
+        (void)snprintf(at, sizeof(at), "%lld", (long long)t);
+    }
+    (void)fprintf(json_out, "{\"phase\": \"%s\", \"paths\": %llu, \"read_bytes\": %llu, "
+                  "\"new_bytes\": %llu, \"total_bytes\": ", phase,
+                  (unsigned long long)st.paths, (unsigned long long)st.bytes,
+                  (unsigned long long)new_bytes);
+    if (active && st.total > 0)
+    {
+        (void)fprintf(json_out, "%llu", (unsigned long long)st.total);
+    } else
+    {
+        (void)fputs("null", json_out);
+    }
+    if (hook[0])
+    {
+        struct rs_buf b;
+
+        rs_buf_init(&b);
+        rs_json_put_string(&b, hook, strlen(hook));
+        (void)fprintf(json_out, ", \"hook\": %s", b.data);
+        rs_buf_free(&b);
+    } else
+    {
+        (void)fputs(", \"hook\": null", json_out);
+    }
+    (void)fprintf(json_out, ", \"at\": \"%s\"}\n", at);
+    (void)fflush(json_out);
+}
+
+void rs_progress_new_bytes(uint64_t n)
+{
+    new_bytes += n;
+}
+
+void rs_progress_hook(const char *name)
+{
+    size_t len = name ? strlen(name) : 0;
+
+    if (len >= sizeof(hook))
+    {
+        len = sizeof(hook) - 1;
+    }
+    memcpy(hook, name ? name : "", len);
+    hook[len] = '\0';
+    if (name)
+    {
+        json_line("hook");
+    }
+}
+
+void rs_progress_finish(void)
+{
+    if (json_out)
+    {
+        active = false;
+        json_line("finish");
+    }
 }
 
 /* "0:11:40": hours, minutes, seconds. */
@@ -252,12 +359,17 @@ static void tick(void)
 {
     uint64_t t;
 
-    if (!on || !active)
+    if (!active)
     {
         return;
     }
     t = now();
-    if (t - last_ns >= (out_tty ? TTY_EVERY : LOG_EVERY))
+    if (json_out && t - json_last >= JSON_EVERY)
+    {
+        json_last = t;
+        json_line(json_phase(st.phase));
+    }
+    if (on && t - last_ns >= (out_tty ? TTY_EVERY : LOG_EVERY))
     {
         last_ns = t;
         emit(false);
@@ -266,7 +378,7 @@ static void tick(void)
 
 void rs_progress_phase(const char *phase, uint64_t total)
 {
-    if (!on)
+    if (!on && !json_out)
     {
         return;
     }
@@ -281,13 +393,15 @@ void rs_progress_phase(const char *phase, uint64_t total)
     current[0] = '\0';
     st.current = current;
     last_ns = st.start_ns;
+    json_last = st.start_ns;
     drawn = false;
     active = true;
+    json_line(json_phase(phase));
 }
 
 void rs_progress_bytes(uint64_t n)
 {
-    if (on && active)
+    if (active)
     {
         st.bytes += n;
         tick();
@@ -296,7 +410,7 @@ void rs_progress_bytes(uint64_t n)
 
 void rs_progress_path(const char *path)
 {
-    if (on && active)
+    if (active)
     {
         st.paths++;
         (void)snprintf(current, sizeof(current), "%s", path ? path : "");
@@ -308,7 +422,7 @@ void rs_progress_path(const char *path)
  * has found to read, in place of them. */
 void rs_progress_found(uint64_t n)
 {
-    if (on && active)
+    if (active)
     {
         st.bytes += n;
     }
@@ -326,11 +440,15 @@ void rs_progress_clear(void)
 
 void rs_progress_done(void)
 {
-    if (!on || !active)
+    if (!active)
     {
         return;
     }
     current[0] = '\0';
-    emit(true);
+    json_line(json_phase(st.phase));
+    if (on)
+    {
+        emit(true);
+    }
     active = false;
 }

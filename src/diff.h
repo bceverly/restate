@@ -21,6 +21,7 @@
 #include <stdio.h>
 
 #include "index.h"
+#include "json.h"
 
 enum {
     RS_DIFF_TYPE    = 1u << 0,
@@ -68,6 +69,15 @@ bool rs_diff_write(const struct rs_index *old, const struct rs_index *new_,
  */
 bool rs_diff_write_packages(const struct rs_index *old, const struct rs_index *new_,
                             FILE *out, struct rs_diff_stats *stats);
+
+/*
+ * Changes as JSON rather than lines: each file change an object appended to
+ * `changes` -- {"change": "M", "path": ..., "what": "content,mode"} -- and,
+ * by package, each package's to `packages` -- {"change": "U", "manager":
+ * "apt", "name": ..., "from": ..., "to": ..., "files": N}. Both made empty
+ * arrays here. NULL, NULL goes back to lines.
+ */
+void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages);
 
 /* "content,mode" and so on, into `out`. */
 void rs_diff_describe(unsigned what, struct rs_buf *out);

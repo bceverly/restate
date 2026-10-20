@@ -47,5 +47,14 @@ override_dh_auto_install:
 
 # Safe here: `make clean` in this project removes build output and nothing
 # else.
+# The units, from the same templates `make install` uses, where this release
+# of debhelper puts units. A template unit is never enabled or started by the
+# package: there is no job until someone writes one.
+override_dh_installsystemd:
+	sed 's|@SBINDIR@|/usr/sbin|' systemd/restate-job@.service.in \
+	    > debian/restate.restate-job@.service
+	cp systemd/restate-job@.timer debian/restate.restate-job@.timer
+	dh_installsystemd --name=restate-job@ --no-enable --no-start
+
 override_dh_auto_clean:
 	$(MAKE) clean

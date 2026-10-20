@@ -874,7 +874,7 @@ const char *rs_live_what(const struct rs_live *l)
     } names[] = {
         { "postgresql", "PostgreSQL" }, { "mysql", "MySQL" },       { "mongodb", "MongoDB" },
         { "redis", "Redis" },           { "libvirt", "the VM" },    { "lxd", "the LXD container" },
-        { "docker", "Docker" },
+        { "docker", "Docker" },         { "unifi", "UniFi Network" }, { "nextcloud", "Nextcloud" },
     };
     size_t i;
 

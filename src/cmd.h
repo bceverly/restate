@@ -33,8 +33,16 @@ int rs_cmd_prune(const struct rs_options *o);
 int rs_cmd_check(const struct rs_options *o);
 int rs_cmd_export(const struct rs_options *o);
 int rs_cmd_status(const struct rs_options *o);
+int rs_cmd_copy(const struct rs_options *o);
+int rs_cmd_du(const struct rs_options *o);
+int rs_cmd_estimate(const struct rs_options *o);
+int rs_cmd_features(const struct rs_options *o);
 
-/* Dispatches on o->command. */
+/*
+ * Dispatches on o->command -- for `run JOBFILE`, on the job's -- with the
+ * run's result collected and, with --result, written when it ends, and its
+ * progress drawn as --progress, --progress=json and --progress-file say.
+ */
 int rs_cmd_run(const struct rs_options *o);
 
 #endif /* RESTATE_CMD_H */

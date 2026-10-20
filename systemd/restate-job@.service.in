@@ -1,0 +1,32 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-job@NAME.service: runs the restate job /etc/restate/jobs.d/NAME.conf
+# once (restate run; see JOBS in restate(8)). Start it by hand, or on a
+# schedule with restate-job@NAME.timer.
+#
+#   systemctl start restate-job@nightly
+#
+# Its output goes to the journal (journalctl -u restate-job@nightly); what the
+# job wrote with `result` and `progress` is where the job says.
+
+[Unit]
+Description=restate job %i
+Documentation=man:restate(8)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@SBINDIR@/restate run /etc/restate/jobs.d/%i.conf
+# Out of the way of whatever the machine is for: a capture of a whole machine
+# reads all of it, and some machines serve with their lids closed.
+Nice=10
+CPUSchedulingPolicy=batch
+IOSchedulingClass=idle
+# A first capture of a large machine takes hours; the next take minutes.
+TimeoutStartSec=24h
+# restate alone is told to stop, and holds that while a hook has something
+# paused: it resumes it first (a resume may take ten minutes), then goes.
+KillMode=mixed
+TimeoutStopSec=15min

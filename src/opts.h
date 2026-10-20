@@ -49,7 +49,19 @@ enum {
     OPT_OFFLINE,
     OPT_AS,
     OPT_CLONES,
-    OPT_READ_ALL
+    OPT_READ_ALL,
+    OPT_QUIESCE_WITH,
+    OPT_APPEND_ONLY,
+    OPT_RESULT,
+    OPT_REPORT_GROUP,
+    OPT_JSON,
+    OPT_INCLUDE,
+    OPT_METADATA_ONLY,
+    OPT_RECORD,
+    OPT_WHOLE_PACKS,
+    OPT_PROGRESS_FILE,
+    OPT_TMPDIR,
+    OPT_PASSPHRASE_FD
 };
 
 enum rs_command {
@@ -107,6 +119,22 @@ struct rs_options {
     const char     *as;             /* restore --as: the copy's host name */
     const char     *clones;         /* autoinstall --clones: the CSV of copies */
     bool            read_all;       /* check: every snapshot read, as restore would */
+    bool            metadata_only;  /* check: no index read, no key needed */
+    const char     *record;         /* check, prune: what was there at the last check */
+    bool            whole_packs;    /* prune: no index read, whole packs only */
+    const char    **quiesce_with;   /* --quiesce-with NAME, each */
+    size_t          nquiesce_with;
+    bool            append_only;    /* capture: add files only */
+    const char     *result;         /* --result FILE */
+    const char     *report_group;   /* --report-group GROUP */
+    bool            json;           /* --json */
+    const char    **includes;       /* restore --include PATTERN, each */
+    size_t          nincludes;
+    bool            progress_json;  /* --progress=json */
+    const char     *progress_file;  /* --progress-file FILE */
+    const char     *tmpdir;         /* --tmpdir DIR */
+    int             passphrase_fd;  /* --passphrase-fd N, where passphrase_given */
+    bool            passphrase_given;
     bool            one_fs;
     bool            no_hash;
     bool            quiet;
@@ -125,6 +153,13 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
 void rs_options_free(struct rs_options *o);
 
 const char *rs_command_name(enum rs_command cmd);
+/* The i'th option's long name, and the i'th command's name, in the order
+ * --help lists them; NULL past the last. */
+const char *rs_option_name(size_t i);
+const char *rs_command_name_at(size_t i);
+/* Whether `name` can be a hook's (--quiesce-with): lowercase letters, digits,
+ * '-' and '_', not starting with '-'. */
+bool rs_hook_name_ok(const char *name);
 
 void rs_print_help(FILE *out);
 void rs_print_version(FILE *out);

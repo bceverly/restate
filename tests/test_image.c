@@ -670,6 +670,29 @@ void test_image(void)
         CHECK(!rs_image_begin(&iw, "/nonexistent/dir/x.tgz", &err));
         CHECK_CONTAINS(err.data, "/nonexistent/dir/x.tgz");
 
+        TEST_CASE("image: staged elsewhere (--tmpdir), and written beside its name");
+        {
+            char *stage = rs_xasprintf("%s/stage", dir);
+            char *staged = rs_xasprintf("%s/staged.tgz", dir);
+            char *out = NULL;
+            char *errs = NULL;
+
+            CHECK(mkdir(stage, 0700) == 0);
+            rs_image_set_stage_dir(stage);
+            CHECK_INT(rs_test_capture(finish_one, staged, &out, &errs), 1);
+            CHECK(access(staged, F_OK) == 0);
+            free(out);
+            free(errs);
+            /* Nothing left in the staging directory: unlinked as it was made. */
+            CHECK(rmdir(stage) == 0);
+            rs_buf_reset(&err);
+            CHECK(!rs_image_begin(&iw, staged, &err));
+            CHECK_CONTAINS(err.data, "/stage/restate-image");
+            rs_image_set_stage_dir(NULL);
+            free(stage);
+            free(staged);
+        }
+
         rs_index_free(&ix);
         rs_rules_free(&rules);
         free(tree);

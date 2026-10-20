@@ -92,6 +92,11 @@ struct rs_image_writer {
     struct rs_pgp_signer signer;       /* who signed it, once it is */
 };
 
+/* Stages the content of images being written in `dir` rather than beside
+ * them (--tmpdir): an image written to a network share then costs the share
+ * only the image. NULL goes back to beside them. */
+void rs_image_set_stage_dir(const char *dir);
+
 /* Creates the temporary content file beside `dest`. */
 bool rs_image_begin(struct rs_image_writer *iw, const char *dest, struct rs_buf *err);
 

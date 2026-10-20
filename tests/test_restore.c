@@ -545,6 +545,64 @@ void test_restore(void)
         free(root);
     }
 
+    TEST_CASE("restore: one directory back, and the directories it is in, with the plan");
+    {
+        /* /etc/app, which the cases above leave as captured. */
+        static const char *const in[] = { "/etc/app" };
+        char                    *root = at(dir, "inc");
+        struct rs_jval           plan;
+        size_t                   i;
+        bool                     has_doc = false;
+        bool                     has_hosts = false;
+
+        CHECK(mkdir(root, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        memset(&plan, 0, sizeof(plan));
+        rs_jval_set_array(&plan);
+        r.o.include = in;
+        r.o.ninclude = 1;
+        r.o.plan = &plan;
+        r.o.plan_max = 2;
+        r.o.dry_run = true;
+        restore_into(&r, img, &ix, root, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.missing, 0);
+        CHECK(r.st.planned >= 3);
+        CHECK_INT(plan.n, 2);
+        free(out);
+        free(errs);
+        rs_buf_free(&r.err);
+        rs_jval_free(&plan);
+        memset(&r, 0, sizeof(r));
+        memset(&plan, 0, sizeof(plan));
+        rs_jval_set_array(&plan);
+        r.o.include = in;
+        r.o.ninclude = 1;
+        r.o.plan = &plan;
+        r.o.plan_max = 100;
+        restore_into(&r, img, &ix, root, &out, &errs);
+        CHECK(r.ok);
+        for (i = 0; i < plan.n; i++)
+        {
+            has_doc = has_doc || strcmp(plan.items[i].s, "/etc/app/key") == 0;
+            has_hosts = has_hosts || strcmp(plan.items[i].s, "/etc/hosts") == 0;
+        }
+        CHECK(has_doc && !has_hosts);
+        CHECK(r.st.excluded >= 4);
+        CHECK_INT(r.st.missing, 0);
+        p = at(root, "etc/app/key");
+        CHECK(access(p, F_OK) == 0);
+        free(p);
+        p = at(root, "etc/hosts");
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        rs_jval_free(&plan);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        free(root);
+    }
+
     TEST_CASE("restore: owners by name, through merged accounts");
     {
         char            *atree = at(dir, "atree");

@@ -132,6 +132,8 @@ struct rs_scan_stats {
     uint64_t stored;
     uint64_t reused;          /* files not read: unchanged since the last capture */
     uint64_t bytes_reused;
+    uint64_t paused;          /* capture --quiesce: things paused by their hooks */
+    uint64_t pause_failed;    /* of those, not paused or not resumed */
 };
 
 /*

@@ -28,6 +28,7 @@
 #include "image.h"
 #include "index.h"
 #include "installer.h"
+#include "jobs.h"
 #include "live.h"
 #include "machine.h"
 #include "meta.h"
@@ -37,10 +38,14 @@
 #include "reinstall.h"
 #include "repo.h"
 #include "restore.h"
+#include "result.h"
 #include "rules.h"
 #include "run.h"
 #include "scan.h"
 #include "sources.h"
+
+/* The paths a restore's result names, of all it puts back. */
+#define RESTORE_PLAN_MAX 1000
 
 /* A machine description read on its own is refused beyond this size. */
 #define MACHINE_MAX ((size_t)16 * 1024 * 1024)
@@ -303,6 +308,12 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
         (void)fprintf(stderr, "restate: %" PRIu64 " paths could not be read; "
                       "the index is incomplete\n", st->unreadable);
     }
+    if (st->pause_failed > 0)
+    {
+        (void)fprintf(stderr, "restate: %" PRIu64 " of the %" PRIu64 " things paused were not "
+                      "paused or not resumed (see above); the capture is incomplete\n",
+                      st->pause_failed, st->paused);
+    }
 }
 
 /*
@@ -389,15 +400,23 @@ static void check_sources(const struct rs_options *o, const char *root, struct r
 /* ------------------------------------------------------------------------- */
 
 struct quiesce {
-    struct rs_live       *live;     /* what was found, and matters */
+    struct rs_live       *live;     /* what was found, and matters, then what was named */
     size_t                nlive;
+    bool                 *declared; /* named by --quiesce-with, not found */
     char                **hooks;    /* each one's hook, NULL for none */
     char                **dumps;    /* each one's dump directory, or NULL */
-    struct rs_scan_group *groups;   /* one per thing with a hook */
+    struct rs_scan_group *groups;   /* one per thing with a hook and paths */
     size_t               *of;       /* the thing each group is */
     size_t                ngroups;
     const char         ***paths;    /* each group's paths */
-    bool                  paused;   /* signals are held while it is */
+    size_t               *whole;    /* the things paused for the whole walk */
+    size_t                nwhole;
+    time_t               *paused_at;
+    bool                 *pause_ok;
+    char                **said;     /* why a pause or a resume failed */
+    uint64_t              paused;
+    uint64_t              failed;
+    unsigned              depth;    /* signals are held while anything is paused */
     sigset_t              held;
     sigset_t              saved;
 };
@@ -453,22 +472,42 @@ static void tell(const struct rs_options *o, int priority, const char *fmt, ...)
     free(msg);
 }
 
+/* Whether something of the kind `kind` was found running, and has a hook. */
+static bool found_kind(const struct quiesce *q, size_t n, const char *kind)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (strcmp(q->live[i].kind, kind) == 0 && q->hooks[i])
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /*
  * The live things whose files the walk would copy: named, with the command
  * that would stop each, when not quiescing; given a hook and a dump
- * directory, and left to the end of the walk, when quiescing.
+ * directory, and left to the end of the walk, when quiescing. Then each hook
+ * --quiesce-with names, with the paths it says it covers, or for the whole
+ * walk if it names none. False, having said why, if a named hook is not
+ * there to run.
  */
-static void quiesce_plan(const struct rs_options *o, const struct rs_rules *rules,
+static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rules,
                          const char *root, struct quiesce *q)
 {
     struct rs_live *all = NULL;
     size_t          n = 0;
+    size_t          found;
     size_t          i;
     size_t          k;
+    bool            ok = true;
 
     memset(q, 0, sizeof(*q));
     rs_live_detect("/proc", &all, &n);
-    q->live = rs_xcalloc(n + 1, sizeof(*q->live));
+    q->live = rs_xcalloc(n + o->nquiesce_with + 1, sizeof(*q->live));
     for (i = 0; i < n; i++)
     {
         bool keep = false;
@@ -491,29 +530,76 @@ static void quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
         }
     }
     free(all);
-    q->hooks = rs_xcalloc(q->nlive + 1, sizeof(*q->hooks));
-    q->dumps = rs_xcalloc(q->nlive + 1, sizeof(*q->dumps));
-    q->groups = rs_xcalloc(q->nlive + 1, sizeof(*q->groups));
-    q->of = rs_xcalloc(q->nlive + 1, sizeof(*q->of));
-    q->paths = rs_xcalloc(q->nlive + 1, sizeof(*q->paths));
+    found = q->nlive;
+    n = found + o->nquiesce_with + 1;
+    q->declared = rs_xcalloc(n, sizeof(*q->declared));
+    q->hooks = rs_xcalloc(n, sizeof(*q->hooks));
+    q->dumps = rs_xcalloc(n, sizeof(*q->dumps));
+    q->groups = rs_xcalloc(n, sizeof(*q->groups));
+    q->of = rs_xcalloc(n, sizeof(*q->of));
+    q->paths = rs_xcalloc(n, sizeof(*q->paths));
+    q->whole = rs_xcalloc(n, sizeof(*q->whole));
+    q->paused_at = rs_xcalloc(n, sizeof(*q->paused_at));
+    q->pause_ok = rs_xcalloc(n, sizeof(*q->pause_ok));
+    q->said = rs_xcalloc(n, sizeof(*q->said));
+    for (i = 0; i < found; i++)
+    {
+        if (o->quiesce)
+        {
+            q->hooks[i] = rs_hook_find(q->live[i].kind);
+        }
+    }
+    /* What --quiesce-with names, unless --quiesce pauses it already. */
+    for (k = 0; k < o->nquiesce_with; k++)
+    {
+        const char     *name = o->quiesce_with[k];
+        struct rs_live *l;
+        struct rs_buf   err;
+        char           *hook;
+
+        if (found_kind(q, found, name))
+        {
+            continue;
+        }
+        hook = rs_hook_find(name);
+        if (!hook)
+        {
+            rs_error("--quiesce-with %s: there is no hook by that name that restate would run "
+                     "(%s/%s, root's and writable by no one else, or one restate ships)", name,
+                     RS_HOOKS_SITE_DIR, name);
+            ok = false;
+            continue;
+        }
+        l = &q->live[q->nlive];
+        memset(l, 0, sizeof(*l));
+        l->kind = name;
+        l->name = rs_xstrdup(name);
+        rs_buf_init(&err);
+        if (!rs_hook_paths(hook, name, &l->paths, &l->npaths, &err))
+        {
+            rs_warn("%s paths: %s; it is paused for the whole walk", hook, err.data);
+        }
+        rs_buf_free(&err);
+        q->hooks[q->nlive] = hook;
+        q->declared[q->nlive] = true;
+        q->nlive++;
+    }
     for (i = 0; i < q->nlive; i++)
     {
         const struct rs_live *l = &q->live[i];
         struct rs_buf         what;
         struct rs_buf         hint;
         struct rs_buf         err;
-        size_t                np = 0;
 
         rs_buf_init(&what);
         rs_buf_init(&hint);
         rs_buf_init(&err);
         describe_live(l, &what);
-        rs_live_hint(l, &hint);
-        if (o->quiesce)
+        if (!q->declared[i])
         {
-            q->hooks[i] = rs_hook_find(l->kind);
+            rs_live_hint(l, &hint);
         }
-        if (!o->quiesce)
+        if (!q->declared[i] && !o->quiesce)
         {
             rs_warn("%s is running, and its files will be copied as they change: stop it "
                     "first (%s), or capture with --quiesce", what.data, hint.data);
@@ -528,23 +614,33 @@ static void quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
             {
                 rs_warn("no dump directory for %s: %s", what.data, err.data);
             }
-            q->paths[q->ngroups] = rs_xcalloc(l->npaths + 2, sizeof(char *));
-            for (k = 0; k < l->npaths; k++)
+            if (l->npaths == 0)
             {
-                q->paths[q->ngroups][np++] = l->paths[k];
-            }
-            if (q->dumps[i])
+                /* A hook that names no paths: paused for all of it. */
+                q->whole[q->nwhole++] = i;
+            } else
             {
-                q->paths[q->ngroups][np++] = q->dumps[i];
+                size_t np = 0;
+
+                q->paths[q->ngroups] = rs_xcalloc(l->npaths + 2, sizeof(char *));
+                for (k = 0; k < l->npaths; k++)
+                {
+                    q->paths[q->ngroups][np++] = l->paths[k];
+                }
+                if (q->dumps[i])
+                {
+                    q->paths[q->ngroups][np++] = q->dumps[i];
+                }
+                q->groups[q->ngroups].paths = q->paths[q->ngroups];
+                q->groups[q->ngroups].npaths = np;
+                q->of[q->ngroups++] = i;
             }
-            q->groups[q->ngroups].paths = q->paths[q->ngroups];
-            q->groups[q->ngroups].npaths = np;
-            q->of[q->ngroups++] = i;
         }
         rs_buf_free(&what);
         rs_buf_free(&hint);
         rs_buf_free(&err);
     }
+    return ok;
 }
 
 static void quiesce_free(struct quiesce *q)
@@ -555,17 +651,23 @@ static void quiesce_free(struct quiesce *q)
     {
         free(q->hooks[i]);
         free(q->dumps[i]);
+        free(q->said[i]);
     }
     for (i = 0; i < q->ngroups; i++)
     {
         free(q->paths[i]);
     }
     rs_live_free(q->live, q->nlive);
+    free(q->declared);
     free(q->hooks);
     free(q->dumps);
     free(q->groups);
     free(q->of);
     free(q->paths);
+    free(q->whole);
+    free(q->paused_at);
+    free(q->pause_ok);
+    free(q->said);
 }
 
 struct around_ctx {
@@ -573,59 +675,97 @@ struct around_ctx {
     struct quiesce          *q;
 };
 
-/*
- * The scan's call on each side of a group: pause before, resume after.
- * While the thing is paused the signals that would end restate are held, so
- * nothing can stop it between the two; a Ctrl-C reaches the hook itself, and
- * once the thing is resumed restate goes the way the signal says.
- */
-static bool around(const void *ctx, size_t group, bool before)
+/* Whether a signal that ends restate came while something was paused. */
+static bool interrupted(void)
 {
-    const struct around_ctx *a = ctx;
-    struct quiesce          *q = a->q;
-    size_t                   i = q->of[group];
-    const struct rs_live    *l = &q->live[i];
-    const char              *what = rs_live_what(l);
-    struct rs_buf            err;
-    bool                     go = true;
+    sigset_t pending;
 
-    rs_buf_init(&err);
-    if (before)
+    return sigpending(&pending) == 0 &&
+           (sigismember(&pending, SIGINT) == 1 || sigismember(&pending, SIGTERM) == 1 ||
+            sigismember(&pending, SIGHUP) == 1 || sigismember(&pending, SIGQUIT) == 1);
+}
+
+/*
+ * Pauses the live thing `i`. While anything is paused the signals that would
+ * end restate are held, so nothing can stop it between the pause and the
+ * resume; a Ctrl-C reaches the hook itself, and once everything is resumed
+ * restate goes the way the signal says. False if a signal came meanwhile.
+ */
+static bool pause_one(const struct around_ctx *a, size_t i)
+{
+    struct quiesce       *q = a->q;
+    const struct rs_live *l = &q->live[i];
+    struct rs_buf         err;
+
+    if (q->depth++ == 0)
     {
-        sigset_t pending;
-
         (void)sigemptyset(&q->held);
         (void)sigaddset(&q->held, SIGINT);
         (void)sigaddset(&q->held, SIGTERM);
         (void)sigaddset(&q->held, SIGHUP);
         (void)sigaddset(&q->held, SIGQUIT);
         (void)sigprocmask(SIG_BLOCK, &q->held, &q->saved);
-        q->paused = true;
-        tell(a->o, LOG_NOTICE, "pausing %s %s", what, l->name);
-        if (!rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], &err))
-        {
-            tell(a->o, LOG_WARNING, "%s %s was not paused (%s): its files are copied as they "
-                 "are", what, l->name, err.data);
-        }
-        /* Interrupted while it paused: nothing more is copied. */
-        go = sigpending(&pending) != 0 ||
-             !(sigismember(&pending, SIGINT) == 1 || sigismember(&pending, SIGTERM) == 1 ||
-               sigismember(&pending, SIGHUP) == 1 || sigismember(&pending, SIGQUIT) == 1);
-    } else
+    }
+    rs_buf_init(&err);
+    tell(a->o, LOG_NOTICE, "pausing %s %s", rs_live_what(l), l->name);
+    rs_progress_hook(l->name);
+    q->paused++;
+    q->paused_at[i] = time(NULL);
+    q->pause_ok[i] = rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], &err);
+    if (!q->pause_ok[i])
     {
-        if (!rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], &err))
-        {
-            tell(a->o, LOG_ERR, "%s %s was not resumed, and may still be stopped: %s", what,
-                 l->name, err.data);
-        } else
-        {
-            tell(a->o, LOG_NOTICE, "resumed %s %s", what, l->name);
-        }
-        q->paused = false;
-        (void)sigprocmask(SIG_SETMASK, &q->saved, NULL);
+        tell(a->o, LOG_WARNING, "%s %s was not paused (%s): its files are copied as they are",
+             rs_live_what(l), l->name, err.data);
+        q->said[i] = rs_xstrdup(err.data ? err.data : "");
     }
     rs_buf_free(&err);
-    return go;
+    return !interrupted();
+}
+
+static void resume_one(const struct around_ctx *a, size_t i)
+{
+    struct quiesce       *q = a->q;
+    const struct rs_live *l = &q->live[i];
+    struct rs_buf         err;
+    bool                  ok;
+
+    rs_buf_init(&err);
+    ok = rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], &err);
+    if (!ok)
+    {
+        tell(a->o, LOG_ERR, "%s %s was not resumed, and may still be stopped: %s",
+             rs_live_what(l), l->name, err.data);
+        free(q->said[i]);
+        q->said[i] = rs_xstrdup(err.data ? err.data : "");
+    } else
+    {
+        tell(a->o, LOG_NOTICE, "resumed %s %s", rs_live_what(l), l->name);
+    }
+    if (!ok || !q->pause_ok[i])
+    {
+        q->failed++;
+    }
+    rs_result_quiesce(l->kind, l->name, q->paused_at[i], ok ? time(NULL) : 0,
+                      ok && q->pause_ok[i], q->said[i]);
+    rs_progress_hook(NULL);
+    rs_buf_free(&err);
+    if (--q->depth == 0)
+    {
+        (void)sigprocmask(SIG_SETMASK, &q->saved, NULL);
+    }
+}
+
+/* The scan's call on each side of a group: pause before, resume after. */
+static bool around(const void *ctx, size_t group, bool before)
+{
+    const struct around_ctx *a = ctx;
+
+    if (before)
+    {
+        return pause_one(a, a->q->of[group]);
+    }
+    resume_one(a, a->q->of[group]);
+    return true;
 }
 
 /* Where a walk's kept content goes: an image, or a new snapshot in a
@@ -653,7 +793,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     struct rs_pkgdb         db;
     struct rs_scan_opts     so;
     struct quiesce          q;
-    struct around_ctx       actx;
+    struct around_ctx       actx = { o, &q };
     bool                    live = false;
     struct rs_buf           err;
     const char             *os_used = NULL;
@@ -667,6 +807,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
      * index and the stats are read whatever happened. */
     rs_index_init(m);
     memset(st, 0, sizeof(*st));
+    memset(&q, 0, sizeof(q));
     if (!load_rules(o, &rules, &os_used))
     {
         return false;
@@ -761,9 +902,18 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     if (storing && is_live_root(root))
     {
         live = true;
-        quiesce_plan(o, &rules, root, &q);
-        actx.o = o;
-        actx.q = &q;
+        if (!quiesce_plan(o, &rules, root, &q))
+        {
+            quiesce_free(&q);
+            rs_rules_free(&rules);
+            rs_pkgdb_free(&db);
+            for (i = 0; i < nkeep; i++)
+            {
+                free(keep[i]);
+            }
+            free(keep);
+            return false;
+        }
         if (q.ngroups > 0)
         {
             so.defer = q.groups;
@@ -826,8 +976,29 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         }
         rs_progress_phase("walking", total);
     }
-    ok = rs_scan(&so, m, st, &err);
+    /* What is paused for the whole walk, around all of it. */
+    ok = true;
+    for (i = 0; live && i < q.nwhole; i++)
+    {
+        ok = pause_one(&actx, q.whole[i]) && ok;
+    }
+    if (ok)
+    {
+        ok = rs_scan(&so, m, st, &err);
+    } else
+    {
+        rs_buf_addstr(&err, "interrupted while it paused what it captures");
+    }
+    for (i = live ? q.nwhole : 0; i-- > 0;)
+    {
+        resume_one(&actx, q.whole[i]);
+    }
     rs_progress_done();
+    if (live)
+    {
+        st->paused = q.paused;
+        st->pause_failed = q.failed;
+    }
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -1103,6 +1274,8 @@ int rs_cmd_sign(const struct rs_options *o)
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
+    rs_jobj_str(rs_result(), "signed", path);
+    rs_jobj_str(rs_result(), "signer", signer.fpr);
     if (!o->quiet)
     {
         say_signer("signed by", &signer);
@@ -1272,7 +1445,7 @@ static int capture_image(const struct rs_options *o, struct rs_scan_stats *st)
         return RESTATE_EXIT_TROUBLE;
     }
     scan_summary(o, st);
-    return st->unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    return st->unreadable + st->pause_failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
 /*
@@ -1316,7 +1489,8 @@ static bool last_capture(const struct rs_options *o, struct rs_repo *r, const ch
 
 /* A capture into a repository: a new snapshot, with only what is new
  * stored, and what has not changed since the last one not read at all. */
-static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, char **where)
+static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, char **where,
+                        uint64_t *new_bytes)
 {
     const char            *root = o->root ? o->root : "/";
     struct rs_repo        *r;
@@ -1330,7 +1504,7 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
     bool                   ok;
 
     rs_buf_init(&err);
-    r = rs_repo_open(o->output, RS_REPO_WRITE, &busy, &err);
+    r = rs_repo_open(o->output, o->append_only ? RS_REPO_APPEND : RS_REPO_WRITE, &busy, &err);
     if (!r)
     {
         rs_error("%s", err.data);
@@ -1366,6 +1540,7 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
     if (ok)
     {
         *where = rs_xasprintf("%s" RS_REPO_SEP "%s", o->output, done.name);
+        *new_bytes = done.bytes;
         if (!o->quiet)
         {
             struct rs_buf size;
@@ -1391,13 +1566,68 @@ static int capture_repo(const struct rs_options *o, struct rs_scan_stats *st, ch
         return RESTATE_EXIT_TROUBLE;
     }
     scan_summary(o, st);
-    return st->unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    return st->unreadable + st->pause_failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+}
+
+/* What a capture did, in its result. */
+static void capture_result(const struct rs_options *o, const struct rs_scan_stats *st,
+                           const char *where, uint64_t new_bytes)
+{
+    struct rs_jval *res = rs_result();
+    struct rs_jval *by;
+    bool            repo = o->output && rs_repo_is(o->output);
+
+    if (!o->output)
+    {
+        return;
+    }
+    rs_jobj_str(res, repo ? "repository" : "image", o->output);
+    rs_jobj_str(res, "snapshot", where);
+    rs_jobj_u64(res, "paths", st->recorded);
+    rs_jobj_u64(res, "kept", st->stored);
+    rs_jobj_u64(res, "read_bytes", st->bytes_hashed);
+    rs_jobj_u64(res, "reused", st->reused);
+    rs_jobj_u64(res, "reused_bytes", st->bytes_reused);
+    if (repo)
+    {
+        struct rs_repo      *r;
+        struct rs_repo_usage u;
+        struct rs_buf        err;
+        bool                 busy;
+
+        rs_jobj_u64(res, "new_bytes", new_bytes);
+        rs_buf_init(&err);
+        r = rs_repo_open(o->output, RS_REPO_LOOK, &busy, &err);
+        if (r)
+        {
+            rs_repo_du(r, &u);
+            rs_jobj_u64(res, "repository_bytes", u.bytes);
+            rs_repo_usage_free(&u);
+            rs_repo_close(r);
+        }
+        rs_buf_free(&err);
+    } else
+    {
+        struct stat sb;
+
+        rs_jobj_u64(res, "new_bytes", stat(o->output, &sb) == 0 ? (uint64_t)sb.st_size : 0);
+    }
+    by = rs_jobj_add(res, "classes");
+    rs_jval_set_object(by);
+    rs_jobj_u64(by, "state", st->by_class[RS_CLASS_STATE]);
+    rs_jobj_u64(by, "identity", st->by_class[RS_CLASS_IDENTITY]);
+    rs_jobj_u64(by, "baseline", st->by_class[RS_CLASS_BASELINE]);
+    rs_jobj_u64(by, "expendable", st->by_class[RS_CLASS_EXPENDABLE]);
+    rs_jobj_u64(res, "grew", st->grew);
+    rs_jobj_u64(res, "paused", st->paused);
+    rs_jobj_u64(res, "pause_failed", st->pause_failed);
 }
 
 int rs_cmd_capture(const struct rs_options *o)
 {
     struct rs_scan_stats st;
     time_t               began = time(NULL);
+    uint64_t             new_bytes = 0;
     char                *where = NULL;
     size_t               k;
     int                  lock = -1;
@@ -1464,14 +1694,21 @@ int rs_cmd_capture(const struct rs_options *o)
             status = RESTATE_EXIT_BUSY;
         }
     }
+    if (status == RESTATE_EXIT_OK && o->append_only && !rs_repo_is(o->output))
+    {
+        rs_error("--append-only: %s is not a repository; an image is written whole", o->output);
+        status = RESTATE_EXIT_TROUBLE;
+    }
     if (status == RESTATE_EXIT_OK)
     {
-        status = rs_repo_is(o->output) ? capture_repo(o, &st, &where) : capture_image(o, &st);
+        status = rs_repo_is(o->output) ? capture_repo(o, &st, &where, &new_bytes)
+                                       : capture_image(o, &st);
     }
     if (lock >= 0)
     {
         (void)close(lock);
     }
+    capture_result(o, &st, where, new_bytes);
     log_outcome(o, status, began, "output=%s paths=%" PRIu64 " kept=%" PRIu64 " read=%" PRIu64
                 " reused=%" PRIu64 " unreadable=%" PRIu64, where ? where : o->output,
                 st.recorded, st.stored, st.bytes_hashed, st.reused, st.unreadable);
@@ -1540,6 +1777,7 @@ OUTPUT_HELD_BEGIN
 int rs_cmd_snapshots(const struct rs_options *o)
 {
     struct rs_repo *r;
+    struct rs_jval  list;
     struct rs_buf   err;
     struct rs_buf   text;
     struct output   out;
@@ -1559,15 +1797,20 @@ int rs_cmd_snapshots(const struct rs_options *o)
     }
     names = rs_repo_snapshots(r, &n);
     rs_buf_init(&text);
+    memset(&list, 0, sizeof(list));
+    rs_jval_set_array(&list);
     for (i = 0; i < n; i++)
     {
         struct rs_jval        info;
+        struct rs_jval       *j = rs_jarr_add(&list);
         struct rs_buf         sig;
         struct rs_buf         gz;
         uint64_t              files = 0;
         uint64_t              bytes = 0;
         uint64_t              fresh = 0;
 
+        rs_jval_set_object(j);
+        rs_jobj_str(j, "name", names[i]);
         rs_buf_reset(&err);
         rs_buf_init(&sig);
         rs_buf_init(&gz);
@@ -1587,17 +1830,39 @@ int rs_cmd_snapshots(const struct rs_options *o)
             rs_buf_addstr(&text, "; ");
             human_size(&text, fresh);
             rs_buf_addf(&text, " new%s\n", sig.len > 0 ? "; signed" : "");
+            rs_jobj_str(j, "host", rs_jobject_str(&info, "host"));
+            rs_jobj_str(j, "created", rs_jobject_str(&info, "created"));
+            rs_jobj_u64(j, "files", files);
+            rs_jobj_u64(j, "bytes", bytes);
+            rs_jobj_u64(j, "new_bytes", fresh);
             rs_jval_free(&info);
         } else
         {
             rs_buf_addf(&text, "%s  (no summary: %s)\n", names[i], err.data);
+            rs_jobj_str(j, "error", err.data);
         }
+        rs_jobj_bool(j, "signed", sig.len > 0);
         rs_buf_free(&sig);
         rs_buf_free(&gz);
     }
     rs_repo_free_names(names, n);
     rs_repo_close(r);
     rs_buf_free(&err);
+    rs_jobj_str(rs_result(), "repository", o->args[0]);
+    if (o->json)
+    {
+        struct rs_jval doc;
+
+        memset(&doc, 0, sizeof(doc));
+        rs_jval_set_object(&doc);
+        rs_jobj_str(&doc, "repository", o->args[0]);
+        rs_jval_copy(rs_jobj_add(&doc, "snapshots"), &list);
+        rs_buf_reset(&text);
+        rs_json_write(&text, &doc, 2, 0);
+        rs_buf_addc(&text, '\n');
+        rs_jval_free(&doc);
+    }
+    *rs_jobj_add(rs_result(), "snapshots") = list;
     if (!output_open(o, &out))
     {
         rs_buf_free(&text);
@@ -1614,6 +1879,50 @@ int rs_cmd_snapshots(const struct rs_options *o)
 }
 
 OUTPUT_HELD_END
+
+/* What prune dropped and kept, in its result. */
+static void prune_result(const struct rs_options *o, struct rs_repo *r,
+                         const struct rs_repo_pruned *p)
+{
+    struct rs_jval *res = rs_result();
+    struct rs_jval *dropped;
+    struct rs_jval *kept;
+    char          **names;
+    size_t          n;
+    size_t          i;
+
+    rs_jobj_str(res, "repository", o->args[0]);
+    rs_jobj_bool(res, "dry_run", o->dry_run);
+    rs_jobj_bool(res, "whole_packs", o->whole_packs);
+    dropped = rs_jobj_add(res, "pruned");
+    rs_jval_set_array(dropped);
+    for (i = 0; i < p->ndropped; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(dropped), p->dropped[i]);
+    }
+    kept = rs_jobj_add(res, "kept_snapshots");
+    rs_jval_set_array(kept);
+    names = rs_repo_snapshots(r, &n);
+    for (i = 0; i < n; i++)
+    {
+        size_t k;
+        bool   going = false;
+
+        for (k = 0; o->dry_run && k < p->ndropped; k++)
+        {
+            going = going || strcmp(p->dropped[k], names[i]) == 0;
+        }
+        if (!going)
+        {
+            rs_jval_set_string(rs_jarr_add(kept), names[i]);
+        }
+    }
+    rs_repo_free_names(names, n);
+    rs_jobj_u64(res, "packs_removed", p->packs_removed);
+    rs_jobj_u64(res, "packs_rewritten", p->packs_rewritten);
+    rs_jobj_u64(res, "packs_left", p->packs_left);
+    rs_jobj_u64(res, "bytes_freed", p->bytes_freed);
+}
 
 int rs_cmd_prune(const struct rs_options *o)
 {
@@ -1659,7 +1968,14 @@ int rs_cmd_prune(const struct rs_options *o)
         return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
     }
     rs_repo_set_recipients(r, o->recipients, o->nrecipients);
-    ok = rs_repo_prune(r, &keep, o->dry_run, &pruned, &err);
+    ok = o->whole_packs ? rs_repo_prune_whole(r, &keep, o->dry_run, &pruned, &err)
+                        : rs_repo_prune(r, &keep, o->dry_run, &pruned, &err);
+    if (ok && o->record && !o->dry_run && !rs_repo_record_update(r, o->record, &err))
+    {
+        rs_warn("--record: %s", err.data);
+        rs_buf_reset(&err);
+    }
+    prune_result(o, r, &pruned);
     rs_repo_close(r);
     for (i = 0; !o->quiet && i < pruned.ndropped; i++)
     {
@@ -1741,21 +2057,70 @@ static bool read_snapshot(const struct rs_options *o, const char *ref, const cha
     return ok;
 }
 
+/* What check found, in its result. */
+static void check_result(const struct rs_options *o, const struct rs_repo_checked *c, size_t n,
+                         uint64_t read_files, uint64_t read_bad, size_t unread, int status)
+{
+    struct rs_jval *res = rs_result();
+    struct rs_jval *k;
+    struct rs_jval *changed;
+    size_t          i;
+
+    rs_jobj_str(res, "repository", o->args[0]);
+    k = rs_jobj_add(res, "check");
+    rs_jval_set_object(k);
+    rs_jobj_bool(k, "ok", status == RESTATE_EXIT_OK);
+    rs_jobj_bool(k, "read_all", o->read_all);
+    rs_jobj_bool(k, "metadata_only", o->metadata_only);
+    rs_jobj_u64(k, "packs", c->packs);
+    rs_jobj_u64(k, "packs_bad", c->packs_bad);
+    rs_jobj_u64(k, "chunks", c->chunks);
+    rs_jobj_u64(k, "bytes", c->bytes);
+    rs_jobj_u64(k, "snapshots", c->snapshots);
+    rs_jobj_u64(k, "snapshots_bad", c->snapshots_bad + unread);
+    rs_jobj_u64(k, "files", c->files);
+    rs_jobj_u64(k, "files_missing", c->missing);
+    rs_jobj_u64(k, "leftovers", c->leftovers);
+    rs_jobj_u64(k, "packs_without_sum", c->unsummed);
+    rs_jobj_u64(k, "snapshots_without_pack_list", c->unlisted);
+    if (o->read_all)
+    {
+        rs_jobj_u64(k, "snapshots_read", n);
+        rs_jobj_u64(k, "files_read", read_files);
+        rs_jobj_u64(k, "files_read_bad", read_bad);
+    }
+    changed = rs_jobj_add(k, "changed");
+    rs_jval_set_array(changed);
+    for (i = 0; i < c->nchanged; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(changed), c->changed[i]);
+    }
+    rs_jobj_bool(k, "recorded", o->record != NULL);
+}
+
 int rs_cmd_check(const struct rs_options *o)
 {
-    struct rs_repo_checked c;
-    struct rs_repo        *r;
-    struct rs_buf          err;
-    struct rs_buf          size;
-    time_t                 began = time(NULL);
-    uint64_t               read_files = 0;
-    uint64_t               read_bad = 0;
-    size_t                 unread = 0;
-    size_t                 n = 0;
-    bool                   busy;
-    bool                   ok;
-    int                    status;
+    struct rs_repo_check_opts copts;
+    struct rs_repo_checked    c;
+    struct rs_repo           *r;
+    struct rs_buf             err;
+    struct rs_buf             size;
+    time_t                    began = time(NULL);
+    uint64_t                  read_files = 0;
+    uint64_t                  read_bad = 0;
+    size_t                    unread = 0;
+    size_t                    n = 0;
+    bool                      busy;
+    bool                      ok;
+    int                       status;
 
+    if (o->metadata_only && o->read_all)
+    {
+        rs_error("check: --metadata-only reads no index, and --read-all reads every one; give "
+                 "one of them");
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
     rs_buf_init(&err);
     r = rs_repo_open(o->args[0], RS_REPO_READ, &busy, &err);
     if (!r)
@@ -1766,7 +2131,12 @@ int rs_cmd_check(const struct rs_options *o)
         log_outcome(o, status, began, "repository=%s", o->args[0]);
         return status;
     }
-    ok = rs_repo_check(r, &c, &err);
+    memset(&copts, 0, sizeof(copts));
+    copts.metadata_only = o->metadata_only;
+    copts.record = o->record;
+    rs_progress_phase("checking", 0);
+    ok = rs_repo_check(r, &copts, &c, &err);
+    rs_progress_done();
     if (ok && o->read_all)
     {
         /* Where the snapshots are restored to, in a dry run: an empty
@@ -1810,17 +2180,41 @@ int rs_cmd_check(const struct rs_options *o)
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
-    status = c.packs_bad + c.snapshots_bad + unread > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+    status = c.packs_bad + c.snapshots_bad + unread + c.nchanged > 0 ? RESTATE_EXIT_INCOMPLETE
+                                                                      : RESTATE_EXIT_OK;
+    check_result(o, &c, n, read_files, read_bad, unread, status);
     if (!o->quiet)
     {
         rs_buf_init(&size);
         human_size(&size, c.bytes);
         (void)fflush(stdout);
-        (void)fprintf(stderr, "restate: read %zu packs (%s, %" PRIu64 " chunks checked against "
-                      "their digests): %zu damaged\n", c.packs, size.data, c.chunks, c.packs_bad);
-        (void)fprintf(stderr, "restate: %zu snapshots, %" PRIu64 " files with content: %zu "
-                      "snapshots with something missing, %" PRIu64 " files not whole\n",
-                      c.snapshots, c.files, c.snapshots_bad, c.missing);
+        if (o->metadata_only)
+        {
+            (void)fprintf(stderr, "restate: read %zu packs (%s), each against the digest written "
+                          "beside it: %zu damaged; no index was read, so no chunk was checked\n",
+                          c.packs, size.data, c.packs_bad);
+            (void)fprintf(stderr, "restate: %zu snapshots: %zu with a pack or file missing\n",
+                          c.snapshots, c.snapshots_bad);
+        } else
+        {
+            (void)fprintf(stderr, "restate: read %zu packs (%s, %" PRIu64 " chunks checked "
+                          "against their digests): %zu damaged\n", c.packs, size.data, c.chunks,
+                          c.packs_bad);
+            (void)fprintf(stderr, "restate: %zu snapshots, %" PRIu64 " files with content: %zu "
+                          "snapshots with something missing, %" PRIu64 " files not whole\n",
+                          c.snapshots, c.files, c.snapshots_bad, c.missing);
+        }
+        if (c.unsummed + c.unlisted > 0)
+        {
+            (void)fprintf(stderr, "restate: %zu packs have no digest beside them and %zu snapshots "
+                          "no list of their packs: written before restate 2.0; a prune adds "
+                          "them\n", c.unsummed, c.unlisted);
+        }
+        if (o->record)
+        {
+            (void)fprintf(stderr, "restate: %zu files removed or changed since the last check "
+                          "(%s)\n", c.nchanged, o->record);
+        }
         if (o->read_all)
         {
             (void)fprintf(stderr, "restate: read %zu snapshots in full, as restore would: %"
@@ -1833,17 +2227,429 @@ int rs_cmd_check(const struct rs_options *o)
                           "which nothing refers to and prune removes\n", c.leftovers);
         }
         (void)fprintf(stderr, "restate: %s\n",
-                      status == RESTATE_EXIT_OK ? "the repository is whole"
-                                                : "the repository is damaged; see above");
+                      status != RESTATE_EXIT_OK ? "the repository is damaged; see above"
+                      : o->metadata_only        ? "the repository is whole, as far as can be "
+                                                  "told without reading its indexes"
+                                                : "the repository is whole");
         rs_buf_free(&size);
     }
     log_outcome(o, status, began,
                 "repository=%s packs=%zu packs_damaged=%zu snapshots=%zu snapshots_damaged=%zu "
-                "files_missing=%" PRIu64 " read_all=%s",
+                "files_missing=%" PRIu64 " read_all=%s metadata_only=%s changed=%zu",
                 o->args[0], c.packs, c.packs_bad, c.snapshots, c.snapshots_bad + unread,
-                c.missing, o->read_all ? "yes" : "no");
+                c.missing, o->read_all ? "yes" : "no", o->metadata_only ? "yes" : "no",
+                c.nchanged);
+    rs_repo_checked_free(&c);
     return status;
 }
+
+int rs_cmd_copy(const struct rs_options *o)
+{
+    struct rs_repo_copied copied;
+    struct rs_repo       *r;
+    struct rs_buf         err;
+    struct rs_jval       *res;
+    time_t                began = time(NULL);
+    char                 *dir = NULL;
+    char                 *name = NULL;
+    bool                  busy = false;
+    bool                  ok;
+    int                   status;
+
+    if (!rs_repo_ref(o->args[0], &dir, &name))
+    {
+        rs_error("copy: %s is not a repository, or a snapshot in one (REPO::NAME)", o->args[0]);
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "snapshot=%s", o->args[0]);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_READ, &busy, &err);
+    ok = r != NULL;
+    memset(&copied, 0, sizeof(copied));
+    if (ok)
+    {
+        rs_progress_phase("copying", 0);
+        ok = rs_repo_copy(r, name, o->args[1], &copied, &busy, &err);
+        rs_progress_done();
+    }
+    status = ok ? RESTATE_EXIT_OK : busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+    } else if (!o->quiet)
+    {
+        struct rs_buf size;
+
+        rs_buf_init(&size);
+        human_size(&size, copied.bytes);
+        (void)fflush(stdout);
+        if (copied.already)
+        {
+            (void)fprintf(stderr, "restate: %s" RS_REPO_SEP "%s is in %s already\n", dir,
+                          copied.name, o->args[1]);
+        } else
+        {
+            (void)fprintf(stderr, "restate: copied %s" RS_REPO_SEP "%s to %s%s: %zu packs (%s); "
+                          "%zu it needs were there already\n", dir, copied.name, o->args[1],
+                          copied.made ? ", made for it" : "", copied.packs_copied, size.data,
+                          copied.packs_there);
+        }
+        rs_buf_free(&size);
+    }
+    res = rs_jobj_add(rs_result(), "copy");
+    rs_jval_set_object(res);
+    rs_jobj_str(res, "from", dir);
+    rs_jobj_str(res, "to", o->args[1]);
+    rs_jobj_str(res, "snapshot", copied.name);
+    rs_jobj_bool(res, "already", copied.already);
+    rs_jobj_bool(res, "made", copied.made);
+    rs_jobj_u64(res, "packs_copied", copied.packs_copied);
+    rs_jobj_u64(res, "packs_there", copied.packs_there);
+    rs_jobj_u64(res, "bytes", copied.bytes);
+    log_outcome(o, status, began, "from=%s to=%s snapshot=%s packs_copied=%zu bytes=%" PRIu64,
+                dir, o->args[1], copied.name ? copied.name : "-", copied.packs_copied,
+                copied.bytes);
+    rs_repo_copied_free(&copied);
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    free(dir);
+    free(name);
+    return status;
+}
+
+OUTPUT_HELD_BEGIN
+int rs_cmd_du(const struct rs_options *o)
+{
+    struct rs_repo_usage u;
+    struct rs_repo      *r;
+    struct rs_jval       doc;
+    struct rs_jval      *list;
+    struct rs_buf        err;
+    struct rs_buf        text;
+    struct output        out;
+    size_t               i;
+    bool                 busy;
+    bool                 ok;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(o->args[0], RS_REPO_LOOK, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_free(&err);
+    rs_repo_du(r, &u);
+    rs_repo_close(r);
+    memset(&doc, 0, sizeof(doc));
+    rs_jval_set_object(&doc);
+    rs_jobj_str(&doc, "repository", o->args[0]);
+    rs_jobj_u64(&doc, "bytes", u.bytes);
+    rs_jobj_u64(&doc, "pack_bytes", u.pack_bytes);
+    rs_jobj_u64(&doc, "packs", u.packs);
+    list = rs_jobj_add(&doc, "snapshots");
+    rs_jval_set_array(list);
+    rs_buf_init(&text);
+    rs_buf_addstr(&text, "snapshot            needs      alone      added\n");
+    for (i = 0; i < u.nsnapshots; i++)
+    {
+        const struct rs_repo_snapshot_usage *s = &u.snapshots[i];
+        struct rs_jval                      *j = rs_jarr_add(list);
+
+        rs_jval_set_object(j);
+        rs_jobj_str(j, "name", s->name);
+        rs_jobj_bool(j, "listed", s->listed);
+        if (s->listed)
+        {
+            char need[32];
+            char alone[32];
+            char added[32];
+
+            rs_jobj_u64(j, "bytes", s->bytes);
+            rs_jobj_u64(j, "unique_bytes", s->unique_bytes);
+            rs_jobj_u64(j, "new_bytes", s->new_bytes);
+            rs_human_size(s->bytes, need, sizeof(need));
+            rs_human_size(s->unique_bytes, alone, sizeof(alone));
+            rs_human_size(s->new_bytes, added, sizeof(added));
+            rs_buf_addf(&text, "%-18s %10s %10s %10s\n", s->name, need, alone, added);
+        } else
+        {
+            rs_buf_addf(&text, "%-18s (written before restate 2.0: no pack list)\n", s->name);
+        }
+    }
+    {
+        char total[32];
+        char packs[32];
+
+        rs_human_size(u.bytes, total, sizeof(total));
+        rs_human_size(u.pack_bytes, packs, sizeof(packs));
+        rs_buf_addf(&text, "total %s, of which %zu packs %s\n", total, u.packs, packs);
+    }
+    rs_jval_copy(rs_jobj_add(rs_result(), "du"), &doc);
+    if (o->json)
+    {
+        rs_buf_reset(&text);
+        rs_json_write(&text, &doc, 2, 0);
+        rs_buf_addc(&text, '\n');
+    }
+    rs_jval_free(&doc);
+    rs_repo_usage_free(&u);
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text.data, 1, text.len, out.fp) == text.len;
+    rs_buf_free(&text);
+    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+}
+
+OUTPUT_HELD_END
+
+/* "/var/lib" for "/var/lib/mysql/ibdata1", "/etc" for "/etc/passwd": the
+ * directory two levels down that a path is in, or the one level for a file
+ * one level down. */
+static char *estimate_dir(const char *path)
+{
+    const char *second = strchr(path + 1, '/');
+    const char *third = second ? strchr(second + 1, '/') : NULL;
+
+    if (!second)
+    {
+        return rs_xstrdup("/");
+    }
+    return rs_xstrndup(path, (size_t)((third ? third : second) - path));
+}
+
+struct dir_total {
+    char    *dir;
+    uint64_t bytes;
+};
+
+static int by_bytes(const void *a, const void *b)
+{
+    const struct dir_total *x = a;
+    const struct dir_total *y = b;
+
+    if (x->bytes != y->bytes)
+    {
+        return x->bytes < y->bytes ? 1 : -1;
+    }
+    return strcmp(x->dir, y->dir);
+}
+
+OUTPUT_HELD_BEGIN
+int rs_cmd_estimate(const struct rs_options *o)
+{
+    struct rs_index      m;
+    struct rs_scan_stats st;
+    struct dir_total    *dirs = NULL;
+    struct rs_jval       doc;
+    struct rs_jval      *by;
+    struct rs_buf        text;
+    struct output        out;
+    uint64_t             bytes = 0;
+    uint64_t             files = 0;
+    size_t               ndirs = 0;
+    size_t               i;
+    bool                 ok;
+
+    if (!run_scan(o, o->root ? o->root : "/", false, NULL, &m, &st, NULL))
+    {
+        rs_index_free(&m);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    for (i = 0; i < m.count; i++)
+    {
+        const struct rs_entry *e = &m.entries[i];
+        char                  *dir;
+        size_t                 k;
+
+        if (e->type != 'f' || (e->cls == RS_CLASS_BASELINE && !o->baseline_content))
+        {
+            continue;
+        }
+        files++;
+        bytes += e->size;
+        dir = estimate_dir(e->path);
+        for (k = 0; k < ndirs && strcmp(dirs[k].dir, dir) != 0; k++)
+        {
+        }
+        if (k == ndirs)
+        {
+            dirs = rs_xreallocarray(dirs, ndirs + 1, sizeof(*dirs));
+            dirs[ndirs].dir = dir;
+            dirs[ndirs++].bytes = 0;
+        } else
+        {
+            free(dir);
+        }
+        dirs[k].bytes += e->size;
+    }
+    rs_index_free(&m);
+    if (ndirs > 1)
+    {
+        qsort(dirs, ndirs, sizeof(*dirs), by_bytes);
+    }
+    memset(&doc, 0, sizeof(doc));
+    rs_jval_set_object(&doc);
+    rs_jobj_u64(&doc, "bytes", bytes);
+    rs_jobj_u64(&doc, "files", files);
+    by = rs_jobj_add(&doc, "by_dir");
+    rs_jval_set_object(by);
+    rs_buf_init(&text);
+    for (i = 0; i < ndirs; i++)
+    {
+        char          size[32];
+        char         *shown = rs_utf8_lossy(dirs[i].dir, strlen(dirs[i].dir));
+        struct rs_buf b;
+
+        rs_jobj_u64(by, shown, dirs[i].bytes);
+        rs_human_size(dirs[i].bytes, size, sizeof(size));
+        rs_buf_init(&b);
+        rs_escape(&b, dirs[i].dir);
+        rs_buf_addf(&text, "%10s  %s\n", size, b.data);
+        rs_buf_free(&b);
+        free(shown);
+        free(dirs[i].dir);
+    }
+    free(dirs);
+    {
+        char size[32];
+
+        rs_human_size(bytes, size, sizeof(size));
+        rs_buf_addf(&text, "%10s  in all, in %" PRIu64 " files a first capture would keep the "
+                    "content of\n", size, files);
+    }
+    rs_jval_copy(rs_jobj_add(rs_result(), "estimate"), &doc);
+    if (o->json)
+    {
+        rs_buf_reset(&text);
+        rs_json_write(&text, &doc, 2, 0);
+        rs_buf_addc(&text, '\n');
+    }
+    rs_jval_free(&doc);
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text.data, 1, text.len, out.fp) == text.len;
+    rs_buf_free(&text);
+    if (!output_close(&out, ok))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    return st.unreadable > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
+}
+
+/* What this restate can do, for a program to ask before it asks for it. */
+int rs_cmd_features(const struct rs_options *o)
+{
+    static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
+                                                RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
+    struct rs_jval     doc;
+    struct rs_jval    *list;
+    struct rs_buf      text;
+    struct output      out;
+    const char *const *keys;
+    const char        *name;
+    char             **hooks;
+    size_t             nkeys;
+    size_t             nhooks;
+    size_t             i;
+    bool               ok;
+
+    memset(&doc, 0, sizeof(doc));
+    rs_jval_set_object(&doc);
+    rs_jobj_str(&doc, "version", RESTATE_VERSION);
+    rs_jobj_u64(&doc, "job_schema", RS_JOB_SCHEMA);
+    rs_jobj_u64(&doc, "result_schema", RS_RESULT_SCHEMA);
+    list = rs_jobj_add(&doc, "commands");
+    rs_jval_set_array(list);
+    for (i = 0; (name = rs_command_name_at(i)) != NULL; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), name);
+    }
+    list = rs_jobj_add(&doc, "options");
+    rs_jval_set_array(list);
+    for (i = 0; (name = rs_option_name(i)) != NULL; i++)
+    {
+        char  *under = rs_xstrdup(name);
+        size_t k;
+
+        /* As a job's keys are spelled. */
+        for (k = 0; under[k]; k++)
+        {
+            if (under[k] == '-')
+            {
+                under[k] = '_';
+            }
+        }
+        rs_jval_set_string(rs_jarr_add(list), under);
+        free(under);
+    }
+    list = rs_jobj_add(&doc, "job_keys");
+    rs_jval_set_array(list);
+    keys = rs_job_keys(&nkeys);
+    for (i = 0; i < nkeys; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), keys[i]);
+    }
+    list = rs_jobj_add(&doc, "hooks");
+    rs_jval_set_array(list);
+    hooks = rs_hooks_list(&nhooks);
+    for (i = 0; i < nhooks; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), hooks[i]);
+    }
+    list = rs_jobj_add(&doc, "programs");
+    rs_jval_set_object(list);
+    for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)
+    {
+        rs_jobj_bool(list, rs_program_name(programs[i]), rs_program_path(programs[i]) != NULL);
+    }
+    rs_buf_init(&text);
+    if (o->json)
+    {
+        rs_json_write(&text, &doc, 2, 0);
+        rs_buf_addc(&text, '\n');
+    } else
+    {
+        rs_buf_addf(&text, "restate %s (job schema %d, result schema %d)\n", RESTATE_VERSION,
+                    RS_JOB_SCHEMA, RS_RESULT_SCHEMA);
+        rs_buf_addstr(&text, "hooks:");
+        for (i = 0; i < nhooks; i++)
+        {
+            rs_buf_addf(&text, " %s", hooks[i]);
+        }
+        rs_buf_addstr(&text, nhooks ? "\n" : " none\n");
+        rs_buf_addstr(&text, "programs:");
+        for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)
+        {
+            rs_buf_addf(&text, " %s%s", rs_program_name(programs[i]),
+                        rs_program_path(programs[i]) ? "" : " (not installed)");
+        }
+        rs_buf_addc(&text, '\n');
+    }
+    for (i = 0; i < nhooks; i++)
+    {
+        free(hooks[i]);
+    }
+    free(hooks);
+    rs_jval_free(&doc);
+    if (!output_open(o, &out))
+    {
+        rs_buf_free(&text);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    ok = fwrite(text.data, 1, text.len, out.fp) == text.len;
+    rs_buf_free(&text);
+    return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+}
+
+OUTPUT_HELD_END
 
 /* ------------------------------------------------------------------------- */
 /* Comparing                                                                 */
@@ -1871,14 +2677,53 @@ static void diff_summary(const struct rs_options *o, const struct rs_diff_stats 
 static int write_diff(const struct rs_options *o, const struct rs_index *a,
                       const struct rs_index *b, struct rs_diff_stats *d)
 {
-    struct output out;
-    bool          ok;
+    struct output   out;
+    struct rs_jval  changes;
+    struct rs_jval  packages;
+    struct rs_jval *res;
+    bool            by_package = o->packages && o->command == CMD_DIFF;
+    bool            ok;
 
     if (!output_open(o, &out))
     {
         return RESTATE_EXIT_TROUBLE;
     }
-    ok = o->packages && o->command == CMD_DIFF ? rs_diff_write_packages(a, b, out.fp, d) : rs_diff_write(a, b, out.fp, d);
+    memset(&changes, 0, sizeof(changes));
+    memset(&packages, 0, sizeof(packages));
+    if (o->json)
+    {
+        rs_diff_json(&changes, &packages);
+    }
+    ok = by_package ? rs_diff_write_packages(a, b, out.fp, d) : rs_diff_write(a, b, out.fp, d);
+    if (o->json)
+    {
+        struct rs_jval doc;
+        struct rs_buf  text;
+
+        rs_diff_json(NULL, NULL);
+        memset(&doc, 0, sizeof(doc));
+        rs_jval_set_object(&doc);
+        rs_jobj_u64(&doc, "added", d->added);
+        rs_jobj_u64(&doc, "deleted", d->deleted);
+        rs_jobj_u64(&doc, "modified", d->modified);
+        if (by_package)
+        {
+            rs_jobj_u64(&doc, "packages_changed", d->packages);
+            rs_jobj_u64(&doc, "explained", d->explained);
+            *rs_jobj_add(&doc, "packages") = packages;
+            memset(&packages, 0, sizeof(packages));
+        }
+        *rs_jobj_add(&doc, "changes") = changes;
+        memset(&changes, 0, sizeof(changes));
+        rs_buf_init(&text);
+        rs_json_write(&text, &doc, 2, 0);
+        rs_buf_addc(&text, '\n');
+        ok = ok && fwrite(text.data, 1, text.len, out.fp) == text.len;
+        rs_buf_free(&text);
+        rs_jval_free(&doc);
+    }
+    rs_jval_free(&changes);
+    rs_jval_free(&packages);
     if (!ok)
     {
         rs_error("%s: %s", out.tmp ? out.tmp : "standard output", strerror(errno));
@@ -1886,6 +2731,15 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     if (!output_close(&out, ok))
     {
         return RESTATE_EXIT_TROUBLE;
+    }
+    res = rs_jobj_add(rs_result(), "diff");
+    rs_jval_set_object(res);
+    rs_jobj_u64(res, "added", d->added);
+    rs_jobj_u64(res, "deleted", d->deleted);
+    rs_jobj_u64(res, "modified", d->modified);
+    if (by_package)
+    {
+        rs_jobj_u64(res, "packages_changed", d->packages);
     }
     diff_summary(o, d);
     return (d->added || d->deleted || d->modified || d->packages) ? RESTATE_EXIT_DIFFERENT
@@ -2422,6 +3276,19 @@ static int renew_identity(const struct rs_options *o, const struct rs_index *ix,
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
+    {
+        struct rs_jval *as = rs_jobj_add(rs_result(), "as");
+
+        rs_jval_set_object(as);
+        rs_jobj_str(as, "name", o->as);
+        rs_jobj_u64(as, "left_out", left);
+        rs_jobj_u64(as, "kept", is.kept);
+        rs_jobj_u64(as, "made", is.made);
+        rs_jobj_u64(as, "removed", is.removed);
+        rs_jobj_u64(as, "failed", is.failed);
+        rs_jobj_bool(as, "host_keys", is.host_keys);
+        rs_jobj_u64(as, "hosts", is.hosts);
+    }
     if (!o->quiet)
     {
         (void)fprintf(stderr, "restate: as %s: %s the image's identity (%" PRIu64 " paths); %"
@@ -2441,8 +3308,35 @@ static int renew_identity(const struct rs_options *o, const struct rs_index *ix,
     return is.failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
+/* What restore put back, or would, in its result: the counts, and the
+ * first paths, which a dry run shows before anything is written. */
+static void restore_result(const struct rs_options *o, const struct rs_restore_stats *st,
+                           struct rs_jval *plan, const char *root)
+{
+    struct rs_jval *res = rs_jobj_add(rs_result(), "restore");
+
+    rs_jval_set_object(res);
+    rs_jobj_str(res, "from", o->args[0]);
+    rs_jobj_str(res, "root", root);
+    rs_jobj_bool(res, "dry_run", o->dry_run);
+    rs_jobj_u64(res, "files", st->files);
+    rs_jobj_u64(res, "bytes", st->bytes);
+    rs_jobj_u64(res, "directories", st->directories);
+    rs_jobj_u64(res, "symlinks", st->symlinks);
+    rs_jobj_u64(res, "unchanged", st->unchanged);
+    rs_jobj_u64(res, "excluded", st->excluded);
+    rs_jobj_u64(res, "identity", st->identity);
+    rs_jobj_u64(res, "refused", st->refused);
+    rs_jobj_u64(res, "failed", st->failed);
+    rs_jobj_u64(res, "missing", st->missing);
+    rs_jobj_u64(res, "plan_count", st->planned);
+    *rs_jobj_add(res, "plan") = *plan;
+    memset(plan, 0, sizeof(*plan));
+}
+
 int rs_cmd_restore(const struct rs_options *o)
 {
+    struct rs_jval          plan;
     struct rs_index         ix;
     struct rs_restore_opts  ro;
     struct rs_restore_stats st;
@@ -2496,6 +3390,8 @@ int rs_cmd_restore(const struct rs_options *o)
     ro.root = o->root ? o->root : "/";
     ro.exclude = o->excludes;
     ro.nexclude = o->nexcludes;
+    ro.include = o->includes;
+    ro.ninclude = o->nincludes;
     ro.verbose = o->verbose;
     ro.numeric_owner = o->numeric_owner;
     if (o->as)
@@ -2580,8 +3476,13 @@ int rs_cmd_restore(const struct rs_options *o)
         ro.exclude = excludes;
         ro.nexclude = n;
     }
+    memset(&plan, 0, sizeof(plan));
+    rs_jval_set_array(&plan);
+    ro.plan = &plan;
+    ro.plan_max = RESTORE_PLAN_MAX;
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     free(excludes);
+    restore_result(o, &st, &plan, ro.root);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -3467,9 +4368,9 @@ int rs_cmd_rules(const struct rs_options *o)
     return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
 
-int rs_cmd_run(const struct rs_options *o)
+/* The command `o` names, run. */
+static int dispatch(const struct rs_options *o)
 {
-    rs_progress_enable(o->progress);
     switch (o->command)
     {
     case CMD_CAPTURE:
@@ -3512,10 +4413,150 @@ int rs_cmd_run(const struct rs_options *o)
         return rs_cmd_export(o);
     case CMD_STATUS:
         return rs_cmd_status(o);
+    case CMD_COPY:
+        return rs_cmd_copy(o);
+    case CMD_DU:
+        return rs_cmd_du(o);
+    case CMD_ESTIMATE:
+        return rs_cmd_estimate(o);
+    case CMD_FEATURES:
+        return rs_cmd_features(o);
+    case CMD_RUN:
+        rs_error("run: a job cannot run another job");
+        return RESTATE_EXIT_TROUBLE;
     case CMD_NONE:
     case CMD_COUNT:
     default:
         rs_error("no command given");
         return RESTATE_EXIT_TROUBLE;
     }
+}
+
+/* --passphrase-fd N: the passphrase, read once from N -- to its end, or its
+ * first line -- and held for every gpg the run starts. */
+static bool read_passphrase(int fd)
+{
+    char    buf[1024];
+    size_t  len = 0;
+    ssize_t n;
+
+    while (len < sizeof(buf) - 1 && (n = read(fd, buf + len, sizeof(buf) - 1 - len)) != 0)
+    {
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n < 0)
+        {
+            rs_error("--passphrase-fd %d: %s", fd, strerror(errno));
+            return false;
+        }
+        len += (size_t)n;
+        if (memchr(buf, '\n', len))
+        {
+            break;
+        }
+    }
+    buf[len] = '\0';
+    buf[strcspn(buf, "\r\n")] = '\0';
+    rs_pgp_set_passphrase(buf);
+    {
+        volatile char *v = buf;
+        size_t         i;
+
+        for (i = 0; i < sizeof(buf); i++)
+        {
+            v[i] = '\0';
+        }
+    }
+    return true;
+}
+
+/*
+ * Opens --progress-file: made at once, with nothing in it, and readable as
+ * --result is; NULL, having said why, if it cannot be.
+ */
+static FILE *progress_open(const struct rs_options *o)
+{
+    char *tmp = NULL;
+    int   fd = rs_result_open(o->progress_file, o->report_group, &tmp);
+    FILE *fp = NULL;
+
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    if (rename(tmp, o->progress_file) == 0)
+    {
+        fp = fdopen(fd, "w");
+    }
+    if (!fp)
+    {
+        rs_error("%s: %s", o->progress_file, strerror(errno));
+        (void)unlink(tmp);
+        (void)close(fd);
+    }
+    free(tmp);
+    return fp;
+}
+
+int rs_cmd_run(const struct rs_options *given)
+{
+    struct rs_job            job;
+    const struct rs_options *o = given;
+    FILE                    *progress = NULL;
+    int                      status;
+
+    rs_job_init(&job);
+    if (given->command == CMD_RUN)
+    {
+        status = rs_job_load(given, &job);
+        if (status != RESTATE_EXIT_OK)
+        {
+            rs_job_free(&job);
+            return status;
+        }
+        o = &job.opts;
+    }
+    if (o->passphrase_given && !read_passphrase(o->passphrase_fd))
+    {
+        rs_job_free(&job);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_image_set_stage_dir(o->tmpdir);
+    rs_result_begin(rs_command_name(o->command));
+    rs_progress_enable(o->progress);
+    if (o->progress_file)
+    {
+        progress = progress_open(o);
+        if (!progress)
+        {
+            rs_result_end();
+            rs_job_free(&job);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        rs_progress_json(progress);
+    } else if (o->progress_json)
+    {
+        rs_progress_json(stderr);
+    }
+    if (given->command == CMD_RUN)
+    {
+        rs_jobj_str(rs_result(), "job", given->args[0]);
+    }
+    status = dispatch(o);
+    rs_progress_finish();
+    rs_progress_json(NULL);
+    if (progress && fclose(progress) != 0)
+    {
+        rs_warn("%s: %s", o->progress_file, strerror(errno));
+    }
+    if (!rs_result_write(status, o->result, o->report_group) && status == RESTATE_EXIT_OK)
+    {
+        status = RESTATE_EXIT_TROUBLE;
+    }
+    rs_pgp_set_passphrase(NULL);
+    rs_image_set_stage_dir(NULL);
+    rs_job_free(&job);
+    return status;
 }

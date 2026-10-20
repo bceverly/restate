@@ -35,6 +35,7 @@ struct ctx {
     int                           root;
     bool                         *done;      /* per index entry: put back */
     bool                         *seen;      /* per index entry: in the image */
+    bool                         *wanted;    /* per index entry, with --include */
     struct link                  *linked;    /* the files with other names, by
                                               * inode, then index order */
     size_t                        nlinked;
@@ -62,6 +63,10 @@ static bool excluded(const struct ctx *c, const struct rs_entry *e)
     size_t i;
 
     if (as_identity(c, e))
+    {
+        return true;
+    }
+    if (c->wanted && !c->wanted[e - c->ix->entries])
     {
         return true;
     }
@@ -1022,6 +1027,14 @@ static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *
         c->st->excluded++;
         return true;
     }
+    c->st->planned++;
+    if (c->o->plan && c->o->plan->n < c->o->plan_max)
+    {
+        char *shown = rs_utf8_lossy(e->path, strlen(e->path));
+
+        rs_jval_set_string(rs_jarr_add(c->o->plan), shown);
+        free(shown);
+    }
     switch (want)
     {
     case 'f':
@@ -1170,6 +1183,51 @@ static bool merge_accounts(struct ctx *c, const char *path)
     return ok;
 }
 
+/* With --include: what it covers, and every directory that is in the way
+ * to it, so those are made as the image has them. */
+static bool *wanted_entries(const struct rs_index *ix, const char *const *include, size_t n)
+{
+    bool  *wanted = rs_xcalloc(ix->count + 1, sizeof(*wanted));
+    size_t i;
+    size_t k;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        const char *p = ix->entries[i].path;
+        char       *up;
+        char       *slash;
+        bool        in = false;
+
+        for (k = 0; k < n && !in; k++)
+        {
+            in = rs_glob_covers(include[k], p);
+        }
+        if (!in || wanted[i])
+        {
+            continue;
+        }
+        wanted[i] = true;
+        up = rs_xstrdup(p);
+        while ((slash = strrchr(up, '/')) != NULL)
+        {
+            const struct rs_entry *d;
+
+            *(slash == up ? slash + 1 : slash) = '\0';
+            d = rs_index_find(ix, up);
+            if (d)
+            {
+                wanted[d - ix->entries] = true;
+            }
+            if (slash == up)
+            {
+                break;
+            }
+        }
+        free(up);
+    }
+    return wanted;
+}
+
 bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_restore_opts *o,
                 struct rs_restore_stats *st, struct rs_buf *err)
 {
@@ -1214,6 +1272,10 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     }
     c.done = rs_xcalloc(ix->count + 1, sizeof(*c.done));
     c.seen = rs_xcalloc(ix->count + 1, sizeof(*c.seen));
+    if (o->ninclude > 0)
+    {
+        c.wanted = wanted_entries(ix, o->include, o->ninclude);
+    }
     group_links(&c);
     for (i = 0; i < ix->count; i++)
     {
@@ -1279,6 +1341,7 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     }
     free(c.done);
     free(c.seen);
+    free(c.wanted);
     free(c.linked);
     rs_accounts_free(&c.accounts);
     (void)close(c.root);

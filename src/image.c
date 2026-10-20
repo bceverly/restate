@@ -64,12 +64,30 @@ static int temp_beside(const char *dest, char **path_out, struct rs_buf *err)
     return fd;
 }
 
+/* Where the content is staged instead of beside the image (--tmpdir). */
+static char *stage_dir;
+
+void rs_image_set_stage_dir(const char *dir)
+{
+    free(stage_dir);
+    stage_dir = dir ? rs_xstrdup(dir) : NULL;
+}
+
 bool rs_image_begin(struct rs_image_writer *iw, const char *dest, struct rs_buf *err)
 {
     char *tmp = NULL;
 
     memset(iw, 0, sizeof(*iw));
-    iw->content_fd = temp_beside(dest, &tmp, err);
+    if (stage_dir)
+    {
+        char *beside = rs_xasprintf("%s/restate-image", stage_dir);
+
+        iw->content_fd = temp_beside(beside, &tmp, err);
+        free(beside);
+    } else
+    {
+        iw->content_fd = temp_beside(dest, &tmp, err);
+    }
     if (iw->content_fd < 0)
     {
         return false;

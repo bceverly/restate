@@ -93,13 +93,14 @@ bool rs_hook_usable(const char *path);
 /*
  * Runs the hook at `path` with `argv`, and an environment of PATH (the
  * system's administration directories), LC_ALL and the "NAME=value" strings
- * in `env` (NULL-terminated, at most 16). Its standard input, output and error
- * are restate's own. It is stopped -- SIGTERM, then SIGKILL -- once it has run
- * `timeout` seconds. True if it ran to an end, with *code as rs_wait's; false,
- * with the reason in `err`, if it could not be run or had to be stopped.
+ * in `env` (NULL-terminated, at most 16). Its standard input and error are
+ * restate's own, and its standard output too unless `out_fd` is not -1. It is
+ * stopped -- SIGTERM, then SIGKILL -- once it has run `timeout` seconds. True
+ * if it ran to an end, with *code as rs_wait's; false, with the reason in
+ * `err`, if it could not be run or had to be stopped.
  */
 bool rs_run_hook(const char *path, char *const argv[], char *const env[], unsigned timeout,
-                 int *code, struct rs_buf *err);
+                 int out_fd, int *code, struct rs_buf *err);
 
 /* How rs_curl fetches. */
 struct rs_curl_opts {

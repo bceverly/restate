@@ -227,10 +227,22 @@ static void vreport(const char *kind, const char *fmt, va_list ap)
     (void)fputc('\n', stderr);
 }
 
+void (*rs_warn_hook)(const char *msg);
+
 void rs_warn(const char *fmt, ...)
 {
     va_list ap;
 
+    if (rs_warn_hook)
+    {
+        char *msg;
+
+        va_start(ap, fmt);
+        msg = rs_xvasprintf(fmt, ap);
+        va_end(ap);
+        rs_warn_hook(msg);
+        free(msg);
+    }
     if (rs_quiet)
     {
         return;

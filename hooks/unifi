@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: the UniFi Network application, for capture --quiesce-with unifi.
+#
+#   paths NAME    the directories UniFi keeps its data in, one a line: what the
+#                 capture copies while UniFi is stopped
+#   pause NAME    dump its database into $RESTATE_DUMP_DIR (mongodump, where it
+#                 is installed, from the database UniFi runs itself, on port
+#                 27117), then stop the unifi service
+#   resume NAME   start it again
+#
+# UniFi runs a MongoDB of its own, started by its own service rather than as
+# mongod's, which is why the mongodb hook cannot pause it. Its own backups --
+# /var/lib/unifi/backup/autobackup/*.unf -- are in the capture too, and
+# restore onto a new UniFi without restate.
+#
+# To change what this does, copy it to /etc/restate/hooks.d/unifi (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+action=$1
+port=27117
+
+case "$action" in
+paths)
+  for dir in /var/lib/unifi /usr/lib/unifi/data; do
+    if [ -d "$dir" ]; then
+      echo "$dir"
+    fi
+  done
+  ;;
+pause)
+  if [ -n "${RESTATE_DUMP_DIR:-}" ] && command -v mongodump > /dev/null 2>&1; then
+    mongodump --quiet --port "$port" --gzip --archive="$RESTATE_DUMP_DIR/unifi.archive.gz.tmp"
+    mv -f "$RESTATE_DUMP_DIR/unifi.archive.gz.tmp" "$RESTATE_DUMP_DIR/unifi.archive.gz"
+  fi
+  systemctl stop unifi
+  ;;
+resume)
+  systemctl start unifi
+  ;;
+*)
+  echo "usage: $0 paths|pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

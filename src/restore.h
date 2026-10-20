@@ -50,6 +50,7 @@
 #include <stdint.h>
 
 #include "index.h"
+#include "json.h"
 #include "util.h"
 
 struct rs_restore_opts {
@@ -65,6 +66,12 @@ struct rs_restore_opts {
     const bool        *leave;      /* per index entry: left out, as restore --as
                                     * leaves the image's identity (identity.h);
                                     * or NULL */
+    const char *const *include;    /* patterns: only what they cover, and the
+                                    * directories it is in; none for everything */
+    size_t             ninclude;
+    struct rs_jval    *plan;       /* an array the paths put back -- or that would
+                                    * be -- are added to, up to plan_max; or NULL */
+    size_t             plan_max;
 };
 
 struct rs_restore_stats {
@@ -82,6 +89,7 @@ struct rs_restore_stats {
     uint64_t missing;     /* the index says stored; the image does not have it */
     uint64_t owners;      /* owners that could not be set (not root) */
     uint64_t xattrs;      /* extended attributes that could not be set */
+    uint64_t planned;     /* paths put back, or that would be: all, not only plan_max */
     bool     merged;      /* the accounts were merged, owners mapped by name */
 };
 

@@ -56,6 +56,9 @@ void rs_hooks_set_dirs(const char *const *dirs, size_t n);
 
 /* The hook for `kind`, or NULL if there is none restate would run. */
 char *rs_hook_find(const char *kind);
+/* The names of every hook restate would run here, sorted; the caller frees
+ * each, and the array. */
+char **rs_hooks_list(size_t *n);
 
 /*
  * The dump directory for `l` beneath `root`, made if it is not there, as a
@@ -69,5 +72,15 @@ bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_pat
 /* Runs `hook` for `action` ("pause", "resume") on `l`. True if it exited 0. */
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
                  const char *dump_dir, struct rs_buf *err);
+
+/*
+ * For a hook named by --quiesce-with: the paths it pauses what it covers
+ * for, as `HOOK paths NAME` prints them, one absolute path a line, each
+ * resolved to its real path (one that is not there is left out). None -- a
+ * hook that prints nothing, or does not know the question and fails -- means
+ * it is paused for the whole walk. False only if it could not be run.
+ */
+bool rs_hook_paths(const char *hook, const char *name, char ***paths, size_t *n,
+                   struct rs_buf *err);
 
 #endif /* RESTATE_HOOKS_H */

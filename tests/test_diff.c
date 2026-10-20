@@ -246,6 +246,37 @@ void test_diff(void)
     CHECK_INT(st.deleted, 0);
     free(text);
 
+    TEST_CASE("diff --packages --json: the same, as objects");
+    {
+        struct rs_jval changes;
+        struct rs_jval packages;
+        struct rs_buf  json;
+
+        rs_diff_json(&changes, &packages);
+        text = diff_text_by(&m1, &m2, &st, true);
+        rs_diff_json(NULL, NULL);
+        CHECK_STR(text, "");
+        free(text);
+        CHECK_INT(packages.n, 5);
+        CHECK_INT(changes.n, 3);
+        rs_buf_init(&json);
+        rs_json_write(&json, &packages, 0, 0);
+        CHECK_CONTAINS(json.data, "{\"change\": \"I\", \"manager\": \"apt\", \"name\": \"htop\", "
+                                  "\"to\": \"3\", \"files\": 1}");
+        CHECK_CONTAINS(json.data, "\"name\": \"libc6\", \"arch\": \"i386\", \"from\": \"2.4\", "
+                                  "\"to\": \"2.5\"");
+        CHECK_CONTAINS(json.data, "{\"change\": \"R\", \"manager\": \"apt\", \"name\": \"old\", "
+                                  "\"from\": \"2\", \"files\": 1}");
+        rs_buf_reset(&json);
+        rs_json_write(&json, &changes, 0, 0);
+        CHECK_CONTAINS(json.data, "{\"change\": \"M\", \"path\": \"/etc/nginx/nginx.conf\", "
+                                  "\"what\": \"mode\"}");
+        CHECK_CONTAINS(json.data, "{\"change\": \"A\", \"path\": \"/var/new\"}");
+        rs_buf_free(&json);
+        rs_jval_free(&changes);
+        rs_jval_free(&packages);
+    }
+
     TEST_CASE("diff --packages: without an inventory on both sides, the files alone");
     rs_jval_free(&m1.packages);
     memset(&m1.packages, 0, sizeof(m1.packages));

@@ -176,30 +176,113 @@ bool rs_pgp_encrypt(const char *const *recipients, size_t n, int out_fd, struct 
     return ok;
 }
 
+/* The passphrase --passphrase-fd gave, for every gpg that needs one; NULL
+ * for gpg to ask for it as it would. */
+static char *passphrase;
+
+void rs_pgp_set_passphrase(const char *text)
+{
+    if (passphrase)
+    {
+        volatile char *v = passphrase;
+
+        while (*v)
+        {
+            *v++ = '\0';
+        }
+        free(passphrase);
+        passphrase = NULL;
+    }
+    if (text)
+    {
+        passphrase = rs_xstrdup(text);
+    }
+}
+
+/*
+ * The passphrase, for one gpg to read: a pipe with it in, whose reading end
+ * the child inherits and the caller closes once gpg has started. -1 if there
+ * is no passphrase, or no pipe. A passphrase is far smaller than a pipe holds,
+ * so writing it all before gpg starts cannot block.
+ */
+static int passphrase_pipe(void)
+{
+    int    p[2];
+    size_t len;
+    bool   ok;
+
+    if (!passphrase || pipe(p) != 0)
+    {
+        return -1;
+    }
+    len = strlen(passphrase);
+    ok = write(p[1], passphrase, len) == (ssize_t)len && write(p[1], "\n", 1) == 1;
+    (void)close(p[1]);
+    cloexec(p[0]);
+    {
+        /* Inherited by gpg alone: it is cleared again once gpg has started. */
+        int flags = fcntl(p[0], F_GETFD);
+
+        (void)fcntl(p[0], F_SETFD, flags & ~FD_CLOEXEC);
+    }
+    if (!ok)
+    {
+        (void)close(p[0]);
+        return -1;
+    }
+    return p[0];
+}
+
+/* Adds what makes gpg read the passphrase from `fd` to argv at *a. */
+static void passphrase_args(char **argv, size_t *a, int fd)
+{
+    argv[(*a)++] = rs_xstrdup("--pinentry-mode");
+    argv[(*a)++] = rs_xstrdup("loopback");
+    argv[(*a)++] = rs_xstrdup("--passphrase-fd");
+    argv[(*a)++] = rs_xasprintf("%d", fd);
+}
+
 bool rs_pgp_decrypt(int in_fd, struct rs_pgp *pg, struct rs_buf *err)
 {
-    static char a0[] = "gpg";
-    static char a1[] = "--quiet";
-    static char a2[] = "--batch";
-    static char a3[] = "--decrypt";
-    char       *argv[] = { a0, a1, a2, a3, NULL };
-    int         p[2];
+    char  *argv[10];
+    size_t a = 0;
+    size_t i;
+    int    pfd = passphrase_pipe();
+    int    p[2];
+    bool   ok;
 
     memset(pg, 0, sizeof(*pg));
     pg->fd = -1;
-    if (!make_pipe(p, err))
+    argv[a++] = rs_xstrdup("gpg");
+    argv[a++] = rs_xstrdup("--quiet");
+    argv[a++] = rs_xstrdup("--batch");
+    if (pfd >= 0)
     {
-        return false;
+        passphrase_args(argv, &a, pfd);
     }
-    if (!rs_spawn(RS_PROG_GPG, argv, in_fd, p[1], -1, &pg->pid, err))
+    argv[a++] = rs_xstrdup("--decrypt");
+    argv[a] = NULL;
+    ok = make_pipe(p, err);
+    if (ok && !rs_spawn(RS_PROG_GPG, argv, in_fd, p[1], -1, &pg->pid, err))
     {
         (void)close(p[0]);
         (void)close(p[1]);
-        return false;
+        ok = false;
     }
-    (void)close(p[1]);
-    pg->fd = p[0];
-    return true;
+    if (ok)
+    {
+        (void)close(p[1]);
+        pg->fd = p[0];
+    }
+    if (pfd >= 0)
+    {
+        (void)close(pfd);
+    }
+    for (i = 0; i < a; i++)
+    {
+        free(argv[i]);
+    }
+    return ok;
 }
 
 bool rs_pgp_finish(struct rs_pgp *pg, bool abandon, struct rs_buf *err)
@@ -600,12 +683,13 @@ bool rs_pgp_keyring(const char *path, const char *dest, struct rs_buf *err)
  * what gpg said, unless it exits 0. */
 static bool gpg_in(const char *home, const char *const *args, size_t n, struct rs_buf *err)
 {
-    char        **argv = rs_xcalloc(8 + n, sizeof(*argv));
+    char        **argv = rs_xcalloc(12 + n, sizeof(*argv));
     struct rs_buf out;
     struct rs_buf errtext;
     size_t        a = 0;
     size_t        i;
     int           code = 0;
+    int           pfd = passphrase_pipe();
     bool          ok;
 
     argv[a++] = rs_xstrdup("gpg");
@@ -614,6 +698,10 @@ static bool gpg_in(const char *home, const char *const *args, size_t n, struct r
     argv[a++] = rs_xstrdup("--batch");
     argv[a++] = rs_xstrdup("--quiet");
     argv[a++] = rs_xstrdup("--no-options");
+    if (pfd >= 0)
+    {
+        passphrase_args(argv, &a, pfd);
+    }
     for (i = 0; i < n; i++)
     {
         argv[a++] = rs_xstrdup(args[i]);
@@ -622,6 +710,10 @@ static bool gpg_in(const char *home, const char *const *args, size_t n, struct r
     rs_buf_init(&out);
     rs_buf_init(&errtext);
     ok = rs_run(RS_PROG_GPG, argv, &out, &errtext, &code, err);
+    if (pfd >= 0)
+    {
+        (void)close(pfd);
+    }
     if (ok && code != 0)
     {
         size_t len = errtext.len;

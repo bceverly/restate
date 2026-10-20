@@ -108,10 +108,51 @@ void rs_diff_describe(unsigned what, struct rs_buf *out)
     }
 }
 
+/* Where changes go as JSON instead of lines, when they do (rs_diff_json). */
+static struct rs_jval *json_changes;
+static struct rs_jval *json_packages;
+
+void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages)
+{
+    json_changes = changes;
+    json_packages = packages;
+    if (changes)
+    {
+        memset(changes, 0, sizeof(*changes));
+        rs_jval_set_array(changes);
+    }
+    if (packages)
+    {
+        memset(packages, 0, sizeof(*packages));
+        rs_jval_set_array(packages);
+    }
+}
+
 static void line(FILE *out, char kind, const char *path, unsigned what)
 {
     struct rs_buf shown;
 
+    if (json_changes)
+    {
+        struct rs_jval *c = rs_jarr_add(json_changes);
+        const char      k[2] = { kind, '\0' };
+        char           *p = rs_utf8_lossy(path, strlen(path));
+
+        rs_jval_set_object(c);
+        rs_jobj_str(c, "change", k);
+        rs_jobj_str(c, "path", p);
+        free(p);
+        if (what)
+        {
+            struct rs_buf names;
+
+            rs_buf_init(&names);
+            rs_diff_describe(what, &names);
+            rs_jobj_str(c, "what", names.data);
+            rs_buf_free(&names);
+        }
+        return;
+    }
     rs_buf_init(&shown);
     rs_escape(&shown, path);
     if (what)
@@ -391,6 +432,24 @@ bool rs_diff_write_packages(const struct rs_index *old, const struct rs_index *n
                                        strcmp(c->arch, cs.native) != 0;
         struct rs_buf        b;
 
+        if (json_packages)
+        {
+            struct rs_jval *j = rs_jarr_add(json_packages);
+            const char      k[2] = { c->kind, '\0' };
+
+            rs_jval_set_object(j);
+            rs_jobj_str(j, "change", k);
+            rs_jobj_str(j, "manager", c->manager);
+            rs_jobj_str(j, "name", c->name);
+            if (foreign)
+            {
+                rs_jobj_str(j, "arch", c->arch);
+            }
+            rs_jobj_str(j, "from", c->from);
+            rs_jobj_str(j, "to", c->to);
+            rs_jobj_u64(j, "files", c->files);
+            continue;
+        }
         rs_buf_init(&b);
         rs_buf_addf(&b, "%c\t%s:", c->kind, c->manager);
         rs_escape(&b, c->name);

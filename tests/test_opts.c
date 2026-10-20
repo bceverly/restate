@@ -119,9 +119,55 @@ void test_opts(void)
     CHECK(parse_args(&o, &err, ARGS("classify", "/a", "/b", "/c")));
     CHECK_INT(o.nargs, 3);
 
+    TEST_CASE("opts: what a program running restate asks for");
+    CHECK(parse_args(&o, &err, ARGS("capture", "-o", "/r", "--result", "/r.json", "--report-group",
+                                    "adm", "--progress=json", "--quiesce-with", "unifi",
+                                    "--quiesce-with=nextcloud", "--append-only", "--tmpdir",
+                                    "/var/tmp", "--passphrase-fd", "0")));
+    CHECK_STR(o.result, "/r.json");
+    CHECK_STR(o.report_group, "adm");
+    CHECK(o.progress_json && !o.progress);
+    CHECK_INT(o.nquiesce_with, 2);
+    CHECK_STR(o.nquiesce_with == 2 ? o.quiesce_with[1] : NULL, "nextcloud");
+    CHECK(o.append_only);
+    CHECK_STR(o.tmpdir, "/var/tmp");
+    CHECK(o.passphrase_given && o.passphrase_fd == 0);
+    CHECK(parse_args(&o, &err, ARGS("-P", "--progress-file", "/p", "check", "--metadata-only",
+                                    "--record", "/rec", "--json", "/r")));
+    CHECK(o.progress && !o.progress_json && o.metadata_only && o.json);
+    CHECK_STR(o.progress_file, "/p");
+    CHECK_STR(o.record, "/rec");
+    CHECK(parse_args(&o, &err, ARGS("prune", "--whole-packs", "--keep-last", "2", "/r")));
+    CHECK(o.whole_packs);
+    CHECK(parse_args(&o, &err, ARGS("restore", "--include", "/home/bob", "--include=/etc", "/r")));
+    CHECK_INT(o.nincludes, 2);
+    CHECK(parse_args(&o, &err, ARGS("copy", "/r::x", "/s")));
+    CHECK_INT(o.command, CMD_COPY);
+    CHECK(parse_args(&o, &err, ARGS("run", "/etc/restate/jobs.d/n.conf")));
+    CHECK_INT(o.command, CMD_RUN);
+    CHECK(parse_args(&o, &err, ARGS("features", "--json")));
+    CHECK(parse_args(&o, &err, ARGS("estimate")));
+    CHECK(parse_args(&o, &err, ARGS("du", "/r")));
+    CHECK(!parse_args(&o, &err, ARGS("--progress=yes", "scan")));
+    CHECK_CONTAINS(err.data, "--progress: \"yes\" is not json");
+    CHECK(!parse_args(&o, &err, ARGS("--quiesce-with", "../x", "capture")));
+    CHECK_CONTAINS(err.data, "is not a hook's name");
+    CHECK(!parse_args(&o, &err, ARGS("--quiesce-with", "Big", "capture")));
+    CHECK(!parse_args(&o, &err, ARGS("--tmpdir", "tmp", "capture")));
+    CHECK_CONTAINS(err.data, "--tmpdir: \"tmp\" is not an absolute path");
+    CHECK(!parse_args(&o, &err, ARGS("--passphrase-fd", "x", "sign", "a")));
+    CHECK_CONTAINS(err.data, "is not a file descriptor");
+    CHECK(!parse_args(&o, &err, ARGS("--passphrase-fd", "5000", "sign", "a")));
+    CHECK(!rs_hook_name_ok(NULL) && !rs_hook_name_ok("") && !rs_hook_name_ok("-x"));
+    CHECK(rs_hook_name_ok("my_hook-2"));
+
     TEST_CASE("opts: command names");
     CHECK_STR(rs_command_name(CMD_VERIFY), "verify");
     CHECK_STR(rs_command_name(CMD_NONE), "(none)");
+    CHECK_STR(rs_command_name_at(0), "capture");
+    CHECK(rs_command_name_at(1000) == NULL);
+    CHECK_STR(rs_option_name(0), "root");
+    CHECK(rs_option_name(1000) == NULL);
 
     TEST_CASE("opts: the help lists every command and option");
     CHECK_INT(rs_test_capture(print_help, NULL, &out, &errtext), 0);
