@@ -440,6 +440,12 @@ void rs_repo_set_cache_dir(const char *dir);
  * that fill up. 0 restores the default. Nothing in restate itself calls it. */
 void rs_repo_set_pack_size(uint64_t bytes);
 
+/* Replaces how a lock file is locked, how NFS is told, and the pause between
+ * asking again where NFS says EIO, for the unit tests' benefit: they cannot
+ * make a file server refuse. NULL and a negative pause restore the defaults.
+ * Nothing in restate itself calls it. */
+void rs_repo_set_locking(int (*lock)(int fd, bool shared), bool (*nfs)(int fd), long nap_ms);
+
 /* The name a snapshot taken at `created` (an index's "created") is given:
  * "20261011T030000Z". */
 char *rs_repo_snapshot_name(const char *created);

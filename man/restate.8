@@ -1548,6 +1548,12 @@ on the file server exclude each other as two on one machine do. NFS version
 3 locks only through its lock daemon; an NFSv3 share mounted
 .B nolock
 does not lock at all, and must not have two writers.
+A FreeBSD server shows its own programs the locks NFS clients take only with
+.BR vfs.nfsd.enable_locallocks=1 ,
+and a Linux client is told of a lock held on such a server as an I/O error
+.RB ( EIO ):
+restate asks again twice, a second apart, and then exits 5, busy, saying the
+connection to the server may be failing if nothing there holds the lock.
 .PP
 .B Owners and modes.
 Nothing in a repository is required to be root's: a share that maps every

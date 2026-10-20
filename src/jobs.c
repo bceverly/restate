@@ -694,7 +694,9 @@ static bool owned_safely(const struct stat *st)
 
 /* Whether the command line says nothing but how much to say and where:
  * all a job takes from it. Every other option is here, so that a new one is
- * refused until it is thought about. */
+ * refused until it is thought about; test_jobs.c tries every option in the
+ * table to hold it to that. It is a boundary: a sudoers rule can admit
+ * `restate run FILE` for root-owned jobs and rely on nothing more getting in. */
 static bool only_reporting(const struct rs_options *o)
 {
     bool said = o->root || o->output || o->nrules_files || o->no_default_rules || o->os ||
@@ -738,8 +740,14 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
     {
+        int saved = errno;
+
+        /* Asked by lstat, not by errno: O_NOFOLLOW's is ELOOP on Linux and
+         * OpenBSD, EMLINK on FreeBSD and EFTYPE on NetBSD. */
         rs_error("run %s: %s", path,
-                 errno == ELOOP ? "a symlink; a job has to be the file itself" : strerror(errno));
+                 lstat(path, &st) == 0 && S_ISLNK(st.st_mode)
+                     ? "a symlink; a job has to be the file itself"
+                     : strerror(saved));
         free(dir);
         return RESTATE_EXIT_TROUBLE;
     }

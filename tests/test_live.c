@@ -592,25 +592,29 @@ void test_live(void)
             CHECK(!rs_hook_paths("/nonexistent/hook", "x", &paths, &nh, &perr));
             CHECK_CONTAINS(perr.data ? perr.data : "", "not run");
             rs_buf_reset(&perr);
-            /* realpath, asked "paths x" where there are files of those
-             * names, prints two absolute paths: as a hook's would be. */
+            /* cat, asked "paths x" where those are files that each hold an
+             * absolute path, prints two: as a hook's would be. A program
+             * stands in for a hook because a hook has to be root's. */
             {
-                const char *rp = rs_hook_usable("/usr/bin/realpath") ? "/usr/bin/realpath"
-                                 : rs_hook_usable("/bin/realpath")    ? "/bin/realpath"
-                                                                      : NULL;
+                const char *cat = rs_hook_usable("/bin/cat") ? "/bin/cat" : "/usr/bin/cat";
                 char       *here = realpath(".", NULL); /* Flawfinder: ignore */
                 char       *in = rs_test_tmpdir();
-                char       *want = NULL;
+                char       *want = rs_xasprintf("%s/paths\n", in);
+                char       *other = rs_xasprintf("%s/x\n", in);
 
-                rs_test_write(in, "paths", "", 0644);
-                rs_test_write(in, "x", "", 0644);
-                if (rp && here && chdir(in) == 0)
+                rs_test_write(in, "paths", want, 0644);
+                rs_test_write(in, "x", other, 0644);
+                free(want);
                 {
                     char *real = realpath(in, NULL); /* Flawfinder: ignore */
 
+                    /* Canonical, as rs_hook_paths makes what a hook says. */
                     want = real ? rs_xasprintf("%s/paths", real) : NULL;
                     free(real);
-                    CHECK(rs_hook_paths(rp, "x", &paths, &nh, &perr));
+                }
+                if (want && rs_hook_usable(cat) && here && chdir(in) == 0)
+                {
+                    CHECK(rs_hook_paths(cat, "x", &paths, &nh, &perr));
                     CHECK_INT(nh, 2);
                     CHECK_STR(nh == 2 ? paths[0] : NULL, want);
                     if (nh == 2)
@@ -621,6 +625,7 @@ void test_live(void)
                     free(paths);
                     CHECK(chdir(here) == 0);
                 }
+                free(other);
                 free(want);
                 free(here);
                 rs_test_rmtree(in);

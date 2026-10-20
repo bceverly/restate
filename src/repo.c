@@ -16,6 +16,14 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#elif defined(__NetBSD__)
+#include <sys/statvfs.h>
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
+#include <sys/mount.h>
+#include <sys/param.h>
+#endif
 
 #include "gzip.h"
 #include "image.h"
@@ -1161,11 +1169,13 @@ const char *rs_repo_dir(const struct rs_repo *r)
  * which is what everything else on a machine -- flock(1) in a script, restate
  * 1 -- takes. Over NFS the two are one lock: the client takes both on the
  * server for the same open file. Elsewhere flock(2) alone, which the BSDs and
- * macOS implement as the same locks as fcntl's.
+ * macOS implement as the same locks as fcntl's -- and Linux only, because
+ * macOS has F_OFD_SETLK too, and there the two locks on one open file
+ * conflict with each other, so every capture would find itself busy.
  */
 static int lock_whole(int fd, bool shared)
 {
-#ifdef F_OFD_SETLK
+#if defined(F_OFD_SETLK) && defined(__linux__)
     struct flock fl;
 
     memset(&fl, 0, sizeof(fl));
@@ -1183,11 +1193,81 @@ static int lock_whole(int fd, bool shared)
     return flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB);
 }
 
+/* Whether `fd` is a file on an NFS mount. */
+static bool on_nfs(int fd)
+{
+#if defined(__linux__)
+    struct statfs st;
+
+    return fstatfs(fd, &st) == 0 && st.f_type == 0x6969;   /* NFS_SUPER_MAGIC */
+#elif defined(__NetBSD__)
+    struct statvfs st;
+
+    return fstatvfs(fd, &st) == 0 && strncmp(st.f_fstypename, "nfs", 3) == 0;
+#elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
+    struct statfs st;
+
+    return fstatfs(fd, &st) == 0 && strncmp(st.f_fstypename, "nfs", 3) == 0;
+#else
+    (void)fd;
+    return false;
+#endif
+}
+
+static int (*lock_fn)(int fd, bool shared) = lock_whole;
+static bool (*nfs_fn)(int fd) = on_nfs;
+static long lock_nap_ms = 1000;
+
+void rs_repo_set_locking(int (*lock)(int fd, bool shared), bool (*nfs)(int fd), long nap_ms)
+{
+    lock_fn = lock ? lock : lock_whole;
+    nfs_fn = nfs ? nfs : on_nfs;
+    lock_nap_ms = nap_ms >= 0 ? nap_ms : 1000;
+}
+
+/*
+ * lock_whole, asked again where NFS says EIO. A Linux NFS client is told EIO,
+ * not EWOULDBLOCK, when the lock it asks for is held by a program on a FreeBSD
+ * server itself: the lock is taken, not the disk broken. So EIO from a lock on
+ * NFS is asked again, LOCK_TRIES times in all, and *refused set if it lasts. A
+ * connection that is really failing fails the reads and writes after it too.
+ */
+#define LOCK_TRIES 3
+static int lock_asking(int fd, bool shared, bool *refused)
+{
+    int tries;
+
+    *refused = false;
+    for (tries = 1;; tries++)
+    {
+        struct timespec nap;
+
+        if (lock_fn(fd, shared) == 0)
+        {
+            return 0;
+        }
+        if (errno != EIO || !nfs_fn(fd))
+        {
+            return -1;
+        }
+        if (tries == LOCK_TRIES)
+        {
+            *refused = true;
+            errno = EIO;
+            return -1;
+        }
+        nap.tv_sec = lock_nap_ms / 1000;
+        nap.tv_nsec = (lock_nap_ms % 1000) * 1000000L;
+        (void)nanosleep(&nap, NULL);
+    }
+}
+
 /* Takes the lock file `name`, shared or not, without waiting. */
 static int take(const char *dir, const char *name, bool shared, bool *busy, struct rs_buf *err)
 {
     char *path = rs_xasprintf("%s/%s", dir, name);
     int   fd = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    bool  refused;
 
     if (fd < 0)
     {
@@ -1195,7 +1275,7 @@ static int take(const char *dir, const char *name, bool shared, bool *busy, stru
         free(path);
         return -1;
     }
-    if (lock_whole(fd, shared) != 0)
+    if (lock_asking(fd, shared, &refused) != 0)
     {
         if (errno == EWOULDBLOCK)
         {
@@ -1205,6 +1285,14 @@ static int take(const char *dir, const char *name, bool shared, bool *busy, stru
                             ? "another capture or prune is using it; try again when it is done"
                             : "a prune is running on it, or something is reading it while "
                               "prune wants to; try again when it is done");
+        } else if (refused)
+        {
+            *busy = true;
+            rs_buf_addf(err, "%s: the file server refused the lock on %s with an I/O error, "
+                             "which is how an NFS client is told a program on the server "
+                             "holds it; try again when that is done, and if nothing there is "
+                             "using it, the connection to the server may be failing",
+                        dir, name);
         } else
         {
             rs_buf_addf(err, "%s: %s", path, strerror(errno));

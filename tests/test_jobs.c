@@ -252,6 +252,52 @@ static int load_quiet(const void *arg)
     return status;
 }
 
+/* The options `restate run` takes from the command line: how much to say and
+ * where, and nothing about what to do. */
+static bool run_may_add(const char *name)
+{
+    static const char *const may[] = { "quiet",  "verbose",       "progress",     "syslog",
+                                       "result", "progress-file", "report-group", "passphrase-fd" };
+    size_t                   i;
+
+    for (i = 0; i < sizeof(may) / sizeof(may[0]); i++)
+    {
+        if (strcmp(name, may[i]) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Loads the job in a[0] as `restate run a[1] JOB` would, a[1] an option. */
+static int load_parsed(const void *arg)
+{
+    const char *const *a = arg;
+    char              *argv[5];
+    struct rs_options  given;
+    struct rs_job      job;
+    struct rs_buf      err;
+    int                status = -1;
+
+    argv[0] = (char *)(uintptr_t)"restate";
+    argv[1] = (char *)(uintptr_t)"run";
+    argv[2] = (char *)(uintptr_t)a[1];
+    argv[3] = (char *)(uintptr_t)a[0];
+    argv[4] = NULL;
+    memset(&given, 0, sizeof(given));
+    rs_buf_init(&err);
+    /* --help and --version are answered before any command is. */
+    if (rs_options_parse(4, argv, &given, &err) && given.command == CMD_RUN)
+    {
+        status = rs_job_load(&given, &job);
+        rs_job_free(&job);
+    }
+    rs_options_free(&given);
+    rs_buf_free(&err);
+    return status;
+}
+
 static void loading(void)
 {
     char             *dir = rs_test_tmpdir();
@@ -289,6 +335,47 @@ static void loading(void)
     free(out);
     free(errs);
     a[1] = NULL;
+
+    TEST_CASE("jobs: no option in the table but those that say how much and where");
+    {
+        /* A sudoers rule can admit `restate run FILE` and rely on this: an
+         * option added to options.def and not thought about here is refused
+         * by only_reporting, or this fails. Each is tried in every form the
+         * parser might take; a form it refuses cannot reach a job either. */
+        static const char *const values[] = { "", "=1", "=json", "=linux", "=x", "=/tmp/x" };
+        const char              *name;
+        size_t                   i;
+        size_t                   parsed = 0;
+
+        for (i = 0; (name = rs_option_name(i)) != NULL; i++)
+        {
+            size_t v;
+
+            for (v = 0; v < sizeof(values) / sizeof(values[0]); v++)
+            {
+                char       *opt = rs_xasprintf("--%s%s", name, values[v]);
+                const char *pa[2] = { path, opt };
+                int         status = rs_test_capture(load_parsed, pa, &out, &errs);
+
+                if (status != -1)
+                {
+                    parsed++;
+                    if (run_may_add(name))
+                    {
+                        CHECK_INT(status, RESTATE_EXIT_OK);
+                    } else if (status != RESTATE_EXIT_TROUBLE ||
+                               !strstr(errs, "what to do is the job's to say"))
+                    {
+                        CHECK_STR(opt, "refused by restate run");
+                    }
+                }
+                free(out);
+                free(errs);
+                free(opt);
+            }
+        }
+        CHECK(parsed > 50);
+    }
 
     TEST_CASE("jobs: one others could change is not run");
     (void)chmod(path, 0664);

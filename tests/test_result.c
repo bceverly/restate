@@ -147,15 +147,19 @@ static void collecting(const char *dir)
     TEST_CASE("result: readable by a group too, where one is given");
     {
         const struct group *g = getgrgid(getgid());
+        /* A copy: getgrnam may parse into the buffer this points into, as
+         * OpenBSD's and NetBSD's do, and then it looks up some other name. */
+        char *name = g && g->gr_name ? rs_xstrdup(g->gr_name) : NULL;
 
-        if (g && g->gr_name)
+        if (name)
         {
             struct stat st;
 
             rs_result_begin("du");
-            CHECK(rs_result_write(RESTATE_EXIT_OK, path, g->gr_name));
+            CHECK(rs_result_write(RESTATE_EXIT_OK, path, name));
             CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0640 && st.st_gid == getgid());
         }
+        free(name);
     }
 
     TEST_CASE("result: a group there is not, and a file that cannot be written");

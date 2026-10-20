@@ -439,6 +439,32 @@ static void test_pure(void)
     }
 }
 
+/* A file server that refuses with EIO, `eio_left` more times; and whether
+ * the repository is on NFS, as it says. */
+static int  eio_left;
+static int  lock_calls;
+static bool says_nfs;
+
+static int refusing_lock(int fd, bool shared)
+{
+    (void)fd;
+    (void)shared;
+    lock_calls++;
+    if (eio_left > 0)
+    {
+        eio_left--;
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+static bool saying_nfs(int fd)
+{
+    (void)fd;
+    return says_nfs;
+}
+
 static void test_made(const char *dir)
 {
     char           *repo = rs_xasprintf("%s/repo", dir);
@@ -516,6 +542,37 @@ static void test_made(const char *dir)
     rs_repo_close(NULL);
     CHECK(!rs_repo_dir_encrypted(repo));
     CHECK(!rs_repo_dir_encrypted(full));
+
+    TEST_CASE("repo: a lock NFS refuses with EIO is asked again, and is busy if it lasts");
+    rs_repo_set_locking(refusing_lock, saying_nfs, 0);
+    says_nfs = true;
+    eio_left = 1;
+    lock_calls = 0;
+    a = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(a != NULL && !busy);
+    CHECK_INT(lock_calls, 2);   /* refused once, then taken */
+    rs_repo_close(a);
+    eio_left = 100;
+    lock_calls = 0;
+    a = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(a == NULL && busy);
+    CHECK_INT(lock_calls, 3);   /* asked three times, then given up */
+    CHECK_CONTAINS(err.data ? err.data : "", "refused the lock on lock with an I/O error");
+    CHECK_CONTAINS(err.data ? err.data : "", "the connection to the server may be failing");
+    rs_buf_reset(&err);
+    /* Not on NFS, EIO is the disk's, and not a lock someone holds. */
+    says_nfs = false;
+    eio_left = 1;
+    lock_calls = 0;
+    a = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(a == NULL && !busy);
+    CHECK_INT(lock_calls, 1);
+    CHECK_CONTAINS(err.data ? err.data : "", strerror(EIO));
+    rs_buf_reset(&err);
+    rs_repo_set_locking(NULL, NULL, -1);
+    a = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(a != NULL);
+    rs_repo_close(a);
 
     TEST_CASE("repo: version 1, read as it is and made version 2 by a write");
     {

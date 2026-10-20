@@ -43,7 +43,11 @@ bold "restate — development environment"
 case "$(uname -s)" in
 FreeBSD)
   bold "FreeBSD"
-  sudo pkg install -y gmake bash shellcheck cppcheck || die "pkg install failed"
+  sudo pkg install -y gmake bash cppcheck || die "pkg install failed"
+  # FreeBSD names it for its Haskell port, and some architectures have no
+  # build of it: without it lint skips the shell scripts, nothing more.
+  sudo pkg install -y hs-ShellCheck \
+    || warn "hs-ShellCheck is not available here; lint will skip shellcheck"
   ok "installed; build with: gmake build && gmake test-unit test-cli"
   exit 0
   ;;

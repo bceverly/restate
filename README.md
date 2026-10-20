@@ -1183,7 +1183,11 @@ restate du /srv/restate/web01
   server the two are different locks, and a prune run there sees a capture's
   NFS lock only as the second kind -- so restate takes both, and two writers,
   one over NFS and one on the NAS, exclude each other. (NFSv3 mounted
-  `nolock` does not lock at all.)
+  `nolock` does not lock at all.) A FreeBSD server shows its own programs
+  the locks NFS clients take only with `vfs.nfsd.enable_locallocks=1`, and a
+  Linux client is told of a lock held on such a server as an I/O error:
+  restate asks again twice, a second apart, and then exits 5 (busy), saying
+  the connection may be failing if nothing on the server holds it.
 - **Nothing needs to be root's.** A share that maps every user to one of its
   own (`all_squash`) works, as long as that user can write it.
 - **A capture only adds files.** Each pack, its index and `.sum`, and each
