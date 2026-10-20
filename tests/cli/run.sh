@@ -24,6 +24,9 @@ esac
 [ -x "$BIN" ] || { echo "run.sh: $BIN is not executable" >&2; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/restate-cli.XXXXXX")" || exit 2
+# macOS's TMPDIR ends in a slash, so that is ".../T//restate-cli.x" -- which a
+# job refuses as a path, rightly, since it is not one written the plain way.
+WORK="$(printf '%s' "$WORK" | tr -s /)"
 trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 cd "$WORK" || exit 2
 

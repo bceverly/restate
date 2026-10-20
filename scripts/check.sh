@@ -42,9 +42,10 @@ if [ -d .git ]; then
   done
   # And one of ours that .githooks/ no longer has, which git would still run.
   for hook in .git/hooks/*; do
-    [ -f "$hook" ] && [ ! -e ".githooks/$(basename "$hook")" ] || continue
-    grep -qF "# restate — installed by scripts/install-hooks.sh" "$hook" 2>/dev/null \
-      && STALE_HOOKS+=("$(basename "$hook")")
+    if [ -f "$hook" ] && [ ! -e ".githooks/$(basename "$hook")" ] &&
+       grep -qF "# restate — installed by scripts/install-hooks.sh" "$hook" 2>/dev/null; then
+      STALE_HOOKS+=("$(basename "$hook")")
+    fi
   done
 fi
 if [ "${#STALE_HOOKS[@]}" -gt 0 ]; then
