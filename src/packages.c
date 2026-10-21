@@ -23,6 +23,9 @@
 /* snapd's state grows with its change history: a few megabytes, usually. */
 #define STATE_MAX  ((size_t)64 * 1024 * 1024)
 #define SMALL_MAX  ((size_t)4 * 1024 * 1024)
+/* A source names every URI, suite and component pairing; a machine has tens of
+ * repositories, and a file that names more than this is not apt's. */
+#define REPOS_MAX  ((size_t)4096)
 
 /* ------------------------------------------------------------------------- */
 /* Files                                                                     */
@@ -702,6 +705,7 @@ struct repo {
 struct repos {
     struct repo *r;
     size_t       n;
+    size_t       cap;
     char       **keys;    /* key files the repositories name */
     size_t       nkeys;
 };
@@ -730,7 +734,11 @@ static void add_repo(struct repos *rs, const char *uri, const char *suite, const
 
     rs_buf_init(&full);
     rs_buf_init(&name);
-    rs->r = rs_xreallocarray(rs->r, rs->n + 1, sizeof(*rs->r));
+    if (rs->n == rs->cap)
+    {
+        rs->cap = rs->cap ? rs->cap * 2 : 16;
+        rs->r = rs_xreallocarray(rs->r, rs->cap, sizeof(*rs->r));
+    }
     r = &rs->r[rs->n++];
     r->flat = component[0] == '\0';
     if (r->flat)
@@ -805,15 +813,15 @@ static void add_source(struct repos *rs, const struct rs_jval *src, const struct
     {
         return;
     }
-    for (u = 0; u < uris->n; u++)
+    for (u = 0; u < uris->n && rs->n < REPOS_MAX; u++)
     {
-        for (s = 0; s < suites->n; s++)
+        for (s = 0; s < suites->n && rs->n < REPOS_MAX; s++)
         {
             if (components->n == 0)
             {
                 add_repo(rs, uris->items[u].s, suites->items[s].s, "");
             }
-            for (c = 0; c < components->n; c++)
+            for (c = 0; c < components->n && rs->n < REPOS_MAX; c++)
             {
                 add_repo(rs, uris->items[u].s, suites->items[s].s, components->items[c].s);
             }

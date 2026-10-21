@@ -431,6 +431,53 @@ static void test_hostile(void)
     free(outside);
 }
 
+/* A source naming more URI and suite pairings than any machine has: the first
+ * are recorded, and the rest are not, rather than every one of them. */
+static void test_many_repos(void)
+{
+    char                 *t = rs_test_tmpdir();
+    struct rs_jval        out;
+    struct rs_buf         uris;
+    struct rs_buf         suites;
+    char                 *text;
+    const struct rs_jval *pkgs;
+    unsigned              i;
+
+    TEST_CASE("apt: a source naming thousands of repositories");
+    rs_buf_init(&uris);
+    rs_buf_init(&suites);
+    for (i = 0; i < 80; i++)
+    {
+        rs_buf_addf(&uris, " http://u%u", i);
+        rs_buf_addf(&suites, " s%u", i);
+    }
+    text = rs_xasprintf("Types: deb\nURIs:%s\nSuites:%s\nComponents: main\n", uris.data,
+                        suites.data);
+    put(t, "etc/apt/sources.list.d/many.sources", text);
+    put(t, "var/lib/dpkg/status",
+        "Package: first\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n\n"
+        "Package: last\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n");
+    put(t, "var/lib/apt/lists/u0_dists_s0_main_binary-amd64_Packages",
+        "Package: first\nArchitecture: amd64\nVersion: 1\n");
+    put(t, "var/lib/apt/lists/u79_dists_s79_main_binary-amd64_Packages",
+        "Package: last\nArchitecture: amd64\nVersion: 1\n");
+
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+    pkgs = rs_jobject_get(rs_jobject_get(&out, "apt"), "packages");
+    CHECK(any_contains(rs_jobject_get(find(pkgs, "name", "first"), "origins"),
+                       "http://u0 s0/main"));
+    /* Past the limit: still found, under its list's own name. */
+    CHECK(any_contains(rs_jobject_get(find(pkgs, "name", "last"), "origins"),
+                       "u79_dists_s79_main_binary-amd64_Packages"));
+    rs_jval_free(&out);
+    rs_buf_free(&uris);
+    rs_buf_free(&suites);
+    free(text);
+    rs_test_rmtree(t);
+    free(t);
+}
+
 static void test_snap(void)
 {
     char                 *t = rs_test_tmpdir();
@@ -1264,6 +1311,7 @@ void test_packages(void)
     test_uri_file();
     test_apt();
     test_hostile();
+    test_many_repos();
     test_snap();
     test_flatpak();
     test_languages();
