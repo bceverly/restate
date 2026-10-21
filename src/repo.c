@@ -26,6 +26,7 @@
 #include <sys/param.h>
 #endif
 
+#include "glob.h"
 #include "gzip.h"
 #include "image.h"
 #include "pgp.h"
@@ -3835,9 +3836,33 @@ static bool resolve(const struct rs_repo *r, const char *hash, struct group *g)
     return true;
 }
 
+/* Whether `path` is one of the files `include` covers; all are when there
+ * are no patterns. */
+static bool included(const char *path, const char *const *include, size_t ninclude)
+{
+    size_t k;
+
+    for (k = 0; k < ninclude; k++)
+    {
+        if (rs_glob_covers(include[k], path))
+        {
+            return true;
+        }
+    }
+    return ninclude == 0;
+}
+
 struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_index *ix,
                                            const char *const *only, size_t nonly,
                                            struct rs_buf *err)
+{
+    return rs_repo_stream_open_matching(r, ix, only, nonly, NULL, 0, err);
+}
+
+struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const struct rs_index *ix,
+                                                    const char *const *only, size_t nonly,
+                                                    const char *const *include,
+                                                    size_t ninclude, struct rs_buf *err)
 {
     struct rs_repo_stream *s = rs_xcalloc(1, sizeof(*s));
     size_t                 i;
@@ -3852,7 +3877,8 @@ struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_in
     {
         const struct rs_entry *e = &ix->entries[i];
 
-        s->want[i] = e->stored && (!only || rs_image_in_list(e->path, only, nonly));
+        s->want[i] = e->stored && (!only || rs_image_in_list(e->path, only, nonly)) &&
+                     (e->type != 'f' || included(e->path, include, ninclude));
         if (s->want[i] && e->type == 'f' && e->hash_state == RS_HASH_PRESENT)
         {
             memcpy(s->refs[s->nrefs].hash, e->hash, RS_SHA256_HEX_SIZE);

@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "index.h"
+#include "run.h"
 
 /* What is read of any one file under /proc: a command line, a status file. */
 #define PROC_MAX ((size_t)64 * 1024)
@@ -194,17 +195,69 @@ static bool readable_by(const struct stat *st, unsigned long uid)
            (uid == 0 || (st->st_uid == uid && (st->st_mode & S_IRUSR)) || (st->st_mode & S_IROTH));
 }
 
+/* Whether `st` is a directory the user `uid` could look a name up in: by
+ * its owner's search bit, or anyone's -- or any, for root. */
+static bool searchable_by(const struct stat *st, unsigned long uid)
+{
+    return S_ISDIR(st->st_mode) &&
+           (uid == 0 || (st->st_uid == uid && (st->st_mode & S_IXUSR)) || (st->st_mode & S_IXOTH));
+}
+
+/*
+ * The directory holding the absolute `path`, opened a name at a time from /,
+ * every one on the way a directory the user `uid` could pass through and none
+ * of them a symlink, which would lead somewhere the check did not look; -1 if
+ * any is not. `*name` is the last name in `path`, the caller's to free.
+ */
+static int open_parent_as(const char *path, unsigned long uid, char **name)
+{
+    char *copy = rs_xstrdup(path);
+    char *p = copy;
+    int   dfd = path[0] == '/' ? open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+
+    *name = NULL;
+    while (dfd >= 0)
+    {
+        struct stat st;
+        char       *slash;
+        int         next;
+
+        p += strspn(p, "/");
+        if (*p == '\0' || fstat(dfd, &st) != 0 || !searchable_by(&st, uid))
+        {
+            (void)close(dfd);
+            dfd = -1;
+            break;
+        }
+        slash = strchr(p, '/');
+        if (!slash)
+        {
+            *name = rs_xstrdup(p);
+            break;
+        }
+        *slash = '\0';
+        next = openat(dfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        (void)close(dfd);
+        dfd = next;
+        p = slash + 1;
+    }
+    free(copy);
+    return dfd;
+}
+
 /*
  * A file a process's command line names, read only if that process's own
- * user could read it (readable_by). Its command line is any user's to write,
- * and restate runs as root: without this, `mongod --config /etc/shadow`
- * would have restate read the file for them.
+ * user could read it: through directories it could pass through (open_parent_as)
+ * to a file it could read (readable_by). Its command line is any user's to
+ * write, and restate runs as root: without this, `mongod --config /etc/shadow`
+ * would have restate read the file for them, and `--config /root/x.conf` a file
+ * readable by all in a directory only root can enter.
  *
  * And looked at before it is opened to be read, not only after: opening a
  * device can do something -- rewind a tape, raise a serial line -- so
  * `--config /dev/nst0` must not have root open it. On Linux an O_PATH
  * descriptor is looked at and then opened again through /proc/self/fd, the
- * same file whatever happens to the path between; elsewhere lstat comes
+ * same file whatever happens to the path between; elsewhere fstatat comes
  * first, and fstat makes sure the file opened is the one it looked at.
  */
 static char *slurp_as(const char *path, unsigned long uid, size_t max)
@@ -214,33 +267,38 @@ static char *slurp_as(const char *path, unsigned long uid, size_t max)
     struct stat   was;
     char          chunk[4096];
     ssize_t       n;
-    int           fd;
+    char         *name;
+    int           dfd = open_parent_as(path, uid, &name);
+    int           fd = -1;
 
-#if defined(O_PATH) && defined(__linux__)
-    {
-        int   pfd = open(path, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-        char *again;
-
-        if (pfd < 0 || fstat(pfd, &was) != 0 || !readable_by(&was, uid))
-        {
-            if (pfd >= 0)
-            {
-                (void)close(pfd);
-            }
-            return NULL;
-        }
-        again = rs_xasprintf("/proc/self/fd/%d", pfd);
-        fd = open(again, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-        free(again);
-        (void)close(pfd);
-    }
-#else
-    if (lstat(path, &was) != 0 || !readable_by(&was, uid))
+    if (dfd < 0)
     {
         return NULL;
     }
-    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+#if defined(O_PATH) && defined(__linux__)
+    {
+        int pfd = openat(dfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+
+        if (pfd >= 0 && fstat(pfd, &was) == 0 && readable_by(&was, uid))
+        {
+            char *again = rs_xasprintf("/proc/self/fd/%d", pfd);
+
+            fd = open(again, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+            free(again);
+        }
+        if (pfd >= 0)
+        {
+            (void)close(pfd);
+        }
+    }
+#else
+    if (fstatat(dfd, name, &was, AT_SYMLINK_NOFOLLOW) == 0 && readable_by(&was, uid))
+    {
+        fd = openat(dfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    }
 #endif
+    (void)close(dfd);
+    free(name);
     if (fd < 0)
     {
         return NULL;
@@ -804,6 +862,18 @@ static bool docker_shim(const struct proc *p)
     return rs_starts_with(p->comm, "containerd-shim") && ns && strcmp(ns, "moby") == 0;
 }
 
+/* Whether rs_live_detect looks at `p` as one of its kinds -- whether or not
+ * it finds files of its to pause -- by the names it goes by there. */
+static bool claimed(const struct proc *p)
+{
+    return strcmp(p->comm, "postgres") == 0 || strcmp(p->comm, "mysqld") == 0 ||
+           strcmp(p->comm, "mariadbd") == 0 || strcmp(p->comm, "mongod") == 0 ||
+           strcmp(p->comm, "redis-server") == 0 || rs_starts_with(p->comm, "qemu-system") ||
+           strcmp(p->comm, "qemu-kvm") == 0 ||
+           (p->argc > 0 && rs_starts_with(p->argv[0], "[lxc monitor] ")) ||
+           strcmp(p->comm, "dockerd") == 0 || docker_shim(p);
+}
+
 static int by_kind_name(const void *a, const void *b)
 {
     const struct rs_live *x = a;
@@ -903,6 +973,91 @@ void rs_live_detect(const char *proc, struct rs_live **out, size_t *n)
     }
     *out = f.l;
     *n = f.n;
+}
+
+void rs_live_programs(const char *proc, struct rs_live **out, size_t *n)
+{
+    DIR                 *dir = opendir(proc);
+    const struct dirent *de;
+    struct found         f;
+
+    memset(&f, 0, sizeof(f));
+    while (dir && (de = readdir(dir)) != NULL)
+    {
+        struct proc p;
+        char       *pdir = NULL;
+        char       *link;
+        char       *exe = NULL;
+
+        if (!numeric(de->d_name) || strlen(de->d_name) > 9)
+        {
+            continue;
+        }
+        if (proc_read(proc, strtol(de->d_name, NULL, 10), &p, &pdir) && !claimed(&p))
+        {
+            link = rs_xasprintf("%s/exe", pdir);
+            exe = proc_link(link);
+            free(link);
+        }
+        /* Named for the file it runs, not for what it calls itself, which
+         * is any user's to choose; and only a file root alone could have put
+         * where it is, or any user could run a copy named for a hook. */
+        if (exe && rs_hook_usable(exe))
+        {
+            const char *name = strrchr(exe, '/') + 1;
+            size_t      i = 0;
+
+            while (i < f.n && strcmp(f.l[i].name, name) != 0)
+            {
+                i++;
+            }
+            if (i < f.n && p.pid < f.l[i].pid)
+            {
+                f.l[i].pid = p.pid;
+                f.l[i].uid = p.uid;
+            } else if (i == f.n)
+            {
+                struct rs_live *l;
+
+                f.l = rs_xreallocarray(f.l, f.n + 1, sizeof(*f.l));
+                l = &f.l[f.n++];
+                memset(l, 0, sizeof(*l));
+                l->name = rs_xstrdup(name);
+                l->kind = l->name;
+                l->pid = p.pid;
+                l->uid = p.uid;
+            }
+        }
+        free(exe);
+        proc_free(&p);
+        free(pdir);
+    }
+    if (dir)
+    {
+        (void)closedir(dir);
+    }
+    if (f.n > 1)
+    {
+        qsort(f.l, f.n, sizeof(*f.l), by_kind_name);
+    }
+    *out = f.l;
+    *n = f.n;
+}
+
+bool rs_live_kind(const char *name)
+{
+    static const char *const kinds[] = { "postgresql", "mysql", "mongodb", "redis",
+                                         "libvirt",    "lxd",   "docker" };
+    size_t                   i;
+
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+    {
+        if (strcmp(kinds[i], name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 const char *rs_live_what(const struct rs_live *l)

@@ -30,6 +30,7 @@ enum {
     OPT_EXCLUDE,
     OPT_DRY_RUN,
     OPT_CHECK_FIRST,
+    OPT_PLAN,
     OPT_NUMERIC_OWNER,
     OPT_RULES_ONLY,
     OPT_QUIESCE,
@@ -111,6 +112,7 @@ struct rs_options {
     size_t          nexcludes;
     bool            dry_run;
     bool            check_first;    /* restore: read it all first */
+    bool            plan_only;      /* restore --plan: dry, from the index alone */
     bool            packages;       /* --packages: diff by package, restore them */
     bool            numeric_owner;
     bool            image_fstab;    /* restore: the image's, whatever disks

@@ -145,6 +145,16 @@ static void other_jobs(void)
     CHECK_INT(job.opts.nincludes, 2);
     CHECK_INT(job.opts.nexcludes, 1);
     CHECK(job.opts.dry_run && job.opts.check_first && !job.opts.allow_unverified);
+    CHECK(!job.opts.plan_only);
+    rs_job_free(&job);
+    /* A plan is a dry run; "plan = no" is no plan, and no dry run of itself. */
+    CHECK(parse(&job, "command = restore\nrepository = /r\nplan = true\n", &why));
+    free(why);
+    CHECK(job.opts.plan_only && job.opts.dry_run);
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = restore\nrepository = /r\nplan = no\n", &why));
+    free(why);
+    CHECK(!job.opts.plan_only && !job.opts.dry_run);
     rs_job_free(&job);
 }
 

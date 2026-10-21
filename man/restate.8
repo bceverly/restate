@@ -247,6 +247,9 @@ restore: read the whole image first, checking every file against the index and w
 \-\-dry\-run
 restore: check the image and say what would be put back, writing nothing; prune: say which snapshots would be dropped, dropping none
 .TP
+\fB\-\-plan\fR
+restore: say what would be put back from the index alone, writing nothing and reading no file's content \-\- a dry run that checks nothing, in seconds
+.TP
 \-\-read\-all
 check: read every snapshot in full as well, as restore would, each file checked against its index and nothing written: a test restore of every snapshot
 .TP
@@ -1197,6 +1200,29 @@ directory, while its database is paused by its own hook with
 A mail store kept as Maildir needs neither: every message is a file of its
 own, written beside its name and renamed into place, so a copy taken while
 mail arrives misses at most what arrived meanwhile.
+.PP
+With
+.BR \-\-quiesce ,
+a program running that is none of the kinds above, and has a hook of its
+own name in
+.I /etc/restate/hooks.d
+\-
+.I /etc/restate/hooks.d/minio
+for
+.I /usr/local/bin/minio
+\- is paused by it as one
+.B \-\-quiesce\-with
+names would be. The name is that of the file it runs
+.RI ( /proc/ PID /exe ),
+not the one it gives itself, which any user can choose, and that file and its
+directory have to be root's and writable by no one else, or any user could
+run a copy named for a hook to have root pause the real thing. Only
+.I /etc/restate/hooks.d
+is looked in, never the hooks restate ships, and the name of a kind or of a
+shipped hook is never taken for a program's: the
+.B docker
+command is not
+.BR dockerd .
 .SH RESTORING
 .B restate restore
 .I IMAGE
@@ -1222,6 +1248,18 @@ restore reads the whole image once before writing anything, checking every
 file against the index, and refuses it \- exit status 2, nothing written \-
 if any file is not what the index says or is missing; then it reads it again
 to put it back.
+.PP
+.B \-\-plan
+says what a restore would put back from the index alone, reading no file's
+content and writing nothing: every path, how many files and how large, in
+seconds however large the image is. It checks nothing, and its result says so
+.RB ( content_read
+is false);
+.B \-\-dry\-run
+is the check. From a repository,
+.B \-\-include
+reads only the packs that hold what it covers, for a restore and a dry run
+alike.
 .PP
 Owners, modes and times (to the nanosecond) come from the index, a
 directory's only once everything in it is in; hard links are made links
@@ -1807,8 +1845,10 @@ check;
 .BR trusted_key " (repeatable)"
 for check and restore.
 .TP
-.BR include ", " exclude " (repeatable), " check_first ", " allow_unverified
-restore.
+.BR include ", " exclude " (repeatable), " check_first ", " plan ", " allow_unverified
+restore;
+.B plan
+is a dry run as well.
 .TP
 .B copy_to
 copy: where to.
@@ -1909,7 +1949,11 @@ with what it read and found, and what changed since a
 .BR restore ,
 an object
 .B restore
-with what it put back \- or would have, in a dry run \- and
+with what it put back \- or would have, in a dry run \-,
+.B content_read
+(false for a
+.BR \-\-plan ),
+and
 .BR plan ,
 the first 1000 of those paths; with
 .BR \-\-as ,

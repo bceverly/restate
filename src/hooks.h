@@ -12,7 +12,9 @@
  * "lxd" -- the list is in live.h) and looked for first in
  * /etc/restate/hooks.d, the site's own, and then among those restate ships, in
  * libexec/restate/hooks beside the sbin it is installed in. Either is used
- * only if it and its directory are root's and writable by no one else.
+ * only if it and its directory are root's and writable by no one else. A
+ * program no kind covers is paused by a hook of its own name, in
+ * /etc/restate/hooks.d alone (rs_hook_for_program).
  *
  * It is run as
  *
@@ -56,6 +58,13 @@ void rs_hooks_set_dirs(const char *const *dirs, size_t n);
 
 /* The hook for `kind`, or NULL if there is none restate would run. */
 char *rs_hook_find(const char *kind);
+/*
+ * The hook for a running program `program` (rs_live_programs) that no kind
+ * covers: RS_HOOKS_SITE_DIR/PROGRAM, root's and writable by no one else, and
+ * nowhere else -- a hook restate ships is never run for a program's name, nor
+ * one named as a kind or a shipped hook is. NULL if there is none.
+ */
+char *rs_hook_for_program(const char *program);
 /* The names of every hook restate would run here, sorted; the caller frees
  * each, and the array. */
 char **rs_hooks_list(size_t *n);

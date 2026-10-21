@@ -1024,8 +1024,8 @@ static bool index_from_parts(int fd, const char *path, struct rs_buf *text,
  * does and it could not be opened. The repository is held open, shared,
  * until the stream is closed, so a prune does not remove what it reads.
  */
-static int open_snapshot(const char *path, const char *part, struct rs_image_stream *s,
-                         struct rs_buf *err)
+static int open_snapshot(const char *path, const char *part, const char *const *include,
+                         size_t ninclude, struct rs_image_stream *s, struct rs_buf *err)
 {
     char  *dir;
     char  *name;
@@ -1064,10 +1064,10 @@ static int open_snapshot(const char *path, const char *part, struct rs_image_str
     }
     if (ok)
     {
-        s->snapshot = rs_repo_stream_open(s->repo, s->snapshot_ix,
-                                          kit_only ? (const char *const *)(kit ? kit : &found)
-                                                   : NULL,
-                                          nkit, err);
+        s->snapshot = rs_repo_stream_open_matching(
+            s->repo, s->snapshot_ix,
+            kit_only ? (const char *const *)(kit ? kit : &found) : NULL, nkit, include,
+            ninclude, err);
         ok = s->snapshot != NULL;
     }
     rs_repo_free_names(kit, nkit);
@@ -1085,13 +1085,13 @@ static int open_snapshot(const char *path, const char *part, struct rs_image_str
 /* One part of an image in parts, `part` (RS_IMAGE_KIT_PART or
  * RS_IMAGE_FILES_PART); for an image from before 1.1, which has no parts,
  * the files are the one stream and there is no kit. */
-static bool open_part(const char *path, const char *part, struct rs_image_stream *s,
-                      struct rs_buf *err)
+static bool open_part(const char *path, const char *part, const char *const *include,
+                      size_t ninclude, struct rs_image_stream *s, struct rs_buf *err)
 {
     unsigned char magic[RS_TAR_BLOCK];
     ssize_t       got;
     int           in = -1;
-    int           snapshot = open_snapshot(path, part, s, err);
+    int           snapshot = open_snapshot(path, part, include, ninclude, s, err);
 
     if (snapshot != 0)
     {
@@ -1268,12 +1268,18 @@ static void feed_some(struct rs_image_stream *s)
 
 bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_buf *err)
 {
-    return open_part(path, RS_IMAGE_FILES_PART, s, err);
+    return open_part(path, RS_IMAGE_FILES_PART, NULL, 0, s, err);
+}
+
+bool rs_image_open_files_matching(const char *path, const char *const *include, size_t ninclude,
+                                  struct rs_image_stream *s, struct rs_buf *err)
+{
+    return open_part(path, RS_IMAGE_FILES_PART, include, ninclude, s, err);
 }
 
 bool rs_image_open_kit(const char *path, struct rs_image_stream *s, struct rs_buf *err)
 {
-    return open_part(path, RS_IMAGE_KIT_PART, s, err);
+    return open_part(path, RS_IMAGE_KIT_PART, NULL, 0, s, err);
 }
 
 ssize_t rs_image_read_files(struct rs_image_stream *s, void *buf, size_t n)

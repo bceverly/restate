@@ -273,7 +273,9 @@ void test_live(void)
             char *d = rs_xasprintf("%s/mongod.conf", dir);
 
             args(&cmd, "/usr/bin/mongod", "--config", d);
-            process(proc, 300, 1, 120, "mongod", cmd.data, cmd.len);
+            /* This user's: the file is read only by a user who could reach
+             * it, and the directory the tests make is theirs alone. */
+            process(proc, 300, 1, (unsigned)getuid(), "mongod", cmd.data, cmd.len);
             rs_buf_free(&cmd);
             free(d);
         }
@@ -521,6 +523,46 @@ void test_live(void)
                 free(c);
             }
         }
+        /* A file readable by all, in a directory its user could not enter,
+         * and one reached through a symlinked directory, are not read; the
+         * same file is, by the directory's owner, the straight way. */
+        {
+            static const char *const via[] = { "locked/open.conf", "around/open.conf",
+                                               "locked/open.conf" };
+            char                    *locked = rs_xasprintf("%s/locked", dir);
+            char                    *around = rs_xasprintf("%s/around", dir);
+            size_t                   i;
+
+            mkdirs(dir, "locked");
+            rs_test_write(locked, "open.conf", conf, 0644);
+            CHECK(chmod(locked, 0700) == 0);
+            CHECK(symlink(locked, around) == 0);
+            for (i = 0; i < sizeof(via) / sizeof(via[0]); i++)
+            {
+                const struct rs_live *mo;
+                char                 *c = rs_xasprintf("%s/%s", dir, via[i]);
+                unsigned              uid = (unsigned)getuid() + (i == 0 ? 4242U : 0U);
+
+                mkdirs(dir, "proc2");
+                args(&cmd, "/usr/bin/mongod", "--config", c);
+                process(proc2, 10, 1, uid, "mongod", cmd.data, cmd.len);
+                rs_buf_free(&cmd);
+                rs_live_detect(proc2, &l, &n);
+                mo = find(l, n, "mongodb", "mongod");
+                if (i < 2)
+                {
+                    CHECK(!mo || mo->npaths == 0 || strcmp(mo->paths[0], want) != 0);
+                } else
+                {
+                    CHECK_STR(mo && mo->npaths == 1 ? mo->paths[0] : "", want);
+                }
+                rs_live_free(l, n);
+                rs_test_rmtree(proc2);
+                free(c);
+            }
+            free(around);
+            free(locked);
+        }
         free(want);
         free(d);
         free(conf);
@@ -664,6 +706,83 @@ void test_live(void)
         rs_hooks_set_dirs(NULL, 0);
         /* The real directories: nothing called this is installed. */
         CHECK(rs_hook_find("restate-no-such-hook") == NULL);
+    }
+
+    TEST_CASE("live: programs, by the file each runs, where only root could have put it");
+    {
+        char                 *proc3 = rs_xasprintf("%s/proc3", dir);
+        char                 *mine = rs_xasprintf("%s/true", dir);
+        struct rs_live       *progs = NULL;
+        size_t                np = 0;
+        size_t                i;
+        bool                  has_true = false;
+        bool                  others = false;
+
+        rs_test_write(dir, "true", "#!/bin/sh\nexit 0\n", 0755);
+        if (geteuid() == 0)
+        {
+            CHECK(chown(mine, 1, (gid_t)-1) == 0);
+        }
+        mkdirs(dir, "proc3");
+        /* Twice, once calling itself sshd: one, named for its file. */
+        process(proc3, 20, 1, 0, "true", ARGS("true"));
+        link_to(proc3, "20/exe", "/usr/bin/true");
+        process(proc3, 21, 1, 0, "sshd", ARGS("sshd"));
+        link_to(proc3, "21/exe", "/usr/bin/true");
+        /* A copy of its own, by the same name; a kind's own process; and one
+         * whose file is not to be had. */
+        process(proc3, 22, 1, 1000, "true", ARGS("true"));
+        link_to(proc3, "22/exe", mine);
+        process(proc3, 23, 1, 0, "postgres", ARGS("postgres"));
+        link_to(proc3, "23/exe", "/usr/bin/env");
+        process(proc3, 24, 1, 0, "gone", ARGS("gone"));
+        rs_live_programs(proc3, &progs, &np);
+        for (i = 0; i < np; i++)
+        {
+            if (strcmp(progs[i].name, "true") == 0)
+            {
+                has_true = true;
+                CHECK_STR(progs[i].kind, "true");
+                CHECK_INT(progs[i].pid, 20);
+                CHECK_INT(progs[i].npaths, 0);
+            } else
+            {
+                others = true;
+            }
+        }
+        CHECK(has_true && !others);
+        CHECK_INT(np, 1);
+        rs_live_free(progs, np);
+        rs_live_programs("/nonexistent", &progs, &np);
+        CHECK(progs == NULL && np == 0);
+        rs_test_rmtree(proc3);
+        free(proc3);
+        free(mine);
+    }
+
+    TEST_CASE("hooks: a program's, in the site's directory and only there");
+    {
+        static const char *const site[] = { "/usr/bin" };
+        static const char *const both[] = { "/usr/bin", "/usr/bin" };
+        static const char *const none[] = { "/nonexistent" };
+        char                    *hook;
+
+        rs_hooks_set_dirs(site, 1);
+        hook = rs_hook_for_program("true");
+        CHECK_STR(hook ? hook : "", "/usr/bin/true");
+        free(hook);
+        /* A kind's name is that kind, whatever program shares it. */
+        CHECK(!rs_live_kind("true") && rs_live_kind("docker"));
+        CHECK(rs_hook_for_program("docker") == NULL);
+        CHECK(rs_hook_for_program("../bin/true") == NULL);
+        CHECK(rs_hook_for_program("") == NULL);
+        /* Nor is a shipped hook's: one by that name restate ships. */
+        rs_hooks_set_dirs(both, 2);
+        CHECK(rs_hook_for_program("true") == NULL);
+        rs_hooks_set_dirs(none, 1);
+        CHECK(rs_hook_for_program("true") == NULL);
+        rs_hooks_set_dirs(NULL, 0);
+        CHECK(rs_hook_for_program("restate-no-such-hook") == NULL);
     }
 
     TEST_CASE("hooks: run, with what they need, and stopped if they hang");

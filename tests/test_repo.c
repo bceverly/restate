@@ -795,6 +795,23 @@ static void test_written(const char *dir)
         CHECK(rs_repo_stream_close(NULL, &err));
     }
 
+    TEST_CASE("repo: only the files a pattern covers read, with every directory");
+    {
+        static const char *const dup[] = { "/etc/dup*" };
+
+        s = rs_repo_stream_open_matching(r, &ix, NULL, 0, dup, 1, &err);
+        CHECK(read_stream(s, &seen, &err));
+        CHECK(rs_repo_stream_close(s, &err));
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/dup1 0");
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/dup2 0");
+        CHECK(strstr(seen.data ? seen.data : "", "restate/files/etc/conf 0") == NULL);
+        CHECK(strstr(seen.data ? seen.data : "", "restate/files/big") == NULL);
+        /* What costs no pack is there whatever the pattern. */
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc 5");
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/link 2");
+        rs_buf_reset(&seen);
+    }
+
     TEST_CASE("repo: a file that could not be read is zeros, for restore to refuse");
     {
         struct rs_entry *e = (struct rs_entry *)rs_index_find(&ix, "/home/u/notes");

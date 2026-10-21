@@ -492,14 +492,17 @@ static bool found_kind(const struct quiesce *q, size_t n, const char *kind)
  * that would stop each, when not quiescing; given a hook and a dump
  * directory, and left to the end of the walk, when quiescing. Then each hook
  * --quiesce-with names, with the paths it says it covers, or for the whole
- * walk if it names none. False, having said why, if a named hook is not
- * there to run.
+ * walk if it names none; and the same, when quiescing, for each program
+ * running that has a hook of its name in RS_HOOKS_SITE_DIR. False, having
+ * said why, if a named hook is not there to run.
  */
 static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rules,
                          const char *root, struct quiesce *q)
 {
     struct rs_live *all = NULL;
+    struct rs_live *progs = NULL;
     size_t          n = 0;
+    size_t          nprogs = 0;
     size_t          found;
     size_t          i;
     size_t          k;
@@ -507,7 +510,11 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
 
     memset(q, 0, sizeof(*q));
     rs_live_detect("/proc", &all, &n);
-    q->live = rs_xcalloc(n + o->nquiesce_with + 1, sizeof(*q->live));
+    if (o->quiesce)
+    {
+        rs_live_programs("/proc", &progs, &nprogs);
+    }
+    q->live = rs_xcalloc(n + o->nquiesce_with + nprogs + 1, sizeof(*q->live));
     for (i = 0; i < n; i++)
     {
         bool keep = false;
@@ -531,7 +538,7 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
     }
     free(all);
     found = q->nlive;
-    n = found + o->nquiesce_with + 1;
+    n = found + o->nquiesce_with + nprogs + 1;
     q->declared = rs_xcalloc(n, sizeof(*q->declared));
     q->hooks = rs_xcalloc(n, sizeof(*q->hooks));
     q->dumps = rs_xcalloc(n, sizeof(*q->dumps));
@@ -584,6 +591,34 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
         q->declared[q->nlive] = true;
         q->nlive++;
     }
+    /* A program no kind covers, with a hook of its name in the site's own
+     * directory: paused as one --quiesce-with names, unless it is named. */
+    for (k = 0; k < nprogs; k++)
+    {
+        struct rs_live *l;
+        struct rs_buf   err;
+        char           *hook = found_kind(q, q->nlive, progs[k].name)
+                                   ? NULL
+                                   : rs_hook_for_program(progs[k].name);
+
+        if (!hook)
+        {
+            free(progs[k].name);
+            continue;
+        }
+        l = &q->live[q->nlive];
+        *l = progs[k];
+        rs_buf_init(&err);
+        if (!rs_hook_paths(hook, l->name, &l->paths, &l->npaths, &err))
+        {
+            rs_warn("%s paths: %s; it is paused for the whole walk", hook, err.data);
+        }
+        rs_buf_free(&err);
+        q->hooks[q->nlive] = hook;
+        q->declared[q->nlive] = true;
+        q->nlive++;
+    }
+    free(progs);
     for (i = 0; i < q->nlive; i++)
     {
         const struct rs_live *l = &q->live[i];
@@ -3413,6 +3448,9 @@ static void restore_result(const struct rs_options *o, const struct rs_restore_s
     rs_jobj_str(res, "from", o->args[0]);
     rs_jobj_str(res, "root", root);
     rs_jobj_bool(res, "dry_run", o->dry_run);
+    /* False for a plan: the files were counted from the index, and none was
+     * read to see that it is what the index says. */
+    rs_jobj_bool(res, "content_read", !o->plan_only);
     rs_jobj_u64(res, "files", st->files);
     rs_jobj_u64(res, "bytes", st->bytes);
     rs_jobj_u64(res, "directories", st->directories);
@@ -3448,6 +3486,12 @@ int rs_cmd_restore(const struct rs_options *o)
     if (o->offline && !o->packages)
     {
         rs_error("--offline is how restore --packages installs them: give --packages too");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (o->plan_only && (o->packages || o->check_first))
+    {
+        rs_error("--plan reads only the index, and %s reads the image: give --dry-run instead",
+                 o->packages ? "--packages" : "--check-first");
         return RESTATE_EXIT_TROUBLE;
     }
     if (o->offline && o->exact_versions)
@@ -3541,6 +3585,7 @@ int rs_cmd_restore(const struct rs_options *o)
         }
     }
     ro.dry_run = o->dry_run;
+    ro.index_only = o->plan_only;
     ro.kit = false;
     if (o->packages || keep_fstab)
     {
@@ -3593,6 +3638,11 @@ int rs_cmd_restore(const struct rs_options *o)
                       " others under %s\n", o->dry_run ? "would put back" : "put back",
                       st.files, st.bytes, st.directories, st.symlinks, st.links, st.other,
                       ro.root);
+        if (o->plan_only)
+        {
+            (void)fprintf(stderr, "restate: planned from the index alone: no file's content was "
+                          "read or checked (--dry-run checks it)\n");
+        }
         if (st.unchanged > 0)
         {
             (void)fprintf(stderr, "restate: %" PRIu64 " of those files were in place already, "

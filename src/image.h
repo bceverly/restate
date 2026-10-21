@@ -165,6 +165,12 @@ struct rs_image_stream {
 };
 
 bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_buf *err);
+/* The files, with only those `include`'s patterns cover read where that saves
+ * reading: from a snapshot in a repository, whose other packs are not opened.
+ * What is not covered may still be in the stream, as an image file's always
+ * is, for the reader to pass over; every directory, symlink and FIFO is. */
+bool rs_image_open_files_matching(const char *path, const char *const *include, size_t ninclude,
+                                  struct rs_image_stream *s, struct rs_buf *err);
 /* The kit, the same way; an image from before 1.1 has none. */
 bool rs_image_open_kit(const char *path, struct rs_image_stream *s, struct rs_buf *err);
 /* Up to `n` bytes of the tar stream: how many, 0 at its end, -1 on error. */

@@ -951,6 +951,74 @@ static bool account_file(const char *path)
     return false;
 }
 
+/* A file as a plan sees it, from the index alone: put back unless the
+ * capture could not read it, its content taken on trust. */
+static void plan_file(struct ctx *c, const struct rs_entry *e)
+{
+    if (e->hash_state != RS_HASH_PRESENT)
+    {
+        struct rs_buf b;
+
+        rs_buf_init(&b);
+        rs_escape(&b, e->path);
+        rs_warn("%s: it could not be read when it was captured; not put back",
+                b.data ? b.data : "");
+        rs_buf_free(&b);
+        c->st->refused++;
+        return;
+    }
+    c->st->files++;
+    c->st->bytes += e->size;
+    c->done[e - c->ix->entries] = true;
+    said(c, "restore", e->path);
+}
+
+/* What the image holds for `e`, a member of type `want` -- read from `r`, or
+ * with no `r`, planned from the index -- put back, or left out. */
+static bool put_back(struct ctx *c, struct rs_tar_reader *r, const struct rs_entry *e, char want,
+                     struct rs_buf *err)
+{
+    c->seen[e - c->ix->entries] = true;
+    if (c->o->kit && account_file(e->path))
+    {
+        return true;
+    }
+    if (as_identity(c, e))
+    {
+        c->st->identity++;
+        return true;
+    }
+    if (excluded(c, e))
+    {
+        c->st->excluded++;
+        return true;
+    }
+    c->st->planned++;
+    if (c->o->plan && c->o->plan->n < c->o->plan_max)
+    {
+        char *shown = rs_utf8_lossy(e->path, strlen(e->path));
+
+        rs_jval_set_string(rs_jarr_add(c->o->plan), shown);
+        free(shown);
+    }
+    switch (want)
+    {
+    case 'f':
+        if (!r)
+        {
+            plan_file(c, e);
+            return true;
+        }
+        return restore_file(c, r, e, err);
+    case 'd':
+        restore_dir(c, e);
+        return true;
+    default:
+        restore_special(c, e);
+        return true;
+    }
+}
+
 /* One member of the image: it has to be an entry the index lists, and the
  * thing the index says. */
 static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *m,
@@ -1012,40 +1080,7 @@ static bool member(struct ctx *c, struct rs_tar_reader *r, struct rs_tar_entry *
         c->st->refused++;
         return true;
     }
-    c->seen[e - c->ix->entries] = true;
-    if (c->o->kit && account_file(e->path))
-    {
-        return true;
-    }
-    if (as_identity(c, e))
-    {
-        c->st->identity++;
-        return true;
-    }
-    if (excluded(c, e))
-    {
-        c->st->excluded++;
-        return true;
-    }
-    c->st->planned++;
-    if (c->o->plan && c->o->plan->n < c->o->plan_max)
-    {
-        char *shown = rs_utf8_lossy(e->path, strlen(e->path));
-
-        rs_jval_set_string(rs_jarr_add(c->o->plan), shown);
-        free(shown);
-    }
-    switch (want)
-    {
-    case 'f':
-        return restore_file(c, r, e, err);
-    case 'd':
-        restore_dir(c, e);
-        return true;
-    default:
-        restore_special(c, e);
-        return true;
-    }
+    return put_back(c, r, e, want, err);
 }
 
 /* A small file beneath the root, read without making anything on the way
@@ -1258,12 +1293,15 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     memset(&ignore, 0, sizeof(ignore));
     ignore.sa_handler = SIG_IGN;
     (void)sigaction(SIGPIPE, &ignore, &saved);
-    /* The accounts first: every owner is mapped through them. */
-    if (!o->numeric_owner)
+    /* The accounts first: every owner is mapped through them -- but a plan
+     * reads nothing beyond the index, and names no owner. */
+    if (!o->numeric_owner && !o->index_only)
     {
         st->merged = merge_accounts(&c, path);
     }
-    if (o->kit ? !rs_image_open_kit(path, &s, err) : !rs_image_open_files(path, &s, err))
+    if (!o->index_only &&
+        (o->kit ? !rs_image_open_kit(path, &s, err)
+                : !rs_image_open_files_matching(path, o->include, o->ninclude, &s, err)))
     {
         (void)sigaction(SIGPIPE, &saved, NULL);
         rs_accounts_free(&c.accounts);
@@ -1285,24 +1323,41 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
         }
     }
     rs_progress_phase("restoring", total);
-    rs_tar_reader_init(&r, read_stream, &s);
-    rs_tar_entry_init(&m);
-    while ((more = rs_tar_next(&r, &m, err)) == 1)
+    if (o->index_only)
     {
-        if (!member(&c, &r, &m, err))
+        /* What the stream would hold, in the index's order, read from it. */
+        for (i = 0; i < ix->count; i++)
         {
-            more = -1;
-            break;
+            const struct rs_entry *e = &ix->entries[i];
+
+            if (e->stored && strcmp(e->path, "/") != 0 &&
+                (e->type == 'f' || e->type == 'd' || e->type == 'l' || e->type == 'p'))
+            {
+                (void)put_back(&c, NULL, e, e->type, err);
+            }
         }
+        more = 0;
+    } else
+    {
+        rs_tar_reader_init(&r, read_stream, &s);
+        rs_tar_entry_init(&m);
+        while ((more = rs_tar_next(&r, &m, err)) == 1)
+        {
+            if (!member(&c, &r, &m, err))
+            {
+                more = -1;
+                break;
+            }
+        }
+        rs_tar_entry_free(&m);
     }
-    rs_tar_entry_free(&m);
     rs_progress_done();
     ok = more == 0;
     if (!ok && err->len == 0)
     {
         rs_buf_addstr(err, "the image ends early");
     }
-    if (!rs_image_close_files(&s, !ok, err))
+    if (!o->index_only && !rs_image_close_files(&s, !ok, err))
     {
         ok = false;
     }

@@ -151,6 +151,9 @@ RS_OPT(OPT_CHECK_FIRST, "check-first", no_argument,     NULL,
 RS_OPT(OPT_DRY_RUN, "dry-run",        no_argument,       NULL,
        "restore: check the image and say what would be put back, writing nothing; "
        "prune: say which snapshots would be dropped, dropping none")
+RS_OPT(OPT_PLAN, "plan",              no_argument,       NULL,
+       "restore: say what would be put back from the index alone, writing nothing and "
+       "reading no file's content -- a dry run that checks nothing, in seconds")
 RS_OPT(OPT_READ_ALL, "read-all",     no_argument,       NULL,
        "check: read every snapshot in full as well, as restore would, each file checked "
        "against its index and nothing written: a test restore of every snapshot")

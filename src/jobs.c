@@ -85,6 +85,7 @@ enum key_id {
     KEY_EXCLUDE,
     KEY_DRY_RUN,
     KEY_CHECK_FIRST,
+    KEY_PLAN,
     KEY_TMPDIR,
     KEY_SYSLOG,
     KEY_RESULT,
@@ -129,6 +130,7 @@ static const struct key {
     [KEY_EXCLUDE] = { "exclude", K_PATTERN, true, J_RESTORE },
     [KEY_DRY_RUN] = { "dry_run", K_BOOL, false, J_RESTORE | J_PRUNE },
     [KEY_CHECK_FIRST] = { "check_first", K_BOOL, false, J_RESTORE },
+    [KEY_PLAN] = { "plan", K_BOOL, false, J_RESTORE },
     [KEY_TMPDIR] = { "tmpdir", K_PATH, false, J_CAPTURE },
     [KEY_SYSLOG] = { "syslog", K_BOOL, false, J_CAPTURE | J_PRUNE | J_CHECK | J_COPY },
     [KEY_RESULT] = { "result", K_PATH, false, J_ANY },
@@ -464,6 +466,11 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     case KEY_CHECK_FIRST:
         o->check_first = b;
         break;
+    case KEY_PLAN:
+        /* A plan is a dry run; "plan = false" leaves dry_run as it was. */
+        o->plan_only = b;
+        o->dry_run = o->dry_run || b;
+        break;
     case KEY_TMPDIR:
         o->tmpdir = v;
         break;
@@ -710,6 +717,7 @@ static bool only_reporting(const struct rs_options *o)
                 o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
                 o->keep_daily || o->keep_weekly || o->keep_monthly || o->exact_versions ||
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||
+                o->plan_only ||
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
                 o->as || o->clones || o->read_all || o->metadata_only || o->record ||
                 o->whole_packs || o->nquiesce_with || o->append_only || o->create || o->json ||

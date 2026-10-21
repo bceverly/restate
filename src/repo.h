@@ -229,6 +229,14 @@ struct rs_repo_stream;
 struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_index *ix,
                                            const char *const *only, size_t nonly,
                                            struct rs_buf *err);
+/* The same, with only the files `include`'s patterns cover (rs_glob_covers)
+ * read from the packs, and none when `ninclude` is 0 means every file; every
+ * directory, symlink and FIFO is in the stream whatever the patterns, so the
+ * ones above a file are there to be put back with it. */
+struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const struct rs_index *ix,
+                                                    const char *const *only, size_t nonly,
+                                                    const char *const *include,
+                                                    size_t ninclude, struct rs_buf *err);
 /* Up to `n` bytes of the stream: how many, 0 at its end, -1 on an error. */
 ssize_t rs_repo_stream_read(struct rs_repo_stream *s, void *buf, size_t n);
 /* True if every pack read was read cleanly. */

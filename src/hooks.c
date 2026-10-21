@@ -115,6 +115,41 @@ char *rs_hook_find(const char *kind)
     return NULL;
 }
 
+char *rs_hook_for_program(const char *program)
+{
+    const char *site = test_dirs ? test_dirs[0] : RS_HOOKS_SITE_DIR;
+    char       *path;
+    size_t      i;
+
+    /* A kind's name, or a shipped hook's, means that thing, not a program
+     * that happens to share it: the docker command is not dockerd. */
+    if (!plain(program) || rs_live_kind(program))
+    {
+        return NULL;
+    }
+    for (i = test_dirs ? 1 : 0; i < (test_dirs ? ntest_dirs : 1); i++)
+    {
+        char       *shipped = test_dirs ? rs_xstrdup(test_dirs[i]) : shipped_dir();
+        struct stat st;
+
+        path = rs_xasprintf("%s/%s", shipped, program);
+        free(shipped);
+        if (lstat(path, &st) == 0)
+        {
+            free(path);
+            return NULL;
+        }
+        free(path);
+    }
+    path = rs_xasprintf("%s/%s", site, program);
+    if (rs_hook_usable(path))
+    {
+        return path;
+    }
+    free(path);
+    return NULL;
+}
+
 static int by_name(const void *a, const void *b)
 {
     return strcmp(*(char *const *)a, *(char *const *)b);

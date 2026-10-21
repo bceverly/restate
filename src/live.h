@@ -50,6 +50,18 @@ void rs_live_detect(const char *proc, struct rs_live **out, size_t *n);
 
 void rs_live_free(struct rs_live *l, size_t n);
 
+/*
+ * The programs running under `proc` that none of the kinds above is, for the
+ * hooks named after them (hooks.h): one each, named for the file it runs (the
+ * name of /proc/PID/exe), and only where that file and its directory are
+ * root's and writable by no one else. Its kind is its name, and it has no
+ * paths; pid and uid are the lowest-numbered process running it. Sorted.
+ */
+void rs_live_programs(const char *proc, struct rs_live **out, size_t *n);
+
+/* Whether `name` is one of the kinds above. */
+bool rs_live_kind(const char *name);
+
 /* "PostgreSQL", "a QEMU VM", for messages. */
 const char *rs_live_what(const struct rs_live *l);
 

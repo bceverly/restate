@@ -487,6 +487,9 @@ Options:
       --dry-run           restore: check the image and say what would be put
                           back, writing nothing; prune: say which snapshots
                           would be dropped, dropping none
+      --plan              restore: say what would be put back from the index
+                          alone, writing nothing and reading no file's content
+                          -- a dry run that checks nothing, in seconds
       --read-all          check: read every snapshot in full as well, as
                           restore would, each file checked against its index
                           and nothing written: a test restore of every snapshot
@@ -621,6 +624,18 @@ sudo restate capture --quiesce --quiesce-with nextcloud -o /mnt/nas/restate/clou
 A Maildir needs neither: every message is its own file, written beside its
 name and renamed into place, so a copy taken while mail arrives misses at
 most what arrived meanwhile.
+
+**A hook for any program.** With `--quiesce`, a program running that is none
+of the kinds above, and has a hook of its own name in `/etc/restate/hooks.d`
+-- `/etc/restate/hooks.d/minio` for `/usr/local/bin/minio` -- is paused by it
+as one `--quiesce-with` names would be, without naming it: each machine's
+`hooks.d` decides, and the job is the same everywhere. The name is that of
+the file it runs (`/proc/PID/exe`), not the one it gives itself, which any
+user can choose; and that file and its directory have to be root's and
+writable by no one else, or any user could run a copy named for a hook to
+have root pause the real thing. Only `hooks.d` is looked in, never the hooks
+restate ships, and a kind's name or a shipped hook's is never taken for a
+program's: the `docker` command is not `dockerd`.
 
 ## Packages
 
@@ -884,6 +899,7 @@ instead.
 ```console
 $ sudo restate restore --dry-run web01.tar            # check it all, write nothing
 $ sudo restate restore --check-first web01.tar        # check it all, then put it back
+$ sudo restate restore --plan --include '/home/bob/**' /mnt/nas/restate/web01
 $ sudo restate restore --exclude /etc/fstab web01.tar
 $ sudo restate restore --root /target web01.tar       # from an installer
 ```
@@ -894,6 +910,14 @@ reads the whole image once before writing anything, checking every file, and
 refuses it -- exit status 2, nothing written -- if any file is not what the
 index says or is missing; then it reads it again to put it back. It costs a
 second read, so it is not the default.
+
+`--plan` says what a restore would put back from the index alone -- every
+path, how many files and how large -- reading no file's content and writing
+nothing, so it takes seconds however large the image is. It checks nothing,
+and its result says so (`"content_read": false`); `--dry-run` is the check.
+From a repository, `--include` reads only the packs that hold what it
+covers, for a restore and a dry run alike: one directory back from a large
+snapshot is as quick as that directory is small.
 
 **The packages too.** On a fresh install, `restore --packages` puts the old
 machine's packages back before its files, as root, onto the running system:
@@ -1302,8 +1326,9 @@ into `FILE` when the run ends, replaced whole:
 
 Every warning is collected, `--quiet` or not, every error -- so a run that
 failed says why in its result, not only on standard error -- and every path a
-walk could not read with why; prune, check, restore (its plan, in a dry run), copy, du,
-estimate and diff add what they did. `--json` writes the output itself as JSON
+walk could not read with why; prune, check, restore (its plan, in a dry run,
+and `"content_read": false` for a `--plan`), copy, du, estimate and diff add
+what they did. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate
 can do -- commands, options, job keys, schemas, the hooks here -- for a

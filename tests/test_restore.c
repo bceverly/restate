@@ -603,6 +603,73 @@ void test_restore(void)
         free(root);
     }
 
+    TEST_CASE("restore: a plan, from the index alone, says what a dry run does");
+    {
+        static const char *const in[] = { "/etc/app" };
+        char                    *root = at(dir, "planned");
+        char                    *gone = at(dir, "no-such-image.tar");
+        struct rs_restore_stats  dry;
+        struct rs_entry         *key = (struct rs_entry *)rs_index_find(&ix, "/etc/app/key");
+
+        CHECK(mkdir(root, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        r.o.include = in;
+        r.o.ninclude = 1;
+        r.o.dry_run = true;
+        restore_into(&r, img, &ix, root, &out, &errs);
+        CHECK(r.ok);
+        dry = r.st;
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        /* The image is not even opened: there is none. */
+        memset(&r, 0, sizeof(r));
+        r.o.include = in;
+        r.o.ninclude = 1;
+        r.o.dry_run = true;
+        r.o.index_only = true;
+        restore_into(&r, gone, &ix, root, &out, &errs);
+        CHECK(r.ok);
+        CHECK(dry.files > 0);
+        CHECK_INT(r.st.files, dry.files);
+        CHECK_INT(r.st.bytes, dry.bytes);
+        CHECK_INT(r.st.planned, dry.planned);
+        /* And /home/u/ghost, which the index has and the image does not:
+         * what only reading the image finds, a plan cannot know. */
+        CHECK_INT(r.st.excluded, dry.excluded + 1);
+        CHECK_INT(r.st.missing, 0);
+        CHECK(!r.st.merged);
+        CHECK_CONTAINS(out ? out : "", "would restore /etc/app/key");
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        /* A file the capture could not read is not planned. */
+        CHECK(key != NULL);
+        if (key)
+        {
+            key->hash_state = RS_HASH_UNREADABLE;
+            memset(&r, 0, sizeof(r));
+            r.o.include = in;
+            r.o.ninclude = 1;
+            r.o.dry_run = true;
+            r.o.index_only = true;
+            restore_into(&r, gone, &ix, root, &out, &errs);
+            CHECK(r.ok);
+            CHECK_INT(r.st.refused, 1);
+            CHECK_INT(r.st.files, dry.files - 1);
+            CHECK_CONTAINS(errs ? errs : "", "could not be read when it was captured");
+            key->hash_state = RS_HASH_PRESENT;
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+        }
+        p = at(root, "etc");
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        free(gone);
+        free(root);
+    }
+
     TEST_CASE("restore: owners by name, through merged accounts");
     {
         char            *atree = at(dir, "atree");

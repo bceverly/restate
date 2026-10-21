@@ -1434,6 +1434,19 @@ expect 0 "restore --include --dry-run --result" -- \
 contains "$(cat rs.json)" '"plan": [' "the result holds the plan"
 contains "$(cat rs.json)" "/etc/one" "of what is included"
 lacks "$OUT" "/srv/data/two" "and nothing else"
+contains "$(cat rs.json)" '"content_read": true' "having read what it says it would put back"
+cp -R prepo pnopacks
+rm -f pnopacks/packs/*
+expect 0 "restore --plan, with no pack to read" -- \
+  "$BIN" restore --allow-unverified --plan --include /etc --root pout --result rp.json pnopacks
+contains "$(cat rp.json)" '"content_read": false' "the result says nothing was read"
+contains "$(cat rp.json)" '"dry_run": true' "and that nothing was written"
+contains "$(cat rp.json)" "/etc/one" "the plan is the dry run's"
+contains "$ERR" "planned from the index alone" "and says so"
+check "writes nothing" test -z "$(ls -A pout)"
+expect 2 "restore --plan --check-first" -- \
+  "$BIN" restore --allow-unverified --plan --check-first --root pout prepo
+contains "$ERR" "give --dry-run instead" "is refused"
 
 if command -v python3 > /dev/null 2>&1; then
   # A TERM that came before it started, held over the exec, so that the

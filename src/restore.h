@@ -58,6 +58,8 @@ struct rs_restore_opts {
     const char *const *exclude;    /* patterns (as rules use them) left out */
     size_t             nexclude;
     bool               dry_run;    /* check everything, write nothing */
+    bool               index_only; /* and, dry, read nothing but the index: what
+                                    * would be put back, no content checked */
     bool               quiet;      /* and, dry, not say what would be put back */
     bool               verbose;    /* name everything put back */
     bool               numeric_owner; /* the index's numbers, not names */
