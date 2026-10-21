@@ -487,6 +487,83 @@ void test_scan(void)
         free(deep);
     }
 
+    TEST_CASE("scan: through a directory left out, to what a later rule keeps below it");
+    {
+        char           *tree = rs_test_tmpdir();
+        struct rs_rules through;
+        const char     *text = "ephemeral /**\n"
+                               "expendable /home/*/Downloads\n"
+                               "state /home/*/Downloads/contracts\n"
+                               "state /home/*/Notes/**/keep\n"
+                               "state stray\n";
+
+        {
+            static const char *const dirs[] = { "home", "home/bob", "home/bob/Downloads",
+                                                "home/bob/Downloads/contracts",
+                                                "home/bob/Notes", "home/bob/Notes/a",
+                                                "home/bob/Notes/a/b", "home/bob/stray",
+                                                "proc", "proc/1" };
+            size_t                   k;
+
+            for (k = 0; k < sizeof(dirs) / sizeof(dirs[0]); k++)
+            {
+                char *d = rs_xasprintf("%s/%s", tree, dirs[k]);
+
+                CHECK(mkdir(d, 0755) == 0);
+                free(d);
+            }
+        }
+        rs_test_write(tree, "home/bob/Downloads/contracts/c.pdf", "c", 0644);
+        rs_test_write(tree, "home/bob/Downloads/junk.iso", "j", 0644);
+        rs_test_write(tree, "home/bob/Downloads/contracts.txt", "t", 0644);
+        rs_test_write(tree, "home/bob/Notes/a/b/keep", "k", 0644);
+        rs_test_write(tree, "home/bob/stray/x", "s", 0644);
+        rs_test_write(tree, "proc/1/stray", "p", 0644);
+        rs_rules_init(&through);
+        CHECK(rs_rules_parse(&through, text, strlen(text), "t", &err));
+        o.root = tree;
+        o.rules = &through;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        /* The way there, recorded as what it is, and what is kept. */
+        e = rs_index_find(&m, "/home/bob/Downloads");
+        CHECK(e && e->type == 'd' && e->cls == RS_CLASS_EXPENDABLE);
+        e = rs_index_find(&m, "/home");
+        CHECK(e && e->cls == RS_CLASS_EPHEMERAL);
+        e = rs_index_find(&m, "/home/bob/Downloads/contracts/c.pdf");
+        CHECK(e && e->cls == RS_CLASS_STATE && e->hash_state == RS_HASH_PRESENT);
+        CHECK(rs_index_find(&m, "/home/bob/Notes/a/b/keep") != NULL);
+        /* What a rule at any depth keeps, met on the way, is kept. */
+        CHECK(rs_index_find(&m, "/home/bob/stray/x") != NULL);
+        /* Nothing else: not the rest of it, not a file named like the way,
+         * and not what only a rule at any depth would keep. */
+        CHECK(rs_index_find(&m, "/home/bob/Downloads/junk.iso") == NULL);
+        CHECK(rs_index_find(&m, "/home/bob/Downloads/contracts.txt") == NULL);
+        CHECK(rs_index_find(&m, "/proc") == NULL);
+        CHECK_INT(st.by_class[RS_CLASS_STATE], 5);
+        rs_index_free(&m);
+
+        /* A kept path reached the same way, ahead of the walk. */
+        {
+            const char *keep[] = { "/home/bob/Downloads/contracts/c.pdf" };
+
+            o.keep = keep;
+            o.nkeep = 1;
+            o.count_only = true;
+            rs_index_init(&m);
+            CHECK(rs_scan(&o, &m, &st, &err));
+            CHECK(st.bytes_hashed >= 2);
+            rs_index_free(&m);
+            o.count_only = false;
+            o.keep = NULL;
+            o.nkeep = 0;
+        }
+        o.rules = &rules;
+        rs_rules_free(&through);
+        rs_test_rmtree(tree);
+        free(tree);
+    }
+
     TEST_CASE("scan: a root that is not there, or not a directory");
     {
         char *file = rs_xasprintf("%s/etc/hosts", root);

@@ -693,6 +693,13 @@ bool rs_rules_parse(struct rs_rules *rs, const char *text, size_t len,
             char *pattern = rs_xstrndup(text + pat_start, end - pat_start);
             char *source = rs_xasprintf("%s:%zu", name, lineno);
 
+            /* Deliberately so (see rs_glob_covers), but not what it looks like. */
+            if (strcmp(pattern, "/") == 0)
+            {
+                rs_warn("%s: \"%s /\" names the root directory alone, not what is in it; "
+                        "\"%s /**\" is everything", source, rs_class_name(cls),
+                        rs_class_name(cls));
+            }
             rs_rules_add(rs, cls, pattern, source, NULL);
             free(pattern);
             free(source);
@@ -784,6 +791,23 @@ enum rs_class rs_rules_classify(const struct rs_rules *rs, const char *path,
         *which = -1;
     }
     return RS_CLASS_STATE;
+}
+
+bool rs_rules_below(const struct rs_rules *rs, const char *dir, long which, bool all)
+{
+    size_t i;
+
+    for (i = which < 0 ? 0 : (size_t)which + 1; i < rs->count; i++)
+    {
+        enum rs_class cls = rs->rules[i].cls;
+
+        if (cls != RS_CLASS_EPHEMERAL && (cls != RS_CLASS_EXPENDABLE || all) &&
+            rs_glob_below(rs->rules[i].pattern, dir))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* The part of a source that names the file: "rules.conf:12" -> "rules.conf". */

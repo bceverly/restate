@@ -130,15 +130,24 @@ static void add_closure(const struct nfa *n, unsigned char *live, size_t start)
 /* Patterns this long or shorter are matched without allocating. */
 #define SMALL_PATTERN 256
 
+/* What run asks of a path. */
+enum ask {
+    WHOLE,      /* the pattern matches the whole of it */
+    ANCESTORS,  /* or any ancestor */
+    PREFIX      /* it is the start of something the pattern matches */
+};
+
 /*
  * Runs the automaton for `pattern` over `path`: true if it matches the whole
- * of `path` or, with `ancestors`, any ancestor of it -- the path up to any
- * '/' after the first character, "/" itself excepted. An ancestor is a prefix
+ * of `path` or, for ANCESTORS, any ancestor of it -- the path up to any '/'
+ * after the first character, "/" itself excepted. An ancestor is a prefix
  * the automaton has read when it reaches that '/', so one pass answers for
- * all of them.
+ * all of them. For PREFIX, true if the automaton is still alive at the end of
+ * `path` short of the end of the pattern: something longer would match.
  */
-static bool run(const char *pattern, const char *path, bool ancestors)
+static bool run(const char *pattern, const char *path, enum ask ask)
 {
+    bool           ancestors = ask == ANCESTORS;
     unsigned char  small[4][SMALL_PATTERN + 4];
     size_t         small_work[SMALL_PATTERN + 4];
     char           small_p[SMALL_PATTERN + 4];
@@ -270,7 +279,15 @@ static bool run(const char *pattern, const char *path, bool ancestors)
         }
     }
 
-    if (!matched)
+    if (!matched && ask == PREFIX)
+    {
+        size_t i;
+
+        for (i = 0; path[s] == '\0' && i < n.plen && !matched; i++)
+        {
+            matched = n.live[i] || n.mid[i];
+        }
+    } else if (!matched)
     {
         matched = path[s] == '\0' && n.live[n.plen];
     }
@@ -355,7 +372,7 @@ bool rs_glob_match(const char *pattern, const char *path)
             return false;
         }
     }
-    return holds_literal(pattern, path) && run(pattern, path, false);
+    return holds_literal(pattern, path) && run(pattern, path, WHOLE);
 }
 
 bool rs_glob_covers(const char *pattern, const char *path)
@@ -381,5 +398,32 @@ bool rs_glob_covers(const char *pattern, const char *path)
             return path[lit] == '\0' || path[lit] == '/';
         }
     }
-    return holds_literal(pattern, path) && run(pattern, path, path[0] != '\0');
+    return holds_literal(pattern, path) && run(pattern, path, path[0] != '\0' ? ANCESTORS : WHOLE);
+}
+
+bool rs_glob_below(const char *pattern, const char *dir)
+{
+    size_t first;
+    size_t i;
+    char  *prefix;
+    bool   below;
+
+    if (pattern[0] != '/' || dir[0] != '/')
+    {
+        return false;
+    }
+    /* Not one that starts anywhere: through it, a walk would go into every
+     * directory left out, /proc and /sys among them. */
+    first = strcspn(pattern + 1, "/");
+    for (i = 1; i < first; i++)
+    {
+        if (pattern[i] == '*' && pattern[i + 1] == '*')
+        {
+            return false;
+        }
+    }
+    prefix = rs_xasprintf("%s/", dir[1] == '\0' ? "" : dir);
+    below = run(pattern, prefix, PREFIX);
+    free(prefix);
+    return below;
 }

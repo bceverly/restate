@@ -688,6 +688,27 @@ static void fuzz_rules(const char *text, size_t len)
     rs_buf_free(&err);
 }
 
+/* Whether rs_glob_below may say yes for `pattern`: anchored, no escapes to
+ * hide a '/', and no "**" in its first component. */
+static bool reaches(const char *pattern)
+{
+    size_t first = strcspn(pattern + (pattern[0] != '\0'), "/");
+    size_t i;
+
+    if (pattern[0] != '/' || strchr(pattern, '\\'))
+    {
+        return false;
+    }
+    for (i = 1; i < first; i++)
+    {
+        if (pattern[i] == '*' && pattern[i + 1] == '*')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void fuzz_glob(const char *text, size_t len)
 {
     const char *nul = memchr(text, '\0', len);
@@ -724,6 +745,29 @@ static void fuzz_glob(const char *text, size_t len)
         if (covered != (matched || ancestor))
         {
             abort();
+        }
+        if (matched && rs_path_is_clean(path) && strcmp(path, "/") != 0 && reaches(pattern))
+        {
+            /* A walk goes into each directory on the way to whatever such a
+             * pattern matches: nothing it matches is out of its reach. */
+            char *dir = rs_xstrdup(path);
+            char *slash;
+
+            while ((slash = strrchr(dir, '/')) != NULL)
+            {
+                bool top = slash == dir;
+
+                slash[top ? 1 : 0] = '\0';
+                if (!rs_glob_below(pattern, dir))
+                {
+                    abort();
+                }
+                if (top)
+                {
+                    break;
+                }
+            }
+            free(dir);
         }
     }
     free(pattern);

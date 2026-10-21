@@ -72,6 +72,7 @@ fresh=0
   seed glob-anydirs 2 '/var/**/x\0/var/a/b/x'
   seed glob-unanchored 2 '*.pid\0/run/sshd.pid'
   seed glob-stars 2 '/*a*a*a*b\0/aaaaaaaaaaaaaaaaaaaa'
+  seed glob-below 2 '/home/*/Downloads/c\0/home/bob/Downloads/c'
   seed time-iso 4 '2026-10-03T14:05:09.123456789Z'
   seed time-epoch 4 '@-62167219201.000000000'
   seed base64 5 'L2V0Yy9h/w=='

@@ -59,6 +59,29 @@ void test_glob(void)
     CHECK(!rs_glob_covers("/x", ""));          /* found by the fuzzer */
     CHECK(rs_glob_covers("", ""));
 
+    TEST_CASE("glob: below a directory, reached through it by name");
+    CHECK(rs_glob_below("/var/lib/docker/volumes", "/var/lib/docker"));
+    CHECK(rs_glob_below("/home/*/Downloads/contracts", "/home/bob/Downloads"));
+    CHECK(rs_glob_below("/home/*/Downloads/contracts", "/home"));
+    CHECK(rs_glob_below("/home/*/Downloads/*.pdf", "/home/bob/Downloads"));
+    CHECK(rs_glob_below("/var/lib/docker/**/data", "/var/lib/docker"));
+    CHECK(rs_glob_below("/a", "/"));
+    CHECK(!rs_glob_below("/**", "/"));
+    /* Not below: the directory itself, beside it, or above it. */
+    CHECK(!rs_glob_below("/var/lib/docker", "/var/lib/docker"));
+    CHECK(!rs_glob_below("/var/lib/docker2/x", "/var/lib/docker"));
+    CHECK(!rs_glob_below("/var/lib", "/var/lib/docker"));
+    CHECK(!rs_glob_below("/home/*", "/home/bob"));
+    CHECK(!rs_glob_below("/home/a*b/x", "/home/bob"));
+    CHECK(rs_glob_below("/var/**/data", "/var/cache/x"));
+    CHECK(rs_glob_below("/home/*/Notes/**/keep", "/home/bob/Notes/a"));
+    /* A "**" first, or no anchor, is not a way in: it would be one into
+     * every directory left out. */
+    CHECK(!rs_glob_below("/**/data", "/proc"));
+    CHECK(!rs_glob_below("/x**/data", "/xa"));
+    CHECK(!rs_glob_below("data", "/proc"));
+    CHECK(!rs_glob_below("/x", "relative"));
+
     TEST_CASE("glob: no pathological patterns");
     {
         /* Exponential for a backtracking matcher; linear here. Timed loosely:

@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -18,6 +19,21 @@ static bool parse(struct rs_rules *rs, const char *text, struct rs_buf *err)
 static enum rs_class classify(const struct rs_rules *rs, const char *path)
 {
     return rs_rules_classify(rs, path, NULL);
+}
+
+/* Parses "ephemeral /" into the rules `arg`; 1 if it did. */
+static int parse_slash(const void *arg)
+{
+    struct rs_rules *rs = (struct rs_rules *)(uintptr_t)arg;
+    struct rs_buf    err;
+    bool             ok;
+
+    rs_rules_free(rs);
+    rs_rules_init(rs);
+    rs_buf_init(&err);
+    ok = rs_rules_parse(rs, "ephemeral /\n", strlen("ephemeral /\n"), "t.rules", &err);
+    rs_buf_free(&err);
+    return ok ? 1 : 0;
 }
 
 void test_rules(void)
@@ -76,6 +92,7 @@ void test_rules(void)
     CHECK_INT(classify(&rs, "/var/lib/app/server.pid"), RS_CLASS_EPHEMERAL);
     CHECK_INT(classify(&rs, "/home/u/documents"), RS_CLASS_STATE);
     cls = rs_rules_classify(&rs, "/usr/local/x", &which);
+    CHECK_INT(cls, RS_CLASS_STATE);
     CHECK(which >= 0);
     CHECK_STR(rs.rules[which].pattern, "/usr/local");
     CHECK_STR(rs.rules[which].source, "built-in (linux)");
@@ -139,6 +156,39 @@ void test_rules(void)
     /* No trailing newline on the last line. */
     CHECK(parse(&rs, "state /last", &err));
     CHECK_STR(rs.rules[rs.count - 1].pattern, "/last");
+
+    TEST_CASE("rules: a directory left out, and a later rule that keeps something below it");
+    rs_rules_free(&rs);
+    rs_rules_init(&rs);
+    CHECK(parse(&rs, "expendable /home/*/Downloads\n"
+                     "ephemeral /proc\n"
+                     "state /home/*/Downloads/contracts\n"
+                     "ephemeral /home/*/Downloads/contracts/tmp\n"
+                     "expendable /var/cache/keep\n"
+                     "state data\n", &err));
+    cls = rs_rules_classify(&rs, "/home/bob/Downloads", &which);
+    CHECK_INT(cls, RS_CLASS_EXPENDABLE);
+    CHECK(rs_rules_below(&rs, "/home/bob/Downloads", which, false));
+    /* Only a rule after the one that left it out. */
+    CHECK(!rs_rules_below(&rs, "/home/bob/Downloads", 2, false));
+    CHECK(!rs_rules_below(&rs, "/proc", 1, false));
+    /* An expendable rule brings nothing back without --all. */
+    CHECK(!rs_rules_below(&rs, "/var/cache", -1, false));
+    CHECK(rs_rules_below(&rs, "/var/cache", -1, true));
+
+    TEST_CASE("rules: \"/\" alone is the root directory, and says so");
+    {
+        char *out = NULL;
+        char *errs = NULL;
+
+        CHECK_INT(rs_test_capture(parse_slash, &rs, &out, &errs), 1);
+        CHECK_CONTAINS(errs, "t.rules:1: \"ephemeral /\" names the root directory alone");
+        CHECK_CONTAINS(errs, "\"ephemeral /**\" is everything");
+        free(out);
+        free(errs);
+    }
+    CHECK_INT(classify(&rs, "/"), RS_CLASS_EPHEMERAL);
+    CHECK_INT(classify(&rs, "/etc"), RS_CLASS_STATE);
 
     TEST_CASE("rules: what a bad rules file is told");
     CHECK(!parse(&rs, "keep /x\n", &err));

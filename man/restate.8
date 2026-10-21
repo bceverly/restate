@@ -367,9 +367,30 @@ rule that covers a path decides its class, as in
 so a site rules file given with
 .B \-\-rules
 overrides any built-in rule. A rule covers the path it names and everything
-beneath it. Because an ephemeral or expendable directory is not descended
-into, no later rule can rescue something inside one; classify the directory as
-state and its unwanted children as expendable instead.
+beneath it \- except a rule for
+.B /
+alone, which covers only the root directory itself (restate warns of it);
+.B /**
+covers everything. The walk does not go into an ephemeral or expendable
+directory, except on the way to what a later rule keeps below it: with
+.RS
+.nf
+ephemeral  /**
+state      /srv/app/data
+.fi
+.RE
+.PP
+it records
+.I /srv
+and
+.I /srv/app
+as the way there, each as the class its rules give it, and
+.I /srv/app/data
+with everything in it, and nothing else. Only a rule that starts with
+.B /
+leads the walk in, and not one whose first component holds
+.BR ** :
+one that could start anywhere would take it into every directory left out.
 .PP
 In a pattern,
 .B *

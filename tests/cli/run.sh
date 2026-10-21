@@ -533,6 +533,15 @@ lacks "$OUT" '"sha256": "' "--no-hash writes no digests"
 expect 0 "scan -v" -- "$BIN" scan -r tree --os=linux -v
 contains "$ERR" "skipped /tmp (ephemeral)" "--verbose names skipped paths"
 
+printf 'ephemeral /**\nstate /var/cache/apt\n' > only.rules
+expect 0 "scan with rules that keep one directory and nothing else" -- \
+  "$BIN" scan -r tree --os=linux -N -R only.rules -q
+contains "$OUT" "/var/cache/apt/pkg.deb" "the walk goes through what is left out to what is kept"
+lacks "$OUT" '"path": "/etc' "and records nothing beside it"
+printf 'ephemeral /\n' > slash.rules
+expect 0 "classify with a rule for / alone" -- "$BIN" classify -N -R slash.rules /etc
+contains "$ERR" '"ephemeral /" names the root directory alone' "is warned of"
+
 expect 0 "scan -o" -- "$BIN" scan -r tree --os=linux -o m1.json -q
 check "scan -o writes the file" test -f m1.json
 check "the index is mode 600, not $(file_mode m1.json)" test "$(file_mode m1.json)" = "600"

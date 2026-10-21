@@ -37,4 +37,12 @@ bool rs_glob_match(const char *pattern, const char *path);
  */
 bool rs_glob_covers(const char *pattern, const char *path);
 
+/*
+ * true if `pattern` could match a path below the directory `dir`: an
+ * anchored pattern whose first component holds no "**". So a pattern for
+ * each home's Downloads/x is below "/home/bob/Downloads", but one that
+ * starts with "**", or has no leading '/', is below nothing.
+ */
+bool rs_glob_below(const char *pattern, const char *dir);
+
 #endif /* RESTATE_GLOB_H */

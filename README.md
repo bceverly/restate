@@ -1452,7 +1452,13 @@ with `--all`), **baseline** (recorded with digests, not kept), **state**
 and left out by [`restore --as`](#copies)).
 
 A rules file is `CLASS PATTERN` per line; the **last** matching rule wins, as
-in `.gitignore`, and a rule covers the path it names and everything below it.
+in `.gitignore`, and a rule covers the path it names and everything below it,
+except a rule for `/` alone, which covers only the root directory itself
+(restate warns of it): `/**` covers everything. The walk does not go into an
+ephemeral or expendable directory except on the way to what a later rule
+keeps below it, so `ephemeral /**` and then `state /srv/app/data` records
+just that directory, and the directories on the way to it. A rule with no
+leading `/`, or with `**` in its first component, never leads the walk in.
 `*` matches within one component, `**` across components, `**/` zero or more
 whole directories, and a pattern with no leading `/` matches at any depth.
 

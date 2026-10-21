@@ -99,6 +99,15 @@ bool rs_rules_load_file(struct rs_rules *rs, const char *path, struct rs_buf *er
 enum rs_class rs_rules_classify(const struct rs_rules *rs, const char *path,
                                 long *which);
 
+/*
+ * Whether a rule after rule `which` -- the one that left the directory `dir`
+ * out -- records something below it: one whose class is recorded (expendable
+ * only with `all`) and whose pattern names, through `dir`, a path below it
+ * (rs_glob_below). A walk goes through such a directory to reach it, though
+ * it leaves the rest out.
+ */
+bool rs_rules_below(const struct rs_rules *rs, const char *dir, long which, bool all);
+
 /* Writes the rules as a rules file, which `restate -N -R FILE` reads back. */
 void rs_rules_write(const struct rs_rules *rs, FILE *out);
 

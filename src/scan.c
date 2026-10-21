@@ -830,6 +830,23 @@ static bool reuse(struct walk *w, struct rs_entry *e, const struct rs_entry *was
 static void walk_dir(struct walk *w, int dirfd, const char *tree_path, unsigned depth);
 
 /*
+ * Whether the walk records `path`, of class `cls` by rule `which`: unless it
+ * is ephemeral or, without --all, expendable -- or a directory a later rule
+ * keeps something below, which is recorded, its class and all, as the way
+ * to it, the rest of it left out as before.
+ */
+static bool entered(const struct walk *w, enum rs_class cls, const char *path, long which,
+                    const struct stat *st)
+{
+    if (cls != RS_CLASS_EPHEMERAL && (cls != RS_CLASS_EXPENDABLE || w->opts->all))
+    {
+        return true;
+    }
+    return (st == NULL || S_ISDIR(st->st_mode)) &&
+           rs_rules_below(w->opts->rules, path, which, w->opts->all);
+}
+
+/*
  * visit and walk_dir recurse into each other once per directory level. The
  * recursion is bounded: past max_depth a directory is recorded but not
  * entered, and counted as unreadable so the scan exits "incomplete" rather
@@ -843,6 +860,7 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     struct stat     st;
     struct rs_entry e;
     enum rs_class   cls;
+    long            which = -1;
     char            type;
 
     if (deferred(w, tree_path))
@@ -854,17 +872,17 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         unreadable(w, tree_path, errno);
         return;
     }
-    cls = w->forced ? RS_CLASS_STATE : rs_rules_classify(w->opts->rules, tree_path, NULL);
-    if (cls == RS_CLASS_EPHEMERAL)
+    cls = w->forced ? RS_CLASS_STATE : rs_rules_classify(w->opts->rules, tree_path, &which);
+    if (!entered(w, cls, tree_path, which, &st))
     {
-        w->stats->skipped_ephemeral++;
-        verbose_skip(w, tree_path, "ephemeral");
-        return;
-    }
-    if (cls == RS_CLASS_EXPENDABLE && !w->opts->all)
-    {
-        w->stats->skipped_expendable++;
-        verbose_skip(w, tree_path, "expendable");
+        if (cls == RS_CLASS_EPHEMERAL)
+        {
+            w->stats->skipped_ephemeral++;
+        } else
+        {
+            w->stats->skipped_expendable++;
+        }
+        verbose_skip(w, tree_path, rs_class_name(cls));
         return;
     }
     type = type_of(st.st_mode);
@@ -1039,10 +1057,12 @@ static bool recorded(const struct rs_index *ix, const char *path)
 static bool reachable(const struct walk *w, const char *path, size_t len)
 {
     char         *dir = rs_xstrndup(path, len);
-    enum rs_class cls = rs_rules_classify(w->opts->rules, dir, NULL);
+    long          which = -1;
+    enum rs_class cls = rs_rules_classify(w->opts->rules, dir, &which);
+    bool          in = entered(w, cls, dir, which, NULL);
 
     free(dir);
-    return cls != RS_CLASS_EPHEMERAL && (cls != RS_CLASS_EXPENDABLE || w->opts->all);
+    return in;
 }
 
 /*
