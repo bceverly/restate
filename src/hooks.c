@@ -210,7 +210,7 @@ char **rs_hooks_list(size_t *n)
         list_hooks(shipped, &names, n);
         free(shipped);
     }
-    if (*n > 1)
+    if (names && *n > 1)
     {
         qsort(names, *n, sizeof(*names), by_name);
     }
