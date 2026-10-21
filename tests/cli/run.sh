@@ -1426,6 +1426,21 @@ contains "$(cat rs.json)" '"plan": [' "the result holds the plan"
 contains "$(cat rs.json)" "/etc/one" "of what is included"
 lacks "$OUT" "/srv/data/two" "and nothing else"
 
+if command -v python3 > /dev/null 2>&1; then
+  # A TERM that came before it started, held over the exec, so that the
+  # prune stops at its first chance rather than at a moment raced for.
+  expect 3 "prune stopped by SIGTERM" -- python3 -c 'import os, signal, sys
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+os.kill(os.getpid(), signal.SIGTERM)
+os.execv(sys.argv[1], sys.argv[1:])' \
+    "$BIN" prune --whole-packs --keep-last 1 --record prec --result pt.json prepo
+  contains "$ERR" "prune: stopped by SIGTERM" "says why"
+  contains "$(cat pt.json)" '"status": "incomplete"' "the result says it did not finish"
+  contains "$(cat pt.json)" '"errors": ["prune: stopped by SIGTERM' "and why"
+  expect 0 "check --record after the stopped prune" -- \
+    "$BIN" check --metadata-only --record prec prepo
+  contains "$ERR" "0 files removed or changed since the last check" "its record follows it"
+fi
 expect 0 "prune --whole-packs" -- \
   "$BIN" prune --whole-packs --keep-last 1 --record prec --result pr.json prepo
 contains "$(cat pr.json)" '"pruned": [' "the result says what it dropped"

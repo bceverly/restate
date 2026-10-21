@@ -2,6 +2,8 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -9,6 +11,7 @@
 #include "cmd.h"
 #include "image.h"
 #include "index.h"
+#include "repo.h"
 #include "test.h"
 
 static int run(const void *arg)
@@ -26,6 +29,26 @@ static int run_cmd(const struct rs_options *o)
     free(out_text);
     free(err_text);
     return rs_test_capture(run, o, &out_text, &err_text);
+}
+
+/* The text of `path`, to free; "" if it cannot be read. */
+static char *text_of(const char *path)
+{
+    FILE         *fp = fopen(path, "r");
+    struct rs_buf b;
+    char          chunk[4096];
+    size_t        n;
+
+    rs_buf_init(&b);
+    while (fp && (n = fread(chunk, 1, sizeof(chunk), fp)) > 0)
+    {
+        rs_buf_add(&b, chunk, n);
+    }
+    if (fp)
+    {
+        (void)fclose(fp);
+    }
+    return b.data ? b.data : rs_xstrdup("");
 }
 
 static void run_done(void)
@@ -397,6 +420,60 @@ void test_cmd(void)
         free(img2);
         free(into);
         free(cache);
+    }
+
+    TEST_CASE("cmd: a prune a signal stops says so, in its result too, and its record follows");
+    {
+        char         *repo = rs_xasprintf("%s/repo", work);
+        char         *result = rs_xasprintf("%s/prune.json", work);
+        char         *record = rs_xasprintf("%s/prune.record", work);
+        char         *text;
+        struct rs_buf err;
+        sigset_t      term;
+        sigset_t      was;
+        int           sig = 0;
+
+        rs_buf_init(&err);
+        CHECK(rs_repo_init(repo, false, &err));
+        rs_buf_free(&err);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CAPTURE;
+        o.root = root;
+        o.os = "linux";
+        o.output = repo;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_PRUNE;
+        args[0] = repo;
+        o.args = args;
+        o.nargs = 1;
+        o.keep_last = 1;
+        o.record = record;
+        o.result = result;
+        /* A TERM that came already, held here so that it ends only the
+         * prune's run and not the tests: the prune stops at its first chance. */
+        (void)sigemptyset(&term);
+        (void)sigaddset(&term, SIGTERM);
+        (void)sigprocmask(SIG_BLOCK, &term, &was);
+        (void)kill(getpid(), SIGTERM);
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_INCOMPLETE);
+        CHECK(sigwait(&term, &sig) == 0 && sig == SIGTERM);
+        (void)sigprocmask(SIG_SETMASK, &was, NULL);
+        CHECK_CONTAINS(err_text, "prune: stopped by SIGTERM");
+        text = text_of(result);
+        CHECK_CONTAINS(text, "\"status\": \"incomplete\"");
+        CHECK_CONTAINS(text, "\"errors\": [\"prune: stopped by SIGTERM");
+        free(text);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CHECK;
+        o.args = args;
+        o.nargs = 1;
+        o.metadata_only = true;
+        o.record = record;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        free(repo);
+        free(result);
+        free(record);
     }
 
     TEST_CASE("cmd: no command is trouble");

@@ -858,6 +858,7 @@ struct rs_repo {
     size_t             nchunks;
     size_t             unreadable; /* packs whose .idx could not be read */
     bool               loaded;
+    bool             (*stop)(void); /* see rs_repo_set_stop */
     /* An encrypted repository's chunk boundaries follow a key of its own
      * (see chunk_key); NULL for the fixed table everyone shares. */
     uint64_t          *gear;
@@ -1616,6 +1617,17 @@ void rs_repo_set_recipients(struct rs_repo *r, const char *const *recips, size_t
 {
     r->recips = recips;
     r->nrecips = n;
+}
+
+void rs_repo_set_stop(struct rs_repo *r, bool (*stop)(void))
+{
+    r->stop = stop;
+}
+
+/* Whether a prune has been asked to stop where it is. */
+static bool stopping(const struct rs_repo *r)
+{
+    return r->stop && r->stop();
 }
 
 /* The keys what is written now is encrypted to: none for a repository that
@@ -4767,7 +4779,7 @@ static void clear_leftovers(const struct rs_repo *r)
  * into `lists` -- each with pack 0, for the first copy found to take.
  */
 static bool live_content(struct rs_repo *r, char *const *names, size_t n, struct objmap *chunks,
-                         struct objmap *lists, struct rs_buf *err)
+                         struct objmap *lists, bool *stopped, struct rs_buf *err)
 {
     size_t i;
 
@@ -4785,6 +4797,11 @@ static bool live_content(struct rs_repo *r, char *const *names, size_t n, struct
         struct rs_index ix;
         size_t          k;
 
+        if (stopping(r))
+        {
+            *stopped = true;
+            return true;
+        }
         rs_index_init(&ix);
         if (!rs_repo_load_index_cached(r, names[i], &ix, err))
         {
@@ -4906,6 +4923,35 @@ static bool first_live(const struct objmap *live, const char *hash)
     return true;
 }
 
+/* Drops the snapshots out->dropped names, in turn, until asked to stop:
+ * then out->dropped keeps only those that went. */
+static void drop_snapshots(struct rs_repo *r, struct rs_repo_pruned *out)
+{
+    size_t i;
+
+    for (i = 0; i < out->ndropped; i++)
+    {
+        char *dir;
+
+        if (stopping(r))
+        {
+            while (out->ndropped > i)
+            {
+                free(out->dropped[--out->ndropped]);
+            }
+            out->stopped = true;
+            break;
+        }
+        dir = rs_xasprintf("%s/snapshots/%s", r->dir, out->dropped[i]);
+        if (!remove_snapshot_dir(dir))
+        {
+            rs_warn("%s: %s; left as it is", dir, strerror(errno));
+        }
+        free(dir);
+    }
+    sync_dir(r->dir);
+}
+
 bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
                    struct rs_repo_pruned *out, struct rs_buf *err)
 {
@@ -4942,21 +4988,11 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         rs_repo_free_names(names, n);
         return true;
     }
-    for (i = 0; i < out->ndropped; i++)
-    {
-        char *dir = rs_xasprintf("%s/snapshots/%s", r->dir, out->dropped[i]);
-
-        if (!remove_snapshot_dir(dir))
-        {
-            rs_warn("%s: %s; left as it is", dir, strerror(errno));
-        }
-        free(dir);
-    }
-    sync_dir(r->dir);
+    drop_snapshots(r, out);
     /* Content is removed only once every snapshot left has been read: one
      * that cannot be read might be the only thing that needs some of it. */
-    ok = live_content(r, left, nleft, &live, &live_lists, err);
-    for (i = 0; ok && i < r->npacks; i++)
+    ok = out->stopped || live_content(r, left, nleft, &live, &live_lists, &out->stopped, err);
+    for (i = 0; ok && !out->stopped && i < r->npacks; i++)
     {
         struct rs_repo_idx x;
         struct rs_buf      why;
@@ -4968,6 +5004,11 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         size_t             nkept = 0;
         size_t             nlists = 0;
 
+        if (stopping(r))
+        {
+            out->stopped = true;
+            break;
+        }
         rs_buf_init(&why);
         if (!pack_idx(r, r->packs[i], &x, &why))
         {
@@ -5023,8 +5064,16 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         clear_leftovers(r);
         list_packs(r);
         unload(r);
-        refresh_pack_lists(r, left, nleft);
-        add_sums(r);
+        /* A rewrite moved content the lists name, so they are written again
+         * even when stopping; what else is left waits for the next prune. */
+        if (!out->stopped || out->packs_rewritten > 0)
+        {
+            refresh_pack_lists(r, left, nleft);
+        }
+        if (!out->stopped)
+        {
+            add_sums(r);
+        }
         tidy_cache(r);
         sync_dir(packs);
         free(packs);
@@ -5089,20 +5138,14 @@ bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, boo
     }
     if (ok && !dry_run)
     {
-        for (i = 0; i < out->ndropped; i++)
+        /* A snapshot left that was to go may need any pack it lists. */
+        drop_snapshots(r, out);
+        for (i = 0; !out->stopped && i < r->npacks; i++)
         {
-            char *dir = rs_xasprintf("%s/snapshots/%s", r->dir, out->dropped[i]);
-
-            if (!remove_snapshot_dir(dir))
+            if (stopping(r))
             {
-                rs_warn("%s: %s; left as it is", dir, strerror(errno));
-            }
-            free(dir);
-        }
-        sync_dir(r->dir);
-        for (i = 0; i < r->npacks; i++)
-        {
-            if (!listed_in(need, nneed, r->packs[i]))
+                out->stopped = true;
+            } else if (!listed_in(need, nneed, r->packs[i]))
             {
                 out->bytes_freed += remove_pack(r, r->packs[i]);
                 out->packs_removed++;

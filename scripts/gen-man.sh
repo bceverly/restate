@@ -1328,7 +1328,13 @@ days,
 ISO weeks and
 .BR "\-\-keep\-monthly " N
 months that have one \- then the chunks no snapshot left needs, rewriting a
-pack that is a quarter or more dead.
+pack that is a quarter or more dead. A prune that SIGTERM, SIGINT, SIGHUP or
+SIGQUIT asks to stop does so between one snapshot or pack and the next,
+within a second or so: it updates its
+.B \-\-record
+with what it removed, ends with exit status 3 and the signal in its result's
+.BR errors ,
+and then lets the signal end it. The next prune finishes the job.
 .PP
 .B "restate init \-\-encrypt\-to"
 .I KEYFILE
@@ -1534,7 +1540,10 @@ a snapshot directory under a temporary name.
 .B check
 reports them as left over, not as damage, and the next
 .B prune
-removes them. Nothing is half written under a name that counts.
+removes them. Nothing is half written under a name that counts. A prune
+stopped by a signal still updates its
+.BR \-\-record ,
+so the next check does not take what it removed for tampering.
 .PP
 .B Images.
 An image's content is staged before the image is written, beside the

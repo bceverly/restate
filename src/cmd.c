@@ -685,6 +685,57 @@ static bool interrupted(void)
             sigismember(&pending, SIGHUP) == 1 || sigismember(&pending, SIGQUIT) == 1);
 }
 
+/* The signals that end restate, while held through a prune that removes. */
+static sigset_t stops_saved;
+static bool     stops_held;
+
+/*
+ * Holds the signals that would end restate, so that one stops a prune
+ * between one removal and the next and its record still follows what went;
+ * let_stops lets it through once the result is written.
+ */
+static void hold_stops(void)
+{
+    sigset_t held;
+
+    (void)sigemptyset(&held);
+    (void)sigaddset(&held, SIGINT);
+    (void)sigaddset(&held, SIGTERM);
+    (void)sigaddset(&held, SIGHUP);
+    (void)sigaddset(&held, SIGQUIT);
+    (void)sigprocmask(SIG_BLOCK, &held, &stops_saved);
+    stops_held = true;
+}
+
+/* The held signal that would end restate, by name. */
+static const char *stop_signal(void)
+{
+    static const int         sigs[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT };
+    static const char *const names[] = { "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT" };
+    sigset_t                 pending;
+    size_t                   i;
+
+    for (i = 0; sigpending(&pending) == 0 && i < sizeof(sigs) / sizeof(sigs[0]); i++)
+    {
+        if (sigismember(&pending, sigs[i]) == 1)
+        {
+            return names[i];
+        }
+    }
+    return "a signal";
+}
+
+/* Lets a signal hold_stops held end restate, the way it says. */
+static void let_stops(void)
+{
+    if (stops_held)
+    {
+        stops_held = false;
+        (void)fflush(NULL);
+        (void)sigprocmask(SIG_SETMASK, &stops_saved, NULL);
+    }
+}
+
 /*
  * Pauses the live thing `i`. While anything is paused the signals that would
  * end restate are held, so nothing can stop it between the pause and the
@@ -1959,6 +2010,7 @@ int rs_cmd_prune(const struct rs_options *o)
     struct rs_buf         err;
     time_t                began = time(NULL);
     size_t                i;
+    int                   status;
     bool                  busy;
     bool                  ok;
 
@@ -1995,12 +2047,24 @@ int rs_cmd_prune(const struct rs_options *o)
         return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
     }
     rs_repo_set_recipients(r, o->recipients, o->nrecipients);
+    if (!o->dry_run)
+    {
+        hold_stops();
+        rs_repo_set_stop(r, interrupted);
+    }
     ok = o->whole_packs ? rs_repo_prune_whole(r, &keep, o->dry_run, &pruned, &err)
                         : rs_repo_prune(r, &keep, o->dry_run, &pruned, &err);
+    /* Stopped, it still records what went, which a check would take for
+     * files removed behind its back. */
     if (ok && o->record && !o->dry_run && !rs_repo_record_update(r, o->record, &err))
     {
         rs_warn("--record: %s", err.data);
         rs_buf_reset(&err);
+    }
+    if (ok && pruned.stopped)
+    {
+        rs_error("prune: stopped by %s; the record follows what was removed, and the next "
+                 "prune finishes it", stop_signal());
     }
     prune_result(o, r, &pruned);
     rs_repo_close(r);
@@ -2029,13 +2093,16 @@ int rs_cmd_prune(const struct rs_options *o)
         }
         rs_buf_free(&size);
     }
-    log_outcome(o, ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE, began,
+    status = !ok             ? RESTATE_EXIT_TROUBLE
+             : pruned.stopped ? RESTATE_EXIT_INCOMPLETE
+                              : RESTATE_EXIT_OK;
+    log_outcome(o, status, began,
                 "repository=%s dropped=%zu packs_removed=%zu packs_rewritten=%zu "
                 "bytes_freed=%" PRIu64, o->args[0], pruned.ndropped, pruned.packs_removed,
                 pruned.packs_rewritten, pruned.bytes_freed);
     rs_repo_pruned_free(&pruned);
     rs_buf_free(&err);
-    return ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+    return status;
 }
 
 /*
@@ -4582,6 +4649,7 @@ int rs_cmd_run(const struct rs_options *given)
     {
         status = RESTATE_EXIT_TROUBLE;
     }
+    let_stops();
     rs_pgp_set_passphrase(NULL);
     rs_image_set_stage_dir(NULL);
     rs_job_free(&job);

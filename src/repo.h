@@ -142,6 +142,9 @@ bool            rs_repo_encrypted(const struct rs_repo *r);
 /* The public key files what is written is encrypted to, for an encrypted
  * repository: borrowed, and needed by a writer and by a prune's rewrites. */
 void            rs_repo_set_recipients(struct rs_repo *r, const char *const *recips, size_t n);
+/* What a prune asks, at each point it could stop and leave the repository
+ * whole, whether to stop there: NULL, the default, for never. */
+void            rs_repo_set_stop(struct rs_repo *r, bool (*stop)(void));
 
 /* The snapshots, oldest first; the caller frees them with rs_repo_free_names. */
 char **rs_repo_snapshots(struct rs_repo *r, size_t *n);
@@ -256,12 +259,16 @@ struct rs_repo_pruned {
     size_t   packs_rewritten;
     size_t   packs_left;      /* worth rewriting, but encrypted, and no keys given */
     uint64_t bytes_freed;     /* on disk */
+    bool     stopped;         /* asked to stop (rs_repo_set_stop) before the end */
 };
 
 /* Drops the snapshots `keep` does not keep, then the content no remaining
  * one refers to; with `dry_run`, only says which. A pack whose .idx cannot
  * be read stops it removing any content. It writes each remaining snapshot's
- * pack list again, and a .sum for each pack that has none. */
+ * pack list again, and a .sum for each pack that has none. Asked to stop, it
+ * stops between one snapshot or pack and the next, with out->dropped saying
+ * only what went; it still writes again the lists that a pack it rewrote
+ * changed, and leaves the rest for the next prune. */
 bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
                    struct rs_repo_pruned *out, struct rs_buf *err);
 /*
@@ -269,7 +276,8 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
  * encrypted repository, or this machine's cache of it: the snapshots are
  * dropped, and then each pack that no snapshot left lists in its pack list,
  * whole. A pack only partly needed is kept as it is. Refused, with nothing
- * removed, if a snapshot that is kept has no pack list.
+ * removed, if a snapshot that is kept has no pack list. It stops as
+ * rs_repo_prune does, and removes no pack once a snapshot it drops is left.
  */
 bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
                          struct rs_repo_pruned *out, struct rs_buf *err);

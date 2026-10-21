@@ -1084,7 +1084,11 @@ say they changed.
 `--keep-last N`, and the newest of each of the last `--keep-daily N` days,
 `--keep-weekly N` ISO weeks and `--keep-monthly N` months that have one --
 then the chunks no snapshot left needs, rewriting a pack that is a quarter or
-more dead. `--dry-run` says which it would drop.
+more dead. `--dry-run` says which it would drop. A prune that SIGTERM, SIGINT,
+SIGHUP or SIGQUIT asks to stop does so between one snapshot or pack and the
+next, within a second or so: it updates its `--record` with what it removed,
+ends with status 3 (incomplete) and the signal in its result's `errors`, and
+then lets the signal end it. The next prune finishes the job.
 
 **`check`** reads the whole repository through, as `restic check
 --read-data` does: every pack, every chunk checked against the digest its
@@ -1232,7 +1236,8 @@ restate du /srv/restate/web01
 - **Interrupted runs.** A capture cut off leaves only files that do not count
   yet -- a pack with no index, a snapshot directory under a temporary name.
   `check` reports them as left over, not as damage, and the next `prune`
-  removes them.
+  removes them. A prune stopped by a signal still updates its `--record`, so
+  the next check does not take what it removed for tampering.
 - **Images too.** `--tmpdir DIR` stages an image's content on the machine
   rather than beside the image on the share.
 

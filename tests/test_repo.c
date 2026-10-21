@@ -2257,6 +2257,196 @@ out:
     free(record);
 }
 
+/* A prune's stop: asked, it says to stop once it has been asked stop_at times. */
+static int  stop_at;
+static int  stop_asked;
+
+static bool stop_counted(void)
+{
+    return ++stop_asked > stop_at;
+}
+
+/* A prune of `repo`, keeping one snapshot, that is asked to stop after `at`
+ * questions; the record follows it, as a prune's --record does. */
+static void prune_stopped(const char *repo, bool whole, int at, const char *record,
+                          struct rs_repo_pruned *pr)
+{
+    struct rs_repo_keep keep;
+    struct rs_repo     *r;
+    struct rs_buf       err;
+    bool                busy;
+    bool                ok;
+
+    memset(&keep, 0, sizeof(keep));
+    keep.last = 1;
+    rs_buf_init(&err);
+    r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+    CHECK(r != NULL);
+    if (!r)
+    {
+        memset(pr, 0, sizeof(*pr));
+        rs_buf_free(&err);
+        return;
+    }
+    stop_at = at;
+    stop_asked = 0;
+    rs_repo_set_stop(r, at >= 0 ? stop_counted : NULL);
+    ok = whole ? rs_repo_prune_whole(r, &keep, false, pr, &err)
+               : rs_repo_prune(r, &keep, false, pr, &err);
+    CHECK(ok);
+    CHECK(rs_repo_record_update(r, record, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    rs_repo_close(r);
+    rs_buf_free(&err);
+}
+
+/* A full check of `repo` against `record`: whole, and nothing changed. */
+static void whole_since(const char *repo, const char *record, size_t snapshots)
+{
+    struct rs_repo_checked c;
+    char                  *errs = NULL;
+
+    storage_check(repo, false, record, &c, &errs);
+    CHECK_INT(c.snapshots, snapshots);
+    CHECK_INT(c.snapshots_bad + c.packs_bad + c.leftovers + c.missing, 0);
+    CHECK_INT(c.nchanged, 0);
+    CHECK_STR(errs ? errs : "", "");
+    rs_repo_checked_free(&c);
+    free(errs);
+}
+
+static void test_stopped(const char *dir)
+{
+    static const char *const dates[] = { "2026-06-01T00:00:00.000000000Z",
+                                         "2026-06-02T00:00:00.000000000Z",
+                                         "2026-06-03T00:00:00.000000000Z",
+                                         "2026-06-04T00:00:00.000000000Z",
+                                         "2026-06-05T00:00:00.000000000Z" };
+    char                    *repo = rs_xasprintf("%s/prepo", dir);
+    char                    *tree = rs_xasprintf("%s/ptree", dir);
+    char                    *record = rs_xasprintf("%s/p.record", dir);
+    char                    *name = NULL;
+    struct rs_scan_stats     st;
+    struct rs_repo_pruned    pr;
+    struct rs_repo          *r;
+    struct rs_buf            err;
+    size_t                   i;
+    size_t                   n;
+    bool                     busy;
+
+    rs_buf_init(&err);
+    rs_repo_set_pack_size(64 * 1024);
+    put(tree, "etc/a", "a\n", 0644);
+    put(tree, "data/small", "small\n", 0644);
+    CHECK(rs_repo_init(repo, false, &err));
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    for (i = 0; r && i < 3; i++)
+    {
+        big_file(tree, "data/f", 2 * RS_REPO_CHUNK_AVG, 40 + (unsigned)i);
+        CHECK(snap(r, tree, dates[i], NULL, &st, &name));
+        free(name);
+    }
+    if (r)
+    {
+        CHECK(rs_repo_record_update(r, record, &err));
+        rs_repo_close(r);
+    }
+
+    TEST_CASE("repo: a keyless prune asked to stop drops no more, and removes no pack");
+    prune_stopped(repo, true, 1, record, &pr);
+    CHECK(pr.stopped);
+    CHECK_INT(stop_asked, 2);
+    CHECK_INT(pr.ndropped, 1);
+    CHECK_INT(pr.packs_removed, 0);
+    rs_repo_pruned_free(&pr);
+    whole_since(repo, record, 2);
+
+    TEST_CASE("repo: a keyless prune asked to stop between packs, and then finished");
+    /* Dropping one, then one pack -- which the snapshot kept may need -- and
+     * asked again before the next. */
+    prune_stopped(repo, true, 2, record, &pr);
+    CHECK(pr.stopped);
+    CHECK_INT(stop_asked, 3);
+    CHECK_INT(pr.ndropped, 1);
+    CHECK(pr.packs_removed <= 1);
+    rs_repo_pruned_free(&pr);
+    whole_since(repo, record, 1);
+    prune_stopped(repo, true, -1, record, &pr);
+    CHECK(!pr.stopped);
+    CHECK(pr.packs_removed > 0);
+    rs_repo_pruned_free(&pr);
+    whole_since(repo, record, 1);
+
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    for (i = 3; r && i < 5; i++)
+    {
+        big_file(tree, "data/f", 2 * RS_REPO_CHUNK_AVG, 40 + (unsigned)i);
+        CHECK(snap(r, tree, dates[i], NULL, &st, &name));
+        free(name);
+    }
+    if (r)
+    {
+        CHECK(rs_repo_record_update(r, record, &err));
+        rs_repo_close(r);
+    }
+
+    TEST_CASE("repo: a prune asked to stop while it reads what is kept removes no content");
+    prune_stopped(repo, false, 2, record, &pr);
+    CHECK(pr.stopped);
+    CHECK_INT(stop_asked, 3);
+    CHECK_INT(pr.ndropped, 2);
+    CHECK_INT(pr.packs_removed + pr.packs_rewritten, 0);
+    rs_repo_pruned_free(&pr);
+    whole_since(repo, record, 1);
+
+    TEST_CASE("repo: a prune asked to stop between packs leaves what is kept whole");
+    {
+        char **names;
+
+        r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+        CHECK(r != NULL);
+        big_file(tree, "data/f", 2 * RS_REPO_CHUNK_AVG, 46);
+        CHECK(r && snap(r, tree, "2026-06-06T00:00:00.000000000Z", NULL, &st, &name));
+        free(name);
+        if (r)
+        {
+            CHECK(rs_repo_record_update(r, record, &err));
+            rs_repo_close(r);
+        }
+        /* Dropping one, reading one, then one pack, as above. */
+        prune_stopped(repo, false, 3, record, &pr);
+        CHECK(pr.stopped);
+        CHECK_INT(stop_asked, 4);
+        CHECK_INT(pr.ndropped, 1);
+        CHECK(pr.packs_removed + pr.packs_rewritten <= 1);
+        rs_repo_pruned_free(&pr);
+        whole_since(repo, record, 1);
+        prune_stopped(repo, false, -1, record, &pr);
+        CHECK(!pr.stopped);
+        CHECK(pr.packs_removed > 0);
+        rs_repo_pruned_free(&pr);
+        whole_since(repo, record, 1);
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        names = r ? rs_repo_snapshots(r, &n) : NULL;
+        CHECK_INT(names ? n : 0, 1);
+        if (names)
+        {
+            rs_repo_free_names(names, n);
+        }
+        if (r)
+        {
+            rs_repo_close(r);
+        }
+    }
+    rs_repo_set_pack_size(0);
+    rs_buf_free(&err);
+    free(repo);
+    free(tree);
+    free(record);
+}
+
 void test_repo(void)
 {
     char *dir = rs_test_tmpdir();
@@ -2268,6 +2458,7 @@ void test_repo(void)
     test_checked(dir);
     test_formats();
     test_storage(dir);
+    test_stopped(dir);
     test_encrypted(dir);
     rs_test_rmtree(dir);
     free(dir);
