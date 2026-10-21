@@ -147,6 +147,60 @@ static bool read_file(const char *path, size_t max, struct rs_buf *out, struct r
     return ok;
 }
 
+/* Whether to act as root does in adopt(): root's alone, but for the tests. */
+static bool adopting_always;
+
+void rs_repo_set_adopting(bool always)
+{
+    adopting_always = always;
+}
+
+/*
+ * What restate makes in a repository is the repository's. Run as root -- as
+ * prune, repack and check are on the storage itself -- what it makes would
+ * otherwise be root's, and 0600: a share that maps every machine to the
+ * repository's owner would then refuse them the packs they wrote. So a file or
+ * directory root makes, `fd`, open, is given the owner and group of the
+ * directory it is made in. Through the descriptor, never the name: a name in
+ * a directory others can write could be swapped for a link to anything.
+ * False where the share will not have it, and it stays as it was made -- as
+ * on a share that maps root to nobody, whose files are not root's anyway.
+ */
+static bool adopt(int fd, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    char       *dir;
+    struct stat parent;
+    struct stat st;
+    bool        ok = true;
+
+    if (fd < 0 || (geteuid() != 0 && !adopting_always))
+    {
+        return true;
+    }
+    dir = !slash ? rs_xstrdup(".") : slash == path ? rs_xstrdup("/")
+                                                    : rs_xstrndup(path, (size_t)(slash - path));
+    if (stat(dir, &parent) == 0 && fstat(fd, &st) == 0 &&
+        (st.st_uid != parent.st_uid || st.st_gid != parent.st_gid))
+    {
+        ok = fchown(fd, parent.st_uid, parent.st_gid) == 0;
+    }
+    free(dir);
+    return ok;
+}
+
+/* The same for a directory just made, `path`. */
+static void adopt_dir(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+    (void)adopt(fd, path);
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+}
+
 /* `len` bytes into a new file `path`, 0600, flushed to disk. */
 static bool write_new(const char *path, const void *data, size_t len, struct rs_buf *err)
 {
@@ -158,6 +212,7 @@ static bool write_new(const char *path, const void *data, size_t len, struct rs_
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
         return false;
     }
+    (void)adopt(fd, path);
     ok = write_all(fd, data, len) && fsync(fd) == 0;
     if (close(fd) != 0)
     {
@@ -699,6 +754,7 @@ static bool write_out(const char *path, const void *data, size_t len, bool gzip,
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
         return false;
     }
+    (void)adopt(fd, path);
     ok = zout_open(&z, fd, gzip, recips, n, err);
     if (ok)
     {
@@ -1069,6 +1125,9 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
                                         : "it is there already, and not an empty directory");
             return false;
         }
+    } else
+    {
+        adopt_dir(dir);
     }
     for (i = 0; ok && i < sizeof(subdirs) / sizeof(subdirs[0]); i++)
     {
@@ -1078,6 +1137,7 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
         {
             rs_buf_addf(err, "%s: %s", path, strerror(errno));
         }
+        adopt_dir(path);
         free(path);
     }
     for (i = 0; ok && i < sizeof(empty) / sizeof(empty[0]); i++)
@@ -2632,6 +2692,7 @@ static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err
         memset(pk, 0, sizeof(*pk));
         return false;
     }
+    (void)adopt(pk->fd, pk->tmp);
     if (!pack_pipe(p, err))
     {
         (void)close(pk->fd);
@@ -3689,6 +3750,9 @@ bool rs_repo_writer_finish(struct rs_repo_writer *w, const struct rs_index *ix,
             free(tmp);
             tmp = NULL;
             ok = false;
+        } else
+        {
+            adopt_dir(tmp);
         }
     }
     if (ok)
@@ -5668,6 +5732,7 @@ static bool copy_file(const char *from, const char *to, uint64_t *bytes, struct 
     (void)unlink(tmp);
     out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     ok = out >= 0;
+    (void)adopt(out, tmp);
     while (ok && (n = read(in, chunk, sizeof(chunk))) != 0)
     {
         if (n < 0 && errno == EINTR)
@@ -5810,6 +5875,10 @@ static bool copy_snapshot_dir(const struct rs_repo *r, const struct rs_repo *des
     if (!made)
     {
         rs_buf_addf(err, "%s: %s", tmp, strerror(errno));
+    }
+    if (made)
+    {
+        adopt_dir(tmp);
     }
     for (i = 0; ok && i < sizeof(files) / sizeof(files[0]); i++)
     {

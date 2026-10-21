@@ -1425,6 +1425,97 @@ static void test_seek(const char *dir)
     rs_buf_free(&err);
 }
 
+/* What restate makes in a repository, as root makes it: the directory's.
+ * Shown with a group of this user's other than its own, which it may give
+ * away, rather than an owner, which only root may. */
+static void test_adopted(const char *dir)
+{
+    char                 *share = rs_xasprintf("%s/share", dir);
+    char                 *repo = rs_xasprintf("%s/share/repo", dir);
+    char                 *tree = rs_xasprintf("%s/tree6", dir);
+    char                 *name = NULL;
+    char                 *cmd;
+    char                 *odd;
+    gid_t                 groups[64];
+    gid_t                 other = 0;
+    int                   ngroups = getgroups(64, groups);
+    int                   i;
+    struct rs_buf         err;
+    struct rs_scan_stats  st;
+    struct rs_repo       *r;
+    struct rs_repo_pruned pr;
+    bool                  busy;
+
+    for (i = 0; i < ngroups && other == 0; i++)
+    {
+        other = groups[i] != getegid() ? groups[i] : 0;
+    }
+    if (other == 0)
+    {
+        (void)printf("  (ownership tests skipped: they need a second group)\n");
+        free(share);
+        free(repo);
+        free(tree);
+        return;
+    }
+    rs_buf_init(&err);
+    CHECK(mkdir(share, 0770) == 0 && chown(share, (uid_t)-1, other) == 0);
+    CHECK(mkdir(tree, 0755) == 0);
+    for (i = 0; i < 20; i++)
+    {
+        char *f = rs_xasprintf("f%02d", i);
+
+        big_file(tree, f, 8192, (unsigned)(9000 + i));
+        free(f);
+    }
+    rs_repo_set_adopting(true);
+    rs_repo_set_pack_size(64 * 1024);
+
+    TEST_CASE("repo: made as root makes it, everything is the share's");
+    CHECK(rs_repo_init(repo, false, &err));
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(snap(r, tree, "2026-05-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+    odd = rs_xasprintf("find '%s' ! -group %u | wc -l", repo, (unsigned)other);
+    cmd = first_line(odd);
+    CHECK_STR(cmd, "0");
+    free(cmd);
+
+    TEST_CASE("repo: a repack, as root runs it on the storage, leaves it the share's");
+    cmd = rs_xasprintf("rm -f '%s/packs/'*.seek", repo);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+    CHECK(rs_repo_repack(r, false, &pr, &err));
+    CHECK(pr.packs_rewritten > 0);
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+    cmd = first_line(odd);
+    CHECK_STR(cmd, "0");
+    free(cmd);
+
+    TEST_CASE("repo: not root, what it makes is its own");
+    rs_repo_set_adopting(false);
+    cmd = rs_xasprintf("rm -f '%s/packs/'*.seek", repo);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+    CHECK(rs_repo_repack(r, false, &pr, &err));
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+    cmd = first_line(odd);
+    CHECK(geteuid() == 0 || strcmp(cmd, "0") != 0);
+    free(cmd);
+
+    rs_repo_set_pack_size(0);
+    free(odd);
+    free(name);
+    free(share);
+    free(repo);
+    free(tree);
+    rs_buf_free(&err);
+}
+
 static void test_encrypted(const char *dir)
 {
     char                  *home = rs_xasprintf("%s/gnupg", dir);
@@ -2743,6 +2834,7 @@ void test_repo(void)
     test_written(dir);
     test_chunks(dir);
     test_seek(dir);
+    test_adopted(dir);
     test_checked(dir);
     test_formats();
     test_storage(dir);

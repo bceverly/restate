@@ -482,6 +482,10 @@ void rs_repo_set_cache_dir(const char *dir);
 void rs_repo_set_pack_size(uint64_t bytes);
 /* The same for RS_REPO_SEGMENT_SIZE. */
 void rs_repo_set_segment_size(uint64_t bytes);
+/* With `always`, what restate makes in a repository is given the owner and
+ * group of the directory it is made in as it is when run as root, for the
+ * unit tests' benefit: they are not root. Nothing in restate itself calls it. */
+void rs_repo_set_adopting(bool always);
 
 /* Replaces how a lock file is locked, how NFS is told, and the pause between
  * asking again where NFS says EIO, for the unit tests' benefit: they cannot

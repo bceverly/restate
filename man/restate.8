@@ -1673,7 +1673,10 @@ Nothing in a repository is required to be root's: a share that maps every
 user to one of its own
 .RB ( all_squash )
 works, as long as that user can write it. What restate makes is its owner's
-alone, 0600 and 0700, where the share keeps modes.
+alone, 0600 and 0700, where the share keeps modes. Run as root \- a prune,
+repack or check on the storage itself \- it gives every file and directory it
+makes the owner and group of the directory it makes it in, so the machines a
+share maps to the repository's owner can still read what root wrote.
 .PP
 .B Only adding.
 A capture only ever adds files: each pack, its

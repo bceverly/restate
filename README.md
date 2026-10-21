@@ -1261,7 +1261,11 @@ restate du /srv/restate/web01
   restate asks again twice, a second apart, and then exits 5 (busy), saying
   the connection may be failing if nothing on the server holds it.
 - **Nothing needs to be root's.** A share that maps every user to one of its
-  own (`all_squash`) works, as long as that user can write it.
+  own (`all_squash`) works, as long as that user can write it. Run as root on
+  the storage itself -- a prune, a repack or a check there -- restate gives
+  every file and directory it makes the owner and group of the directory it
+  makes it in, so the machines the share maps to the repository's owner can
+  still read the packs root wrote.
 - **A capture only adds files.** Each pack, its index and `.sum`, and each
   snapshot are written under a name of their own and renamed to a name
   nothing had; nothing already there is changed. `--append-only` refuses the
