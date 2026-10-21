@@ -2140,6 +2140,76 @@ int rs_cmd_prune(const struct rs_options *o)
     return status;
 }
 
+int rs_cmd_repack(const struct rs_options *o)
+{
+    struct rs_repo_pruned packed;
+    struct rs_repo       *r;
+    struct rs_buf         err;
+    struct rs_jval       *res = rs_result();
+    time_t                began = time(NULL);
+    int                   status;
+    bool                  busy;
+    bool                  ok;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(o->args[0], o->dry_run ? RS_REPO_LOOK : RS_REPO_PRUNE, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+        rs_buf_free(&err);
+        log_outcome(o, busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE, began, "repository=%s",
+                    o->args[0]);
+        return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    }
+    if (!o->dry_run)
+    {
+        hold_stops();
+        rs_repo_set_stop(r, interrupted);
+    }
+    ok = rs_repo_repack(r, o->dry_run, &packed, &err);
+    if (ok && o->record && !o->dry_run && !rs_repo_record_update(r, o->record, &err))
+    {
+        rs_warn("--record: %s", err.data);
+        rs_buf_reset(&err);
+    }
+    rs_repo_close(r);
+    rs_jobj_str(res, "repository", o->args[0]);
+    rs_jobj_bool(res, "dry_run", o->dry_run);
+    rs_jobj_u64(res, "packs_removed", packed.packs_removed);
+    rs_jobj_u64(res, "packs_rewritten", packed.packs_rewritten);
+    rs_jobj_u64(res, "bytes_freed", packed.bytes_freed);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+    } else if (packed.stopped)
+    {
+        rs_error("repack: stopped by %s; the packs written so far are kept, and the next "
+                 "repack goes on from there", stop_signal());
+    } else if (!o->quiet && o->dry_run)
+    {
+        (void)printf("would write again %zu packs\n", packed.packs_rewritten);
+    } else if (!o->quiet)
+    {
+        struct rs_buf size;
+
+        rs_buf_init(&size);
+        human_size(&size, packed.bytes_freed);
+        (void)fprintf(stderr, "restate: wrote again %zu packs, and removed %zu that nothing "
+                      "needed, freeing %s\n", packed.packs_rewritten, packed.packs_removed,
+                      size.data);
+        rs_buf_free(&size);
+    }
+    status = !ok             ? RESTATE_EXIT_TROUBLE
+             : packed.stopped ? RESTATE_EXIT_INCOMPLETE
+                              : RESTATE_EXIT_OK;
+    log_outcome(o, status, began,
+                "repository=%s packs_removed=%zu packs_rewritten=%zu bytes_freed=%" PRIu64,
+                o->args[0], packed.packs_removed, packed.packs_rewritten, packed.bytes_freed);
+    rs_repo_pruned_free(&packed);
+    rs_buf_free(&err);
+    return status;
+}
+
 /*
  * check --read-all: the snapshot `ref` read in full, as restore reads it, into
  * `empty`, a directory that stays empty: every file checked against its
@@ -4551,6 +4621,8 @@ static int dispatch(const struct rs_options *o)
         return rs_cmd_snapshots(o);
     case CMD_PRUNE:
         return rs_cmd_prune(o);
+    case CMD_REPACK:
+        return rs_cmd_repack(o);
     case CMD_CHECK:
         return rs_cmd_check(o);
     case CMD_EXPORT:

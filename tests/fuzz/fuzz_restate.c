@@ -343,13 +343,15 @@ static void fuzz_jobs(const char *text, size_t len)
     rs_buf_free(&err);
 }
 
-/* A pack's .sum, a snapshot's pack list and a check's record, NUL-separated:
- * what each accepts is what it says it is -- digests in lowercase hex, names
- * in order and each once. */
+/* A pack's .sum, a snapshot's pack list, a check's record and a pack's
+ * .seek, NUL-separated: what each accepts is what it says it is -- digests
+ * in lowercase hex, names in order and each once, segments going up from the
+ * pack's start. */
 static void fuzz_storage(const char *text, size_t len)
 {
-    const char           *parts[3] = { "", "", "" };
-    size_t                lens[3] = { 0, 0, 0 };
+    const char           *parts[4] = { "", "", "", "" };
+    size_t                lens[4] = { 0, 0, 0, 0 };
+    struct rs_repo_seek  *at;
     size_t                k = 0;
     size_t                i;
     char                  hex[RS_SHA256_HEX_SIZE];
@@ -359,7 +361,7 @@ static void fuzz_storage(const char *text, size_t len)
     struct rs_repo_record rec;
 
     parts[0] = text;
-    for (i = 0; i < len && k < 2; i++)
+    for (i = 0; i < len && k < 3; i++)
     {
         if (text[i] == '\0')
         {
@@ -368,6 +370,24 @@ static void fuzz_storage(const char *text, size_t len)
         }
     }
     lens[k] = (size_t)(text + len - parts[k]);
+    if (rs_repo_parse_seek(parts[3], lens[3], &at, &n))
+    {
+        if (n == 0 || at[0].member != 1 || at[0].offset != 0)
+        {
+            abort();
+        }
+        for (i = 1; i < n; i++)
+        {
+            if (at[i].member <= at[i - 1].member || at[i].offset <= at[i - 1].offset)
+            {
+                abort();
+            }
+        }
+        free(at);
+    } else if (at || n)
+    {
+        abort();
+    }
     if (rs_repo_parse_sum(parts[0], lens[0], hex, &size) && !all_hex(hex, 64))
     {
         abort();

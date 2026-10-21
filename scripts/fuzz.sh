@@ -90,7 +90,7 @@ fresh=0
   seed hosts 16 '127.0.0.1 localhost\n127.0.1.1\tweb1 web1.lan # web1\n::1 ip6-localhost\n'
   seed job 17 '# nightly\ncommand = capture\nrepository = /mnt/nas/r\nquiesce = true\nquiesce_with = unifi\nencrypt_to = /etc/restate/k.asc\nresult = /var/lib/restate/n.json\nreport_group = adm\n'
   seed job-restore 17 'command = restore\nsnapshot = /r::20261020T030000Z\nrestore_root = /var/tmp/x\ninclude = /home/bob\ndry_run = yes\n'
-  seed storage 18 'restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 42\n\0restate-packs 1\n20261020T030000Z-1-0001\n20261020T030000Z-1-0002\n\0restate-record 1\npacks/a.idx 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 10\nsnapshots/x/kit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0\n'
+  seed storage 18 'restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 42\n\0restate-packs 1\n20261020T030000Z-1-0001\n20261020T030000Z-1-0002\n\0restate-record 1\npacks/a.idx 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 10\nsnapshots/x/kit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0\n\0restate-seek 1\n1 0\n9 100\n20 230\n'
   seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
   # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
   # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.

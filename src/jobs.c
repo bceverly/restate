@@ -30,7 +30,8 @@ enum {
     J_RESTORE   = 1u << 5,
     J_ESTIMATE  = 1u << 6,
     J_DU        = 1u << 7,
-    J_ANY       = 0xffu
+    J_REPACK    = 1u << 8,
+    J_ANY       = 0x1ffu
 };
 
 static const struct {
@@ -42,6 +43,7 @@ static const struct {
     { "check", CMD_CHECK, J_CHECK },             { "copy", CMD_COPY, J_COPY },
     { "snapshots", CMD_SNAPSHOTS, J_SNAPSHOTS }, { "restore", CMD_RESTORE, J_RESTORE },
     { "estimate", CMD_ESTIMATE, J_ESTIMATE },    { "du", CMD_DU, J_DU },
+    { "repack", CMD_REPACK, J_REPACK },
 };
 
 enum kind {
@@ -124,15 +126,16 @@ static const struct key {
     [KEY_WHOLE_PACKS] = { "whole_packs", K_BOOL, false, J_PRUNE },
     [KEY_READ_ALL] = { "read_all", K_BOOL, false, J_CHECK },
     [KEY_METADATA_ONLY] = { "metadata_only", K_BOOL, false, J_CHECK },
-    [KEY_RECORD] = { "record", K_PATH, false, J_CHECK | J_PRUNE },
+    [KEY_RECORD] = { "record", K_PATH, false, J_CHECK | J_PRUNE | J_REPACK },
     [KEY_COPY_TO] = { "copy_to", K_PATH, false, J_COPY },
     [KEY_INCLUDE] = { "include", K_PATTERN, true, J_RESTORE },
     [KEY_EXCLUDE] = { "exclude", K_PATTERN, true, J_RESTORE },
-    [KEY_DRY_RUN] = { "dry_run", K_BOOL, false, J_RESTORE | J_PRUNE },
+    [KEY_DRY_RUN] = { "dry_run", K_BOOL, false, J_RESTORE | J_PRUNE | J_REPACK },
     [KEY_CHECK_FIRST] = { "check_first", K_BOOL, false, J_RESTORE },
     [KEY_PLAN] = { "plan", K_BOOL, false, J_RESTORE },
     [KEY_TMPDIR] = { "tmpdir", K_PATH, false, J_CAPTURE },
-    [KEY_SYSLOG] = { "syslog", K_BOOL, false, J_CAPTURE | J_PRUNE | J_CHECK | J_COPY },
+    [KEY_SYSLOG] = { "syslog", K_BOOL, false,
+                     J_CAPTURE | J_PRUNE | J_CHECK | J_COPY | J_REPACK },
     [KEY_RESULT] = { "result", K_PATH, false, J_ANY },
     [KEY_PROGRESS] = { "progress", K_PATH, false, J_ANY },
     [KEY_REPORT_GROUP] = { "report_group", K_NAME, false, J_ANY },
@@ -506,6 +509,7 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
         o->output = repo;
         break;
     case CMD_PRUNE:
+    case CMD_REPACK:
     case CMD_CHECK:
     case CMD_SNAPSHOTS:
     case CMD_DU:
@@ -653,7 +657,7 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
             if (!cmd)
             {
                 rs_buf_addf(err, "%s:%u: command: \"%.40s\" is not one a job can run (capture, "
-                            "prune, check, copy, snapshots, restore, estimate, du)", name,
+                            "prune, check, copy, snapshots, restore, estimate, du, repack)", name,
                             lineno, value);
                 return false;
             }

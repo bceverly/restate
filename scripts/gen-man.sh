@@ -1392,6 +1392,36 @@ with what it removed, ends with exit status 3 and the signal in its result's
 .BR errors ,
 and then lets the signal end it. The next prune finishes the job.
 .PP
+A pack is one gzip file, and gzip reads only forward, so a pack that is one
+gzip stream must be read from its start to reach the last file in it. restate
+2.0.0.8 and later begin a new gzip stream in a pack every two mebibytes or
+so, at a file's boundary, and write beside it a
+.I .seek
+saying where in the file each stream begins: a restore of a few files
+\- an
+.B \-\-include
+\- reads only the stretch of each pack that holds them, not the packs from
+their start. Read from its start, such a pack is still one gzip file to
+.BR gzip (1),
+and an older restate reads it as it reads any other.
+.I .seek
+is trusted for nothing: what is read from where it says is checked to be the
+file it says, and is otherwise read from the pack's start.
+.B restate repack
+.I REPO
+writes again every pack an older restate wrote, so that the whole
+repository can be read this way, keeping every snapshot and dropping on the
+way what none of them needs, as
+.B prune
+does; with
+.BR \-\-dry\-run ,
+it says how many packs it would write. It stops on a signal as prune does,
+keeping what it has written, and the next repack goes on from there. An
+encrypted repository's packs are encrypted whole, and gpg too reads one only
+from its start: they are written without a
+.IR .seek ,
+and repack refuses one.
+.PP
 .B "restate init \-\-encrypt\-to"
 .I KEYFILE
 makes an encrypted repository: its chunks, the indexes of what is in its
@@ -1420,14 +1450,14 @@ in the capturing machine's cache, where a capture reads it without the secret
 key. A machine with neither makes a key of its own, and stores its large
 files whole once more.
 .PP
-One capture or prune runs on a repository at a time, and one
+One capture, prune or repack runs on a repository at a time, and one
 .B capture \-\-quiesce
 on a machine at a time; one that finds the lock taken does nothing, and exits
 with status 5 (see
 .B STORAGE
 for a repository on a file server). With
 .BR \-\-syslog ,
-capture, prune, check and copy put one line in the system log as they end \- the command,
+capture, prune, repack, check and copy put one line in the system log as they end \- the command,
 .BR status= ,
 .BR exit= ,
 .B seconds=
@@ -1458,9 +1488,11 @@ checks one without (see
 On disk a repository is plain files:
 .I packs/
 holds the chunks, in gzip'd tar files of about 32 MiB beside an index of
-what is in them and a
+what is in them, a
 .I .sum
-of the file as written, and each directory of
+of the file as written and, but in an encrypted repository, a
+.I .seek
+of where in it each gzip stream begins, and each directory of
 .I snapshots/
 a capture's index, its kit's list, a summary, the list of the packs it needs
 and, if it is signed, the signature. Everything is written beside its final name and renamed into
@@ -1511,9 +1543,10 @@ alone, 0600 and 0700, where the share keeps modes.
 .PP
 .B Only adding.
 A capture only ever adds files: each pack, its
-.I .idx
-and
+.IR .idx ,
 .I .sum
+and
+.IR .seek ,
 and each snapshot are written under a name of their own beside where they
 go, then renamed to a name nothing had; nothing already there is changed,
 renamed over or truncated, and the lock files are opened but never written.
@@ -1676,9 +1709,10 @@ and the commands each means something to:
 .BR copy ,
 .BR snapshots ,
 .BR restore ,
-.B estimate
+.BR estimate ,
+.B du
 or
-.BR du .
+.BR repack .
 .TP
 .B repository
 the repository; every command but estimate.
@@ -1705,9 +1739,9 @@ capture and prune: key files.
 .BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " whole_packs
 prune;
 .B dry_run
-for prune and restore;
+for prune, repack and restore;
 .B record
-for prune and check.
+for prune, repack and check.
 .TP
 .BR read_all ", " metadata_only
 check;
@@ -1727,7 +1761,7 @@ every command: where its result and its progress go, and the group that
 may read them (see
 .BR RESULTS );
 .B syslog
-for capture, prune, check and copy.
+for capture, prune, repack, check and copy.
 .PP
 A key restate does not know, a key the command has no use for, a key given
 twice that is not repeatable, or a value of the wrong kind refuses the whole
@@ -1810,6 +1844,11 @@ every path a walk could not read, the first 100 with why. Each command adds what
 and
 .B kept_snapshots
 and the packs it removed and rewrote;
+.BR repack ,
+.BR packs_rewritten ,
+.B packs_removed
+and
+.BR bytes_freed ;
 .BR check ,
 an object
 .B check

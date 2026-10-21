@@ -1150,7 +1150,7 @@ static bool merge_accounts(struct ctx *c, const char *path)
         rs_buf_init(&texts[k]);
         mine[k] = NULL;
     }
-    if (!rs_image_open_kit(path, &s, &err))
+    if (!rs_image_open_kit(path, c->ix, &s, &err))
     {
         rs_buf_free(&err);
         return false;
@@ -1300,8 +1300,8 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
         st->merged = merge_accounts(&c, path);
     }
     if (!o->index_only &&
-        (o->kit ? !rs_image_open_kit(path, &s, err)
-                : !rs_image_open_files_matching(path, o->include, o->ninclude, &s, err)))
+        (o->kit ? !rs_image_open_kit(path, ix, &s, err)
+                : !rs_image_open_files_matching(path, ix, o->include, o->ninclude, &s, err)))
     {
         (void)sigaction(SIGPIPE, &saved, NULL);
         rs_accounts_free(&c.accounts);

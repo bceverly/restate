@@ -1427,6 +1427,30 @@ expect 0 "copy it again" -- "$BIN" copy prepo poff
 contains "$ERR" "is in poff already" "copies nothing twice"
 expect 0 "check the copy" -- "$BIN" check -q poff
 expect 2 "copy what is not a repository" -- "$BIN" copy ptree poff
+# How many files in DIR end in SUFFIX.
+howmany() { find "$1" -name "*$2" | wc -l | tr -d ' '; }
+check "every pack has a .seek" test "$(howmany prepo/packs .seek)" -eq "$(howmany prepo/packs .idx)"
+check "and its copy has it too" test "$(howmany poff/packs .seek)" -eq "$(howmany poff/packs .idx)"
+
+# repack: packs as an older restate wrote them, with no .seek.
+cp -R prepo pold
+rm -f pold/packs/*.seek
+expect 0 "repack --dry-run" -- "$BIN" repack --dry-run pold
+contains "$OUT" "would write again $(howmany pold/packs .idx) packs" "says how many"
+check "and writes nothing" test "$(howmany pold/packs .seek)" -eq 0
+expect 0 "repack" -- "$BIN" repack --syslog --record pold.rec --result rk.json pold
+contains "$ERR" "wrote again" "says what it did"
+contains "$(cat rk.json)" '"packs_rewritten": ' "and its result too"
+check "every pack has a .seek now" test "$(howmany pold/packs .seek)" -eq "$(howmany pold/packs .idx)"
+expect 0 "and a repack finds nothing to do" -- "$BIN" repack --dry-run pold
+contains "$OUT" "would write again 0 packs" "says so"
+expect 0 "check what repack wrote" -- "$BIN" check -q --read-all pold
+expect 0 "check its record" -- "$BIN" check -q --metadata-only --record pold.rec pold
+mkdir -p rkout
+expect 0 "restore --include from it" -- \
+  "$BIN" restore --allow-unverified --include /etc --root rkout pold
+check "puts back what it should" test -f rkout/etc/one
+expect 2 "repack what is not a repository" -- "$BIN" repack ptree
 
 mkdir -p pout
 expect 0 "restore --include --dry-run --result" -- \

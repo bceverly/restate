@@ -90,7 +90,8 @@ static void other_jobs(void)
     struct rs_job job;
     char         *why;
 
-    TEST_CASE("jobs: prune, check, snapshots and du take the repository as their argument");
+    TEST_CASE("jobs: prune, check, snapshots, du and repack take the repository as their "
+              "argument");
     rs_job_init(&job);
     CHECK(parse(&job, "command = prune\nrepository = /r\nkeep_last = 3\nkeep_daily = 7\n"
                       "keep_weekly = 4\nkeep_monthly = 12\nwhole_packs = true\ndry_run = no\n"
@@ -116,6 +117,12 @@ static void other_jobs(void)
     CHECK(parse(&job, "command = du\nrepository = /r\n", &why));
     free(why);
     CHECK(job.opts.command == CMD_DU && job.opts.nargs == 1);
+    CHECK(parse(&job, "command = repack\nrepository = /r\ndry_run = true\n"
+                      "record = /var/lib/r.record\nsyslog = true\n", &why));
+    free(why);
+    CHECK(job.opts.command == CMD_REPACK && job.opts.nargs == 1 && job.opts.dry_run);
+    CHECK_STR(job.opts.args[0], "/r");
+    refused("command = repack\nrepository = /r\nkeep_last = 3\n", "keep_last");
 
     TEST_CASE("jobs: estimate needs no repository");
     CHECK(parse(&job, "command = estimate\nroot = /srv\nall = true\n", &why));

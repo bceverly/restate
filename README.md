@@ -290,6 +290,11 @@ Commands:
   prune REPO              drop the snapshots --keep-last, --keep-daily,
                           --keep-weekly and --keep-monthly do not keep, and the
                           content nothing left refers to
+  repack REPO             write again each pack an older restate wrote, which
+                          can be read only from its start, so that a restore of
+                          a few files reads only the parts of each pack that
+                          hold them; every snapshot is kept, and what none of
+                          them needs is dropped on the way
   check REPO              check a repository: read every pack through, each
                           chunk against the digest its index gives, and check
                           that every snapshot's index and kit can be read and
@@ -402,9 +407,9 @@ Options:
                           an empty one -- as restate init would, encrypted with
                           --encrypt-to; one with anything else in it is
                           refused, and nothing is written
-      --syslog            capture, prune, check, copy: say how the run ended in
-                          the system log too, as one line of key=value pairs a
-                          monitoring system can match on
+      --syslog            capture, prune, repack, check, copy: say how the run
+                          ended in the system log too, as one line of key=value
+                          pairs a monitoring system can match on
       --result=FILE       when the command ends, write how it ended and what it
                           did into FILE as one JSON object, replaced atomically
                           (see RESULTS)
@@ -486,7 +491,8 @@ Options:
                           it back only if all of it is whole
       --dry-run           restore: check the image and say what would be put
                           back, writing nothing; prune: say which snapshots
-                          would be dropped, dropping none
+                          would be dropped, dropping none; repack: say how many
+                          packs would be written again
       --plan              restore: say what would be put back from the index
                           alone, writing nothing and reading no file's content
                           -- a dry run that checks nothing, in seconds
@@ -498,8 +504,9 @@ Options:
                           snapshot's files and the packs it lists (see STORAGE)
       --record=FILE       check: compare the repository with what FILE says it
                           held at the last check, saying what has been removed
-                          or changed since, then record it as it is now; prune:
-                          record what it removed and wrote (see STORAGE)
+                          or changed since, then record it as it is now; prune
+                          and repack: record what they removed and wrote (see
+                          STORAGE)
       --whole-packs       prune: read no index, so that no key is needed:
                           remove only the packs no snapshot kept lists as
                           needing, whole (see STORAGE)
@@ -1114,6 +1121,32 @@ next, within a second or so: it updates its `--record` with what it removed,
 ends with status 3 (incomplete) and the signal in its result's `errors`, and
 then lets the signal end it. The next prune finishes the job.
 
+**`repack`** makes an older repository fast to restore a few files from. A
+pack is one gzip file, and gzip reads only forward, so a pack written as one
+gzip stream has to be read from its start to reach the last file in it: an
+`--include` of a small directory spread over many packs reads most of each.
+restate 2.0.0.8 and later begin a new gzip stream every two mebibytes or so,
+at a file's boundary, and write a `.seek` beside the pack saying where each
+begins, so a restore reads only the stretch of each pack that holds what it
+wants. (On a 57 GB repository over NFS, restoring `~/.config` read about
+12 GB of packs the old way.) To `gzip`, and to
+an older restate, such a pack is still one gzip file read from the start, and
+`.seek` is trusted for nothing: what is read where it points is checked to be
+the file it should be, and the pack is otherwise read from its start.
+`restate repack REPO` writes again every pack an older restate wrote, keeping
+every snapshot and dropping on the way what none of them needs, as prune
+does; `--dry-run` says how many packs it would write, and a repack stopped by
+a signal keeps what it wrote, for the next to go on from. An encrypted
+repository's packs are encrypted whole, and gpg reads one only from its
+start too, so they are written as before and repack refuses one.
+
+```console
+$ sudo restate repack --dry-run /mnt/nas/laptop
+would write again 688 packs
+$ sudo restate repack /mnt/nas/laptop
+restate: wrote again 688 packs, and removed 0 that nothing needed, freeing 3.1 MiB
+```
+
 **`check`** reads the whole repository through, as `restic check
 --read-data` does: every pack, every chunk checked against the digest its
 pack's index gives (the repository's own index, not this machine's cached
@@ -1140,7 +1173,7 @@ restate: the repository is whole
 30 5 1 * *   root  restate check --read-all --syslog /var/backups/web01
 ```
 
-**Run from cron.** One capture or prune runs on a repository at a time, and
+**Run from cron.** One capture, prune or repack runs on a repository at a time, and
 one `--quiesce` capture on a machine at a time: another that finds the lock
 taken does nothing and exits with status 5, a reason to try later rather than
 an alarm. `--syslog` puts one line in the system log as the run ends, for a
@@ -1188,8 +1221,9 @@ secret key. A machine with neither makes a key of its own, and stores its
 large files whole once more.
 
 On disk a repository is plain files: `packs/` holds the chunks, in gzip'd tar
-files of about 32 MiB each beside an index of what is in them and a `.sum`
-of the file as written, and each of `snapshots/` holds a capture's index, its
+files of about 32 MiB each beside an index of what is in them, a `.sum`
+of the file as written and (but in an encrypted repository) a `.seek` of
+where each gzip stream in it begins, and each of `snapshots/` holds a capture's index, its
 kit's list, a summary, the list of packs it needs and, if it is signed, the
 signature. Everything is written beside its final name and
 renamed into place, the snapshot last, so an interrupted capture leaves
@@ -1326,7 +1360,7 @@ into `FILE` when the run ends, replaced whole:
 
 Every warning is collected, `--quiet` or not, every error -- so a run that
 failed says why in its result, not only on standard error -- and every path a
-walk could not read with why; prune, check, restore (its plan, in a dry run,
+walk could not read with why; prune, repack, check, restore (its plan, in a dry run,
 and `"content_read": false` for a `--plan`), copy, du, estimate and diff add
 what they did. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
@@ -1784,7 +1818,7 @@ src/            the program: one module per concern
   scan.c        the walk
   index.c       the index, to and from JSON
   image.c       images: assembling and reading back, and exporting snapshots
-  repo.c        repositories: packs, snapshots, the content stream, prune, check, copy, du
+  repo.c        repositories: packs, snapshots, the content stream, prune, repack, check, copy, du
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
   run.c         running gzip, curl, gpg, sh, ssh-keygen and the hooks: fixed paths, posix_spawn

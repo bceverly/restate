@@ -91,6 +91,10 @@
 /* A pack is closed once this much has been written into it, before gzip:
  * small enough that reading one for a single chunk is quick. */
 #define RS_REPO_PACK_SIZE ((uint64_t)32 * 1024 * 1024)
+/* gzip begins again at the first member after each this much, and the pack's
+ * .seek says where in the file each such member starts: so a pack can be read
+ * from near the member wanted, not only from its start. */
+#define RS_REPO_SEGMENT_SIZE ((uint64_t)2 * 1024 * 1024)
 /* Chunks: at least, about, and at most this many bytes. */
 #define RS_REPO_CHUNK_MIN ((size_t)256 * 1024)
 #define RS_REPO_CHUNK_AVG ((size_t)1024 * 1024)
@@ -291,6 +295,18 @@ bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, boo
                          struct rs_repo_pruned *out, struct rs_buf *err);
 void rs_repo_pruned_free(struct rs_repo_pruned *p);
 
+/*
+ * Writes again each pack that has no .seek -- every pack restate wrote before
+ * 2.0.0.8 -- so it can be read from the middle; what no snapshot needs is
+ * dropped on the way, as rs_repo_prune drops it, and every snapshot is kept.
+ * With `dry_run`, only counts them, into out->packs_rewritten. Refused for
+ * an encrypted repository, whose packs gpg reads only from their start. It
+ * stops as rs_repo_prune does; what it has written by then is kept, and the
+ * next repack goes on from there.
+ */
+bool rs_repo_repack(struct rs_repo *r, bool dry_run, struct rs_repo_pruned *out,
+                    struct rs_buf *err);
+
 /* ------------------------------------------------------------------------- */
 /* Usage, and copying                                                        */
 /* ------------------------------------------------------------------------- */
@@ -432,6 +448,15 @@ struct rs_repo_record {
 bool rs_repo_parse_record(const char *text, size_t len, struct rs_repo_record *out);
 void rs_repo_record_free(struct rs_repo_record *rec);
 
+/* A pack's .seek: "restate-seek 1", then "MEMBER OFFSET" per segment -- the
+ * first member in it, and where in the pack's file it begins. The first is
+ * "1 0"; both go up from line to line. */
+struct rs_repo_seek {
+    uint64_t member;
+    uint64_t offset;
+};
+bool rs_repo_parse_seek(const char *text, size_t len, struct rs_repo_seek **out, size_t *n);
+
 /* Parses a pack's .idx, version 1 or 2; members must be numbered upward, and
  * a list has two chunks at least. */
 bool rs_repo_parse_idx(const char *text, size_t len, struct rs_repo_idx *out);
@@ -455,6 +480,8 @@ void rs_repo_set_cache_dir(const char *dir);
 /* Replaces RS_REPO_PACK_SIZE, for the unit tests' benefit: they need packs
  * that fill up. 0 restores the default. Nothing in restate itself calls it. */
 void rs_repo_set_pack_size(uint64_t bytes);
+/* The same for RS_REPO_SEGMENT_SIZE. */
+void rs_repo_set_segment_size(uint64_t bytes);
 
 /* Replaces how a lock file is locked, how NFS is told, and the pause between
  * asking again where NFS says EIO, for the unit tests' benefit: they cannot

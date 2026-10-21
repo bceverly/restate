@@ -55,6 +55,8 @@
  * the repository is on can check and prune it without its keys. */
 #define SUM_FORMAT     "restate-sum 1\n"
 #define PACKS_FORMAT   "restate-packs 1\n"
+/* A pack's .seek: nor is it, and it says only where its segments begin. */
+#define SEEK_FORMAT    "restate-seek 1\n"
 /* A pack list names a few thousand packs at most. */
 #define SMALL_MAX_LIST ((size_t)16 * 1024 * 1024)
 /* A pack's .idx, a snapshot's kit and its info are small; anything larger is
@@ -1832,6 +1834,47 @@ bool rs_repo_parse_idx(const char *text, size_t len, struct rs_repo_idx *x)
     return ok;
 }
 
+bool rs_repo_parse_seek(const char *text, size_t len, struct rs_repo_seek **out, size_t *n)
+{
+    const char          *p = text;
+    const char          *end = text + len;
+    struct rs_repo_seek *at = NULL;
+    size_t               cap = 0;
+    size_t               k = 0;
+    bool                 ok;
+
+    *out = NULL;
+    *n = 0;
+    ok = len >= strlen(SEEK_FORMAT) && memcmp(text, SEEK_FORMAT, strlen(SEEK_FORMAT)) == 0;
+    p += ok ? strlen(SEEK_FORMAT) : 0;
+    while (ok && p < end)
+    {
+        struct rs_repo_seek e;
+
+        ok = number(&p, end, &e.member) && skip(&p, end, ' ') && number(&p, end, &e.offset) &&
+             skip(&p, end, '\n') &&
+             (k == 0 ? e.member == 1 && e.offset == 0
+                     : e.member > at[k - 1].member && e.offset > at[k - 1].offset);
+        if (ok)
+        {
+            if (k == cap)
+            {
+                cap = cap ? cap * 2 : 16;
+                at = rs_xreallocarray(at, cap, sizeof(*at));
+            }
+            at[k++] = e;
+        }
+    }
+    if (!ok || k == 0)
+    {
+        free(at);
+        return false;
+    }
+    *out = at;
+    *n = k;
+    return true;
+}
+
 /* A pack's .idx: this machine's copy of it if the repository is encrypted
  * and it has one, else the repository's, decrypted -- unless `decrypt` is
  * false, *sealed then saying why not -- and then cached. */
@@ -2375,10 +2418,16 @@ char *rs_repo_snapshot_name(const char *created)
 /* ------------------------------------------------------------------------- */
 
 static uint64_t pack_size = RS_REPO_PACK_SIZE;
+static uint64_t segment_size = RS_REPO_SEGMENT_SIZE;
 
 void rs_repo_set_pack_size(uint64_t bytes)
 {
     pack_size = bytes ? bytes : RS_REPO_PACK_SIZE;
+}
+
+void rs_repo_set_segment_size(uint64_t bytes)
+{
+    segment_size = bytes ? bytes : RS_REPO_SEGMENT_SIZE;
 }
 
 /*
@@ -2400,6 +2449,11 @@ struct pack_out {
     struct rs_tar_writer tar;
     struct rs_buf        idx;
     uint64_t             seq;
+    /* Unless it is encrypted -- gpg reads only from the start -- gzip begins
+     * again every segment_size, and `seek` says where. */
+    bool                 seekable;
+    uint64_t             segment_at; /* the tar offset the segment began at */
+    struct rs_buf        seek;
 };
 
 /* How many packs this process has begun: with the time and the process,
@@ -2606,6 +2660,9 @@ static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err
     rs_tar_writer_init(&pk->tar, pack_feed, pk);
     rs_buf_init(&pk->idx);
     rs_buf_addstr(&pk->idx, PACK_FORMAT);
+    pk->seekable = !pk->z.sealed;
+    rs_buf_init(&pk->seek);
+    rs_buf_addstr(&pk->seek, SEEK_FORMAT "1 0\n");
     pk->open = true;
     return true;
 }
@@ -2633,6 +2690,7 @@ static void pack_discard(struct pack_out *pk)
     free(pk->name);
     free(pk->tmp);
     rs_buf_free(&pk->idx);
+    rs_buf_free(&pk->seek);
     memset(pk, 0, sizeof(*pk));
 }
 
@@ -2643,6 +2701,8 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
     char *final = rs_xasprintf("%s/packs/%s.tar.gz", r->dir, pk->name);
     char *idx = rs_xasprintf("%s/packs/.%s.idx.tmp", r->dir, pk->name);
     char *idx_final = rs_xasprintf("%s/packs/%s.idx", r->dir, pk->name);
+    char *seek = rs_xasprintf("%s/packs/.%s.seek.tmp", r->dir, pk->name);
+    char *seek_final = rs_xasprintf("%s/packs/%s.seek", r->dir, pk->name);
     bool  ok = rs_tar_finish(&pk->tar);
     char  hex[RS_SHA256_HEX_SIZE];
 
@@ -2689,6 +2749,17 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
     }
     /* Its .sum before its .idx: a pack that counts has one. */
     ok = ok && put_sum(r->dir, pk->name, hex, pk->written, err);
+    /* Then its .seek: what reads it from the middle trusts nothing in it
+     * that the content does not bear out. */
+    if (ok && pk->seekable)
+    {
+        ok = write_out(seek, pk->seek.data, pk->seek.len, false, NULL, 0, err);
+        if (ok && rename(seek, seek_final) != 0)
+        {
+            rs_buf_addf(err, "%s: %s", seek_final, strerror(errno));
+            ok = false;
+        }
+    }
     ok = ok && write_out(idx, pk->idx.data, pk->idx.len, false, r->recips, seal_n(r), err);
     if (ok && rename(idx, idx_final) != 0)
     {
@@ -2710,13 +2781,18 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
         (void)unlink(final);
         (void)unlink(idx);
         (void)unlink(sum);
+        (void)unlink(seek);
+        (void)unlink(seek_final);
         free(sum);
     }
     free(final);
     free(idx);
     free(idx_final);
+    free(seek);
+    free(seek_final);
     free(pk->tmp);
     rs_buf_free(&pk->idx);
+    rs_buf_free(&pk->seek);
     *done = ok ? pk->name : NULL;
     if (!ok)
     {
@@ -2726,13 +2802,58 @@ static bool pack_close(struct rs_repo *r, struct pack_out *pk, char **done, stru
     return ok;
 }
 
-/* The header of the pack's next member, `size` bytes, numbered. */
-static bool pack_header(struct pack_out *pk, uint64_t size)
+/*
+ * Ends the segment: gzip is told its input is over, and what it writes is
+ * taken to its end; then a new gzip, writing into a new pipe, whose output
+ * begins where the next member, its first, will be.
+ */
+static bool pack_cut(struct pack_out *pk, struct rs_buf *err)
+{
+    int  p[2];
+    bool ok;
+
+    (void)close(pk->z.fd);
+    pk->z.gz.fd = -1;
+    pk->z.fd = -1;
+    (void)pack_take(pk, true);
+    ok = zout_close(&pk->z, false, err);
+    if (ok && pk->write_errno != 0)
+    {
+        rs_buf_addf(err, "%s: %s", pk->tmp, strerror(pk->write_errno));
+        ok = false;
+    }
+    if (!ok || !pack_pipe(p, err))
+    {
+        return false;
+    }
+    if (!zout_open(&pk->z, p[1], true, NULL, 0, err))
+    {
+        (void)close(p[0]);
+        (void)close(p[1]);
+        return false;
+    }
+    (void)close(p[1]);
+    pk->tap = p[0];
+    (void)fcntl(pk->z.fd, F_SETFL, fcntl(pk->z.fd, F_GETFL) | O_NONBLOCK);
+    pk->segment_at = pk->tar.offset;
+    rs_buf_addf(&pk->seek, "%" PRIu64 " %" PRIu64 "\n", pk->seq + 1, pk->written);
+    return true;
+}
+
+/* The header of the pack's next member, `size` bytes, numbered -- first in
+ * a segment of its own, once the one before is full. */
+static bool pack_header(struct pack_out *pk, uint64_t size, struct rs_buf *err)
 {
     struct rs_tar_member m;
-    char                *num = rs_xasprintf("%" PRIu64, ++pk->seq);
+    char                *num;
     bool                 ok;
 
+    if (pk->seekable && pk->seq > 0 && pk->tar.offset - pk->segment_at >= segment_size &&
+        !pack_cut(pk, err))
+    {
+        return false;
+    }
+    num = rs_xasprintf("%" PRIu64, ++pk->seq);
     memset(&m, 0, sizeof(m));
     m.name = num;
     m.typeflag = '0';
@@ -3131,7 +3252,7 @@ static bool put_chunk(struct rs_repo_writer *w, const unsigned char *p, size_t l
             return true;
         }
     }
-    if (!ensure_pack(w, w->err) || !pack_header(&w->pk, len) || !rs_tar_data(&w->pk.tar, p, len) ||
+    if (!ensure_pack(w, w->err) || !pack_header(&w->pk, len, w->err) || !rs_tar_data(&w->pk.tar, p, len) ||
         !rs_tar_pad(&w->pk.tar))
     {
         if (w->err->len == 0)
@@ -3687,6 +3808,13 @@ struct reader {
     uint64_t             used;        /* when last, for the least recent to go */
 };
 
+/* A pack's .seek, once it is wanted: none, if it has none or it is not one. */
+struct seeks {
+    bool                 loaded;
+    struct rs_repo_seek *at;
+    size_t               n;
+};
+
 /* A chunk more than one content has, kept once read. */
 struct cached {
     unsigned char  d[32];
@@ -3699,6 +3827,10 @@ struct cached {
  * image's old chunks, and the few that changed since -- each read forward. */
 #define READERS     8
 #define CACHE_BYTES ((size_t)64 * 1024 * 1024)
+/* A pack read forward this little way short of the segment wanted is read on
+ * to it: gzip, started anew, reads a quarter of a mebibyte before it writes
+ * anything, so a jump shorter than about twice that saves nothing. */
+#define SEEK_NEAR   ((uint64_t)512 * 1024)
 
 enum phase {
     PH_OTHERS = 0,   /* directories, symlinks and FIFOs, from the index */
@@ -3739,6 +3871,7 @@ struct rs_repo_stream {
     size_t                 ncache;
     size_t                 cache_bytes;
     bool                  *warned;    /* per pack */
+    struct seeks          *seeks;     /* per pack */
     /* The content being made: its next chunk, and the chunk being read. */
     const struct group    *g;
     size_t                 ci;
@@ -3928,6 +4061,7 @@ struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const str
         }
     }
     s->warned = rs_xcalloc(r->npacks + 1, sizeof(*s->warned));
+    s->seeks = rs_xcalloc(r->npacks + 1, sizeof(*s->seeks));
     rs_buf_init(&s->out);
     rs_buf_init(&s->err);
     return s;
@@ -3978,7 +4112,9 @@ static void close_reader(struct reader *rd)
     memset(rd, 0, sizeof(*rd));
 }
 
-static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pack)
+/* Pack `pack` open from `offset` in its file, where a gzip stream starts. */
+static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pack,
+                        uint64_t offset)
 {
     char         *path = rs_xasprintf("%s/packs/%s.tar.gz", s->r->dir, s->r->packs[pack]);
     int           fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -3990,6 +4126,10 @@ static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pa
     if (!ok)
     {
         rs_buf_addstr(&why, strerror(errno));
+    } else if (offset > 0 && lseek(fd, (off_t)offset, SEEK_SET) < 0)
+    {
+        rs_buf_addstr(&why, strerror(errno));
+        ok = false;
     }
     ok = ok && zin_open(&rd->z, fd, true, &why);
     if (fd >= 0)
@@ -4011,21 +4151,118 @@ static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pa
     return ok;
 }
 
+/* The segment of pack `pack` that member `member` is in: its first member
+ * and where it begins -- the pack's start, if the pack has no .seek. The
+ * .seek of an encrypted repository's pack is not even looked for. */
+static void segment_of(struct rs_repo_stream *s, uint32_t pack, uint64_t member,
+                       uint64_t *first, uint64_t *offset)
+{
+    struct seeks *t = &s->seeks[pack];
+    size_t        lo = 0;
+    size_t        hi;
+
+    if (!t->loaded && !s->r->encrypted)
+    {
+        char         *path = rs_xasprintf("%s/packs/%s.seek", s->r->dir, s->r->packs[pack]);
+        struct rs_buf text;
+        struct rs_buf ignore;
+
+        rs_buf_init(&ignore);
+        if (read_file(path, SMALL_MAX_LIST, &text, &ignore) &&
+            !rs_repo_parse_seek(text.data, text.len, &t->at, &t->n))
+        {
+            t->at = NULL;
+            t->n = 0;
+        }
+        rs_buf_free(&text);
+        rs_buf_free(&ignore);
+        free(path);
+    }
+    t->loaded = true;
+    *first = 1;
+    *offset = 0;
+    hi = t->n;
+    /* The last segment whose first member is no later than `member`. */
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+
+        if (t->at[mid].member <= member)
+        {
+            *first = t->at[mid].member;
+            *offset = t->at[mid].offset;
+            lo = mid + 1;
+        } else
+        {
+            hi = mid;
+        }
+    }
+}
+
+/* Opens pack `pack` at the segment that begins with member `first`, at
+ * `offset`: the reader at that member's header -- or, if what is there is not
+ * that, at the pack's start, its .seek not used again. */
+static bool open_at(struct rs_repo_stream *s, struct reader *rd, uint32_t pack, uint64_t first,
+                    uint64_t offset)
+{
+    const char *p;
+    uint64_t    num = 0;
+
+    if (offset > 0 && open_reader(s, rd, pack, offset))
+    {
+        int more = rs_tar_next(&rd->tr, &rd->te, &s->err);
+
+        p = rd->te.name.data;
+        if (more == 1 && rd->te.typeflag == '0' &&
+            number(&p, rd->te.name.data + rd->te.name.len, &num) && *p == '\0' && num == first)
+        {
+            rd->at = num;
+            rd->pending = true;
+            return true;
+        }
+        rs_buf_reset(&s->err);
+        close_reader(rd);
+    }
+    if (offset > 0)
+    {
+        free(s->seeks[pack].at);
+        s->seeks[pack].at = NULL;
+        s->seeks[pack].n = 0;
+    }
+    return open_reader(s, rd, pack, 0);
+}
+
 /* A reader at the start of member `member` of pack `pack`: one already open
- * that has not passed it, or the pack opened again. */
+ * that has not passed it -- nor is a segment or more short of it -- or the
+ * pack opened again, at the segment it is in. */
 static struct reader *position(struct rs_repo_stream *s, uint32_t pack, uint32_t member)
 {
     struct reader *rd = NULL;
     struct reader *oldest = &s->readers[0];
+    struct reader *behind = NULL;
+    uint64_t       first;
+    uint64_t       offset;
+    uint64_t       x_first;
+    uint64_t       x_offset;
     size_t         i;
 
+    segment_of(s, pack, member, &first, &offset);
     for (i = 0; i < READERS && !rd; i++)
     {
         struct reader *x = &s->readers[i];
+        bool           ahead = x->open && x->pack == pack &&
+                     (x->at < member || (x->at == member && x->pending));
 
-        if (x->open && x->pack == pack && (x->at < member || (x->at == member && x->pending)))
+        if (ahead)
+        {
+            segment_of(s, pack, x->at, &x_first, &x_offset);
+        }
+        if (ahead && (x->at + 1 >= first || offset - x_offset <= SEEK_NEAR))
         {
             rd = x;
+        } else if (ahead)
+        {
+            behind = x;
         } else if (!x->open || (oldest->open && x->used < oldest->used))
         {
             oldest = x;
@@ -4033,9 +4270,11 @@ static struct reader *position(struct rs_repo_stream *s, uint32_t pack, uint32_t
     }
     if (!rd)
     {
-        rd = oldest;
+        /* One a segment or more short of it in this pack is the one to
+         * open again, nearer. */
+        rd = behind ? behind : oldest;
         close_reader(rd);
-        if (!open_reader(s, rd, pack))
+        if (!open_at(s, rd, pack, first, offset))
         {
             return NULL;
         }
@@ -4464,6 +4703,11 @@ bool rs_repo_stream_close(struct rs_repo_stream *s, struct rs_buf *err)
     map_free(&s->multi);
     free(s->cache);
     free(s->warned);
+    for (i = 0; i < s->r->npacks; i++)
+    {
+        free(s->seeks[i].at);
+    }
+    free(s->seeks);
     free(s->want);
     free(s->refs);
     free(s->groups);
@@ -4607,14 +4851,17 @@ static uint64_t remove_pack(const struct rs_repo *r, const char *name)
     char    *idx = rs_xasprintf("%s/packs/%s.idx", r->dir, name);
     char    *content = rs_xasprintf("%s/packs/%s.tar.gz", r->dir, name);
     char    *sum = rs_xasprintf("%s/packs/%s.sum", r->dir, name);
-    uint64_t freed = disk_size(idx) + disk_size(content) + disk_size(sum);
+    char    *seek = rs_xasprintf("%s/packs/%s.seek", r->dir, name);
+    uint64_t freed = disk_size(idx) + disk_size(content) + disk_size(sum) + disk_size(seek);
 
     (void)unlink(idx);
     (void)unlink(content);
     (void)unlink(sum);
+    (void)unlink(seek);
     free(idx);
     free(content);
     free(sum);
+    free(seek);
     return freed;
 }
 
@@ -4681,7 +4928,7 @@ static bool rewrite(struct rs_repo *r, const char *name, const struct rs_repo_id
         {
             continue;
         }
-        ok = pack_header(&pk, te.size);
+        ok = pack_header(&pk, te.size, err);
         while (ok && (got = rs_tar_read(&tr, chunk, sizeof(chunk), err)) > 0)
         {
             ok = rs_tar_data(&pk.tar, chunk, (size_t)got);
@@ -4763,12 +5010,14 @@ static void clear_leftovers(const struct rs_repo *r)
                 (void)unlink(path);
             }
             free(idx);
-        } else if (len > 4 && strcmp(de->d_name + len - 4, ".sum") == 0)
+        } else if ((len > 4 && strcmp(de->d_name + len - 4, ".sum") == 0) ||
+                   (len > 5 && strcmp(de->d_name + len - 5, ".seek") == 0))
         {
-            char       *idx = rs_xasprintf("%s/%.*s.idx", packs, (int)(len - 4), de->d_name);
+            size_t      ext = de->d_name[len - 1] == 'm' ? 4 : 5;
+            char       *idx = rs_xasprintf("%s/%.*s.idx", packs, (int)(len - ext), de->d_name);
             struct stat st;
 
-            /* A .sum is a pack's only while its .idx is there. */
+            /* A .sum or .seek is a pack's only while its .idx is there. */
             if (lstat(idx, &st) != 0)
             {
                 (void)unlink(path);
@@ -4978,46 +5227,62 @@ static void drop_snapshots(struct rs_repo *r, struct rs_repo_pruned *out)
     sync_dir(r->dir);
 }
 
-bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
-                   struct rs_repo_pruned *out, struct rs_buf *err)
+/* A pack's files on disk: its content, its .idx, its .sum and its .seek. */
+static uint64_t pack_disk(const struct rs_repo *r, const char *name)
 {
-    size_t        n;
-    char        **names = rs_repo_snapshots(r, &n);
-    char        **left = rs_xcalloc(n + 1, sizeof(*left));
-    bool         *kept = rs_xcalloc(n + 1, sizeof(*kept));
+    static const char *const ext[] = { "tar.gz", "idx", "sum", "seek" };
+    uint64_t                 total = 0;
+    size_t                   i;
+
+    for (i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/packs/%s.%s", r->dir, name, ext[i]);
+
+        total += disk_size(path);
+        free(path);
+    }
+    return total;
+}
+
+/* Whether pack `name` has a .seek: whether it can be read from the middle. */
+static bool has_seek(const struct rs_repo *r, const char *name)
+{
+    char       *path = rs_xasprintf("%s/packs/%s.seek", r->dir, name);
+    struct stat st;
+    bool        there = lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+
+    free(path);
+    return there;
+}
+
+/*
+ * The content the snapshots `left` need, kept, and the rest removed: a pack
+ * with nothing needed in it goes, and one a quarter or more dead is written
+ * again -- as, with `repack`, is every one with no .seek.
+ */
+static bool sweep(struct rs_repo *r, char *const *left, size_t nleft, bool repack,
+                  struct rs_repo_pruned *out, struct rs_buf *err)
+{
     struct objmap live;
     struct objmap live_lists;
-    size_t        nleft = 0;
     size_t        i;
-    bool          ok = true;
+    bool          ok;
 
-    memset(out, 0, sizeof(*out));
     memset(&live, 0, sizeof(live));
     memset(&live_lists, 0, sizeof(live_lists));
-    rs_repo_choose(names, n, keep, kept);
-    for (i = 0; i < n; i++)
-    {
-        if (kept[i])
-        {
-            left[nleft++] = names[i];
-        } else
-        {
-            out->dropped = rs_xreallocarray(out->dropped, out->ndropped + 1,
-                                            sizeof(*out->dropped));
-            out->dropped[out->ndropped++] = rs_xstrdup(names[i]);
-        }
-    }
-    if (dry_run)
-    {
-        free(left);
-        free(kept);
-        rs_repo_free_names(names, n);
-        return true;
-    }
-    drop_snapshots(r, out);
     /* Content is removed only once every snapshot left has been read: one
      * that cannot be read might be the only thing that needs some of it. */
     ok = out->stopped || live_content(r, left, nleft, &live, &live_lists, &out->stopped, err);
+    if (ok && repack)
+    {
+        uint64_t total = 0;
+
+        for (i = 0; i < r->npacks; i++)
+        {
+            total += has_seek(r, r->packs[i]) ? 0 : pack_disk(r, r->packs[i]);
+        }
+        rs_progress_phase("repacking", total);
+    }
     for (i = 0; ok && !out->stopped && i < r->npacks; i++)
     {
         struct rs_repo_idx x;
@@ -5027,8 +5292,10 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         bool              *keepl;
         uint64_t           total = 0;
         uint64_t           kept_bytes = 0;
+        uint64_t           was = 0;
         size_t             nkept = 0;
         size_t             nlists = 0;
+        bool               seekless = repack && !has_seek(r, r->packs[i]);
 
         if (stopping(r))
         {
@@ -5042,6 +5309,7 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
             rs_buf_free(&why);
             continue;
         }
+        was = seekless ? pack_disk(r, r->packs[i]) : 0;
         keepm = rs_xcalloc(x.nmembers + 1, sizeof(*keepm));
         keepl = rs_xcalloc(x.nlists + 1, sizeof(*keepl));
         for (k = 0; k < x.nmembers; k++)
@@ -5063,7 +5331,7 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
         {
             out->bytes_freed += remove_pack(r, r->packs[i]);
             out->packs_removed++;
-        } else if ((total - kept_bytes) * 4 >= total && total > kept_bytes)
+        } else if (((total - kept_bytes) * 4 >= total && total > kept_bytes) || seekless)
         {
             /* A quarter or more of it is dead: worth writing again -- which,
              * encrypted, needs the keys to encrypt to. */
@@ -5078,10 +5346,15 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
                 rs_warn("%s", why.data);
             }
         }
+        rs_progress_bytes(was);
         free(keepm);
         free(keepl);
         rs_repo_idx_free(&x);
         rs_buf_free(&why);
+    }
+    if (repack)
+    {
+        rs_progress_done();
     }
     if (ok)
     {
@@ -5106,8 +5379,76 @@ bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_
     }
     map_free(&live);
     map_free(&live_lists);
+    return ok;
+}
+
+bool rs_repo_prune(struct rs_repo *r, const struct rs_repo_keep *keep, bool dry_run,
+                   struct rs_repo_pruned *out, struct rs_buf *err)
+{
+    size_t n;
+    char **names = rs_repo_snapshots(r, &n);
+    char **left = rs_xcalloc(n + 1, sizeof(*left));
+    bool  *kept = rs_xcalloc(n + 1, sizeof(*kept));
+    size_t nleft = 0;
+    size_t i;
+    bool   ok;
+
+    memset(out, 0, sizeof(*out));
+    rs_repo_choose(names, n, keep, kept);
+    for (i = 0; i < n; i++)
+    {
+        if (kept[i])
+        {
+            left[nleft++] = names[i];
+        } else
+        {
+            out->dropped = rs_xreallocarray(out->dropped, out->ndropped + 1,
+                                            sizeof(*out->dropped));
+            out->dropped[out->ndropped++] = rs_xstrdup(names[i]);
+        }
+    }
+    if (dry_run)
+    {
+        free(left);
+        free(kept);
+        rs_repo_free_names(names, n);
+        return true;
+    }
+    drop_snapshots(r, out);
+    ok = sweep(r, left, nleft, false, out, err);
     free(left);
     free(kept);
+    rs_repo_free_names(names, n);
+    return ok;
+}
+
+bool rs_repo_repack(struct rs_repo *r, bool dry_run, struct rs_repo_pruned *out,
+                    struct rs_buf *err)
+{
+    size_t n;
+    char **names;
+    bool   ok;
+
+    memset(out, 0, sizeof(*out));
+    if (r->encrypted)
+    {
+        rs_buf_addf(err, "%s: an encrypted repository's packs are encrypted whole, and gpg reads "
+                    "one only from its start: written again, they would read no faster",
+                    r->dir);
+        return false;
+    }
+    if (dry_run)
+    {
+        size_t i;
+
+        for (i = 0; i < r->npacks; i++)
+        {
+            out->packs_rewritten += has_seek(r, r->packs[i]) ? 0 : 1;
+        }
+        return true;
+    }
+    names = rs_repo_snapshots(r, &n);
+    ok = sweep(r, names, n, true, out, err);
     rs_repo_free_names(names, n);
     return ok;
 }
@@ -5203,23 +5544,6 @@ bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, boo
 /* ------------------------------------------------------------------------- */
 /* Usage                                                                     */
 /* ------------------------------------------------------------------------- */
-
-/* A pack's files on disk: its content, its .idx and its .sum. */
-static uint64_t pack_disk(const struct rs_repo *r, const char *name)
-{
-    static const char *const ext[] = { "tar.gz", "idx", "sum" };
-    uint64_t                 total = 0;
-    size_t                   i;
-
-    for (i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
-    {
-        char *path = rs_xasprintf("%s/packs/%s.%s", r->dir, name, ext[i]);
-
-        total += disk_size(path);
-        free(path);
-    }
-    return total;
-}
 
 void rs_repo_du(struct rs_repo *r, struct rs_repo_usage *out)
 {
@@ -5419,11 +5743,11 @@ static bool packs_needed(struct rs_repo *r, const char *name, char ***list, size
 }
 
 /* Copies pack `pack` from `r` to `dest`, unless dest has it: the content, its
- * .sum, then its .idx, which makes it count there. */
+ * .sum, its .seek if it has one, then its .idx, which makes it count there. */
 static bool copy_pack(const struct rs_repo *r, const struct rs_repo *dest, const char *pack,
                       struct rs_repo_copied *out, struct rs_buf *err)
 {
-    static const char *const ext[] = { "tar.gz", "sum", "idx" };
+    static const char *const ext[] = { "tar.gz", "sum", "seek", "idx" };
     size_t                   i;
     bool                     ok = true;
 
@@ -5454,8 +5778,10 @@ static bool copy_pack(const struct rs_repo *r, const struct rs_repo *dest, const
         {
             /* One restate 1 wrote: given a .sum on the way. */
             ok = write_sum(dest->dir, pack, err);
-        } else
+        } else if (i != 2 || lstat(from, &st) == 0)
         {
+            /* A .seek only where there is one: a pack written before packs
+             * had segments has none, and is read from its start. */
             ok = copy_file(from, to, &out->bytes, err);
         }
         free(from);
@@ -6161,8 +6487,8 @@ static void record_file(const struct rs_repo *r, struct rs_repo_record *rec, con
     free(path);
 }
 
-/* Everything in the record but the packs' content: their .idx and .sum, and
- * each snapshot's files. */
+/* Everything in the record but the packs' content: their .idx, .sum and
+ * .seek, and each snapshot's files. */
 static void record_rest(const struct rs_repo *r, struct rs_repo_record *rec)
 {
     static const char *const files[] = { "index.json.gz", "index.sig", "kit", "info", "packs" };
@@ -6176,11 +6502,14 @@ static void record_rest(const struct rs_repo *r, struct rs_repo_record *rec)
     {
         char *idx = rs_xasprintf("packs/%s.idx", r->packs[i]);
         char *sum = rs_xasprintf("packs/%s.sum", r->packs[i]);
+        char *seek = rs_xasprintf("packs/%s.seek", r->packs[i]);
 
         record_file(r, rec, idx);
         record_file(r, rec, sum);
+        record_file(r, rec, seek);
         free(idx);
         free(sum);
+        free(seek);
     }
     snaps = list_dir(dir, any_snapshot, &nsnaps);
     for (i = 0; i < nsnaps; i++)

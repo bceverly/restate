@@ -73,7 +73,8 @@ RS_OPT(OPT_CREATE, "create",        no_argument,       NULL,
        "(its parent must be), or an empty one -- as restate init would, encrypted with "
        "--encrypt-to; one with anything else in it is refused, and nothing is written")
 RS_OPT(OPT_SYSLOG, "syslog",        no_argument,       NULL,
-       "capture, prune, check, copy: say how the run ended in the system log too, as one "
+       "capture, prune, repack, check, copy: say how the run ended in the system log too, "
+       "as one "
        "line of key=value pairs a monitoring system can match on")
 RS_OPT(OPT_RESULT, "result",        required_argument, "FILE",
        "when the command ends, write how it ended and what it did into FILE as one JSON "
@@ -150,7 +151,8 @@ RS_OPT(OPT_CHECK_FIRST, "check-first", no_argument,     NULL,
        "writing nothing, and put it back only if all of it is whole")
 RS_OPT(OPT_DRY_RUN, "dry-run",        no_argument,       NULL,
        "restore: check the image and say what would be put back, writing nothing; "
-       "prune: say which snapshots would be dropped, dropping none")
+       "prune: say which snapshots would be dropped, dropping none; repack: say how many "
+       "packs would be written again")
 RS_OPT(OPT_PLAN, "plan",              no_argument,       NULL,
        "restore: say what would be put back from the index alone, writing nothing and "
        "reading no file's content -- a dry run that checks nothing, in seconds")
@@ -162,8 +164,8 @@ RS_OPT(OPT_METADATA_ONLY, "metadata-only", no_argument,   NULL,
        "beside it, and each snapshot's files and the packs it lists (see STORAGE)")
 RS_OPT(OPT_RECORD, "record",          required_argument, "FILE",
        "check: compare the repository with what FILE says it held at the last check, saying "
-       "what has been removed or changed since, then record it as it is now; prune: record "
-       "what it removed and wrote (see STORAGE)")
+       "what has been removed or changed since, then record it as it is now; prune and "
+       "repack: record what they removed and wrote (see STORAGE)")
 RS_OPT(OPT_WHOLE_PACKS, "whole-packs", no_argument,     NULL,
        "prune: read no index, so that no key is needed: remove only the packs no snapshot "
        "kept lists as needing, whole (see STORAGE)")

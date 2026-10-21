@@ -1193,6 +1193,238 @@ static char *cached_key(const char *cache)
     return key;
 }
 
+/* The first line of `cmd`'s output, or "". */
+static char *first_line(const char *cmd)
+{
+    FILE *fp = popen(cmd, "r");
+    char  line[512] = "";
+
+    if (fp && fgets(line, sizeof(line), fp))
+    {
+        line[strcspn(line, "\n")] = '\0';
+    }
+    if (fp)
+    {
+        (void)pclose(fp);
+    }
+    return rs_xstrdup(line);
+}
+
+/* The whole snapshot `name` streamed: how many of its files were whole. */
+static size_t whole_files(struct rs_repo *r, const char *name)
+{
+    struct rs_index        ix;
+    struct rs_buf          seen;
+    struct rs_buf          err;
+    struct rs_repo_stream *s;
+    size_t                 n;
+
+    rs_index_init(&ix);
+    rs_buf_init(&seen);
+    rs_buf_init(&err);
+    CHECK(rs_repo_load_index(r, name, &ix, &err));
+    s = rs_repo_stream_open(r, &ix, NULL, 0, &err);
+    (void)read_stream(s, &seen, &err);
+    (void)rs_repo_stream_close(s, &err);
+    n = matching(&ix, seen.data);
+    rs_index_free(&ix);
+    rs_buf_free(&seen);
+    rs_buf_free(&err);
+    return n;
+}
+
+static void test_seek(const char *dir)
+{
+    char                 *repo = rs_xasprintf("%s/repo5", dir);
+    char                 *tree = rs_xasprintf("%s/tree5", dir);
+    char                 *name = NULL;
+    char                 *pattern = rs_xasprintf("%s/packs/*.seek", repo);
+    char                 *idxs = rs_xasprintf("%s/packs/*.idx", repo);
+    char                 *cmd;
+    char                 *pack;
+    char                 *path;
+    struct rs_buf         err;
+    struct rs_buf         text;
+    struct rs_scan_stats  st;
+    struct rs_repo       *r;
+    struct rs_repo_pruned pr;
+    struct rs_repo_keep   keep;
+    struct rs_repo_seek  *at = NULL;
+    size_t                n = 0;
+    size_t                files = 200;
+    size_t                i;
+    bool                  busy;
+
+    rs_buf_init(&err);
+    rs_buf_init(&text);
+    CHECK(rs_repo_init(repo, false, &err));
+    CHECK(mkdir(tree, 0755) == 0);
+    for (i = 0; i < files; i++)
+    {
+        char *f = rs_xasprintf("f%03zu", i);
+
+        big_file(tree, f, 8192, (unsigned)(1000 + i));
+        free(f);
+    }
+    rs_repo_set_pack_size(1024 * 1024);
+    rs_repo_set_segment_size(64 * 1024);
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(snap(r, tree, "2026-04-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+
+    TEST_CASE("repo: a pack in segments, each where its .seek says");
+    CHECK(count(idxs) >= 2);
+    CHECK_INT(count(pattern), count(idxs));
+    cmd = rs_xasprintf("cd '%s/packs' && ls *.seek | head -1", repo);
+    pack = first_line(cmd);
+    free(cmd);
+    path = rs_xasprintf("%s/packs/%s", repo, pack);
+    CHECK(slurp(path, &text));
+    CHECK(rs_repo_parse_seek(text.data, text.len, &at, &n));
+    CHECK(n > 4);
+    free(at);
+    /* Read from the start, the segments are one gzip stream. */
+    cmd = rs_xasprintf("gzip -dc '%s/packs/%.*s.tar.gz' | tar tf - | wc -l", repo,
+                       (int)(strlen(pack) - 5), pack);
+    free(pack);
+    pack = first_line(cmd);
+    CHECK(atoi(pack) > 100);
+    free(pack);
+    free(cmd);
+
+    TEST_CASE("repo: a snapshot in segmented packs, read whole");
+    r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+    CHECK_INT(whole_files(r, name), files);
+    rs_repo_close(r);
+
+    TEST_CASE("repo: a .seek that is wrong costs a read from the start, not a file");
+    {
+        char *saved = rs_xasprintf("%s.keep", path);
+
+        CHECK(rename(path, saved) == 0);
+        rs_test_write(repo, path + strlen(repo) + 1, "restate-seek 1\n1 0\n2 7\n", 0644);
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        CHECK_INT(whole_files(r, name), files);
+        rs_repo_close(r);
+        rs_test_write(repo, path + strlen(repo) + 1, "not one\n", 0644);
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        CHECK_INT(whole_files(r, name), files);
+        rs_repo_close(r);
+        CHECK(rename(saved, path) == 0);
+        free(saved);
+    }
+
+    TEST_CASE("repo: a .seek with no pack is cleared away, and goes with its pack");
+    rs_test_write(repo, "packs/20260101T000000Z-1-0001.seek", "restate-seek 1\n1 0\n", 0644);
+    r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+    memset(&keep, 0, sizeof(keep));
+    keep.last = 5;
+    CHECK(rs_repo_prune(r, &keep, false, &pr, &err));
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+    CHECK_INT(count(pattern), count(idxs));
+
+    TEST_CASE("repo: repack makes packs written before segments readable from the middle");
+    rs_repo_set_segment_size(UINT64_MAX);
+    for (i = 0; i < files; i += 2)
+    {
+        char *f = rs_xasprintf("f%03zu", i);
+
+        big_file(tree, f, 8192, (unsigned)(5000 + i));
+        free(f);
+    }
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    {
+        struct rs_index prev;
+        char           *second = NULL;
+
+        rs_index_init(&prev);
+        CHECK(rs_repo_load_index(r, name, &prev, &err));
+        CHECK(snap(r, tree, "2026-04-02T00:00:00.000000000Z", &prev, &st, &second));
+        rs_index_free(&prev);
+        free(name);
+        name = second;
+    }
+    rs_repo_close(r);
+    cmd = rs_xasprintf("rm -f '%s/packs/'*.seek", repo);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    rs_repo_set_segment_size(64 * 1024);
+    r = rs_repo_open(repo, RS_REPO_LOOK, &busy, &err);
+    CHECK(rs_repo_repack(r, true, &pr, &err));
+    CHECK_INT(pr.packs_rewritten, count(idxs));
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+    CHECK_INT(count(pattern), 0);
+    r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+    CHECK(rs_repo_repack(r, false, &pr, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    CHECK(pr.packs_rewritten > 0);
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+    CHECK_INT(count(pattern), count(idxs));
+    r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+    CHECK_INT(whole_files(r, name), files);
+    rs_repo_close(r);
+    /* Both snapshots still name the packs their content is in now. */
+    {
+        char **snaps;
+        size_t nsnaps;
+        char **list;
+        size_t nlist;
+
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        snaps = rs_repo_snapshots(r, &nsnaps);
+        CHECK_INT(nsnaps, 2);
+        for (i = 0; i < nsnaps; i++)
+        {
+            char *packs = rs_xasprintf("%s/snapshots/%s/packs", repo, snaps[i]);
+
+            rs_buf_reset(&text);
+            CHECK(slurp(packs, &text));
+            CHECK(rs_repo_parse_pack_list(text.data, text.len, &list, &nlist));
+            for (n = 0; n < nlist; n++)
+            {
+                char *idx = rs_xasprintf("%s/packs/%s.seek", repo, list[n]);
+
+                CHECK(access(idx, F_OK) == 0);
+                free(idx);
+            }
+            rs_repo_free_names(list, nlist);
+            free(packs);
+        }
+        rs_repo_free_names(snaps, nsnaps);
+        rs_repo_close(r);
+    }
+    r = rs_repo_open(repo, RS_REPO_LOOK, &busy, &err);
+    CHECK(rs_repo_repack(r, true, &pr, &err));
+    CHECK_INT(pr.packs_rewritten, 0);
+    rs_repo_pruned_free(&pr);
+    rs_repo_close(r);
+
+    TEST_CASE("repo: a pack read from the middle, past a segment that is damaged");
+    /* The first segment of every pack spoiled: only what is in it is lost. */
+    cmd = rs_xasprintf("for p in '%s/packs/'*.tar.gz; do printf 'xxxxxxxxxxxxxxxx' | "
+                       "dd of=\"$p\" bs=1 seek=40 conv=notrunc 2> /dev/null; done", repo);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+    n = whole_files(r, name);
+    CHECK(n > files / 2 && n < files);
+    rs_repo_close(r);
+
+    rs_repo_set_segment_size(0);
+    rs_repo_set_pack_size(0);
+    free(path);
+    free(name);
+    free(pattern);
+    free(idxs);
+    free(repo);
+    free(tree);
+    rs_buf_free(&text);
+    rs_buf_free(&err);
+}
+
 static void test_encrypted(const char *dir)
 {
     char                  *home = rs_xasprintf("%s/gnupg", dir);
@@ -1393,6 +1625,15 @@ static void test_encrypted(const char *dir)
     CHECK_INT(matching(&ix, seen.data), 2);
     rs_buf_reset(&seen);
     rs_index_free(&ix);
+
+    TEST_CASE("repo: an encrypted repository's packs are whole, and repack says so");
+    pattern = rs_xasprintf("'%s'/packs/*.seek", repo);
+    CHECK_INT(count(pattern), 0);
+    free(pattern);
+    CHECK(!rs_repo_repack(r, true, &pr, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "gpg reads one only from its start");
+    rs_buf_reset(&err);
+    rs_repo_pruned_free(&pr);
     rs_repo_close(r);
 
     TEST_CASE("repo: an encrypted repository checked, with its key");
@@ -1733,6 +1974,35 @@ static void test_formats(void)
         CHECK(!rs_repo_parse_record("record\n", 7, &rec));
         CHECK(rs_repo_parse_record("restate-record 1\n", 17, &rec));
         CHECK_INT(rec.n, 0);
+    }
+
+    TEST_CASE("repo: a pack's .seek, parsed");
+    {
+        static const char *const bad[] = {
+            "restate-seek 1\n",                 /* no segment at all */
+            "restate-seek 2\n1 0\n",
+            "restate-seek 1\n2 0\n",            /* not from the first member */
+            "restate-seek 1\n1 5\n",            /* nor from the start */
+            "restate-seek 1\n1 0\n9 100\n9 200\n",
+            "restate-seek 1\n1 0\n9 100\n10 100\n",
+            "restate-seek 1\n1 0\n9 100",       /* cut short */
+            "restate-seek 1\n1 0\n09 100\n",
+            "restate-seek 1\n1 0\n9  100\n",
+            "restate-seek 1\n1 0\n9 99999999999999999999\n",
+        };
+        static const char    good[] = "restate-seek 1\n1 0\n9 100\n20 230\n";
+        struct rs_repo_seek *at = NULL;
+        size_t               i;
+
+        CHECK(rs_repo_parse_seek(good, strlen(good), &at, &n));
+        CHECK_INT(n, 3);
+        CHECK(n == 3 && at[2].member == 20 && at[2].offset == 230);
+        free(at);
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        {
+            CHECK(!rs_repo_parse_seek(bad[i], strlen(bad[i]), &at, &n));
+            CHECK(at == NULL && n == 0);
+        }
     }
 }
 
@@ -2472,6 +2742,7 @@ void test_repo(void)
     test_made(dir);
     test_written(dir);
     test_chunks(dir);
+    test_seek(dir);
     test_checked(dir);
     test_formats();
     test_storage(dir);
