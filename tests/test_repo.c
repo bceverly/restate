@@ -2904,6 +2904,7 @@ static void test_protected(const char *dir)
     path = rs_xasprintf("%s/.%s.abcdef", snaps, "being-written");
     CHECK(mkdir(path, 0700) == 0);
     put(path, "info", "{}", 0600);
+    free(path);
 
     TEST_CASE("repo: protected, everything finished is read-only and the directories sticky");
     CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));

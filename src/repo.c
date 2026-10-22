@@ -5594,11 +5594,8 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
     {
         protect_failed(out, dir, name, "it has other names (hard links), and is left as it is");
         changed = -1;
-    } else if ((st.st_uid != owner || st.st_gid != group) && fchown(fd, owner, group) != 0)
-    {
-        protect_failed(out, dir, name, strerror(errno));
-        changed = -1;
-    } else if ((st.st_mode & 07777) != mode && fchmod(fd, mode) != 0)
+    } else if (((st.st_uid != owner || st.st_gid != group) && fchown(fd, owner, group) != 0) ||
+               ((st.st_mode & 07777) != mode && fchmod(fd, mode) != 0))
     {
         protect_failed(out, dir, name, strerror(errno));
         changed = -1;

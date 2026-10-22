@@ -2264,9 +2264,9 @@ int rs_cmd_repack(const struct rs_options *o)
 static bool protect_group(const struct rs_options *o, const char *dir, gid_t *gid,
                           const char **name)
 {
-    static char  number[32];
-    struct stat  st;
-    struct group *g;
+    static char         number[32];
+    struct stat         st;
+    const struct group *g;
 
     if (o->group)
     {
