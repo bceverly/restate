@@ -1919,6 +1919,17 @@ static void test_checked(const char *dir)
     free(run.said);
     free(run.warned);
 
+    /* More padding than a pipe holds: gzip must be read to its end, not
+     * killed writing it. */
+    TEST_CASE("repo: checked, a pack padded far past its end");
+    check_copy(dir, repo, "c-padded",
+               "dd if=/dev/zero bs=65536 count=16 2> /dev/null | gzip -c >> \"$pack\"", &run);
+    CHECK(run.ok);
+    CHECK_INT(run.c.packs_bad, 0);
+    CHECK_INT(run.c.snapshots_bad, 0);
+    free(run.said);
+    free(run.warned);
+
     TEST_CASE("repo: checked, a chunk not what its index says");
     check_copy(dir, repo, "c-digest",
                "sed '2s/^\\([0-9]* \\)./\\1x/' \"$idx\" > t && sed 's/ x/ 0/' t > \"$idx\"", &run);

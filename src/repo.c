@@ -6544,6 +6544,12 @@ static void check_pack(struct checking *k, const char *name, const struct rs_rep
     {
         struct rs_buf closing;
 
+        /* Past its end-of-archive blocks a pack runs on to its record size.
+         * Read to gzip's end, so it is not killed writing what nobody reads:
+         * FreeBSD holds a writer in a large write until all of it is read. */
+        while (!damaged && read(z.fd, chunk, sizeof(chunk)) > 0)
+        {
+        }
         rs_buf_init(&closing);
         if (!zin_close(&z, damaged, &closing) && !damaged)
         {
