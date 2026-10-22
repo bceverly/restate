@@ -431,6 +431,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_REPORT_GROUP:
             o->report_group = optarg;
             break;
+        case OPT_GROUP:
+            o->group = optarg;
+            break;
         case OPT_JSON:
             o->json = true;
             break;

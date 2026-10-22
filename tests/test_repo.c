@@ -1482,7 +1482,7 @@ static void test_adopted(const char *dir)
     free(cmd);
 
     TEST_CASE("repo: a repack, as root runs it on the storage, leaves it the share's");
-    cmd = rs_xasprintf("rm -f '%s/packs/'*.seek", repo);
+    cmd = rs_xasprintf("rm -f '%s/packs/'*.seek && chmod 0750 '%s/packs'", repo, repo);
     CHECK(system(cmd) == 0);
     free(cmd);
     r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
@@ -1493,6 +1493,15 @@ static void test_adopted(const char *dir)
     cmd = first_line(odd);
     CHECK_STR(cmd, "0");
     free(cmd);
+    /* Written where the group reads, the group reads it. */
+    cmd = rs_xasprintf("find '%s/packs' -type f ! -perm -0040 | wc -l", repo);
+    free(odd);
+    odd = cmd;
+    cmd = first_line(odd);
+    CHECK_STR(cmd, "0");
+    free(cmd);
+    free(odd);
+    odd = rs_xasprintf("find '%s' ! -group %u | wc -l", repo, (unsigned)other);
 
     TEST_CASE("repo: not root, what it makes is its own");
     rs_repo_set_adopting(false);
@@ -2825,6 +2834,240 @@ static void test_stopped(const char *dir)
     free(record);
 }
 
+/* A file's or directory's mode, never through a symlink; 0 if it is not there. */
+static unsigned mode_of(const char *dir, const char *name)
+{
+    char       *path = rs_xasprintf("%s/%s", dir, name);
+    struct stat st;
+    unsigned    mode = lstat(path, &st) == 0 ? (unsigned)(st.st_mode & 07777) : 0;
+
+    free(path);
+    return mode;
+}
+
+/* Whether what protect could not protect says `needle`. */
+static bool failed_with(const struct rs_repo_protected *p, const char *needle)
+{
+    size_t i;
+
+    for (i = 0; i < p->nfailed; i++)
+    {
+        if (strstr(p->failed[i], needle))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_protected(const char *dir)
+{
+    char                    *repo = rs_xasprintf("%s/prot", dir);
+    char                    *tree = rs_xasprintf("%s/tree7", dir);
+    char                    *packs = rs_xasprintf("%s/prot/packs", dir);
+    char                    *snaps = rs_xasprintf("%s/prot/snapshots", dir);
+    char                    *first = NULL;
+    char                    *second = NULL;
+    char                    *third = NULL;
+    char                    *path;
+    char                    *cmd;
+    char                   **names;
+    struct rs_buf            err;
+    struct rs_scan_stats     st;
+    struct rs_repo          *r;
+    struct rs_repo_protected p;
+    struct rs_index          ix;
+    size_t                   n;
+    size_t                   total;
+    bool                     busy;
+    int                      i;
+
+    rs_buf_init(&err);
+    CHECK(mkdir(tree, 0755) == 0);
+    for (i = 0; i < 6; i++)
+    {
+        char *f = rs_xasprintf("f%02d", i);
+
+        big_file(tree, f, 8192, (unsigned)(7000 + i));
+        free(f);
+    }
+    CHECK(rs_repo_init(repo, false, &err));
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(snap(r, tree, "2026-06-01T00:00:00.000000000Z", NULL, &st, &first));
+    big_file(tree, "f00", 8192, 7100);
+    CHECK(snap(r, tree, "2026-06-02T00:00:00.000000000Z", NULL, &st, &second));
+    rs_repo_close(r);
+    /* What is being written: a pack's temporary file, a pack whose .idx is not
+     * there yet, a snapshot not yet under its name. */
+    put(packs, ".unfinished.tar.gz.tmp", "x", 0600);
+    put(packs, "unfinished.tar.gz", "x", 0600);
+    path = rs_xasprintf("%s/.%s.abcdef", snaps, "being-written");
+    CHECK(mkdir(path, 0700) == 0);
+    put(path, "info", "{}", 0600);
+
+    TEST_CASE("repo: protected, everything finished is read-only and the directories sticky");
+    CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    CHECK_INT(p.nfailed, 0);
+    CHECK_INT(p.dirs, 3);
+    CHECK_INT(p.snapshots, 2);
+    CHECK(p.files > 8);
+    CHECK_INT(mode_of(repo, "."), 01770);
+    CHECK_INT(mode_of(repo, "packs"), 01770);
+    CHECK_INT(mode_of(repo, "snapshots"), 01770);
+    CHECK_INT(mode_of(snaps, first), 0550);
+    CHECK_INT(mode_of(snaps, second), 0550);
+    path = rs_xasprintf("%s/%s", snaps, first);
+    CHECK_INT(mode_of(path, "index.json.gz"), 0440);
+    CHECK_INT(mode_of(path, "packs"), 0440);
+    free(path);
+    {
+        DIR                 *d = opendir(packs);
+        const struct dirent *de;
+        size_t               idx = 0;
+        size_t               ro = 0;
+
+        while (d && (de = readdir(d)) != NULL)
+        {
+            size_t len = strlen(de->d_name);
+
+            if (len > 4 && strcmp(de->d_name + len - 4, ".idx") == 0 && de->d_name[0] != '.')
+            {
+                idx++;
+                ro += mode_of(packs, de->d_name) == 0440 ? 1 : 0;
+            }
+        }
+        if (d)
+        {
+            (void)closedir(d);
+        }
+        CHECK(idx > 0);
+        CHECK_INT(ro, idx);
+    }
+    /* Left as they are: the marker, the lock, readers, and what is unfinished. */
+    CHECK_INT(mode_of(repo, RS_REPO_MARKER), 0600);
+    CHECK_INT(mode_of(repo, "lock"), 0600);
+    CHECK_INT(mode_of(packs, ".unfinished.tar.gz.tmp"), 0600);
+    CHECK_INT(mode_of(packs, "unfinished.tar.gz"), 0600);
+    path = rs_xasprintf("%s/.%s.abcdef", snaps, "being-written");
+    CHECK_INT(mode_of(path, "."), 0700);
+    CHECK_INT(mode_of(path, "info"), 0600);
+
+    TEST_CASE("repo: protected again, nothing changes");
+    total = p.files + p.dirs + p.snapshots + p.unchanged;
+    rs_repo_protected_free(&p);
+    CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    CHECK_INT(p.files + p.dirs + p.snapshots, 0);
+    CHECK_INT(p.nfailed, 0);
+    CHECK(p.unchanged > 0 && p.unchanged <= total);
+    rs_repo_protected_free(&p);
+
+    TEST_CASE("repo: protected, a capture --append-only still adds, and it is read back");
+    cmd = rs_xasprintf("rm -rf '%s' '%s/unfinished.tar.gz' '%s/.unfinished.tar.gz.tmp'", path,
+                       packs, packs);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    free(path);
+    big_file(tree, "f01", 8192, 7200);
+    r = rs_repo_open(repo, RS_REPO_APPEND, &busy, &err);
+    CHECK(r != NULL);
+    CHECK(r && snap(r, tree, "2026-06-03T00:00:00.000000000Z", NULL, &st, &third));
+    if (r)
+    {
+        rs_repo_close(r);
+    }
+    CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    CHECK_INT(p.snapshots, 1);
+    CHECK(p.files > 0);
+    CHECK_INT(p.dirs, 0);
+    rs_repo_protected_free(&p);
+    r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+    names = r ? rs_repo_snapshots(r, &n) : NULL;
+    CHECK_INT(names ? n : 0, 3);
+    rs_index_init(&ix);
+    CHECK(r && rs_repo_load_index(r, third ? third : "", &ix, &err));
+    rs_index_free(&ix);
+    if (names)
+    {
+        rs_repo_free_names(names, n);
+    }
+    if (r)
+    {
+        rs_repo_close(r);
+    }
+
+    TEST_CASE("repo: protect follows no symlink, and gives away no file with a second name");
+    path = rs_xasprintf("%s/f02", tree);
+    CHECK(chmod(path, 0644) == 0);
+    cmd = rs_xasprintf("%s/evil.idx", packs);
+    CHECK(symlink(path, cmd) == 0);
+    free(cmd);
+    cmd = rs_xasprintf("%s/linked.idx", packs);
+    CHECK(link(path, cmd) == 0);
+    free(cmd);
+    cmd = rs_xasprintf("%s/fifo.idx", packs);
+    CHECK(mkfifo(cmd, 0600) == 0);
+    free(cmd);
+    CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    CHECK_INT(p.nfailed, 3);
+    CHECK(failed_with(&p, "evil.idx: not a regular file"));
+    CHECK(failed_with(&p, "linked.idx: it has other names"));
+    CHECK(failed_with(&p, "fifo.idx: not a regular file"));
+    CHECK_INT(mode_of(tree, "f02"), 0644);
+    rs_repo_protected_free(&p);
+    cmd = rs_xasprintf("%s/evil.idx", packs);
+    CHECK(unlink(cmd) == 0);
+    free(cmd);
+    cmd = rs_xasprintf("%s/linked.idx", packs);
+    CHECK(unlink(cmd) == 0);
+    free(cmd);
+    cmd = rs_xasprintf("%s/fifo.idx", packs);
+    CHECK(unlink(cmd) == 0);
+    free(cmd);
+    free(path);
+
+    TEST_CASE("repo: protect says what it could not make another's");
+    if (geteuid() != 0)
+    {
+        /* Root's group, which no one else may give a file to. */
+        CHECK(rs_repo_protect(repo, geteuid(), 0, &p, &err));
+        CHECK(p.nfailed > 0);
+        CHECK(failed_with(&p, strerror(EPERM)));
+        rs_repo_protected_free(&p);
+    }
+    CHECK(!rs_repo_protect(tree, geteuid(), getegid(), &p, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "not a restate repository");
+    rs_buf_reset(&err);
+    path = rs_xasprintf("%s/nothing-here", dir);
+    CHECK(!rs_repo_protect(path, geteuid(), getegid(), &p, &err));
+    rs_buf_reset(&err);
+    free(path);
+
+    TEST_CASE("repo: made in an empty directory made ready for a group, it stays so");
+    path = rs_xasprintf("%s/ready", dir);
+    CHECK(mkdir(path, 0700) == 0 && chmod(path, 01770) == 0);
+    CHECK(rs_repo_init(path, false, &err));
+    CHECK_INT(mode_of(path, "."), 01770);
+    free(path);
+    path = rs_xasprintf("%s/plain", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    CHECK(rs_repo_init(path, false, &err));
+    CHECK_INT(mode_of(path, "."), 0700);
+    free(path);
+
+    /* Writable again, to be cleared away. */
+    cmd = rs_xasprintf("chmod -R u+w '%s'", repo);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    free(first);
+    free(second);
+    free(third);
+    free(packs);
+    free(snaps);
+    free(repo);
+    free(tree);
+    rs_buf_free(&err);
+}
+
 void test_repo(void)
 {
     char *dir = rs_test_tmpdir();
@@ -2835,6 +3078,7 @@ void test_repo(void)
     test_chunks(dir);
     test_seek(dir);
     test_adopted(dir);
+    test_protected(dir);
     test_checked(dir);
     test_formats();
     test_storage(dir);

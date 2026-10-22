@@ -1060,6 +1060,25 @@ bool rs_live_kind(const char *name)
     return false;
 }
 
+bool rs_live_within(const struct rs_live *inner, const struct rs_live *outer)
+{
+    size_t k;
+    bool   all = inner->npaths > 0 && outer->npaths > 0;
+
+    for (k = 0; all && k < inner->npaths; k++)
+    {
+        size_t m;
+        bool   in = false;
+
+        for (m = 0; !in && m < outer->npaths; m++)
+        {
+            in = within(inner->paths[k], outer->paths[m]);
+        }
+        all = in;
+    }
+    return all;
+}
+
 const char *rs_live_what(const struct rs_live *l)
 {
     static const struct {

@@ -1139,7 +1139,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ -d /proc/self ] && [ ! -
 
   cat > /etc/restate/hooks.d/redis <<HOOK
 #!/bin/sh
-{ echo "\$1 \$2 uid=\$RESTATE_UID"; echo "\$RESTATE_PATHS"; echo "dump=\$RESTATE_DUMP_DIR"; } >> "$WORK/hook.log"
+{ echo "\$1 \$2 uid=\$RESTATE_UID quiesce=\$RESTATE_QUIESCE"; echo "\$RESTATE_PATHS"; echo "dump=\$RESTATE_DUMP_DIR"; } >> "$WORK/hook.log"
 [ "\$1" = pause ] && echo dumped > "\$RESTATE_DUMP_DIR/dump.txt"
 exit 0
 HOOK
@@ -1148,7 +1148,7 @@ HOOK
   contains "$ERR" "pausing Redis redis-server" "it says it is pausing it"
   contains "$ERR" "resumed Redis redis-server" "and that it resumed it"
   hook_log="$(cat "$WORK/hook.log" 2> /dev/null)"
-  contains "$hook_log" "pause redis-server uid=0" "the hook is told what to pause"
+  contains "$hook_log" "pause redis-server uid=0 quiesce=yes" "the hook is told what to pause"
   contains "$hook_log" "resume redis-server" "and then to resume it"
   contains "$hook_log" "/srv/restate-redis" "and which files are about to be copied"
   contains "$hook_log" "dump=/var/lib/restate/dumps/redis-redis-server" "and where a dump goes"
@@ -1198,6 +1198,41 @@ HOOK
   expect 2 "capture --quiesce-with a hook there is not" -- \
     "$BIN" capture -N -R live.rules --quiesce-with nosuch -o live.tar
   contains "$ERR" "there is no hook by that name" "says so"
+  # One that says what it pauses is not on this host: a policy every host
+  # shares may name it. It is left out of features, and not run.
+  cat > /etc/restate/hooks.d/gone <<HOOK
+#!/bin/sh
+case "\$1" in
+present) echo absent ;;
+*) echo "\$1 \$2" >> "$WORK/gone.log" ;;
+esac
+exit 0
+HOOK
+  chmod 0755 /etc/restate/hooks.d/gone
+  expect 0 "capture --quiesce-with a hook for what is not here" -- \
+    "$BIN" capture -N -R live.rules --quiesce-with gone -o live.tar
+  contains "$ERR" "--quiesce-with gone: /etc/restate/hooks.d/gone says there is none on this host" \
+    "says so"
+  check "and does not run it" test ! -e "$WORK/gone.log"
+  expect 0 "features, with that hook" -- "$BIN" features --json
+  contains "$OUT" '"named"' "lists a hook that does not say"
+  lacks "$OUT" '"gone"' "and leaves out one for what is not here"
+  # One that covers where something found running keeps its files pauses it:
+  # UniFi's own mongod is the unifi hook's, not the mongodb hook's.
+  cat > /etc/restate/hooks.d/owner <<HOOK
+#!/bin/sh
+case "\$1" in
+paths) echo /srv/restate-redis ;;
+*) echo "\$1 \$2 quiesce=\$RESTATE_QUIESCE" >> "$WORK/owner.log" ;;
+esac
+exit 0
+HOOK
+  chmod 0755 /etc/restate/hooks.d/owner
+  # The redis hook fails to pause, by now: run, it would make this exit 3.
+  expect 0 "capture --quiesce-with a hook that covers what is running" -- \
+    "$BIN" capture -N -R live.rules --quiesce --quiesce-with owner -o live.tar
+  contains "$ERR" "Redis redis-server is owner's own, and paused with it" "says whose it is"
+  contains "$(cat "$WORK/owner.log")" "pause owner quiesce=yes" "pauses it with its own hook"
   rm -rf /srv/restate-named
 
   chmod 0777 /etc/restate/hooks.d/redis
@@ -1451,6 +1486,92 @@ expect 0 "restore --include from it" -- \
   "$BIN" restore --allow-unverified --include /etc --root rkout pold
 check "puts back what it should" test -f rkout/etc/one
 expect 2 "repack what is not a repository" -- "$BIN" repack ptree
+
+# protect: what is finished made read-only, the directories sticky. For this
+# user's group -- or nobody's, as root, whose own group protect refuses.
+pgroup="--group=$(id -gn)"
+if [ "$(id -u)" = 0 ]; then
+  pgroup="--group=$(id -gn nobody)"
+fi
+cp -R prepo pprot
+expect 0 "protect" -- "$BIN" protect "$pgroup" --syslog --result pr.json pprot
+contains "$ERR" "restate: protected " "says what it did"
+contains "$(cat pr.json)" '"files_protected": ' "and its result too"
+contains "$(cat pr.json)" '"not_protected": 0' "with nothing it could not"
+check "a pack is read-only" test "$(file_mode "$(find pprot/packs -name '*.idx' | head -n 1)")" = 440
+check "and so is a snapshot" \
+  test "$(file_mode "$(find pprot/snapshots -mindepth 1 -maxdepth 1 | head -n 1)")" = 550
+check "packs/ is sticky" test "$(file_mode pprot/packs)" = 1770
+check "the lock is left as it was" test "$(file_mode pprot/lock)" = 600
+expect 0 "protect again" -- "$BIN" protect "$pgroup" --result pr2.json pprot
+contains "$(cat pr2.json)" '"files_protected": 0' "changes nothing"
+expect 0 "capture --append-only into it" -- "$BIN" capture -N -r ptree -q -o pprot --append-only
+expect 0 "check it" -- "$BIN" check -q --read-all pprot
+expect 0 "du it" -- "$BIN" du pprot
+mkdir -p prout
+expect 0 "restore from it" -- "$BIN" restore --allow-unverified --include /etc --root prout pprot
+check "puts back what it should" test -f prout/etc/one
+ln -s ../../ptree/etc/one pprot/packs/planted.idx
+expect 3 "protect, with a link planted" -- "$BIN" protect "$pgroup" pprot
+contains "$ERR" "planted.idx: not a regular file" "touches it not, and says so"
+rm -f pprot/packs/planted.idx
+expect 2 "protect for a group that is not there" -- \
+  "$BIN" protect --group restate-no-such-group pprot
+contains "$ERR" "no such group" "says so"
+expect 2 "protect what is not a repository" -- "$BIN" protect "$pgroup" ptree
+chmod -R u+w pprot
+
+# As a share is used: a machine mapped to one user, in the repository's
+# group, captures into it; root protects it on the storage. Linux's, as root,
+# where users can be made for it and are not there already.
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && command -v runuser > /dev/null 2>&1 &&
+   command -v useradd > /dev/null 2>&1 && ! getent passwd restate-cli > /dev/null &&
+   ! getent group restate-cli > /dev/null; then
+  groupadd restate-cli
+  useradd -M -N -g restate-cli -s /bin/sh restate-cli
+  shared="$(mktemp -d /tmp/restate-shared.XXXXXX)"
+  chmod 0755 "$shared"
+  mkdir -p "$shared/tree/etc" "$shared/repo"
+  echo one > "$shared/tree/etc/one"
+  chmod -R a+rX "$shared/tree"
+  chown root:restate-cli "$shared/repo"
+  chmod 1770 "$shared/repo"
+  # Called through expect and check.
+  # shellcheck disable=SC2317,SC2329
+  machine() { runuser -u restate-cli -- "$@"; }
+  expect 0 "a machine's capture --create --append-only into a directory made ready" -- \
+    machine "$BIN" capture -N -r "$shared/tree" -q -o "$shared/repo" --create --append-only
+  check "which stays sticky" test "$(file_mode "$shared/repo")" = 1770
+  expect 0 "protect it, as root" -- "$BIN" protect --result "$shared/p.json" "$shared/repo"
+  contains "$(cat "$shared/p.json")" '"group": "restate-cli"' "for the repository's group"
+  spack="$(find "$shared/repo/packs" -name '*.tar.gz' | head -n 1)"
+  ssnap="$(find "$shared/repo/snapshots" -mindepth 1 -maxdepth 1 | head -n 1)"
+  # Called through check: whether the machine is refused what it asks.
+  # shellcheck disable=SC2317,SC2329
+  refused() { ! runuser -u restate-cli -- "$@" 2> /dev/null; }
+  check "the machine cannot remove a pack" refused rm -f "$spack"
+  check "nor overwrite one" refused dd if=/dev/null of="$spack"
+  check "nor rename one" refused mv "$spack" "$spack.x"
+  check "nor change its mode" refused chmod 0644 "$spack"
+  check "nor remove a snapshot" refused rm -rf "$ssnap"
+  check "nor packs/" refused rm -rf "$shared/repo/packs"
+  check "and the pack is there" test -s "$spack"
+  check "and the snapshot" test -f "$ssnap/index.json.gz"
+  echo two > "$shared/tree/etc/two"
+  chmod a+r "$shared/tree/etc/two"
+  expect 0 "the machine still adds snapshots" -- \
+    machine "$BIN" capture -N -r "$shared/tree" -q -o "$shared/repo" --append-only
+  expect 0 "and checks them" -- machine "$BIN" check -q --read-all "$shared/repo"
+  expect 0 "root prunes it on the storage" -- "$BIN" prune -q --keep-last 1 "$shared/repo"
+  expect 0 "and repacks it" -- "$BIN" repack -q "$shared/repo"
+  expect 0 "and checks it" -- "$BIN" check -q "$shared/repo"
+  expect 0 "and the machine still reads what root wrote" -- \
+    machine "$BIN" check -q --read-all "$shared/repo"
+  expect 0 "protect it again, as root" -- "$BIN" protect -q "$shared/repo"
+  rm -rf "$shared"
+  userdel restate-cli 2> /dev/null
+  getent group restate-cli > /dev/null && groupdel restate-cli
+fi
 
 mkdir -p pout
 expect 0 "restore --include --dry-run --result" -- \

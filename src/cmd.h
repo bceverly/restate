@@ -31,6 +31,7 @@ int rs_cmd_init(const struct rs_options *o);
 int rs_cmd_snapshots(const struct rs_options *o);
 int rs_cmd_prune(const struct rs_options *o);
 int rs_cmd_repack(const struct rs_options *o);
+int rs_cmd_protect(const struct rs_options *o);
 int rs_cmd_check(const struct rs_options *o);
 int rs_cmd_export(const struct rs_options *o);
 int rs_cmd_status(const struct rs_options *o);

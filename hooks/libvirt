@@ -5,6 +5,7 @@
 #
 # restate hook: a libvirt VM, for capture --quiesce.
 #
+#   present NAME  whether libvirt is on this host: prints present or absent
 #   pause NAME    suspend the VM: its CPUs stop, so its disks stop changing
 #   resume NAME   resume it -- unless it was already paused before, or
 #                 something else has resumed it since
@@ -18,6 +19,16 @@
 # To change what this does, copy it to /etc/restate/hooks.d/libvirt (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if command -v virsh > /dev/null 2>&1; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
 
 action=$1
 name=$2
@@ -60,7 +71,7 @@ resume)
   fi
   ;;
 *)
-  echo "usage: $0 pause|resume NAME" >&2
+  echo "usage: $0 present|pause|resume NAME" >&2
   exit 2
   ;;
 esac

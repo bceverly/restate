@@ -5,6 +5,7 @@
 #
 # restate hook: an LXD container, for capture --quiesce.
 #
+#   present NAME  whether LXD is on this host: prints present or absent
 #   pause NAME    freeze the container (lxc pause): its processes stop where
 #                 they are, so its files stop changing
 #   resume NAME   thaw it again -- unless it was frozen before
@@ -12,6 +13,16 @@
 # To change what this does, copy it to /etc/restate/hooks.d/lxd (root's, mode
 # 0755) and edit the copy: that one is used in place of this.
 set -eu
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if command -v lxc > /dev/null 2>&1 && { [ -d /var/snap/lxd ] || [ -d /var/lib/lxd ]; }; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
 
 action=$1
 name=$2
@@ -34,7 +45,7 @@ resume)
   fi
   ;;
 *)
-  echo "usage: $0 pause|resume NAME" >&2
+  echo "usage: $0 present|pause|resume NAME" >&2
   exit 2
   ;;
 esac

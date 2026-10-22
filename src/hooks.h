@@ -32,6 +32,15 @@
  *   RESTATE_DUMP_DIR   a directory, root's and 0700, for a dump to go into
  *                      the image beside the files (pg_dumpall's, say): it is
  *                      copied along with them, after "pause" returns
+ *   RESTATE_QUIESCE    yes if the capture is --quiesce's, which pauses the
+ *                      databases it finds running, and no if it is not
+ *
+ * It is asked too, as
+ *
+ *   HOOK present NAME      whether what it pauses is on this host
+ *
+ * which looks and changes nothing, and prints "present" or "absent": one
+ * that prints neither, or fails, does not know (rs_hook_present).
  *
  * Exiting 0 means done. A pause that fails is warned about and the files are
  * copied as they are; resume is run anyway. Pausing may take up to 30
@@ -65,8 +74,9 @@ char *rs_hook_find(const char *kind);
  * one named as a kind or a shipped hook is. NULL if there is none.
  */
 char *rs_hook_for_program(const char *program);
-/* The names of every hook restate would run here, sorted; the caller frees
- * each, and the array. */
+/* The names of every hook restate would run here, sorted, but for one that
+ * says what it pauses is absent (rs_hook_present); the caller frees each,
+ * and the array. */
 char **rs_hooks_list(size_t *n);
 
 /*
@@ -78,9 +88,23 @@ char **rs_hooks_list(size_t *n);
 bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_path,
                       struct rs_buf *err);
 
-/* Runs `hook` for `action` ("pause", "resume") on `l`. True if it exited 0. */
+/* Runs `hook` for `action` ("pause", "resume") on `l`, `quiescing` for a
+ * capture with --quiesce. True if it exited 0. */
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
-                 const char *dump_dir, struct rs_buf *err);
+                 const char *dump_dir, bool quiescing, struct rs_buf *err);
+
+enum rs_hook_presence {
+    RS_HOOK_UNKNOWN, /* it prints neither word, fails or cannot be run */
+    RS_HOOK_PRESENT,
+    RS_HOOK_ABSENT
+};
+
+/*
+ * Whether what `hook` pauses is on this host, as `HOOK present NAME` says.
+ * A hook that does not know the question is RS_HOOK_UNKNOWN, and is treated
+ * as there: only RS_HOOK_ABSENT leaves one out.
+ */
+enum rs_hook_presence rs_hook_present(const char *hook, const char *name);
 
 /*
  * For a hook named by --quiesce-with: the paths it pauses what it covers

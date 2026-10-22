@@ -30,6 +30,8 @@
 /* Saying which paths it covers is quick; and a few thousand of them at most. */
 #define PATHS_TIMEOUT  60u
 #define PATHS_MAX      ((size_t)1024 * 1024)
+/* Whether what a hook pauses is here: a look at a file or two. */
+#define PRESENT_TIMEOUT 10u
 
 static const char *const *test_dirs;
 static size_t             ntest_dirs;
@@ -176,6 +178,15 @@ static void list_hooks(const char *dir, char ***names, size_t *n)
             have = strcmp((*names)[i], de->d_name) == 0;
         }
         found = have ? NULL : rs_hook_find(de->d_name);
+        /* Left out only when it says what it pauses is not on this host.
+         * Never asked of the tests' directories: those are the system's own
+         * (/usr/bin), whose programs are no hooks, and run with "present"
+         * would do what each does. */
+        if (found && !test_dirs && rs_hook_present(found, de->d_name) == RS_HOOK_ABSENT)
+        {
+            free(found);
+            found = NULL;
+        }
         if (found)
         {
             *names = rs_xreallocarray(*names, *n + 1, sizeof(**names));
@@ -298,11 +309,11 @@ bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_pat
 }
 
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
-                 const char *dump_dir, struct rs_buf *err)
+                 const char *dump_dir, bool quiescing, struct rs_buf *err)
 {
     struct rs_buf  paths;
     struct passwd *pw = getpwuid((uid_t)l->uid);
-    char          *env[9];
+    char          *env[10];
     char          *argv[4];
     size_t         i;
     int            code = -1;
@@ -321,7 +332,8 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     env[5] = rs_xasprintf("RESTATE_USER=%s", pw && pw->pw_name ? pw->pw_name : "");
     env[6] = rs_xasprintf("RESTATE_PATHS=%s", paths.data ? paths.data : "");
     env[7] = rs_xasprintf("RESTATE_DUMP_DIR=%s", dump_dir ? dump_dir : "");
-    env[8] = NULL;
+    env[8] = rs_xasprintf("RESTATE_QUIESCE=%s", quiescing ? "yes" : "no");
+    env[9] = NULL;
     argv[0] = rs_xstrdup(hook);
     argv[1] = rs_xstrdup(action);
     argv[2] = rs_xstrdup(l->name);
@@ -337,7 +349,7 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     {
         free(argv[i]);
     }
-    for (i = 0; i < 8; i++)
+    for (i = 0; i < 9; i++)
     {
         free(env[i]);
     }
@@ -345,60 +357,99 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     return ok;
 }
 
-bool rs_hook_paths(const char *hook, const char *name, char ***paths, size_t *n,
-                   struct rs_buf *err)
+/*
+ * Runs `HOOK ACTION NAME` and keeps the first PATHS_MAX bytes of what it
+ * prints in `text`, with its exit status in *code. False only if it could not
+ * be run.
+ */
+static bool ask(const char *hook, const char *action, const char *name, unsigned timeout,
+                struct rs_buf *text, int *code, struct rs_buf *err)
 {
-    FILE         *out = tmpfile();
-    char         *env[3];
-    char         *argv[4];
-    struct rs_buf text;
-    const char   *p;
-    int           code = -1;
-    bool          ok;
-    size_t        i;
+    FILE  *out = tmpfile();
+    char  *env[3];
+    char  *argv[4];
+    bool   ok;
+    size_t i;
 
-    *paths = NULL;
-    *n = 0;
+    *code = -1;
     if (!out)
     {
-        rs_buf_addf(err, "a temporary file for %s paths: %s", hook, strerror(errno));
+        rs_buf_addf(err, "a temporary file for %s %s: %s", hook, action, strerror(errno));
         return false;
     }
-    env[0] = rs_xstrdup("RESTATE_ACTION=paths");
+    env[0] = rs_xasprintf("RESTATE_ACTION=%s", action);
     env[1] = rs_xasprintf("RESTATE_NAME=%s", name);
     env[2] = NULL;
     argv[0] = rs_xstrdup(hook);
-    argv[1] = rs_xstrdup("paths");
+    argv[1] = rs_xstrdup(action);
     argv[2] = rs_xstrdup(name);
     argv[3] = NULL;
-    ok = rs_run_hook(hook, argv, env, PATHS_TIMEOUT, fileno(out), &code, err);
+    ok = rs_run_hook(hook, argv, env, timeout, fileno(out), code, err);
     for (i = 0; i < 3; i++)
     {
         free(argv[i]);
     }
     free(env[0]);
     free(env[1]);
-    /* One that does not know the question has no paths to give. */
-    if (!ok || code != 0)
-    {
-        (void)fclose(out);
-        return ok;
-    }
     /* Read through the descriptor the hook wrote to: the stream's own
      * buffer was never used. */
-    rs_buf_init(&text);
-    if (lseek(fileno(out), 0, SEEK_SET) == 0)
+    if (ok && lseek(fileno(out), 0, SEEK_SET) == 0)
     {
         char    chunk[4096];
         ssize_t got;
 
-        while ((got = read(fileno(out), chunk, sizeof(chunk))) > 0 && text.len < PATHS_MAX)
+        while ((got = read(fileno(out), chunk, sizeof(chunk))) > 0 && text->len < PATHS_MAX)
         {
-            rs_buf_add(&text, chunk, (size_t)got);
+            rs_buf_add(text, chunk, (size_t)got);
         }
     }
     (void)fclose(out);
-    for (p = text.data; p && *p; )
+    return ok;
+}
+
+enum rs_hook_presence rs_hook_present(const char *hook, const char *name)
+{
+    struct rs_buf         text;
+    struct rs_buf         err;
+    int                   code = -1;
+    enum rs_hook_presence said = RS_HOOK_UNKNOWN;
+
+    rs_buf_init(&text);
+    rs_buf_init(&err);
+    if (ask(hook, "present", name, PRESENT_TIMEOUT, &text, &code, &err) && code == 0 && text.data)
+    {
+        size_t len = strcspn(text.data, "\n");
+
+        if (len == 7 && strncmp(text.data, "present", 7) == 0)
+        {
+            said = RS_HOOK_PRESENT;
+        } else if (len == 6 && strncmp(text.data, "absent", 6) == 0)
+        {
+            said = RS_HOOK_ABSENT;
+        }
+    }
+    rs_buf_free(&text);
+    rs_buf_free(&err);
+    return said;
+}
+
+bool rs_hook_paths(const char *hook, const char *name, char ***paths, size_t *n,
+                   struct rs_buf *err)
+{
+    struct rs_buf text;
+    const char   *p;
+    int           code = -1;
+
+    *paths = NULL;
+    *n = 0;
+    rs_buf_init(&text);
+    if (!ask(hook, "paths", name, PATHS_TIMEOUT, &text, &code, err))
+    {
+        rs_buf_free(&text);
+        return false;
+    }
+    /* One that does not know the question has no paths to give. */
+    for (p = code == 0 ? text.data : NULL; p && *p; )
     {
         size_t len = strcspn(p, "\n");
 

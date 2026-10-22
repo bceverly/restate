@@ -5,31 +5,57 @@
 #
 # restate hook: Nextcloud, for capture --quiesce-with nextcloud.
 #
+#   present NAME  whether Nextcloud is on this host: prints present or absent
 #   paths NAME    Nextcloud's own directory and its data directory, one a
 #                 line: what the capture copies while it is in maintenance mode
 #   pause NAME    put it in maintenance mode, so that no one changes a file
 #                 while it is copied
 #   resume NAME   take it out of maintenance mode
 #
-# Its database is a MySQL, MariaDB or PostgreSQL that capture --quiesce finds
-# running and pauses with that database's own hook. The snap's Nextcloud is
-# found too (nextcloud.occ), and so is one installed in /var/www/nextcloud;
-# for one elsewhere, set NEXTCLOUD below in a copy of this hook.
+# It is found as the snap (nextcloud.occ), or as the first directory with occ
+# and config/config.php in it beneath /var/www, /usr/local/www or /srv/www;
+# for one elsewhere, set NEXTCLOUD below in a copy of this hook. occ is run as
+# the user config/config.php belongs to: the web server's.
+#
+# Its database, a MySQL, MariaDB or PostgreSQL server of the system's, is
+# paused by that database's own hook when the capture is --quiesce's as well:
+# capture with both. The snap's database is its own, and is dumped into
+# $RESTATE_DUMP_DIR here (nextcloud.mysqldump) while it is in maintenance mode.
 #
 # To change what this does, copy it to /etc/restate/hooks.d/nextcloud (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
 
 action=$1
-NEXTCLOUD=/var/www/nextcloud
+NEXTCLOUD=
 
-# occ, as the user Nextcloud's files belong to: the web server's.
+snapped() {
+  command -v nextcloud.occ > /dev/null 2>&1
+}
+
+# Sets NEXTCLOUD to the first directory holding occ and config/config.php;
+# fails if there is none.
+find_nextcloud() {
+  if [ -n "$NEXTCLOUD" ]; then
+    return 0
+  fi
+  for occ in /var/www/*/occ /usr/local/www/*/occ /srv/www/*/occ; do
+    if [ -f "$occ" ] && [ -f "${occ%/occ}/config/config.php" ]; then
+      NEXTCLOUD=${occ%/occ}
+      return 0
+    fi
+  done
+  return 1
+}
+
+# occ, as the user Nextcloud's configuration belongs to: the web server's.
 occ() {
-  if command -v nextcloud.occ > /dev/null 2>&1; then
+  if snapped; then
     nextcloud.occ "$@"
     return
   fi
-  owner="$(stat -c %U "$NEXTCLOUD/occ" 2> /dev/null || stat -f %Su "$NEXTCLOUD/occ")"
+  config="$NEXTCLOUD/config/config.php"
+  owner="$(stat -c %U "$config" 2> /dev/null || stat -f %Su "$config")"
   if command -v runuser > /dev/null 2>&1; then
     runuser -u "$owner" -- php "$NEXTCLOUD/occ" "$@"
   else
@@ -40,9 +66,24 @@ occ() {
   fi
 }
 
+# Looks, and changes nothing.
+if [ "$action" = present ]; then
+  if snapped || find_nextcloud; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
+
+if ! snapped && ! find_nextcloud; then
+  echo "restate hook: no Nextcloud found here; set NEXTCLOUD in a copy of $0" >&2
+  exit 1
+fi
+
 case "$action" in
 paths)
-  if command -v nextcloud.occ > /dev/null 2>&1; then
+  if snapped; then
     echo /var/snap/nextcloud/current
     echo /var/snap/nextcloud/common
   else
@@ -55,12 +96,29 @@ paths)
   ;;
 pause)
   occ maintenance:mode --on
+  if snapped; then
+    if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
+      out="$RESTATE_DUMP_DIR/mysqldump.sql"
+      nextcloud.mysqldump > "$out.tmp"
+      gzip -f "$out.tmp"
+      mv -f "$out.tmp.gz" "$out.gz"
+    fi
+  elif [ "${RESTATE_QUIESCE:-}" = no ]; then
+    dbtype="$(occ config:system:get dbtype 2> /dev/null || true)"
+    case "$dbtype" in
+    '' | sqlite*) ;;
+    *)
+      echo "restate hook: Nextcloud's database ($dbtype) is copied as it runs; capture with" \
+        "--quiesce as well, which pauses it" >&2
+      ;;
+    esac
+  fi
   ;;
 resume)
   occ maintenance:mode --off
   ;;
 *)
-  echo "usage: $0 paths|pause|resume NAME" >&2
+  echo "usage: $0 present|paths|pause|resume NAME" >&2
   exit 2
   ;;
 esac

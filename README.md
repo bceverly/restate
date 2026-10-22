@@ -295,6 +295,12 @@ Commands:
                           a few files reads only the parts of each pack that
                           hold them; every snapshot is kept, and what none of
                           them needs is dropped on the way
+  protect REPO            run as root on the storage a repository is on, after
+                          each capture: make every finished pack and snapshot
+                          root's and read-only, and the repository's
+                          directories sticky, so the machines that capture into
+                          it can add snapshots but change or remove none that
+                          are there
   check REPO              check a repository: read every pack through, each
                           chunk against the digest its index gives, and check
                           that every snapshot's index and kit can be read and
@@ -413,6 +419,9 @@ Options:
       --result=FILE       when the command ends, write how it ended and what it
                           did into FILE as one JSON object, replaced atomically
                           (see RESULTS)
+      --group=GROUP       protect: the group the machines that write to the
+                          repository are in, as the share maps them (default:
+                          the group of the repository's directory)
       --report-group=GROUP
                           make the --result and --progress-file files readable
                           by GROUP too (0640), so a monitoring program that is
@@ -598,8 +607,11 @@ executable named for the kind of thing (`postgresql`, `mysql`, `mongodb`,
 ones restate ships in `libexec/restate/hooks`, and only if it and its
 directory are root's alone. It is run as `HOOK pause NAME` and then, always,
 `HOOK resume NAME`, with `RESTATE_KIND`, `RESTATE_NAME`, `RESTATE_PID`,
-`RESTATE_UID`, `RESTATE_USER`, `RESTATE_PATHS` and `RESTATE_DUMP_DIR` in its
-environment. The shipped database hooks dump into `RESTATE_DUMP_DIR` (which
+`RESTATE_UID`, `RESTATE_USER`, `RESTATE_PATHS`, `RESTATE_DUMP_DIR` and
+`RESTATE_QUIESCE` (`yes` for a capture with `--quiesce`, else `no`) in its
+environment. It is also asked `HOOK present NAME`, which only looks and
+prints `present` or `absent`: whether what it pauses is on this host. Every
+shipped hook answers; one that prints neither is taken to be present. The shipped database hooks dump into `RESTATE_DUMP_DIR` (which
 goes into the image beside the files) and stop the service; the others
 suspend the VM, freeze the container or pause Docker's containers. The
 PostgreSQL hook stops the units listed in `/etc/restate/also.d/postgresql`
@@ -612,17 +624,31 @@ What `/proc` does not show as one of these is named instead:
 `--quiesce-with NAME` runs the hook `NAME` whether or not anything is found.
 It is asked first, as `HOOK paths NAME`, which paths it covers, and those are
 copied while it is paused; a hook that names none is paused for the whole
-walk. Two are shipped for this:
+walk. One that answers `absent` to `HOOK present NAME` is not run, with a
+notice, so one policy can name it for every host. Anything found running whose
+files all lie within the paths it covers is its to pause, not the hook for its
+kind's: UniFi's own `mongod` is paused by the `unifi` hook, never by `mongodb`.
+Two are shipped for this:
 
 - **`unifi`** -- the UniFi Network application runs a MongoDB of its own,
   started by its own service, which the `mongodb` hook cannot pause. This one
   dumps it (`mongodump --port 27117`, where installed) and stops `unifi` while
-  `/var/lib/unifi` is copied. UniFi's own backups,
+  `/var/lib/unifi` is copied: that MongoDB is not a replica set, so a dump
+  taken while it runs is not of one moment, and the stopped copy is the one
+  that restores reliably. Only the controller is down meanwhile; the access
+  points and switches go on forwarding. UniFi's own backups,
   `/var/lib/unifi/backup/autobackup/*.unf`, are in the capture too, and
   restore onto a new UniFi without restate.
 - **`nextcloud`** -- maintenance mode on, while Nextcloud's own directory and
-  its data directory are copied; its database is paused by its own hook with
-  `--quiesce`. The snap is found as well (`nextcloud.occ`).
+  its data directory are copied. It is found as the snap (`nextcloud.occ`) or
+  as the first directory holding `occ` and `config/config.php` beneath
+  `/var/www`, `/usr/local/www` or `/srv/www`, and `occ` runs as the owner of
+  `config/config.php`. Capture with both `--quiesce` and `--quiesce-with
+  nextcloud` (in a job, `quiesce = true` and `quiesce_with = nextcloud`):
+  `--quiesce` pauses its MySQL, MariaDB or PostgreSQL with that database's
+  own hook, and without it the hook warns that the database is copied as it
+  runs. The snap's database is its own, and is dumped
+  (`nextcloud.mysqldump`) while in maintenance mode.
 
 ```bash
 sudo restate capture --quiesce --quiesce-with nextcloud -o /mnt/nas/restate/cloud01
@@ -1173,7 +1199,8 @@ restate: the repository is whole
 30 5 1 * *   root  restate check --read-all --syslog /var/backups/web01
 ```
 
-**Run from cron.** One capture, prune or repack runs on a repository at a time, and
+**Run from cron.** One capture, prune or repack runs on a repository at a time (`protect`
+takes no lock: it changes only what is finished), and
 one `--quiesce` capture on a machine at a time: another that finds the lock
 taken does nothing and exits with status 5, a reason to try later rather than
 an alarm. `--syslog` puts one line in the system log as the run ends, for a
@@ -1264,16 +1291,43 @@ restate du /srv/restate/web01
   own (`all_squash`) works, as long as that user can write it. Run as root on
   the storage itself -- a prune, a repack or a check there -- restate gives
   every file and directory it makes the owner and group of the directory it
-  makes it in, so the machines the share maps to the repository's owner can
-  still read the packs root wrote.
+  makes it in, and that group's read where the directory gives its group
+  read, so the machines the share maps to the repository's owner, or into its
+  group, can still read the packs root wrote.
 - **A capture only adds files.** Each pack, its index and `.sum`, and each
   snapshot are written under a name of their own and renamed to a name
   nothing had; nothing already there is changed. `--append-only` refuses the
   one exception, the marker of a repository made by restate 1.3 or older.
-  restate cannot make a repository append-only for a machine that has been
-  taken over -- that machine is root, and has the share -- so the NAS has to:
-  with a ZFS snapshot after each capture, or by making what each capture
-  wrote immutable.
+  That keeps an honest capture from changing anything; a machine that has
+  been taken over is root, and has the share, so only the NAS can stop it --
+  with `restate protect`, below, and a ZFS snapshot after each capture.
+- **Protected on the NAS.** `restate protect REPO`, run as root on the NAS
+  after each capture, makes every finished pack and snapshot root's and the
+  repository's group's, and read-only (files 0440, each snapshot's directory
+  0550), and the repository, `packs/` and `snapshots/` root's and the
+  group's, 1770: sticky, so the machines in the group make files there and
+  remove only their own unfinished ones. A machine that has been taken over
+  can then add snapshots and read them, but not change, rename or remove one
+  that is there. The marker, `lock` and `readers`, which a capture and a
+  restore open as their own, are left as they are, and so is anything being
+  written. Only what is not so already is changed, so it is quick after every
+  capture; it takes no lock, follows no symlink, and refuses a file with a
+  second name, which a machine could plant to have root give away a file
+  elsewhere. The group is the repository directory's, or `--group`; root's
+  is refused. Prune, repack and check, run as root on the NAS, go on as
+  before. A snapshot cannot be signed once it is protected, so sign it as it
+  is captured. `capture --create` works into an empty directory made ready
+  for it -- root's and the group's, 1770 -- and leaves it so.
+
+  ```bash
+  # On the NAS, once: a directory for the machine to make its repository in.
+  install -d -o root -g restate -m 1770 /tank/restate/web01
+  # /etc/exports (FreeBSD): map every machine to the user AND the group, by
+  # name -- with the user alone, the group's right to make files was refused.
+  /tank/restate -mapall=restate:restate -network 10.0.0.0/24
+  # After each capture:
+  restate protect --syslog /tank/restate/web01
+  ```
 - **A machine can make its own repository.** `capture --create` (a job's
   `create = true`) makes the repository first where there is none: a
   directory not there yet, under a parent that is, or an empty one -- as
@@ -1364,13 +1418,14 @@ into `FILE` when the run ends, replaced whole:
 
 Every warning is collected, `--quiet` or not, every error -- so a run that
 failed says why in its result, not only on standard error -- and every path a
-walk could not read with why; prune, repack, check, restore (its plan, in a dry run,
+walk could not read with why; prune, repack, protect, check, restore (its plan, in a dry run,
 and `"content_read": false` for a `--plan`), copy, du, estimate and diff add
 what they did. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate
-can do -- commands, options, job keys, schemas, the hooks here -- for a
-program to ask before it asks. The result and progress files are their
+can do -- commands, options, job keys, schemas, the hooks here (each hook is
+asked `HOOK present NAME`, and one that answers `absent` is left out, so a
+host lists only what it has) -- for a program to ask before it asks. The result and progress files are their
 owner's alone unless `--report-group GROUP` makes them that group's to read
 too. A later restate adds to all of this, and changes what something means
 only with a new schema number.
@@ -1822,7 +1877,7 @@ src/            the program: one module per concern
   scan.c        the walk
   index.c       the index, to and from JSON
   image.c       images: assembling and reading back, and exporting snapshots
-  repo.c        repositories: packs, snapshots, the content stream, prune, repack, check, copy, du
+  repo.c        repositories: packs, snapshots, the content stream, prune, repack, protect, check, copy, du
   tar.c         pax tar, writing and reading the first member
   gzip.c        gzip as a separate process
   run.c         running gzip, curl, gpg, sh, ssh-keygen and the hooks: fixed paths, posix_spawn

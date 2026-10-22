@@ -5,6 +5,7 @@
 #
 # restate hook: the UniFi Network application, for capture --quiesce-with unifi.
 #
+#   present NAME  whether UniFi is on this host: prints present or absent
 #   paths NAME    the directories UniFi keeps its data in, one a line: what the
 #                 capture copies while UniFi is stopped
 #   pause NAME    dump its database into $RESTATE_DUMP_DIR (mongodump, where it
@@ -17,9 +18,25 @@
 # /var/lib/unifi/backup/autobackup/*.unf -- are in the capture too, and
 # restore onto a new UniFi without restate.
 #
+# It is stopped as well as dumped because its MongoDB runs alone, not in a
+# replica set, so a dump taken while it runs is not of one moment (there is
+# no --oplog to make it one); the files copied while it is stopped are. Only
+# the controller is down meanwhile: the access points and switches it manages
+# go on forwarding without it.
+#
 # To change what this does, copy it to /etc/restate/hooks.d/unifi (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if [ -d /usr/lib/unifi ]; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
 
 action=$1
 port=27117
@@ -43,7 +60,7 @@ resume)
   systemctl start unifi
   ;;
 *)
-  echo "usage: $0 paths|pause|resume NAME" >&2
+  echo "usage: $0 present|paths|pause|resume NAME" >&2
   exit 2
   ;;
 esac

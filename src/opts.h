@@ -55,6 +55,7 @@ enum {
     OPT_APPEND_ONLY,
     OPT_CREATE,
     OPT_RESULT,
+    OPT_GROUP,
     OPT_REPORT_GROUP,
     OPT_JSON,
     OPT_INCLUDE,
@@ -131,6 +132,7 @@ struct rs_options {
     bool            create;         /* capture: init the repository if need be */
     const char     *result;         /* --result FILE */
     const char     *report_group;   /* --report-group GROUP */
+    const char     *group;          /* --group GROUP, for protect */
     bool            json;           /* --json */
     const char    **includes;       /* restore --include PATTERN, each */
     size_t          nincludes;

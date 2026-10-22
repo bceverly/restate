@@ -5,6 +5,7 @@
 #
 # restate hook: Redis, for capture --quiesce.
 #
+#   present NAME  whether Redis is on this host: prints present or absent
 #   pause NAME    stop redis-server, which saves its data as it stops
 #   resume NAME   start it again
 #
@@ -12,11 +13,21 @@
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
 
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if command -v redis-server > /dev/null 2>&1; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
+
 case "$1" in
 pause) systemctl stop redis-server ;;
 resume) systemctl start redis-server ;;
 *)
-  echo "usage: $0 pause|resume NAME" >&2
+  echo "usage: $0 present|pause|resume NAME" >&2
   exit 2
   ;;
 esac

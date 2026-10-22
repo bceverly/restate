@@ -42,6 +42,11 @@ RS_CMD(CMD_REPACK,   "repack",   "REPO",       1,  1,
        "write again each pack an older restate wrote, which can be read only from its start, "
        "so that a restore of a few files reads only the parts of each pack that hold them; "
        "every snapshot is kept, and what none of them needs is dropped on the way")
+RS_CMD(CMD_PROTECT,  "protect",  "REPO",       1,  1,
+       "run as root on the storage a repository is on, after each capture: make every "
+       "finished pack and snapshot root's and read-only, and the repository's directories "
+       "sticky, so the machines that capture into it can add snapshots but change or remove "
+       "none that are there")
 RS_CMD(CMD_CHECK,    "check",    "REPO",       1,  1,
        "check a repository: read every pack through, each chunk against the digest its index "
        "gives, and check that every snapshot's index and kit can be read and the content of "

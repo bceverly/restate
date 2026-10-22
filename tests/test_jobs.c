@@ -90,8 +90,8 @@ static void other_jobs(void)
     struct rs_job job;
     char         *why;
 
-    TEST_CASE("jobs: prune, check, snapshots, du and repack take the repository as their "
-              "argument");
+    TEST_CASE("jobs: prune, check, snapshots, du, repack and protect take the repository as "
+              "their argument");
     rs_job_init(&job);
     CHECK(parse(&job, "command = prune\nrepository = /r\nkeep_last = 3\nkeep_daily = 7\n"
                       "keep_weekly = 4\nkeep_monthly = 12\nwhole_packs = true\ndry_run = no\n"
@@ -123,6 +123,15 @@ static void other_jobs(void)
     CHECK(job.opts.command == CMD_REPACK && job.opts.nargs == 1 && job.opts.dry_run);
     CHECK_STR(job.opts.args[0], "/r");
     refused("command = repack\nrepository = /r\nkeep_last = 3\n", "keep_last");
+    CHECK(parse(&job, "command = protect\nrepository = /r\ngroup = backup\nsyslog = true\n"
+                      "result = /var/lib/r.json\n", &why));
+    free(why);
+    CHECK(job.opts.command == CMD_PROTECT && job.opts.nargs == 1 && job.opts.log_outcome);
+    CHECK_STR(job.opts.args[0], "/r");
+    CHECK_STR(job.opts.group, "backup");
+    refused("command = protect\nrepository = /r\ngroup = ../x\n", "group: not");
+    refused("command = protect\nrepository = /r\ndry_run = true\n", "dry_run");
+    refused("command = capture\nrepository = /r\ngroup = backup\n", "group");
 
     TEST_CASE("jobs: estimate needs no repository");
     CHECK(parse(&job, "command = estimate\nroot = /srv\nall = true\n", &why));
@@ -236,7 +245,7 @@ static void bad_jobs(void)
 
         CHECK(n > 30);
         CHECK_STR(keys[0], "command");
-        CHECK_STR(keys[n - 1], "report_group");
+        CHECK_STR(keys[n - 1], "group");
     }
 }
 

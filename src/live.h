@@ -62,6 +62,13 @@ void rs_live_programs(const char *proc, struct rs_live **out, size_t *n);
 /* Whether `name` is one of the kinds above. */
 bool rs_live_kind(const char *name);
 
+/*
+ * Whether every one of `inner`'s paths is one of `outer`'s or beneath it:
+ * false if either has none. UniFi's own mongod is within what the unifi hook
+ * covers, and that hook, not the one for mongod in general, pauses it.
+ */
+bool rs_live_within(const struct rs_live *inner, const struct rs_live *outer);
+
 /* "PostgreSQL", "a QEMU VM", for messages. */
 const char *rs_live_what(const struct rs_live *l);
 

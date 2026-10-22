@@ -5,6 +5,7 @@
 #
 # restate hook: MongoDB, for capture --quiesce.
 #
+#   present NAME  whether MongoDB is on this host: prints present or absent
 #   pause NAME    dump every database into $RESTATE_DUMP_DIR (mongodump, where
 #                 it is installed), then stop mongod
 #   resume NAME   start it again
@@ -12,6 +13,16 @@
 # To change what this does, copy it to /etc/restate/hooks.d/mongodb (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if command -v mongod > /dev/null 2>&1; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
 
 action=$1
 
@@ -27,7 +38,7 @@ resume)
   systemctl start mongod
   ;;
 *)
-  echo "usage: $0 pause|resume NAME" >&2
+  echo "usage: $0 present|pause|resume NAME" >&2
   exit 2
   ;;
 esac

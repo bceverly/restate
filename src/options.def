@@ -79,6 +79,9 @@ RS_OPT(OPT_SYSLOG, "syslog",        no_argument,       NULL,
 RS_OPT(OPT_RESULT, "result",        required_argument, "FILE",
        "when the command ends, write how it ended and what it did into FILE as one JSON "
        "object, replaced atomically (see RESULTS)")
+RS_OPT(OPT_GROUP, "group",       required_argument, "GROUP",
+       "protect: the group the machines that write to the repository are in, as the share "
+       "maps them (default: the group of the repository's directory)")
 RS_OPT(OPT_REPORT_GROUP, "report-group", required_argument, "GROUP",
        "make the --result and --progress-file files readable by GROUP too (0640), so a "
        "monitoring program that is not root can read them")

@@ -161,7 +161,7 @@ void rs_repo_set_adopting(bool always)
  * otherwise be root's, and 0600: a share that maps every machine to the
  * repository's owner would then refuse them the packs they wrote. So a file or
  * directory root makes, `fd`, open, is given the owner and group of the
- * directory it is made in. Through the descriptor, never the name: a name in
+ * directory it is made in, and that group's read if the directory has it. Through the descriptor, never the name: a name in
  * a directory others can write could be swapped for a link to anything.
  * False where the share will not have it, and it stays as it was made -- as
  * on a share that maps root to nobody, whose files are not root's anyway.
@@ -180,10 +180,25 @@ static bool adopt(int fd, const char *path)
     }
     dir = !slash ? rs_xstrdup(".") : slash == path ? rs_xstrdup("/")
                                                     : rs_xstrndup(path, (size_t)(slash - path));
-    if (stat(dir, &parent) == 0 && fstat(fd, &st) == 0 &&
-        (st.st_uid != parent.st_uid || st.st_gid != parent.st_gid))
+    if (stat(dir, &parent) == 0 && fstat(fd, &st) == 0)
     {
-        ok = fchown(fd, parent.st_uid, parent.st_gid) == 0;
+        mode_t mode = st.st_mode & 07777;
+
+        if (st.st_uid != parent.st_uid || st.st_gid != parent.st_gid)
+        {
+            ok = fchown(fd, parent.st_uid, parent.st_gid) == 0;
+        }
+        /* Made where its group reads -- a protected repository
+         * (rs_repo_protect) -- its group reads it too: what a prune or a
+         * repack writes there, the machines read before protect runs again. */
+        if (parent.st_mode & S_IRGRP)
+        {
+            mode |= S_IRGRP | (S_ISDIR(st.st_mode) ? S_IXGRP : 0);
+        }
+        if (mode != (st.st_mode & 07777) && fchmod(fd, mode) != 0)
+        {
+            ok = false;
+        }
     }
     free(dir);
     return ok;
@@ -1080,11 +1095,13 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
      * nothing can be swapped in between. */
     if (mkdir(dir, 0700) != 0)
     {
-        int  made = errno;
-        int  fd = made == EEXIST ? open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
-        int  listing = fd >= 0 ? dup(fd) : -1;
-        DIR *d = listing >= 0 ? fdopendir(listing) : NULL;
-        bool has = !d;
+        int         made = errno;
+        int         fd = made == EEXIST ? open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                                        : -1;
+        struct stat st;
+        int         listing = fd >= 0 ? dup(fd) : -1;
+        DIR        *d = listing >= 0 ? fdopendir(listing) : NULL;
+        bool        has = !d;
 
         if (made != EEXIST)
         {
@@ -1109,9 +1126,10 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
         {
             (void)closedir(d);
         }
-        if (!has)
+        /* Its owner's alone, as a new one is made -- unless it is sticky:
+         * made ready by root for a group to add to (rs_repo_protect). */
+        if (!has && fd >= 0 && fstat(fd, &st) == 0 && !(st.st_mode & S_ISVTX))
         {
-            /* Its owner's alone, as a new one is made. */
             (void)fchmod(fd, 0700);
         }
         if (fd >= 0)
@@ -5515,6 +5533,303 @@ bool rs_repo_repack(struct rs_repo *r, bool dry_run, struct rs_repo_pruned *out,
     ok = sweep(r, names, n, true, out, err);
     rs_repo_free_names(names, n);
     return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Protecting what is finished                                               */
+/* ------------------------------------------------------------------------- */
+
+/* What protect could not protect, as "PATH: why". */
+static void protect_failed(struct rs_repo_protected *out, const char *dir, const char *name,
+                           const char *why)
+{
+    out->failed = rs_xreallocarray(out->failed, out->nfailed + 1, sizeof(*out->failed));
+    out->failed[out->nfailed++] = strcmp(name, ".") != 0 ? rs_xasprintf("%s/%s: %s", dir, name, why)
+                                                         : rs_xasprintf("%s: %s", dir, why);
+}
+
+/*
+ * Makes `name` in the directory `dfd` (`dir`, for messages) `owner`'s and
+ * `group`'s, with `mode`, where it is not so already: 1 if it was changed, 0
+ * if it was so, -1 if it could not be, saying why. Only a regular file or a
+ * directory, never through a symlink, and a file only with one name: the
+ * machines that write here could plant a link to anything for root to give
+ * away. One that is not there (a prune took it meanwhile) is left out, as 2.
+ */
+static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, uid_t owner,
+                       gid_t group, mode_t mode, struct rs_repo_protected *out)
+{
+    struct stat before;
+    struct stat st;
+    int         fd;
+    int         changed;
+
+    if (fstatat(dfd, name, &before, AT_SYMLINK_NOFOLLOW) != 0)
+    {
+        if (errno == ENOENT)
+        {
+            return 2;
+        }
+        protect_failed(out, dir, name, strerror(errno));
+        return -1;
+    }
+    if (is_dir ? !S_ISDIR(before.st_mode) : !S_ISREG(before.st_mode))
+    {
+        protect_failed(out, dir, name, is_dir ? "not a directory" : "not a regular file");
+        return -1;
+    }
+    fd = openat(dfd, name,
+                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (is_dir ? O_DIRECTORY : 0));
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_dev != before.st_dev ||
+        st.st_ino != before.st_ino)
+    {
+        protect_failed(out, dir, name, fd < 0 ? strerror(errno) : "changed while it was looked at");
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        return -1;
+    }
+    if (!is_dir && st.st_nlink != 1)
+    {
+        protect_failed(out, dir, name, "it has other names (hard links), and is left as it is");
+        changed = -1;
+    } else if ((st.st_uid != owner || st.st_gid != group) && fchown(fd, owner, group) != 0)
+    {
+        protect_failed(out, dir, name, strerror(errno));
+        changed = -1;
+    } else if ((st.st_mode & 07777) != mode && fchmod(fd, mode) != 0)
+    {
+        protect_failed(out, dir, name, strerror(errno));
+        changed = -1;
+    } else
+    {
+        changed = st.st_uid != owner || st.st_gid != group || (st.st_mode & 07777) != mode;
+    }
+    (void)close(fd);
+    return changed;
+}
+
+/* Counts what protect_one did with a file. */
+static void protect_file(int dfd, const char *dir, const char *name, uid_t owner, gid_t group,
+                         struct rs_repo_protected *out, bool *any)
+{
+    int did = protect_one(dfd, dir, name, false, owner, group, 0440, out);
+
+    if (did == 1)
+    {
+        out->files++;
+        *any = true;
+    } else if (did == 0)
+    {
+        out->unchanged++;
+    }
+}
+
+/* The directory `name` in `dfd`, opened never through a symlink; -1, saying
+ * why, if it cannot be. */
+static int protect_open_dir(int dfd, const char *dir, const char *name,
+                            struct rs_repo_protected *out)
+{
+    int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+    if (fd < 0)
+    {
+        protect_failed(out, dir, name, strerror(errno));
+    }
+    return fd;
+}
+
+/* The suffixes of a pack's files: each is protected once the .idx, written
+ * last, says the pack is finished. */
+static const char *pack_suffix(const char *name)
+{
+    static const char *const sfx[] = { ".tar.gz", ".idx", ".sum", ".seek" };
+    size_t                   len = strlen(name);
+    size_t                   i;
+
+    for (i = 0; i < sizeof(sfx) / sizeof(sfx[0]); i++)
+    {
+        size_t n = strlen(sfx[i]);
+
+        if (len > n && strcmp(name + len - n, sfx[i]) == 0)
+        {
+            return name + len - n;
+        }
+    }
+    return NULL;
+}
+
+/* Each finished pack's files in packs/, `pfd`. */
+static void protect_packs(int pfd, const char *dir, uid_t owner, gid_t group,
+                          struct rs_repo_protected *out)
+{
+    int                  listing = dup(pfd);
+    DIR                 *d = listing >= 0 ? fdopendir(listing) : NULL;
+    const struct dirent *de;
+    bool                 any = false;
+
+    if (!d && listing >= 0)
+    {
+        (void)close(listing);
+    }
+    while (d && (de = readdir(d)) != NULL)
+    {
+        const char *sfx = de->d_name[0] == '.' ? NULL : pack_suffix(de->d_name);
+        char       *idx;
+        struct stat st;
+
+        if (!sfx)
+        {
+            continue;
+        }
+        idx = rs_xasprintf("%.*s.idx", (int)(sfx - de->d_name), de->d_name);
+        /* Anything there by that name says it is finished; protect_one
+         * refuses what is not a regular file, and says so. */
+        if (fstatat(pfd, idx, &st, AT_SYMLINK_NOFOLLOW) == 0)
+        {
+            protect_file(pfd, dir, de->d_name, owner, group, out, &any);
+        }
+        free(idx);
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+}
+
+/* Each finished snapshot in snapshots/, `sfd`: its files, then itself. */
+static void protect_snapshots(int sfd, const char *dir, uid_t owner, gid_t group,
+                              struct rs_repo_protected *out)
+{
+    int                  listing = dup(sfd);
+    DIR                 *d = listing >= 0 ? fdopendir(listing) : NULL;
+    const struct dirent *de;
+
+    if (!d && listing >= 0)
+    {
+        (void)close(listing);
+    }
+    while (d && (de = readdir(d)) != NULL)
+    {
+        char                *path;
+        int                  fd;
+        int                  inner;
+        DIR                 *files;
+        const struct dirent *fe;
+        bool                 any = false;
+        int                  did;
+
+        /* One being written has a name of its own, beginning with '.'. */
+        if (!rs_repo_name_valid(de->d_name))
+        {
+            continue;
+        }
+        fd = protect_open_dir(sfd, dir, de->d_name, out);
+        if (fd < 0)
+        {
+            continue;
+        }
+        path = rs_xasprintf("%s/%s", dir, de->d_name);
+        inner = dup(fd);
+        files = inner >= 0 ? fdopendir(inner) : NULL;
+        if (!files && inner >= 0)
+        {
+            (void)close(inner);
+        }
+        while (files && (fe = readdir(files)) != NULL)
+        {
+            if (fe->d_name[0] != '.')
+            {
+                protect_file(fd, path, fe->d_name, owner, group, out, &any);
+            }
+        }
+        if (files)
+        {
+            (void)closedir(files);
+        }
+        did = protect_one(sfd, dir, de->d_name, true, owner, group, 0550, out);
+        if (did == 1 || (did == 0 && any))
+        {
+            out->snapshots++;
+        }
+        out->unchanged += did == 0 ? 1 : 0;
+        (void)close(fd);
+        free(path);
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+}
+
+bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_protected *out,
+                     struct rs_buf *err)
+{
+    static const char *const subs[] = { "packs", "snapshots" };
+    int                      top;
+    size_t                   i;
+    bool                     any = false;
+
+    memset(out, 0, sizeof(*out));
+    if (!rs_repo_is(dir))
+    {
+        rs_buf_addf(err, "%s: not a restate repository", dir);
+        return false;
+    }
+    top = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (top < 0)
+    {
+        rs_buf_addf(err, "%s: %s", dir, strerror(errno));
+        return false;
+    }
+    /* An encrypted repository's chunk key, made once; never the marker, the
+     * lock or readers, which the machines that write here open as their own. */
+    protect_file(top, dir, RS_REPO_CHUNK_KEY, owner, group, out, &any);
+    for (i = 0; i < sizeof(subs) / sizeof(subs[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/%s", dir, subs[i]);
+        int   fd = protect_open_dir(top, dir, subs[i], out);
+        int   did;
+
+        if (fd >= 0)
+        {
+            if (i == 0)
+            {
+                protect_packs(fd, path, owner, group, out);
+            } else
+            {
+                protect_snapshots(fd, path, owner, group, out);
+            }
+            (void)close(fd);
+        }
+        /* Sticky: anyone in the group adds to it, and removes only what is
+         * their own -- what they have not finished. */
+        did = protect_one(top, dir, subs[i], true, owner, group, 01770, out);
+        out->dirs += did == 1 ? 1 : 0;
+        out->unchanged += did == 0 ? 1 : 0;
+        free(path);
+    }
+    {
+        int did = protect_one(top, dir, ".", true, owner, group, 01770, out);
+
+        out->dirs += did == 1 ? 1 : 0;
+        out->unchanged += did == 0 ? 1 : 0;
+    }
+    (void)close(top);
+    return true;
+}
+
+void rs_repo_protected_free(struct rs_repo_protected *p)
+{
+    size_t i;
+
+    for (i = 0; i < p->nfailed; i++)
+    {
+        free(p->failed[i]);
+    }
+    free(p->failed);
+    memset(p, 0, sizeof(*p));
 }
 
 /* Whether `name` is among `names`, which are in order. */

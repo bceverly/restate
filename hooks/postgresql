@@ -5,6 +5,7 @@
 #
 # restate hook: PostgreSQL, for capture --quiesce.
 #
+#   present NAME  whether PostgreSQL is on this host: prints present or absent
 #   pause NAME    dump every database into $RESTATE_DUMP_DIR (pg_dumpall,
 #                 gzipped), stop the units listed in /etc/restate/also.d/
 #                 postgresql -- services that write to the database -- and
@@ -19,6 +20,17 @@
 # To change what this does, copy it to /etc/restate/hooks.d/postgresql (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
 set -eu
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if [ -d /usr/lib/postgresql ] || command -v postgres > /dev/null 2>&1 ||
+    command -v pg_ctl > /dev/null 2>&1; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
 
 action=$1
 name=$2
@@ -64,7 +76,7 @@ resume)
   fi
   ;;
 *)
-  echo "usage: $0 pause|resume NAME" >&2
+  echo "usage: $0 present|pause|resume NAME" >&2
   exit 2
   ;;
 esac

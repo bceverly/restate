@@ -703,6 +703,82 @@ void test_live(void)
             }
             rs_buf_free(&perr);
         }
+        TEST_CASE("live: whether what a hook pauses is on this host");
+        {
+            const char *t = rs_hook_usable("/usr/bin/true") ? "/usr/bin/true" : "/bin/true";
+            const char *f = rs_hook_usable("/usr/bin/false") ? "/usr/bin/false" : "/bin/false";
+            const char *cat = rs_hook_usable("/bin/cat") ? "/bin/cat" : "/usr/bin/cat";
+            char       *here = realpath(".", NULL); /* Flawfinder: ignore */
+            char       *in = rs_test_tmpdir();
+
+            /* Saying nothing, failing, or not there to run: it does not know. */
+            CHECK(rs_hook_present(t, "x") == RS_HOOK_UNKNOWN);
+            CHECK(rs_hook_present(f, "x") == RS_HOOK_UNKNOWN);
+            CHECK(rs_hook_present("/nonexistent/hook", "x") == RS_HOOK_UNKNOWN);
+            /* cat, asked "present x", prints the files present and x: as a
+             * hook would print its answer. */
+            rs_test_write(in, "x", "", 0644);
+            if (rs_hook_usable(cat) && here && chdir(in) == 0)
+            {
+                rs_test_write(in, "present", "absent\n", 0644);
+                CHECK(rs_hook_present(cat, "x") == RS_HOOK_ABSENT);
+                rs_test_write(in, "present", "present\n", 0644);
+                CHECK(rs_hook_present(cat, "x") == RS_HOOK_PRESENT);
+                rs_test_write(in, "present", "present", 0644);
+                CHECK(rs_hook_present(cat, "x") == RS_HOOK_PRESENT);
+                rs_test_write(in, "present", "presently\n", 0644);
+                CHECK(rs_hook_present(cat, "x") == RS_HOOK_UNKNOWN);
+                rs_test_write(in, "present", "usage: present|pause|resume\n", 0644);
+                CHECK(rs_hook_present(cat, "x") == RS_HOOK_UNKNOWN);
+                CHECK(chdir(here) == 0);
+            }
+            free(here);
+            rs_test_rmtree(in);
+            free(in);
+        }
+
+        TEST_CASE("live: what lies within what a named hook covers");
+        {
+            char          *unifi_paths[] = { (char *)(uintptr_t)"/var/lib/unifi",
+                                             (char *)(uintptr_t)"/usr/lib/unifi" };
+            char          *mongo_paths[] = { (char *)(uintptr_t)"/var/lib/unifi/db" };
+            char          *system_paths[] = { (char *)(uintptr_t)"/var/lib/mongodb" };
+            char          *both_paths[] = { (char *)(uintptr_t)"/var/lib/unifi/db",
+                                            (char *)(uintptr_t)"/var/lib/mongodb" };
+            char          *near_paths[] = { (char *)(uintptr_t)"/var/lib/unifi-other" };
+            char          *root_paths[] = { (char *)(uintptr_t)"/" };
+            struct rs_live unifi;
+            struct rs_live inner;
+
+            memset(&unifi, 0, sizeof(unifi));
+            memset(&inner, 0, sizeof(inner));
+            unifi.paths = unifi_paths;
+            unifi.npaths = 2;
+            inner.paths = mongo_paths;
+            inner.npaths = 1;
+            CHECK(rs_live_within(&inner, &unifi));
+            inner.paths = unifi_paths;
+            CHECK(rs_live_within(&inner, &unifi));
+            inner.paths = system_paths;
+            CHECK(!rs_live_within(&inner, &unifi));
+            /* Every one of its paths, not some. */
+            inner.paths = both_paths;
+            inner.npaths = 2;
+            CHECK(!rs_live_within(&inner, &unifi));
+            /* A name that begins the same is not beneath it. */
+            inner.paths = near_paths;
+            inner.npaths = 1;
+            CHECK(!rs_live_within(&inner, &unifi));
+            unifi.paths = root_paths;
+            unifi.npaths = 1;
+            CHECK(rs_live_within(&inner, &unifi));
+            /* Nothing is within what names no paths, nor holds what has none. */
+            unifi.npaths = 0;
+            CHECK(!rs_live_within(&inner, &unifi));
+            unifi.npaths = 1;
+            inner.npaths = 0;
+            CHECK(!rs_live_within(&inner, &unifi));
+        }
         rs_hooks_set_dirs(NULL, 0);
         /* The real directories: nothing called this is installed. */
         CHECK(rs_hook_find("restate-no-such-hook") == NULL);
@@ -804,8 +880,8 @@ void test_live(void)
         one.paths = paths;
         one.npaths = 2;
         rs_buf_init(&err);
-        CHECK(rs_hook_run("/usr/bin/true", "pause", &one, "/var/lib/restate/dumps/x", &err));
-        CHECK(!rs_hook_run("/usr/bin/false", "resume", &one, NULL, &err));
+        CHECK(rs_hook_run("/usr/bin/true", "pause", &one, "/var/lib/restate/dumps/x", true, &err));
+        CHECK(!rs_hook_run("/usr/bin/false", "resume", &one, NULL, false, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "resume 18-main exited 1");
         rs_buf_reset(&err);
         /* Anyone's file is not run, however executable. */
@@ -815,7 +891,7 @@ void test_live(void)
         {
             CHECK(chown(mine, 1, (gid_t)-1) == 0);
         }
-        CHECK(!rs_hook_run(mine, "pause", &one, NULL, &err));
+        CHECK(!rs_hook_run(mine, "pause", &one, NULL, false, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "not run");
         rs_buf_reset(&err);
         {

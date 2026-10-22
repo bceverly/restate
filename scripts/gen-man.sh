@@ -1013,9 +1013,24 @@ after them \- always, even if pausing failed \- with
 .BR RESTATE_UID " and " RESTATE_USER
 (whose it is: a VM may be a user's own),
 .B RESTATE_PATHS
-(the paths about to be copied, one to a line) and
+(the paths about to be copied, one to a line),
 .B RESTATE_DUMP_DIR
-in its environment. The dump directory,
+and
+.B RESTATE_QUIESCE
+.RB ( yes
+for a capture with
+.BR \-\-quiesce ,
+else
+.BR no )
+in its environment. It is asked too, as
+.I HOOK
+.B present
+.IR NAME ,
+whether what it pauses is on this host: it only looks, and prints
+.B present
+or
+.BR absent .
+Every shipped hook answers; one that prints neither is taken to be present. The dump directory,
 .IR /var/lib/restate/dumps/ KIND\-NAME ,
 root's and 0700, is copied into the image with the files once
 .B pause
@@ -1054,18 +1069,57 @@ whether or not anything is found. It is asked first, as
 which paths it covers, one absolute path a line; those are left to the end
 and copied while it is paused, as above. A hook that names none, or does not
 know the question, is paused before the walk begins and resumed after it
-ends. Two are shipped for this:
+ends. One that answers
+.B absent
+is not run, with a notice, so one policy can name it for every host.
+Anything found running whose files all lie within the paths it covers is
+its to pause, not the hook for its kind's: UniFi's own
+.B mongod
+is paused by the
+.B unifi
+hook, never by
+.BR mongodb .
+Two are shipped for this:
 .B unifi
 dumps the database the UniFi Network application runs itself (port 27117)
 and stops its service, for
 .I /var/lib/unifi
-\- UniFi's own backups, in
+\- that database is no replica set, so a dump taken while it runs is not of
+one moment, and the stopped copy is the one that restores reliably; only the
+controller is down meanwhile, not what it manages. UniFi's own backups, in
 .IR /var/lib/unifi/backup/autobackup ,
-are in the capture too, and restore onto a new UniFi without restate \- and
+are in the capture too, and restore onto a new UniFi without restate.
 .B nextcloud
 puts Nextcloud in maintenance mode, for its own directory and its data
-directory, while its database is paused by its own hook with
-.BR \-\-quiesce .
+directory. It is found as the snap
+.RB ( nextcloud.occ )
+or as the first directory holding
+.I occ
+and
+.I config/config.php
+beneath
+.IR /var/www ,
+.I /usr/local/www
+or
+.IR /srv/www ,
+and runs
+.I occ
+as the owner of
+.IR config/config.php .
+Capture with both
+.B \-\-quiesce
+and
+.B \-\-quiesce\-with nextcloud
+(in a job,
+.B quiesce = true
+and
+.BR "quiesce_with = nextcloud" ):
+.B \-\-quiesce
+pauses its MySQL, MariaDB or PostgreSQL with that database's own hook, and
+without it the hook warns that the database is copied as it runs. The snap's
+database is its own, and is dumped
+.RB ( nextcloud.mysqldump )
+while in maintenance mode.
 A mail store kept as Maildir needs neither: every message is a file of its
 own, written beside its name and renamed into place, so a copy taken while
 mail arrives misses at most what arrived meanwhile.
@@ -1457,7 +1511,7 @@ with status 5 (see
 .B STORAGE
 for a repository on a file server). With
 .BR \-\-syslog ,
-capture, prune, repack, check and copy put one line in the system log as they end \- the command,
+capture, prune, repack, protect, check and copy put one line in the system log as they end \- the command,
 .BR status= ,
 .BR exit= ,
 .B seconds=
@@ -1541,8 +1595,10 @@ user to one of its own
 works, as long as that user can write it. What restate makes is its owner's
 alone, 0600 and 0700, where the share keeps modes. Run as root \- a prune,
 repack or check on the storage itself \- it gives every file and directory it
-makes the owner and group of the directory it makes it in, so the machines a
-share maps to the repository's owner can still read what root wrote.
+makes the owner and group of the directory it makes it in, and that group's
+read where the directory gives its group read, so the machines a share maps
+to the repository's owner, or into its group, can still read what root
+wrote.
 .PP
 .B Only adding.
 A capture only ever adds files: each pack, its
@@ -1557,11 +1613,57 @@ What it needs of the directory is to make files, write them, rename them to
 new names, remove its own unfinished ones, and lock.
 .B \-\-append\-only
 holds a capture to that, refusing the one thing it would otherwise change:
-the marker of a repository made by restate 1.3 or older. restate cannot make
-a repository append-only for a machine that has been taken over \- that
-machine is root, and has the share \- so the storage has to: by taking a
-filesystem snapshot after each capture (ZFS's), or by marking what each
-capture wrote immutable.
+the marker of a repository made by restate 1.3 or older. That keeps an honest
+capture from changing anything; a machine that has been taken over is root,
+and has the share, so only the storage can stop it \- with
+.BR protect ,
+below, and a filesystem snapshot (ZFS's) after each capture.
+.PP
+.B Protected on the storage.
+.B restate protect
+.IR REPO ,
+run as root on the storage after each capture, makes every finished pack's
+files and every snapshot root's and the repository's group's, and read-only:
+files 0440, each snapshot's directory 0550. The repository and its
+.I packs
+and
+.I snapshots
+become root's and the group's, 1770: sticky, so the machines in the group
+make files there, and remove only their own \- what they have not
+finished. A machine that has been taken over can then add snapshots, and
+read them, but not change, rename or remove one that is there. The marker,
+.I lock
+and
+.IR readers ,
+which a capture and a restore open as their own, are left as they are, and
+so is anything being written: a pack is finished once its
+.I .idx
+is there, a snapshot once it has its own name. Only what is not so already
+is changed, so it is quick to run after every capture, and it takes no lock.
+It never follows a symlink, and refuses a file with a second name, which a
+machine could plant to have root give away a file elsewhere. The group is
+the repository directory's, or
+.BR \-\-group ;
+root's own is refused. Prune, repack and check, run as root on the storage,
+go on as before, and what they write is the group's to read. A snapshot
+already protected cannot be signed afterwards: sign it as it is captured.
+.B capture \-\-create
+works into an empty directory made ready for it, root's and the group's,
+1770, and leaves it so. Over NFS, map every machine to one user and the
+group by name \- on FreeBSD,
+.B \-mapall=restate:restate
+in
+.IR /etc/exports ,
+since with the user alone a client was refused making files the group may
+make. The result says
+.BR files_protected ,
+.BR snapshots_protected ,
+.BR directories_protected ,
+.B unchanged
+and
+.BR not_protected ,
+with each that could not be protected among its errors, and exit status 3
+if any.
 .PP
 .B A machine makes its own.
 .B capture \-\-create
@@ -1713,9 +1815,10 @@ and the commands each means something to:
 .BR snapshots ,
 .BR restore ,
 .BR estimate ,
-.B du
+.BR du ,
+.B repack
 or
-.BR repack .
+.BR protect .
 .TP
 .B repository
 the repository; every command but estimate.
@@ -1759,12 +1862,15 @@ is a dry run as well.
 .B copy_to
 copy: where to.
 .TP
+.B group
+protect: the group the machines that write to the repository are in.
+.TP
 .BR result ", " progress ", " report_group
 every command: where its result and its progress go, and the group that
 may read them (see
 .BR RESULTS );
 .B syslog
-for capture, prune, repack, check and copy.
+for capture, prune, repack, protect, check and copy.
 .PP
 A key restate does not know, a key the command has no use for, a key given
 twice that is not repeatable, or a value of the wrong kind refuses the whole
@@ -1852,6 +1958,14 @@ and the packs it removed and rewrote;
 .B packs_removed
 and
 .BR bytes_freed ;
+.BR protect ,
+.BR group ,
+.BR files_protected ,
+.BR snapshots_protected ,
+.BR directories_protected ,
+.B unchanged
+and
+.BR not_protected ;
 .BR check ,
 an object
 .B check
@@ -1891,7 +2005,12 @@ and
 .B restate features \-\-json
 says what this restate can do \- its version, commands, options, the keys a
 job takes, the schemas, the hooks here and the programs it can use \- for a
-program to ask before it asks for any of them.
+program to ask before it asks for any of them. A hook that answers
+.B absent
+to
+.I HOOK
+.B present
+is not listed, so a host lists only what it has.
 .PP
 The result and the progress file are their owner's alone, as everything
 restate writes is;

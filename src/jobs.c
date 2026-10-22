@@ -31,7 +31,8 @@ enum {
     J_ESTIMATE  = 1u << 6,
     J_DU        = 1u << 7,
     J_REPACK    = 1u << 8,
-    J_ANY       = 0x1ffu
+    J_PROTECT   = 1u << 9,
+    J_ANY       = 0x3ffu
 };
 
 static const struct {
@@ -43,7 +44,7 @@ static const struct {
     { "check", CMD_CHECK, J_CHECK },             { "copy", CMD_COPY, J_COPY },
     { "snapshots", CMD_SNAPSHOTS, J_SNAPSHOTS }, { "restore", CMD_RESTORE, J_RESTORE },
     { "estimate", CMD_ESTIMATE, J_ESTIMATE },    { "du", CMD_DU, J_DU },
-    { "repack", CMD_REPACK, J_REPACK },
+    { "repack", CMD_REPACK, J_REPACK },          { "protect", CMD_PROTECT, J_PROTECT },
 };
 
 enum kind {
@@ -93,6 +94,7 @@ enum key_id {
     KEY_RESULT,
     KEY_PROGRESS,
     KEY_REPORT_GROUP,
+    KEY_GROUP,
     KEY_COUNT
 };
 
@@ -135,10 +137,11 @@ static const struct key {
     [KEY_PLAN] = { "plan", K_BOOL, false, J_RESTORE },
     [KEY_TMPDIR] = { "tmpdir", K_PATH, false, J_CAPTURE },
     [KEY_SYSLOG] = { "syslog", K_BOOL, false,
-                     J_CAPTURE | J_PRUNE | J_CHECK | J_COPY | J_REPACK },
+                     J_CAPTURE | J_PRUNE | J_CHECK | J_COPY | J_REPACK | J_PROTECT },
     [KEY_RESULT] = { "result", K_PATH, false, J_ANY },
     [KEY_PROGRESS] = { "progress", K_PATH, false, J_ANY },
     [KEY_REPORT_GROUP] = { "report_group", K_NAME, false, J_ANY },
+    [KEY_GROUP] = { "group", K_NAME, false, J_PROTECT },
 };
 
 const char *const *rs_job_keys(size_t *n)
@@ -489,6 +492,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     case KEY_REPORT_GROUP:
         o->report_group = v;
         break;
+    case KEY_GROUP:
+        o->group = v;
+        break;
     case KEY_COUNT:
     default:
         break;
@@ -510,6 +516,7 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
         break;
     case CMD_PRUNE:
     case CMD_REPACK:
+    case CMD_PROTECT:
     case CMD_CHECK:
     case CMD_SNAPSHOTS:
     case CMD_DU:
@@ -657,7 +664,7 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
             if (!cmd)
             {
                 rs_buf_addf(err, "%s:%u: command: \"%.40s\" is not one a job can run (capture, "
-                            "prune, check, copy, snapshots, restore, estimate, du, repack)", name,
+                            "prune, check, copy, snapshots, restore, estimate, du, repack, protect)", name,
                             lineno, value);
                 return false;
             }
@@ -725,7 +732,7 @@ static bool only_reporting(const struct rs_options *o)
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
                 o->as || o->clones || o->read_all || o->metadata_only || o->record ||
                 o->whole_packs || o->nquiesce_with || o->append_only || o->create || o->json ||
-                o->nincludes || o->tmpdir || o->one_fs || o->no_hash;
+                o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group;
 
     return !said;
 }

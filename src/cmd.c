@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -403,6 +404,7 @@ struct quiesce {
     struct rs_live       *live;     /* what was found, and matters, then what was named */
     size_t                nlive;
     bool                 *declared; /* named by --quiesce-with, not found */
+    size_t               *covered;  /* 1 + the named one whose paths hold all of its */
     char                **hooks;    /* each one's hook, NULL for none */
     char                **dumps;    /* each one's dump directory, or NULL */
     struct rs_scan_group *groups;   /* one per thing with a hook and paths */
@@ -488,6 +490,24 @@ static bool found_kind(const struct quiesce *q, size_t n, const char *kind)
 }
 
 /*
+ * The named thing whose paths hold every one of the found thing `l`'s, as
+ * 1 + its index; 0 for none (rs_live_within).
+ */
+static size_t covered_by(const struct quiesce *q, size_t found, const struct rs_live *l)
+{
+    size_t j;
+
+    for (j = found; j < q->nlive; j++)
+    {
+        if (rs_live_within(l, &q->live[j]))
+        {
+            return j + 1;
+        }
+    }
+    return 0;
+}
+
+/*
  * The live things whose files the walk would copy: named, with the command
  * that would stop each, when not quiescing; given a hook and a dump
  * directory, and left to the end of the walk, when quiescing. Then each hook
@@ -540,6 +560,7 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
     found = q->nlive;
     n = found + o->nquiesce_with + nprogs + 1;
     q->declared = rs_xcalloc(n, sizeof(*q->declared));
+    q->covered = rs_xcalloc(n, sizeof(*q->covered));
     q->hooks = rs_xcalloc(n, sizeof(*q->hooks));
     q->dumps = rs_xcalloc(n, sizeof(*q->dumps));
     q->groups = rs_xcalloc(n, sizeof(*q->groups));
@@ -575,6 +596,15 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
                      "(%s/%s, root's and writable by no one else, or one restate ships)", name,
                      RS_HOOKS_SITE_DIR, name);
             ok = false;
+            continue;
+        }
+        /* Named by a policy that every host shares, it may have nothing to
+         * pause here: so it says, and is not run. */
+        if (rs_hook_present(hook, name) == RS_HOOK_ABSENT)
+        {
+            tell(o, LOG_NOTICE, "--quiesce-with %s: %s says there is none on this host to pause",
+                 name, hook);
+            free(hook);
             continue;
         }
         l = &q->live[q->nlive];
@@ -619,6 +649,15 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
         q->nlive++;
     }
     free(progs);
+    for (i = 0; i < found; i++)
+    {
+        q->covered[i] = covered_by(q, found, &q->live[i]);
+        if (q->covered[i])
+        {
+            free(q->hooks[i]);
+            q->hooks[i] = NULL;
+        }
+    }
     for (i = 0; i < q->nlive; i++)
     {
         const struct rs_live *l = &q->live[i];
@@ -626,6 +665,12 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
         struct rs_buf         hint;
         struct rs_buf         err;
 
+        if (q->covered[i])
+        {
+            tell(o, LOG_NOTICE, "%s %s is %s's own, and paused with it", rs_live_what(l), l->name,
+                 q->live[q->covered[i] - 1].name);
+            continue;
+        }
         rs_buf_init(&what);
         rs_buf_init(&hint);
         rs_buf_init(&err);
@@ -694,6 +739,7 @@ static void quiesce_free(struct quiesce *q)
     }
     rs_live_free(q->live, q->nlive);
     free(q->declared);
+    free(q->covered);
     free(q->hooks);
     free(q->dumps);
     free(q->groups);
@@ -797,7 +843,7 @@ static bool pause_one(const struct around_ctx *a, size_t i)
     rs_progress_hook(l->name);
     q->paused++;
     q->paused_at[i] = time(NULL);
-    q->pause_ok[i] = rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], &err);
+    q->pause_ok[i] = rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], a->o->quiesce, &err);
     if (!q->pause_ok[i])
     {
         tell(a->o, LOG_WARNING, "%s %s was not paused (%s): its files are copied as they are",
@@ -816,7 +862,7 @@ static void resume_one(const struct around_ctx *a, size_t i)
     bool                  ok;
 
     rs_buf_init(&err);
-    ok = rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], &err);
+    ok = rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], a->o->quiesce, &err);
     if (!ok)
     {
         tell(a->o, LOG_ERR, "%s %s was not resumed, and may still be stopped: %s",
@@ -2206,6 +2252,110 @@ int rs_cmd_repack(const struct rs_options *o)
                 "repository=%s packs_removed=%zu packs_rewritten=%zu bytes_freed=%" PRIu64,
                 o->args[0], packed.packs_removed, packed.packs_rewritten, packed.bytes_freed);
     rs_repo_pruned_free(&packed);
+    rs_buf_free(&err);
+    return status;
+}
+
+/*
+ * The group protect makes a repository's: --group, or else its directory's.
+ * False, having said why, for one that is not there, and for root's: the
+ * machines a share maps are never in it, and would be locked out.
+ */
+static bool protect_group(const struct rs_options *o, const char *dir, gid_t *gid,
+                          const char **name)
+{
+    static char  number[32];
+    struct stat  st;
+    struct group *g;
+
+    if (o->group)
+    {
+        g = getgrnam(o->group);
+        if (!g)
+        {
+            rs_error("--group %s: there is no such group here", o->group);
+            return false;
+        }
+        *gid = g->gr_gid;
+    } else if (stat(dir, &st) != 0)
+    {
+        rs_error("%s: %s", dir, strerror(errno));
+        return false;
+    } else
+    {
+        *gid = st.st_gid;
+    }
+    if (*gid == 0)
+    {
+        rs_error("protect %s: its group would be root's, which no machine writing to it is in; "
+                 "name theirs with --group", dir);
+        return false;
+    }
+    g = getgrgid(*gid);
+    if (g && g->gr_name)
+    {
+        *name = g->gr_name;
+    } else
+    {
+        (void)snprintf(number, sizeof(number), "%lu", (unsigned long)*gid);
+        *name = number;
+    }
+    return true;
+}
+
+int rs_cmd_protect(const struct rs_options *o)
+{
+    struct rs_repo_protected done;
+    struct rs_buf            err;
+    struct rs_jval          *res = rs_result();
+    const char              *dir = o->args[0];
+    const char              *name = NULL;
+    time_t                   began = time(NULL);
+    gid_t                    gid = 0;
+    size_t                   i;
+    int                      status;
+    bool                     ok;
+
+    rs_jobj_str(res, "repository", dir);
+    if (!protect_group(o, dir, &gid, &name))
+    {
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", dir);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_buf_init(&err);
+    ok = rs_repo_protect(dir, geteuid(), gid, &done, &err);
+    rs_jobj_str(res, "group", name);
+    rs_jobj_u64(res, "files_protected", done.files);
+    rs_jobj_u64(res, "snapshots_protected", done.snapshots);
+    rs_jobj_u64(res, "directories_protected", done.dirs);
+    rs_jobj_u64(res, "unchanged", done.unchanged);
+    rs_jobj_u64(res, "not_protected", done.nfailed);
+    if (!ok)
+    {
+        rs_error("%s", err.data);
+    }
+    for (i = 0; i < done.nfailed; i++)
+    {
+        rs_error("not protected: %s", done.failed[i]);
+    }
+    if (ok && geteuid() != 0 && !o->quiet)
+    {
+        rs_warn("protect %s: run as other than root, what it protects is still yours to change: "
+                "safe from the machines only if a share maps them to another user", dir);
+    }
+    if (ok && !o->quiet)
+    {
+        (void)fprintf(stderr, "restate: protected %zu files, %zu snapshots and %zu directories "
+                      "for the group %s; %zu were already\n", done.files, done.snapshots,
+                      done.dirs, name, done.unchanged);
+    }
+    status = !ok             ? RESTATE_EXIT_TROUBLE
+             : done.nfailed ? RESTATE_EXIT_INCOMPLETE
+                            : RESTATE_EXIT_OK;
+    log_outcome(o, status, began,
+                "repository=%s group=%s files_protected=%zu snapshots_protected=%zu "
+                "not_protected=%zu", dir, name, done.files, done.snapshots, done.nfailed);
+    rs_repo_protected_free(&done);
     rs_buf_free(&err);
     return status;
 }
@@ -4623,6 +4773,8 @@ static int dispatch(const struct rs_options *o)
         return rs_cmd_prune(o);
     case CMD_REPACK:
         return rs_cmd_repack(o);
+    case CMD_PROTECT:
+        return rs_cmd_protect(o);
     case CMD_CHECK:
         return rs_cmd_check(o);
     case CMD_EXPORT:
