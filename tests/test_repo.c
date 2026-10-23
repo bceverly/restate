@@ -1428,6 +1428,43 @@ static void test_seek(const char *dir)
 /* What restate makes in a repository, as root makes it: the directory's.
  * Shown with a group of this user's other than its own, which it may give
  * away, rather than an owner, which only root may. */
+/* A file's or directory's mode, never through a symlink; 0 if it is not there. */
+static unsigned mode_of(const char *dir, const char *name)
+{
+    char       *path = rs_xasprintf("%s/%s", dir, name);
+    struct stat st;
+    unsigned    mode = lstat(path, &st) == 0 ? (unsigned)(st.st_mode & 07777) : 0;
+
+    free(path);
+    return mode;
+}
+
+/* Made as root does, where the directory's owner is another and cannot be
+ * given what is made -- as a share that maps root to a user -- it is left as
+ * it was made: no chmod, which on ZFS would drop what its ACL gave it. */
+static void test_unadoptable(void)
+{
+    struct stat   tmp;
+    struct rs_buf err;
+    char         *path;
+
+    if (geteuid() == 0 || stat("/tmp", &tmp) != 0 || tmp.st_uid == geteuid() ||
+        !(tmp.st_mode & S_IRGRP))
+    {
+        return;
+    }
+    TEST_CASE("repo: made as root, where it cannot be the directory's, its mode is left");
+    rs_buf_init(&err);
+    path = rs_xasprintf("/tmp/restate-unadoptable.%ld", (long)getpid());
+    rs_repo_set_adopting(true);
+    CHECK(rs_repo_init(path, false, &err));
+    rs_repo_set_adopting(false);
+    CHECK_INT(mode_of(path, "."), 0700);
+    rs_test_rmtree(path);
+    free(path);
+    rs_buf_free(&err);
+}
+
 static void test_adopted(const char *dir)
 {
     char                 *share = rs_xasprintf("%s/share", dir);
@@ -2845,17 +2882,6 @@ static void test_stopped(const char *dir)
     free(record);
 }
 
-/* A file's or directory's mode, never through a symlink; 0 if it is not there. */
-static unsigned mode_of(const char *dir, const char *name)
-{
-    char       *path = rs_xasprintf("%s/%s", dir, name);
-    struct stat st;
-    unsigned    mode = lstat(path, &st) == 0 ? (unsigned)(st.st_mode & 07777) : 0;
-
-    free(path);
-    return mode;
-}
-
 /* Whether what protect could not protect says `needle`. */
 static bool failed_with(const struct rs_repo_protected *p, const char *needle)
 {
@@ -3177,6 +3203,7 @@ void test_repo(void)
     test_written(dir);
     test_chunks(dir);
     test_seek(dir);
+    test_unadoptable();
     test_adopted(dir);
     test_protected(dir);
     test_checked(dir);

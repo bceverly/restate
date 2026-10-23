@@ -167,8 +167,9 @@ void rs_repo_set_adopting(bool always)
  * otherwise be root's, and 0600: a share that maps every machine to the
  * repository's owner would then refuse them the packs they wrote. So a file or
  * directory root makes, `fd`, open, is given the owner and group of the
- * directory it is made in, and that group's read if the directory has it. Through the descriptor, never the name: a name in
- * a directory others can write could be swapped for a link to anything.
+ * directory it is made in, and that group's read if the directory has it.
+ * Through the descriptor, never the name: a name in a directory others can
+ * write could be swapped for a link to anything.
  * False where the share will not have it, and it stays as it was made -- as
  * on a share that maps root to nobody, whose files are not root's anyway.
  */
@@ -196,8 +197,12 @@ static bool adopt(int fd, const char *path)
         }
         /* Made where its group reads -- a protected repository
          * (rs_repo_protect) -- its group reads it too: what a prune or a
-         * repack writes there, the machines read before protect runs again. */
-        if (parent.st_mode & S_IRGRP)
+         * repack writes there, the machines read before protect runs again.
+         * Only once it is the directory's, though: a machine root on a share
+         * that maps it to a user cannot make it so, and where the directory
+         * has an ACL (ZFS's), a chmod would drop the right to rename and
+         * remove its own file that the ACL gave it. */
+        if (ok && (parent.st_mode & S_IRGRP))
         {
             mode |= S_IRGRP | (S_ISDIR(st.st_mode) ? S_IXGRP : 0);
         }
