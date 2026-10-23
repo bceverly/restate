@@ -462,6 +462,10 @@ place:
       26.04, from signed source packages the release workflow uploads once
       the package has installed on clean Ubuntu; `make deb`, `deb-source`
       and `deb-sbuild` by hand
+- [x] Binary packages for every supported release of FreeBSD, OpenBSD and
+      NetBSD on each release, built in that release's VM with its own package
+      tool from the release's tarball, installed, checked and removed there
+      first; `make bsd-pkg` by hand
 - [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, Homebrew formula
 - [ ] Debian and RPM packages for other Linux distributions
 

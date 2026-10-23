@@ -238,13 +238,19 @@ jobs:
   #
   # gmake and bash are installed rather than worked around: the Makefile is
   # GNU make, and the scripts are bash.
+  # Every FreeBSD release still supported: 14.4 until 2026-12-31, 14.5 until
+  # 2027-06-30, 15.1 until 2027-03-31.
   freebsd:
-    name: Tests (FreeBSD)
+    name: Tests (FreeBSD ${{ matrix.version }})
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["14.4", "14.5", "15.1"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -253,7 +259,7 @@ jobs:
         timeout-minutes: 15
         with:
           operating_system: freebsd
-          version: "14.3"
+          version: ${{ matrix.version }}
 
       - name: Build and test
         shell: cpa.sh {0}
@@ -274,13 +280,17 @@ jobs:
           test -x staged/usr/local/sbin/restate
           find staged -name restate.8 | grep -q .
           rm -rf staged
+          gmake bsd-pkg
+          sudo scripts/verify-bsd-pkg.sh dist/restate-*
           sudo gmake install
           /usr/local/sbin/restate --version
           man -w restate
           /usr/local/sbin/restate classify /usr/local/bin/x /usr/local/etc/x
 
+  # OpenBSD supports its two newest releases: 7.9 here, 8.0 below (which
+  # cross-platform-actions has no image of yet).
   openbsd:
-    name: Tests (OpenBSD)
+    name: Tests (OpenBSD 7.9)
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name != github.repository
@@ -314,17 +324,66 @@ jobs:
           test -x staged/usr/local/sbin/restate
           find staged -name restate.8 | grep -q .
           rm -rf staged
+          gmake bsd-pkg
+          sudo scripts/verify-bsd-pkg.sh dist/restate-*
           sudo gmake install
           /usr/local/sbin/restate --version
           man -w restate
 
-  netbsd:
-    name: Tests (NetBSD)
+  # OpenBSD 8.0, in vmactions' VM, which runs every command as root: the
+  # build and the tests run as a user of their own, as everywhere else, and
+  # only the install, the package's check and its removal as root.
+  openbsd-8:
+    name: Tests (OpenBSD 8.0)
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and test
+        uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1.4.9
+        with:
+          release: "8.0"
+          usesh: true
+          sync: rsync
+          copyback: false
+          prepare: |
+            pkg_add -I bash gmake
+          run: |
+            set -e
+            for t in bash gmake; do
+              command -v "$t" > /dev/null 2>&1 || { echo "not installed: $t" >&2; exit 1; }
+            done
+            uname -srm
+            cc --version | head -1
+            useradd -m builder
+            chown -R builder .
+            su builder -c 'gmake build WERROR=-Werror && gmake test-unit test-cli'
+            su builder -c 'gmake install DESTDIR="$PWD/staged"'
+            test -x staged/usr/local/sbin/restate
+            find staged -name restate.8 | grep -q .
+            rm -rf staged
+            su builder -c 'gmake bsd-pkg'
+            scripts/verify-bsd-pkg.sh dist/restate-*
+            gmake install
+            /usr/local/sbin/restate --version
+            man -w restate
+
+  # NetBSD maintains its two newest branches, 10 and 11.
+  netbsd:
+    name: Tests (NetBSD ${{ matrix.version }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["10.1", "11.0"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -337,7 +396,7 @@ jobs:
         timeout-minutes: 15
         with:
           operating_system: netbsd
-          version: "10.1"
+          version: ${{ matrix.version }}
 
       - name: Wait before retrying the VM
         if: steps.vm1.outcome == 'failure'
@@ -351,7 +410,7 @@ jobs:
         timeout-minutes: 15
         with:
           operating_system: netbsd
-          version: "10.1"
+          version: ${{ matrix.version }}
 
       - name: Build and test
         shell: cpa.sh {0}
@@ -380,6 +439,8 @@ jobs:
           test -x staged/usr/local/sbin/restate
           find staged -name restate.8 | grep -q .
           rm -rf staged
+          gmake bsd-pkg
+          sudo scripts/verify-bsd-pkg.sh dist/restate-*
           sudo gmake install
           /usr/local/sbin/restate --version
           man -w restate

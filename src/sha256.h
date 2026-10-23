@@ -16,7 +16,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 64 hex digits and the terminator. */
+/* 32 bytes; as 64 hex digits and the terminator. */
+#define RS_SHA256_SIZE 32
 #define RS_SHA256_HEX_LEN 64
 #define RS_SHA256_HEX_SIZE (RS_SHA256_HEX_LEN + 1)
 
@@ -31,6 +32,8 @@ void rs_sha256_init(struct rs_sha256 *ctx);
 void rs_sha256_update(struct rs_sha256 *ctx, const void *data, size_t n);
 /* Writes the digest as lowercase hex into `hex`, RS_SHA256_HEX_SIZE bytes. */
 void rs_sha256_final(struct rs_sha256 *ctx, char hex[RS_SHA256_HEX_SIZE]);
+/* The same as its 32 bytes. */
+void rs_sha256_final_raw(struct rs_sha256 *ctx, unsigned char out[RS_SHA256_SIZE]);
 
 /* One-shot convenience over a memory buffer. */
 void rs_sha256_hex(const void *data, size_t n, char hex[RS_SHA256_HEX_SIZE]);

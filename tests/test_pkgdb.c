@@ -9,10 +9,12 @@
 #include <unistd.h>
 
 #include "image.h"
+#include "json.h"
 #include "md5.h"
 #include "pkgdb.h"
 #include "progress.h"
 #include "scan.h"
+#include "sha256.h"
 #include "test.h"
 
 static void md5_hex(const char *text, char hex[RS_MD5_SIZE * 2 + 1])
@@ -271,6 +273,221 @@ static bool have_none(const void *ctx, const char hash[RS_SHA256_HEX_SIZE])
     return false;
 }
 
+/* `text`'s SHA-256 as OpenBSD's +CONTENTS gives it: base64. */
+static char *sha256_b64(const char *text)
+{
+    struct rs_sha256 ctx;
+    unsigned char    raw[RS_SHA256_SIZE];
+    struct rs_buf    out;
+
+    rs_sha256_init(&ctx);
+    rs_sha256_update(&ctx, text, strlen(text));
+    rs_sha256_final_raw(&ctx, raw);
+    rs_buf_init(&out);
+    rs_base64_encode(&out, raw, sizeof(raw));
+    return rs_buf_detach(&out);
+}
+
+/*
+ * A machine OpenBSD's pkg_add has installed a package on, beneath `root`:
+ * its files under /usr/local, one changed since, a configuration file made
+ * from the package's sample, and a base system no package owns.
+ */
+static void build_openbsd(const char *root)
+{
+    char *foo = sha256_b64("foo\n");
+    char *conf = sha256_b64("setting = 1\n");
+    char *was = sha256_b64("as shipped\n");
+    char *contents = rs_xasprintf("@name foo-1.2p0\n"
+                                  "@comment pkgpath=misc/foo\n"
+                                  "@cwd /usr/local\n"
+                                  "@bin bin/foo\n@sha %s\n@size 4\n@ts 1700000000\n"
+                                  "@man man/man1/foo.1\n"
+                                  "bin/changed\n@sha %s\n"
+                                  "bin/nosha\n"
+                                  "share/examples/foo/foo.conf\n@sha %s\n"
+                                  "@sample /etc/foo.conf\n"
+                                  "@sample /etc/foo.d/\n"
+                                  "@sha nonsense\n",
+                                  foo, was, conf);
+
+    mkdirs(root, "var/db/pkg/foo-1.2p0");
+    rs_test_write(root, "var/db/pkg/foo-1.2p0/+CONTENTS", contents, 0644);
+    mkdirs(root, "var/db/pkg/broken");
+    rs_test_write(root, "var/db/pkg/broken/+CONTENTS", "no name here\n", 0644);
+    mkdirs(root, "usr/local/bin");
+    mkdirs(root, "usr/local/man/man1");
+    mkdirs(root, "usr/local/share/examples/foo");
+    mkdirs(root, "usr/bin");
+    mkdirs(root, "etc");
+    rs_test_write(root, "usr/local/bin/foo", "foo\n", 0755);
+    rs_test_write(root, "usr/local/bin/changed", "changed since\n", 0755);
+    rs_test_write(root, "usr/local/bin/nosha", "x\n", 0755);
+    rs_test_write(root, "usr/local/bin/handmade", "mine\n", 0755);
+    rs_test_write(root, "usr/local/man/man1/foo.1", ".TH FOO 1\n", 0644);
+    rs_test_write(root, "usr/local/share/examples/foo/foo.conf", "setting = 1\n", 0644);
+    rs_test_write(root, "etc/foo.conf", "setting = 1\n", 0644);
+    rs_test_write(root, "usr/bin/base", "the base set\n", 0755);
+    free(foo);
+    free(conf);
+    free(was);
+    free(contents);
+}
+
+static void test_bsd_packages(void)
+{
+    char                    *root = rs_test_tmpdir();
+    struct rs_pkgdb          db;
+    const struct rs_pkgfile *f;
+    struct rs_rules          rules;
+    struct rs_scan_opts      o;
+    struct rs_scan_stats     st;
+    struct rs_index          m;
+    struct rs_buf            err;
+    const struct rs_entry   *e;
+    size_t                   len;
+    char                     hex[RS_SHA256_HEX_SIZE];
+    const char              *text = "baseline /usr\nbaseline /usr/local\nstate /etc\n"
+                                    "baseline /var/db/pkg\n";
+
+    rs_buf_init(&err);
+    build_openbsd(root);
+
+    TEST_CASE("pkgdb: OpenBSD's packages, read from each one's +CONTENTS");
+    CHECK(rs_pkgdb_load(&db, root));
+    CHECK_INT(db.nnames, 1);
+    CHECK_STR(db.names[0], "foo");
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/foo", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256);
+    CHECK_STR(rs_pkgdb_package(&db, f, &len), "foo");
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/man/man1/foo.1", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    /* A sample's copy is a configuration file with the sample's digest; a
+     * directory made from one is nothing to compare. */
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/foo.conf", &f), 1);
+    CHECK(f->flags & RS_PKGFILE_CONFFILE);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/foo.d", &f), 0);
+    /* Only packages put files in /usr/local; the base system and the
+     * database are no package's. */
+    CHECK(rs_pkgdb_scoped(&db, "/usr/local/bin/handmade"));
+    CHECK(rs_pkgdb_scoped(&db, "/usr/local"));
+    CHECK(!rs_pkgdb_scoped(&db, "/usr/localx"));
+    CHECK(!rs_pkgdb_scoped(&db, "/usr/bin/base"));
+    CHECK(!rs_pkgdb_scoped(&db, "/var/db/pkg/foo-1.2p0/+CONTENTS"));
+    rs_pkgdb_free(&db);
+
+    TEST_CASE("scan: an OpenBSD package's files checked against their SHA-256");
+    rs_rules_init(&rules);
+    CHECK(rs_rules_parse(&rules, text, strlen(text), "test", &err));
+    CHECK(rs_pkgdb_load(&db, root));
+    memset(&o, 0, sizeof(o));
+    o.root = root;
+    o.rules = &rules;
+    o.hash = true;
+    o.pkgdb = &db;
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    e = find(&m, "/usr/local/bin/foo");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && e->package && !e->modified);
+    /* The index's digest is the one compared with the package's. */
+    rs_sha256_hex("foo\n", 4, hex);
+    CHECK_STR(e ? e->hash : "", hex);
+    e = find(&m, "/usr/local/bin/changed");
+    CHECK(e && e->cls == RS_CLASS_STATE && e->modified);
+    CHECK_STR(e ? e->package : "", "foo");
+    e = find(&m, "/usr/local/bin/nosha");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && e->package && !e->modified);
+    e = find(&m, "/usr/local/bin/handmade");
+    CHECK(e && e->cls == RS_CLASS_STATE && !e->package);
+    e = find(&m, "/etc/foo.conf");
+    CHECK(e && e->cls == RS_CLASS_BASELINE);
+    CHECK_STR(e ? e->package : "", "foo");
+    /* The base system, which no package owns, is as the rules say. */
+    e = find(&m, "/usr/bin/base");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && !e->package);
+    e = find(&m, "/var/db/pkg/foo-1.2p0/+CONTENTS");
+    CHECK(e && e->cls == RS_CLASS_BASELINE);
+    CHECK_INT(st.pkg_modified, 1);
+    CHECK_INT(st.unpackaged, 1);
+    rs_index_free(&m);
+
+    TEST_CASE("scan: without hashing, OpenBSD's files are still compared");
+    o.hash = false;
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    e = find(&m, "/usr/local/bin/foo");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && e->hash_state != RS_HASH_PRESENT);
+    e = find(&m, "/usr/local/bin/changed");
+    CHECK(e && e->cls == RS_CLASS_STATE && e->modified);
+    rs_index_free(&m);
+    rs_pkgdb_free(&db);
+    rs_rules_free(&rules);
+
+    TEST_CASE("pkgdb: pkgsrc's packages, and the files their +INSTALL copied");
+    rs_pkgdb_init(&db);
+    CHECK(rs_pkgdb_parse_contents(&db, "@cwd /usr/pkg\n"
+                                       "@name hello-2.12nb1\n"
+                                       "@pkgdep libiconv>=1.9\n"
+                                       "@ignore\n+BUILD_INFO\n"
+                                       "bin/hello\n"
+                                       "@comment MD5:a723176f804503c15766073170b99298\n"
+                                       "share/examples/hello/hello.conf\n"
+                                       "@comment MD5:f968f33f844c98de1d3b4fe70f2e1a0f\n"
+                                       "share/doc/hello\n"
+                                       "@comment MD5:short\n"
+                                       "@comment not a digest\n"
+                                       "@pkgdir share/hello\n"));
+    rs_pkgdb_parse_install(&db, 0, "/usr/pkg",
+                           "#!/bin/sh\n"
+                           "# FILE: etc/hello.conf c share/examples/hello/hello.conf 0644\n"
+                           "# FILE: /etc/rc.d/hello cr share/examples/hello/hello.conf 0755\n"
+                           "# FILE: etc/linked.conf l share/examples/hello/hello.conf\n"
+                           "# FILE: etc/nosource.conf c share/examples/none 0644\n"
+                           "# FILE: etc/short.conf c\n"
+                           "# DIR: etc m\n");
+    rs_pkgdb_parse_install(&db, 9, "/usr/pkg", "# FILE: etc/x c bin/hello 0644\n");
+    rs_pkgdb_parse_install(&db, 0, "relative", "# FILE: etc/x c bin/hello 0644\n");
+    rs_pkgdb_sort(&db);
+    CHECK_STR(db.names[0], "hello");
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/+BUILD_INFO", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/bin/hello", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/share/doc/hello", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/etc/hello.conf", &f), 1);
+    CHECK(f->flags & RS_PKGFILE_CONFFILE);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/rc.d/hello", &f), 1);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/etc/linked.conf", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/etc/nosource.conf", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/pkg/etc/x", &f), 0);
+    CHECK(rs_pkgdb_scoped(&db, "/usr/pkg/bin/other"));
+    CHECK(!rs_pkgdb_scoped(&db, "/etc/rc.d/other"));
+    rs_pkgdb_free(&db);
+
+    TEST_CASE("pkgdb: a +CONTENTS no package manager would write");
+    rs_pkgdb_init(&db);
+    CHECK(!rs_pkgdb_parse_contents(&db, "bin/x\n@sha abc\n"));
+    CHECK(!rs_pkgdb_parse_contents(&db, "@name -1.0\n"));
+    CHECK(!rs_pkgdb_parse_contents(&db, "@name a:b-1.0\n"));
+    CHECK(rs_pkgdb_parse_contents(&db, "@name nocwd-1\nbin/x\n@cwd relative\nbin/y\n"
+                                       "@cwd /\netc/z\n@cwd /opt/../etc\nbin/w\n"));
+    CHECK(rs_pkgdb_parse_contents(&db, "@name ab\n@cwd /usr/local\n../escape\n@sha\n"));
+    rs_pkgdb_sort(&db);
+    CHECK_INT(db.nnames, 2);
+    CHECK_STR(db.names[1], "ab");
+    CHECK_INT(db.nfiles, 1);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/z", &f), 1);
+    /* "/" holds the system's files too: it is no package's scope. */
+    CHECK(!rs_pkgdb_scoped(&db, "/etc/hosts"));
+    rs_pkgdb_free(&db);
+
+    rs_buf_free(&err);
+    rs_test_rmtree(root);
+    free(root);
+}
+
 void test_pkgdb(void)
 {
     char                    *root = rs_test_tmpdir();
@@ -295,7 +512,7 @@ void test_pkgdb(void)
     CHECK_INT(db.nnames, 2);
     CHECK_STR(db.names[1], "libfoo:amd64");
     CHECK_INT(rs_pkgdb_lookup(&db, "/usr/bin/ls", &f), 1);
-    CHECK(f->flags & RS_PKGFILE_MD5);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
     CHECK_STR(rs_pkgdb_package(&db, f, &len), "coreutils");
     CHECK_INT(len, 9);
     /* Merged /usr: listed as /bin/true, found as /usr/bin/true. */
@@ -308,17 +525,17 @@ void test_pkgdb(void)
     CHECK_INT(db.ndiv, 2);
     /* In the list and the md5sums: one entry, the one with the digest. */
     CHECK_INT(rs_pkgdb_lookup(&db, "/usr/bin/changed", &f), 1);
-    CHECK(f->flags & RS_PKGFILE_MD5);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
     CHECK_INT(rs_pkgdb_lookup(&db, "/usr/bin/nomd5", &f), 1);
-    CHECK(!(f->flags & RS_PKGFILE_MD5));
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
     /* Conffiles, from the status file. */
     CHECK_INT(rs_pkgdb_lookup(&db, "/etc/old.conf", &f), 1);
     CHECK(f->flags & RS_PKGFILE_OBSOLETE);
     CHECK(f->flags & RS_PKGFILE_CONFFILE);
     CHECK_INT(rs_pkgdb_lookup(&db, "/etc/new.conf", &f), 1);
-    CHECK(!(f->flags & RS_PKGFILE_MD5));
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
     CHECK_INT(rs_pkgdb_lookup(&db, "/etc/with space.conf", &f), 1);
-    CHECK(f->flags & RS_PKGFILE_MD5);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
     CHECK_INT(rs_pkgdb_lookup(&db, "/etc/gone.conf", &f), 0);
     CHECK_INT(rs_pkgdb_lookup(&db, "/escape", &f), 0);
     CHECK_INT(rs_pkgdb_lookup(&db, "/", &f), 0);
@@ -637,4 +854,5 @@ void test_pkgdb(void)
     rs_buf_free(&err);
     rs_test_rmtree(root);
     free(root);
+    test_bsd_packages();
 }

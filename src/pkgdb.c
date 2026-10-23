@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "index.h"
+#include "json.h"
 #include "packages.h"
 #include "util.h"
 
@@ -16,6 +17,8 @@
 #define STATUS_MAX ((size_t)256 * 1024 * 1024)
 #define INFO_MAX   ((size_t)64 * 1024 * 1024)
 #define DIV_MAX    ((size_t)4 * 1024 * 1024)
+/* A BSD package's +CONTENTS: a few megabytes for the largest (TeX Live's). */
+#define CONTENTS_MAX ((size_t)64 * 1024 * 1024)
 
 void rs_pkgdb_init(struct rs_pkgdb *db)
 {
@@ -43,7 +46,22 @@ void rs_pkgdb_free(struct rs_pkgdb *db)
         free(db->div[i].by);
     }
     free(db->div);
+    for (i = 0; i < db->nscopes; i++)
+    {
+        free(db->scopes[i]);
+    }
+    free(db->scopes);
+    for (i = 0; i < db->nunscoped; i++)
+    {
+        free(db->unscoped[i]);
+    }
+    free(db->unscoped);
     rs_pkgdb_init(db);
+}
+
+size_t rs_pkgdigest_size(unsigned kind)
+{
+    return kind == RS_PKGDIGEST_MD5 ? RS_MD5_SIZE : kind == RS_PKGDIGEST_SHA256 ? RS_SHA256_SIZE : 0;
 }
 
 /* One line of `text` at *p: its start and length, *p moved past it. False
@@ -96,8 +114,10 @@ static size_t bare_len(const char *name)
     return strcspn(name, ":");
 }
 
-static void add_file(struct rs_pkgdb *db, const char *path, size_t len, uint32_t pkg,
-                     unsigned flags, const unsigned char *md5)
+/* Adds `path` to package `pkg`, with its digest of kind `kind` if any; false
+ * if the path is not one to add. */
+static bool add_file(struct rs_pkgdb *db, const char *path, size_t len, uint32_t pkg,
+                     unsigned flags, unsigned kind, const unsigned char *digest)
 {
     struct rs_pkgfile *f;
     char              *copy = rs_xstrndup(path, len);
@@ -107,7 +127,7 @@ static void add_file(struct rs_pkgdb *db, const char *path, size_t len, uint32_t
     if (copy[0] != '/' || !rs_path_is_clean(copy))
     {
         free(copy);
-        return;
+        return false;
     }
     /* A file this package installed that another moved aside is at the
      * diversion's other name. */
@@ -133,10 +153,12 @@ static void add_file(struct rs_pkgdb *db, const char *path, size_t len, uint32_t
     f->path = copy;
     f->pkg = pkg;
     f->flags = (unsigned char)flags;
-    if (md5)
+    if (digest && rs_pkgdigest_size(kind) > 0)
     {
-        memcpy(f->md5, md5, RS_MD5_SIZE);
+        f->digest_kind = (unsigned char)kind;
+        memcpy(f->digest, digest, rs_pkgdigest_size(kind));
     }
+    return true;
 }
 
 void rs_pkgdb_parse_diversions(struct rs_pkgdb *db, const char *text)
@@ -189,6 +211,7 @@ static void conffile(struct rs_pkgdb *db, uint32_t pkg, const char *line, size_t
 {
     unsigned      flags = RS_PKGFILE_CONFFILE;
     unsigned char md5[RS_MD5_SIZE];
+    bool          have;
     size_t        end = len;
     size_t        sp;
 
@@ -217,17 +240,14 @@ static void conffile(struct rs_pkgdb *db, uint32_t pkg, const char *line, size_t
         end = sp - 1;
     }
     /* "newconffile": installed, not yet configured, no digest to compare. */
-    if (rs_md5_parse_hex(line + sp, end - sp, md5))
-    {
-        flags |= RS_PKGFILE_MD5;
-    }
+    have = rs_md5_parse_hex(line + sp, end - sp, md5);
     end = sp - 1;
     sp = 0;
     while (sp < end && line[sp] == ' ')
     {
         sp++;
     }
-    add_file(db, line + sp, end - sp, pkg, flags, (flags & RS_PKGFILE_MD5) ? md5 : NULL);
+    (void)add_file(db, line + sp, end - sp, pkg, flags, RS_PKGDIGEST_MD5, have ? md5 : NULL);
 }
 
 static size_t finish_stanza(struct rs_pkgdb *db, struct stanza *s)
@@ -390,7 +410,7 @@ void rs_pkgdb_parse_md5sums(struct rs_pkgdb *db, uint32_t pkg, const char *text)
             continue;
         }
         path = rs_xasprintf("/%.*s", (int)(len - at), line + at);
-        add_file(db, path, strlen(path), pkg, RS_PKGFILE_MD5, md5);
+        (void)add_file(db, path, strlen(path), pkg, 0, RS_PKGDIGEST_MD5, md5);
         free(path);
     }
 }
@@ -410,8 +430,334 @@ void rs_pkgdb_parse_list(struct rs_pkgdb *db, uint32_t pkg, const char *text)
         /* "/." heads every list: the root, which every package "owns". */
         if (len > 2 && line[0] == '/')
         {
-            add_file(db, line, len, pkg, 0, NULL);
+            (void)add_file(db, line, len, pkg, 0, RS_PKGDIGEST_NONE, NULL);
         }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* OpenBSD's and pkgsrc's +CONTENTS                                          */
+/* ------------------------------------------------------------------------- */
+
+/* Whether `line` (`len` long) is the command `cmd` ("@cwd"), followed by its
+ * argument or nothing; the argument into *arg, *alen. */
+static bool command(const char *line, size_t len, const char *cmd, const char **arg,
+                    size_t *alen)
+{
+    size_t n = strlen(cmd);
+
+    if (len < n || strncmp(line, cmd, n) != 0 || (len > n && line[n] != ' '))
+    {
+        return false;
+    }
+    *arg = line + n + (len > n ? 1 : 0);
+    *alen = len > n ? len - n - 1 : 0;
+    return true;
+}
+
+/* A package's name from "@name NAME-VERSION": up to the first '-' before a
+ * digit, as both systems split one. NULL if it is not a name to use: a
+ * name names files nowhere, but is said in an index, so it is held to
+ * printable characters, and no ':', which marks an architecture. */
+static char *stem(const char *arg, size_t len)
+{
+    size_t i;
+    size_t end = len;
+
+    for (i = 1; i + 1 < len; i++)
+    {
+        if (arg[i] == '-' && arg[i + 1] >= '0' && arg[i + 1] <= '9')
+        {
+            end = i;
+            break;
+        }
+    }
+    if (end == 0 || end > 256 || arg[0] == '-')
+    {
+        return NULL;
+    }
+    for (i = 0; i < end; i++)
+    {
+        if (arg[i] <= ' ' || arg[i] > '~' || arg[i] == ':' || arg[i] == '/')
+        {
+            return NULL;
+        }
+    }
+    return rs_xstrndup(arg, end);
+}
+
+/* A directory packages put files in, once: not "/", whose files are the
+ * system's as well. */
+static void add_scope(struct rs_pkgdb *db, const char *dir)
+{
+    size_t i;
+
+    if (strcmp(dir, "/") == 0)
+    {
+        return;
+    }
+    for (i = 0; i < db->nscopes; i++)
+    {
+        if (strcmp(db->scopes[i], dir) == 0)
+        {
+            return;
+        }
+    }
+    db->scopes = rs_xreallocarray(db->scopes, db->nscopes + 1, sizeof(*db->scopes));
+    db->scopes[db->nscopes++] = rs_xstrdup(dir);
+}
+
+/* `rel` (`len` long) beneath `cwd`, or itself if it is absolute. */
+static char *beneath_cwd(const char *cwd, const char *rel, size_t len)
+{
+    if (len > 0 && rel[0] == '/')
+    {
+        return rs_xstrndup(rel, len);
+    }
+    return rs_xasprintf("%s%s%.*s", cwd, strcmp(cwd, "/") == 0 ? "" : "/", (int)len, rel);
+}
+
+/* A file's annotation, OpenBSD's: "@bin PATH", "@man PATH" and the rest
+ * are files as a plain line is. */
+static bool file_line(const char *line, size_t len, const char **path, size_t *plen)
+{
+    static const char *const kinds[] = { "@bin",  "@file", "@info", "@lib", "@man",
+                                         "@shell", "@so",  "@static-lib" };
+    size_t                   i;
+
+    if (len > 0 && line[0] != '@')
+    {
+        *path = line;
+        *plen = len;
+        return true;
+    }
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+    {
+        if (command(line, len, kinds[i], path, plen) && *plen > 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* rs_pkgdb_parse_contents, with the package's first directory into *prefix
+ * (freed by the caller), or NULL. */
+static bool parse_contents(struct rs_pkgdb *db, const char *text, char **prefix)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+    char       *cwd = NULL;
+    char       *name = NULL;
+    uint32_t    pkg = 0;
+    size_t      last = SIZE_MAX;     /* the file a digest after it is of */
+    bool        ignore = false;
+    bool        named;
+
+    db->scoped = true;
+    while (next_line(&p, &line, &len))
+    {
+        const char *arg;
+        size_t      alen;
+
+        if (ignore)
+        {
+            /* "@ignore": the next line is the package's own file, not one it
+             * installs (pkgsrc's +BUILD_INFO and the rest). */
+            ignore = false;
+            continue;
+        }
+        if (!name && !command(line, len, "@cwd", &arg, &alen))
+        {
+            /* No file before the package is named; its directory (pkgsrc's
+             * "@cwd", first of all) may be. */
+            if (command(line, len, "@name", &arg, &alen) && db->nnames < UINT32_MAX)
+            {
+                name = stem(arg, alen);
+                if (!name)
+                {
+                    break;
+                }
+                pkg = (uint32_t)db->nnames;
+                db->names = rs_xreallocarray(db->names, db->nnames + 1, sizeof(*db->names));
+                db->names[db->nnames++] = rs_xstrdup(name);
+            }
+            continue;
+        }
+        if (command(line, len, "@cwd", &arg, &alen) || command(line, len, "@src", &arg, &alen))
+        {
+            char *dir = rs_xstrndup(arg, alen);
+
+            free(cwd);
+            cwd = NULL;
+            last = SIZE_MAX;
+            if (dir[0] == '/' && rs_path_is_clean(dir))
+            {
+                cwd = dir;
+                if (!*prefix)
+                {
+                    *prefix = rs_xstrdup(dir);
+                }
+            } else
+            {
+                free(dir);
+            }
+        } else if (command(line, len, "@ignore", &arg, &alen))
+        {
+            ignore = true;
+            last = SIZE_MAX;
+        } else if (command(line, len, "@sha", &arg, &alen))
+        {
+            struct rs_buf raw;
+
+            rs_buf_init(&raw);
+            if (last != SIZE_MAX && rs_base64_decode(arg, alen, &raw) &&
+                raw.len == RS_SHA256_SIZE)
+            {
+                db->files[last].digest_kind = RS_PKGDIGEST_SHA256;
+                memcpy(db->files[last].digest, raw.data, RS_SHA256_SIZE);
+            }
+            rs_buf_free(&raw);
+        } else if (command(line, len, "@comment", &arg, &alen))
+        {
+            unsigned char md5[RS_MD5_SIZE];
+
+            if (last != SIZE_MAX && alen == 4 + RS_MD5_SIZE * 2 && strncmp(arg, "MD5:", 4) == 0 &&
+                rs_md5_parse_hex(arg + 4, RS_MD5_SIZE * 2, md5))
+            {
+                db->files[last].digest_kind = RS_PKGDIGEST_MD5;
+                memcpy(db->files[last].digest, md5, RS_MD5_SIZE);
+            }
+        } else if (command(line, len, "@sample", &arg, &alen))
+        {
+            /* A configuration file, copied from the example before it when
+             * the package was installed: as it was installed, it is the
+             * package's; changed, it is the machine's. A directory made the
+             * same way ("@sample DIR/") has nothing to compare. */
+            if (cwd && alen > 0 && arg[alen - 1] != '/')
+            {
+                char         *path = beneath_cwd(cwd, arg, alen);
+                const bool    from = last != SIZE_MAX;
+                unsigned      kind = from ? db->files[last].digest_kind : RS_PKGDIGEST_NONE;
+                unsigned char digest[RS_SHA256_SIZE];
+
+                if (from)
+                {
+                    memcpy(digest, db->files[last].digest, sizeof(digest));
+                }
+                (void)add_file(db, path, strlen(path), pkg, RS_PKGFILE_CONFFILE, kind,
+                               from ? digest : NULL);
+                free(path);
+            }
+            last = SIZE_MAX;
+        } else if (file_line(line, len, &arg, &alen))
+        {
+            char *path;
+
+            last = SIZE_MAX;
+            if (!cwd)
+            {
+                continue;
+            }
+            path = beneath_cwd(cwd, arg, alen);
+            if (add_file(db, path, strlen(path), pkg, 0, RS_PKGDIGEST_NONE, NULL))
+            {
+                last = db->nfiles - 1;
+                add_scope(db, cwd);
+            }
+            free(path);
+        }
+        /* Everything else -- @size, @ts, @mode, @owner, @dir, @pkgdep and the
+         * rest -- says nothing of a file's content. */
+    }
+    named = name != NULL;
+    free(cwd);
+    free(name);
+    return named;
+}
+
+bool rs_pkgdb_parse_contents(struct rs_pkgdb *db, const char *text)
+{
+    char *prefix = NULL;
+    bool  named = parse_contents(db, text, &prefix);
+
+    free(prefix);
+    return named;
+}
+
+/* The next word of `line` at *at, as a pointer and length; false if there is
+ * none. */
+static bool word(const char *line, size_t len, size_t *at, const char **w, size_t *wlen)
+{
+    while (*at < len && line[*at] == ' ')
+    {
+        (*at)++;
+    }
+    if (*at >= len)
+    {
+        return false;
+    }
+    *w = line + *at;
+    while (*at < len && line[*at] != ' ')
+    {
+        (*at)++;
+    }
+    *wlen = (size_t)(line + *at - *w);
+    return true;
+}
+
+void rs_pkgdb_parse_install(struct rs_pkgdb *db, uint32_t pkg, const char *prefix,
+                            const char *text)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+
+    if (pkg >= db->nnames || prefix[0] != '/')
+    {
+        return;
+    }
+    while (next_line(&p, &line, &len))
+    {
+        const char *target;
+        const char *flags;
+        const char *source;
+        size_t      tlen;
+        size_t      flen;
+        size_t      slen;
+        size_t      at = 7;
+        char       *from;
+        char       *to;
+        size_t      i;
+
+        /* "# FILE: TARGET FLAGS SOURCE MODE...": a copy ('c' among FLAGS)
+         * of SOURCE, each beneath the prefix unless it is absolute. */
+        if (len <= at || strncmp(line, "# FILE:", at) != 0 ||
+            !word(line, len, &at, &target, &tlen) || !word(line, len, &at, &flags, &flen) ||
+            !word(line, len, &at, &source, &slen) || !memchr(flags, 'c', flen))
+        {
+            continue;
+        }
+        from = beneath_cwd(prefix, source, slen);
+        to = beneath_cwd(prefix, target, tlen);
+        /* The package's own files are the last added. */
+        for (i = db->nfiles; i > 0 && db->files[i - 1].pkg == pkg; i--)
+        {
+            const struct rs_pkgfile *f = &db->files[i - 1];
+
+            if (f->digest_kind != RS_PKGDIGEST_NONE && strcmp(f->path, from) == 0)
+            {
+                unsigned char digest[RS_SHA256_SIZE];
+                unsigned      kind = f->digest_kind;
+
+                memcpy(digest, f->digest, sizeof(digest));
+                (void)add_file(db, to, strlen(to), pkg, RS_PKGFILE_CONFFILE, kind, digest);
+                break;
+            }
+        }
+        free(from);
+        free(to);
     }
 }
 
@@ -430,7 +776,7 @@ static int file_cmp(const void *a, const void *b)
     {
         return x->pkg < y->pkg ? -1 : 1;
     }
-    return (int)(y->flags & RS_PKGFILE_MD5) - (int)(x->flags & RS_PKGFILE_MD5);
+    return (y->digest_kind != RS_PKGDIGEST_NONE) - (x->digest_kind != RS_PKGDIGEST_NONE);
 }
 
 void rs_pkgdb_sort(struct rs_pkgdb *db)
@@ -444,7 +790,8 @@ void rs_pkgdb_sort(struct rs_pkgdb *db)
     }
     qsort(db->files, db->nfiles, sizeof(*db->files), file_cmp);
     /* A file is in its package's list and its md5sums, or its list and its
-     * conffiles: one entry each, the one with the digest. */
+     * conffiles: one entry each, the one with the digest. (A BSD package
+     * lists a file once.) */
     for (in = 0; in < db->nfiles; in++)
     {
         if (out > 0 && db->files[out - 1].pkg == db->files[in].pkg &&
@@ -521,10 +868,87 @@ const char *rs_pkgdb_package(const struct rs_pkgdb *db, const struct rs_pkgfile 
     return name;
 }
 
+/* Whether `path` is `dir` or beneath it. */
+static bool within(const char *path, const char *dir)
+{
+    size_t n = strlen(dir);
+
+    return strncmp(path, dir, n) == 0 && (path[n] == '/' || path[n] == '\0');
+}
+
+bool rs_pkgdb_scoped(const struct rs_pkgdb *db, const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < db->nunscoped; i++)
+    {
+        if (within(path, db->unscoped[i]))
+        {
+            return false;
+        }
+    }
+    if (!db->scoped)
+    {
+        return true;
+    }
+    for (i = 0; i < db->nscopes; i++)
+    {
+        if (within(path, db->scopes[i]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* OpenBSD's packages, or pkgsrc's: each directory in `rel` with a +CONTENTS. */
+static bool load_contents(struct rs_pkgdb *db, const char *root, const char *rel)
+{
+    size_t n;
+    char **names = rs_list_beneath(root, rel, &n);
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        char         *contents = rs_xasprintf("%s/%s/+CONTENTS", rel, names[i]);
+        struct rs_buf text;
+
+        char         *prefix = NULL;
+
+        if (rs_read_beneath(root, contents, CONTENTS_MAX, &text))
+        {
+            bool named = parse_contents(db, text.data, &prefix);
+
+            rs_buf_free(&text);
+            /* pkgsrc's: the configuration files copied from examples. */
+            free(contents);
+            contents = rs_xasprintf("%s/%s/+INSTALL", rel, names[i]);
+            if (named && prefix && rs_read_beneath(root, contents, CONTENTS_MAX, &text))
+            {
+                rs_pkgdb_parse_install(db, (uint32_t)(db->nnames - 1), prefix, text.data);
+                rs_buf_free(&text);
+            }
+        }
+        free(prefix);
+        free(contents);
+    }
+    rs_free_names(names, n);
+    if (db->nnames > 0)
+    {
+        /* The database is no package's file, and pkgsrc's reference counts
+         * beside it neither: both are made again as packages are added. */
+        db->unscoped = rs_xreallocarray(db->unscoped, db->nunscoped + 2, sizeof(*db->unscoped));
+        db->unscoped[db->nunscoped++] = rs_xstrdup(rel);
+        db->unscoped[db->nunscoped++] = rs_xasprintf("%s.refcount", rel);
+    }
+    return db->nnames > 0;
+}
+
 bool rs_pkgdb_load(struct rs_pkgdb *db, const char *root)
 {
-    struct rs_buf text;
-    size_t        i;
+    static const char *const bsd[] = { "/var/db/pkg", "/usr/pkg/pkgdb" };
+    struct rs_buf            text;
+    size_t                   i;
 
     rs_pkgdb_init(db);
     if (rs_read_beneath(root, "/var/lib/dpkg/diversions", DIV_MAX, &text))
@@ -534,8 +958,20 @@ bool rs_pkgdb_load(struct rs_pkgdb *db, const char *root)
     }
     if (!rs_read_beneath(root, "/var/lib/dpkg/status", STATUS_MAX, &text))
     {
+        /* No dpkg: OpenBSD's packages, or pkgsrc's. (FreeBSD's pkg keeps its
+         * own in /var/db/pkg too, in local.sqlite, with no +CONTENTS.) */
         rs_pkgdb_free(db);
-        return false;
+        for (i = 0; i < sizeof(bsd) / sizeof(bsd[0]) && db->nnames == 0; i++)
+        {
+            (void)load_contents(db, root, bsd[i]);
+        }
+        rs_pkgdb_sort(db);
+        if (db->nfiles == 0)
+        {
+            rs_pkgdb_free(db);
+            return false;
+        }
+        return true;
     }
     (void)rs_pkgdb_parse_status(db, text.data);
     rs_buf_free(&text);

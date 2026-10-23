@@ -97,17 +97,18 @@
  * the matcher is O(pattern x path), so cap them to keep the run fast. */
 #define GLOB_MAX 2048
 
-/* dpkg's database, its four kinds of file between NULs. Every path loaded is
- * found again, under its own name and its merged-/usr one. */
+/* dpkg's database, its four kinds of file between NULs, then a BSD package's
+ * +CONTENTS and pkgsrc's +INSTALL. Every path loaded is found again, under
+ * its own name and its merged-/usr one. */
 static void fuzz_pkgdb(const char *text, size_t len)
 {
-    char           *parts[4];
+    char           *parts[6];
     const char     *p = text;
     const char     *end = text + len;
     struct rs_pkgdb db;
     size_t          i;
 
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 6; i++)
     {
         const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
         size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
@@ -124,6 +125,11 @@ static void fuzz_pkgdb(const char *text, size_t len)
         rs_pkgdb_parse_list(&db, (uint32_t)i, parts[3]);
     }
     rs_pkgdb_parse_md5sums(&db, (uint32_t)db.nnames, parts[2]);
+    if (rs_pkgdb_parse_contents(&db, parts[4]))
+    {
+        rs_pkgdb_parse_install(&db, (uint32_t)(db.nnames - 1), "/usr/pkg", parts[5]);
+    }
+    rs_pkgdb_parse_install(&db, (uint32_t)db.nnames, "/usr/pkg", parts[5]);
     rs_pkgdb_sort(&db);
     for (i = 0; i < db.nfiles; i++)
     {
@@ -142,12 +148,17 @@ static void fuzz_pkgdb(const char *text, size_t len)
         {
             abort();
         }
+        if (rs_pkgdigest_size(db.files[i].digest_kind) > sizeof(db.files[i].digest))
+        {
+            abort();
+        }
+        (void)rs_pkgdb_scoped(&db, db.files[i].path);
         other = rs_xasprintf("/usr%s", db.files[i].path);
         (void)rs_pkgdb_lookup(&db, other, &f);
         free(other);
     }
     rs_pkgdb_free(&db);
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 6; i++)
     {
         free(parts[i]);
     }

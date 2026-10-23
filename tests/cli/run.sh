@@ -107,7 +107,9 @@ refute() {
 }
 
 file_mode() {
-  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+  # The BSDs' %Lp leaves out the sticky and set-id bits: %p is the whole
+  # mode, the file's type before its last four digits.
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%p' "$1" | sed 's/.*\(....\)$/\1/; s/^0*//'
 }
 
 # Whether restate will run a program: where it looks, root's, and writable by
@@ -958,9 +960,24 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 2 "capture --sign-with a key that is not there" -- \
     "$BIN" capture -r rtree --sign-with no-such.key -o x.tar
 
-  # The index changed after it was signed.
+  # The index changed after it was signed: a byte in the middle of the first
+  # member, the compressed index. Its data follows its header and any pax
+  # headers ('x') before it; a header's size is the octal at 124, its type at 156.
   cp simg.tar forged.tar
-  printf 'X' | dd of=forged.tar bs=1 seek=1600 conv=notrunc 2> /dev/null
+  check "the index is the image's first member" \
+    eval 'tar -tf forged.tar | head -n 1 | grep -x restate/index.json.gz > /dev/null'
+  hat=0
+  while :; do
+    isize="$(printf '%d' "0$(dd if=forged.tar bs=1 skip=$((hat + 124)) count=11 2> /dev/null)")"
+    [ "$(dd if=forged.tar bs=1 skip=$((hat + 156)) count=1 2> /dev/null)" = x ] || break
+    hat=$((hat + 512 + (isize + 511) / 512 * 512))
+  done
+  iat=$((hat + 512 + isize / 2))
+  forge=X
+  if [ "$(dd if=forged.tar bs=1 skip="$iat" count=1 2> /dev/null)" = X ]; then
+    forge=Y
+  fi
+  printf '%s' "$forge" | dd of=forged.tar bs=1 seek="$iat" conv=notrunc 2> /dev/null
   expect 4 "restore an image whose index changed" -- \
     "$BIN" restore --trusted-key signer.pub --root sout forged.tar
   contains "$ERR" "a bad signature" "is refused as a bad signature"

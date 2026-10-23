@@ -134,4 +134,12 @@ void rs_apt_uri_file(struct rs_buf *out, const char *uri);
  */
 bool rs_read_beneath(const char *root, const char *rel, size_t max, struct rs_buf *out);
 
+/*
+ * The names in the directory root + rel, reached as rs_read_beneath reaches
+ * a file, sorted, without those beginning with '.'; NULL, with *count 0, if
+ * it cannot be read. Freed with rs_free_names.
+ */
+char **rs_list_beneath(const char *root, const char *rel, size_t *count);
+void   rs_free_names(char **names, size_t count);
+
 #endif /* RESTATE_PACKAGES_H */

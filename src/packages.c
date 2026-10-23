@@ -225,7 +225,7 @@ static int compare_names(const void *a, const void *b)
 
 /* The entries of a directory, sorted, without "." and ".." and anything else
  * starting with a dot. */
-static char **list_dir(const char *root, const char *rel, size_t *count)
+char **rs_list_beneath(const char *root, const char *rel, size_t *count)
 {
     int                  fd = open_beneath(root, rel, O_RDONLY | O_DIRECTORY);
     DIR                 *d = fd >= 0 ? fdopendir(fd) : NULL;
@@ -260,7 +260,7 @@ static char **list_dir(const char *root, const char *rel, size_t *count)
     return names;
 }
 
-static void free_list(char **names, size_t n)
+void rs_free_names(char **names, size_t n)
 {
     size_t i;
 
@@ -564,7 +564,7 @@ static void free_apt(struct apt *apt)
         free(apt->pkgs[i].others);
     }
     free(apt->pkgs);
-    free_list(apt->labels, apt->nlabels);
+    rs_free_names(apt->labels, apt->nlabels);
 }
 
 /*
@@ -1001,7 +1001,7 @@ static void read_all_sources(const char *root, struct repos *rs, struct rs_jval 
     size_t          i;
 
     read_list(root, "/etc/apt/sources.list", rs, arr);
-    names = list_dir(root, "/etc/apt/sources.list.d", &n);
+    names = rs_list_beneath(root, "/etc/apt/sources.list.d", &n);
     for (i = 0; i < n; i++)
     {
         char *rel = rs_xasprintf("/etc/apt/sources.list.d/%s", names[i]);
@@ -1015,7 +1015,7 @@ static void read_all_sources(const char *root, struct repos *rs, struct rs_jval 
         }
         free(rel);
     }
-    free_list(names, n);
+    rs_free_names(names, n);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1089,7 +1089,7 @@ static size_t read_lists(const char *root, const struct repos *rs, struct apt *a
     struct stanza            s;
 
     memset(&s, 0, sizeof(s));
-    names = list_dir(root, "/var/lib/apt/lists", &n);
+    names = rs_list_beneath(root, "/var/lib/apt/lists", &n);
     for (i = 0; i < n; i++)
     {
         char  *rel;
@@ -1134,7 +1134,7 @@ static size_t read_lists(const char *root, const struct repos *rs, struct apt *a
         (void)fclose(fp);
     }
     stanza_free(&s);
-    free_list(names, n);
+    rs_free_names(names, n);
     if (compressed)
     {
         note(out, "apt keeps its package lists compressed here, and they were not read: "
@@ -1165,7 +1165,7 @@ static void trusted_keys(const char *root, struct repos *rs)
         size_t n;
         size_t i;
 
-        names = list_dir(root, dirs[d], &n);
+        names = rs_list_beneath(root, dirs[d], &n);
         for (i = 0; i < n; i++)
         {
             char *path;
@@ -1178,7 +1178,7 @@ static void trusted_keys(const char *root, struct repos *rs)
             add_key_path(rs, path);
             free(path);
         }
-        free_list(names, n);
+        rs_free_names(names, n);
     }
 }
 
@@ -1414,7 +1414,7 @@ static void describe_apt(const char *root, struct rs_jval *out)
         free(rs.r[i].prefix);
     }
     free(rs.r);
-    free_list(rs.keys, rs.nkeys);
+    rs_free_names(rs.keys, rs.nkeys);
     free_apt(&apt);
 }
 
@@ -1498,7 +1498,7 @@ static void snaps_from_mounts(const char *root, struct rs_jval *arr)
     size_t n;
     size_t i;
 
-    names = list_dir(root, "/snap", &n);
+    names = rs_list_beneath(root, "/snap", &n);
     for (i = 0; i < n; i++)
     {
         char           *rel = rs_xasprintf("/snap/%s/current", names[i]);
@@ -1520,7 +1520,7 @@ static void snaps_from_mounts(const char *root, struct rs_jval *arr)
             rs_jobj_bool(o, "local", true);
         }
     }
-    free_list(names, n);
+    rs_free_names(names, n);
 }
 
 static void describe_snap(const char *root, struct rs_jval *out)
@@ -1818,7 +1818,7 @@ static void describe_alternatives(const char *root, struct rs_jval *out)
         size_t n;
         size_t i;
 
-        names = list_dir(root, dbs[d], &n);
+        names = rs_list_beneath(root, dbs[d], &n);
         for (i = 0; i < n; i++)
         {
             char         *rel = rs_xasprintf("%s/%s", dbs[d], names[i]);
@@ -1844,7 +1844,7 @@ static void describe_alternatives(const char *root, struct rs_jval *out)
             free(rel);
             rs_buf_free(&text);
         }
-        free_list(names, n);
+        rs_free_names(names, n);
     }
 }
 
@@ -2426,7 +2426,7 @@ static void flatpak_dir(const char *root, const char *dir, const char *scope, st
     size_t i;
 
     flatpak_remotes(root, dir, scope, array_member(fp, "remotes"), &remotes, &nremotes);
-    ids = list_dir(root, rel, &nids);
+    ids = rs_list_beneath(root, rel, &nids);
     free(rel);
     for (i = 0; i < nids; i++)
     {
@@ -2435,7 +2435,7 @@ static void flatpak_dir(const char *root, const char *dir, const char *scope, st
         size_t a;
 
         rel = rs_xasprintf("%s/app/%s", dir, ids[i]);
-        archs = list_dir(root, rel, &narchs);
+        archs = rs_list_beneath(root, rel, &narchs);
         free(rel);
         for (a = 0; a < narchs; a++)
         {
@@ -2444,7 +2444,7 @@ static void flatpak_dir(const char *root, const char *dir, const char *scope, st
             size_t b;
 
             rel = rs_xasprintf("%s/app/%s/%s", dir, ids[i], archs[a]);
-            branches = list_dir(root, rel, &nbranches);
+            branches = rs_list_beneath(root, rel, &nbranches);
             free(rel);
             for (b = 0; b < nbranches; b++)
             {
@@ -2478,12 +2478,12 @@ static void flatpak_dir(const char *root, const char *dir, const char *scope, st
                     free(rel);
                 }
             }
-            free_list(branches, nbranches);
+            rs_free_names(branches, nbranches);
         }
-        free_list(archs, narchs);
+        rs_free_names(archs, narchs);
     }
-    free_list(ids, nids);
-    free_list(remotes, nremotes);
+    rs_free_names(ids, nids);
+    rs_free_names(remotes, nremotes);
 }
 
 static void describe_flatpak(const char *root, char **home, size_t nhome, struct rs_jval *out)
@@ -2544,7 +2544,7 @@ static bool pip_dir(const char *root, const char *rel, struct rs_jval *out)
     size_t i;
     bool   any = false;
 
-    names = list_dir(root, rel, &n);
+    names = rs_list_beneath(root, rel, &n);
     for (i = 0; i < n; i++)
     {
         const char *dash = strchr(names[i], '-');
@@ -2565,7 +2565,7 @@ static bool pip_dir(const char *root, const char *rel, struct rs_jval *out)
         }
         any = true;
     }
-    free_list(names, n);
+    rs_free_names(names, n);
     return any;
 }
 
@@ -2577,7 +2577,7 @@ static bool pip_under(const char *root, const char *lib, const char *sub, struct
     size_t i;
     bool   any = false;
 
-    names = list_dir(root, lib, &n);
+    names = rs_list_beneath(root, lib, &n);
     for (i = 0; i < n; i++)
     {
         if (rs_starts_with(names[i], "python"))
@@ -2588,7 +2588,7 @@ static bool pip_under(const char *root, const char *lib, const char *sub, struct
             free(rel);
         }
     }
-    free_list(names, n);
+    rs_free_names(names, n);
     return any;
 }
 
@@ -2626,7 +2626,7 @@ static bool npm_dir(const char *root, const char *rel, struct rs_jval *out)
     size_t i;
     bool   any = false;
 
-    names = list_dir(root, rel, &n);
+    names = rs_list_beneath(root, rel, &n);
     for (i = 0; i < n; i++)
     {
         char **sub = NULL;
@@ -2637,7 +2637,7 @@ static bool npm_dir(const char *root, const char *rel, struct rs_jval *out)
         {
             char *srel = rs_xasprintf("%s/%s", rel, names[i]);
 
-            sub = list_dir(root, srel, &nsub);
+            sub = rs_list_beneath(root, srel, &nsub);
             free(srel);
         }
         for (j = 0; j < nsub; j++)
@@ -2655,9 +2655,9 @@ static bool npm_dir(const char *root, const char *rel, struct rs_jval *out)
             free(pj);
             free(name);
         }
-        free_list(sub, sub ? nsub : 0);
+        rs_free_names(sub, sub ? nsub : 0);
     }
-    free_list(names, n);
+    rs_free_names(names, n);
     return any;
 }
 
@@ -2732,13 +2732,13 @@ static bool pipx_home(const char *root, const char *home, struct rs_jval *out)
         size_t n;
         size_t i;
 
-        names = list_dir(root, rel, &n);
+        names = rs_list_beneath(root, rel, &n);
         for (i = 0; i < n; i++)
         {
             add_item(array_member(out, "pipx"), names[i], NULL, rel);
             any = true;
         }
-        free_list(names, n);
+        rs_free_names(names, n);
         free(rel);
     }
     return any;
@@ -2753,7 +2753,7 @@ static bool gem_dirs(const char *root, struct rs_jval *out)
     size_t r;
     bool   any = false;
 
-    rubies = list_dir(root, "/var/lib/gems", &nrubies);
+    rubies = rs_list_beneath(root, "/var/lib/gems", &nrubies);
     for (r = 0; r < nrubies; r++)
     {
         char  *rel = rs_xasprintf("/var/lib/gems/%s/specifications", rubies[r]);
@@ -2761,7 +2761,7 @@ static bool gem_dirs(const char *root, struct rs_jval *out)
         size_t n;
         size_t i;
 
-        names = list_dir(root, rel, &n);
+        names = rs_list_beneath(root, rel, &n);
         for (i = 0; i < n; i++)
         {
             const char *dash = strrchr(names[i], '-');
@@ -2777,10 +2777,10 @@ static bool gem_dirs(const char *root, struct rs_jval *out)
                 any = true;
             }
         }
-        free_list(names, n);
+        rs_free_names(names, n);
         free(rel);
     }
-    free_list(rubies, nrubies);
+    rs_free_names(rubies, nrubies);
     return any;
 }
 
@@ -2792,7 +2792,7 @@ static bool bsd_pkgs(const char *root, const char *rel, struct rs_jval *out)
     size_t i;
     bool   any = false;
 
-    names = list_dir(root, rel, &n);
+    names = rs_list_beneath(root, rel, &n);
     for (i = 0; i < n; i++)
     {
         char *contents = rs_xasprintf("%s/%s/+CONTENTS", rel, names[i]);
@@ -2804,7 +2804,7 @@ static bool bsd_pkgs(const char *root, const char *rel, struct rs_jval *out)
         }
         free(contents);
     }
-    free_list(names, n);
+    rs_free_names(names, n);
     return any;
 }
 
@@ -2914,5 +2914,5 @@ void rs_packages_describe(const char *root, struct rs_jval *out)
         add_manager(out, "pkg", "/var/db/pkg", true);
     }
     other_managers(root, out);
-    free_list(home, nhome);
+    rs_free_names(home, nhome);
 }

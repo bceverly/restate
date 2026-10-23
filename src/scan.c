@@ -498,7 +498,7 @@ static const struct rs_pkgfile *with_digest(const struct rs_pkgfile *f, size_t n
 
     for (i = 0; i < n; i++)
     {
-        if (f[i].flags & RS_PKGFILE_MD5)
+        if (f[i].digest_kind != RS_PKGDIGEST_NONE)
         {
             return &f[i];
         }
@@ -514,24 +514,85 @@ static void name_package(const struct walk *w, struct rs_entry *e, const struct 
     e->package = rs_xstrndup(pkg, len);
 }
 
-/* The MD5 of what a store copies, and how much of it there was. */
-struct md5_tapped {
-    struct rs_md5 md5;
-    uint64_t      bytes;
+/* The digests the packages at one path recorded -- MD5 (dpkg, pkgsrc),
+ * SHA-256 (OpenBSD) -- of what is read, and how much of it there was. */
+struct pkg_digests {
+    bool             want_md5;
+    bool             want_sha256;
+    struct rs_md5    md5;
+    struct rs_sha256 sha256;
+    unsigned char    md5_out[RS_MD5_SIZE];
+    unsigned char    sha256_out[RS_SHA256_SIZE];
+    uint64_t         bytes;
 };
 
-static void md5_tap(void *ctx, const void *data, size_t n)
+static void digests_start(struct pkg_digests *d)
 {
-    struct md5_tapped *t = ctx;
-
-    rs_md5_update(&t->md5, data, n);
-    t->bytes += n;
+    d->bytes = 0;
+    rs_md5_init(&d->md5);
+    rs_sha256_init(&d->sha256);
 }
 
-/* The MD5 of the open file `fd`, read again from its start. */
-static bool md5_again(int fd, unsigned char got[RS_MD5_SIZE])
+static void digests_init(struct pkg_digests *d, const struct rs_pkgfile *f, size_t n)
 {
-    struct rs_md5 md5;
+    size_t i;
+
+    memset(d, 0, sizeof(*d));
+    for (i = 0; i < n; i++)
+    {
+        d->want_md5 = d->want_md5 || f[i].digest_kind == RS_PKGDIGEST_MD5;
+        d->want_sha256 = d->want_sha256 || f[i].digest_kind == RS_PKGDIGEST_SHA256;
+    }
+    digests_start(d);
+}
+
+static void digests_update(struct pkg_digests *d, const void *data, size_t n)
+{
+    if (d->want_md5)
+    {
+        rs_md5_update(&d->md5, data, n);
+    }
+    if (d->want_sha256)
+    {
+        rs_sha256_update(&d->sha256, data, n);
+    }
+    d->bytes += n;
+}
+
+static void digests_final(struct pkg_digests *d)
+{
+    if (d->want_md5)
+    {
+        rs_md5_final(&d->md5, d->md5_out);
+    }
+    if (d->want_sha256)
+    {
+        rs_sha256_final_raw(&d->sha256, d->sha256_out);
+    }
+}
+
+/* Whether what was read is what `f`'s package installed. */
+static bool digests_match(const struct pkg_digests *d, const struct rs_pkgfile *f)
+{
+    switch (f->digest_kind)
+    {
+    case RS_PKGDIGEST_MD5:
+        return d->want_md5 && memcmp(f->digest, d->md5_out, RS_MD5_SIZE) == 0;
+    case RS_PKGDIGEST_SHA256:
+        return d->want_sha256 && memcmp(f->digest, d->sha256_out, RS_SHA256_SIZE) == 0;
+    default:
+        return false;
+    }
+}
+
+static void digests_tap(void *ctx, const void *data, size_t n)
+{
+    digests_update(ctx, data, n);
+}
+
+/* The digests of the open file `fd`, read again from its start. */
+static bool digests_again(int fd, struct pkg_digests *d)
+{
     unsigned char chunk[65536];
     ssize_t       n;
 
@@ -539,7 +600,7 @@ static bool md5_again(int fd, unsigned char got[RS_MD5_SIZE])
     {
         return false;
     }
-    rs_md5_init(&md5);
+    digests_start(d);
     while ((n = read(fd, chunk, sizeof(chunk))) != 0)
     {
         if (n < 0 && errno == EINTR)
@@ -550,24 +611,25 @@ static bool md5_again(int fd, unsigned char got[RS_MD5_SIZE])
         {
             return false;
         }
-        rs_md5_update(&md5, chunk, (size_t)n);
+        digests_update(d, chunk, (size_t)n);
         rs_progress_bytes((uint64_t)n);
     }
-    rs_md5_final(&md5, got);
+    digests_final(d);
     return true;
 }
 
-/* A file whose content has MD5 `got`, classified by the `n` packaged files
- * at its path: baseline if it is what one of them installed, else state. */
+/* A file whose content has the digests `d`, classified by the `n` packaged
+ * files at its path: baseline if it is what one of them installed, else
+ * state. */
 static void classify_by(struct walk *w, struct rs_entry *e, const struct rs_pkgfile *f,
-                        size_t n, const unsigned char got[RS_MD5_SIZE])
+                        size_t n, const struct pkg_digests *d)
 {
     const struct rs_pkgfile *match = NULL;
     size_t                   i;
 
     for (i = 0; i < n && !match; i++)
     {
-        if ((f[i].flags & RS_PKGFILE_MD5) && memcmp(f[i].md5, got, RS_MD5_SIZE) == 0)
+        if (digests_match(d, &f[i]))
         {
             match = &f[i];
         }
@@ -585,6 +647,20 @@ static void classify_by(struct walk *w, struct rs_entry *e, const struct rs_pkgf
     }
 }
 
+/* SHA-256's 32 bytes as the index writes them. */
+static void sha256_hex(const unsigned char raw[RS_SHA256_SIZE], char hex[RS_SHA256_HEX_SIZE])
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t            i;
+
+    for (i = 0; i < RS_SHA256_SIZE; i++)
+    {
+        hex[i * 2] = digits[raw[i] >> 4];
+        hex[i * 2 + 1] = digits[raw[i] & 0x0fu];
+    }
+    hex[RS_SHA256_HEX_LEN] = '\0';
+}
+
 /*
  * A regular file checked against the package that installed it, and
  * classified as rs_scan_opts says -- in one read of it, where it is kept,
@@ -600,16 +676,14 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
     const struct rs_pkgfile *f;
     const struct rs_pkgfile *first;
     size_t                   n = rs_pkgdb_lookup(w->opts->pkgdb, e->path, &f);
-    struct rs_md5            md5;
+    struct pkg_digests       d;
     struct rs_sha256         sha;
-    unsigned char            got[RS_MD5_SIZE];
     unsigned char            chunk[65536];
-    uint64_t                 bytes = 0;
     int                      fd;
 
     if (n == 0)
     {
-        if (e->cls == RS_CLASS_BASELINE)
+        if (e->cls == RS_CLASS_BASELINE && rs_pkgdb_scoped(w->opts->pkgdb, e->path))
         {
             e->cls = RS_CLASS_STATE;
             w->stats->unpackaged++;
@@ -635,12 +709,10 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
         /* Kept whatever it is: compared in the same read that keeps it --
          * or, from a store that does not copy through rs_image_copy_file,
          * read again to compare. */
-        struct md5_tapped t;
-        bool              ok;
+        bool ok;
 
-        rs_md5_init(&t.md5);
-        t.bytes = 0;
-        rs_image_copy_tap(md5_tap, &t);
+        digests_init(&d, f, n);
+        rs_image_copy_tap(digests_tap, &d);
         ok = keep_from(w, fd, st, e);
         rs_image_copy_tap(NULL, NULL);
         if (!ok)
@@ -648,13 +720,13 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
             w->failed = true;
         } else if (e->hash_state == RS_HASH_PRESENT)
         {
-            if (t.bytes == (uint64_t)st->st_size)
+            if (d.bytes == (uint64_t)st->st_size)
             {
-                rs_md5_final(&t.md5, got);
-                classify_by(w, e, f, n, got);
-            } else if (md5_again(fd, got))
+                digests_final(&d);
+                classify_by(w, e, f, n, &d);
+            } else if (digests_again(fd, &d))
             {
-                classify_by(w, e, f, n, got);
+                classify_by(w, e, f, n, &d);
             } else
             {
                 unreadable(w, e->path, errno);
@@ -664,7 +736,7 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
         (void)close(fd);
         return true;
     }
-    rs_md5_init(&md5);
+    digests_init(&d, f, n);
     rs_sha256_init(&sha);
     for (;;)
     {
@@ -685,16 +757,16 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
         {
             break;
         }
-        rs_md5_update(&md5, chunk, (size_t)got_n);
-        if (w->opts->hash)
+        digests_update(&d, chunk, (size_t)got_n);
+        /* The index's SHA-256 is the package's too, where it recorded one. */
+        if (w->opts->hash && !d.want_sha256)
         {
             rs_sha256_update(&sha, chunk, (size_t)got_n);
         }
         rs_progress_bytes((uint64_t)got_n);
-        bytes += (uint64_t)got_n;
     }
-    rs_md5_final(&md5, got);
-    classify_by(w, e, f, n, got);
+    digests_final(&d);
+    classify_by(w, e, f, n, &d);
     if (storing(w, e))
     {
         /* Changed from its package, so kept: copied from the descriptor
@@ -712,9 +784,15 @@ static bool check_package(struct walk *w, int dirfd, const char *name,
     }
     if (w->opts->hash)
     {
-        rs_sha256_final(&sha, e->hash);
+        if (d.want_sha256)
+        {
+            sha256_hex(d.sha256_out, e->hash);
+        } else
+        {
+            rs_sha256_final(&sha, e->hash);
+        }
         e->hash_state = RS_HASH_PRESENT;
-        w->stats->bytes_hashed += bytes;
+        w->stats->bytes_hashed += d.bytes;
     }
     (void)close(fd);
     return true;
@@ -773,7 +851,7 @@ static bool reuse(struct walk *w, struct rs_entry *e, const struct rs_entry *was
 
         if (n == 0)
         {
-            unpackaged = cls == RS_CLASS_BASELINE;
+            unpackaged = cls == RS_CLASS_BASELINE && rs_pkgdb_scoped(w->opts->pkgdb, e->path);
             cls = unpackaged ? RS_CLASS_STATE : cls;
         } else if (!with_digest(f, n))
         {

@@ -1677,8 +1677,31 @@ sudo apt install restate
 That puts `restate` in `/usr/sbin`, its manual in section 8 and its
 [hooks](#live-services) in `/usr/libexec/restate/hooks`, and brings `gpgv`,
 which checks an image's signature, with it; `curl`, `gpg` and `pigz` come as
-recommendations. Packages for the BSDs and macOS come later; see the
-[roadmap](ROADMAP.md). Everywhere else, and for what is not released yet,
+recommendations.
+
+On FreeBSD, OpenBSD and NetBSD, from the binary package attached to each
+[release](https://github.com/bceverly/restate/releases) for every release
+each system supports -- FreeBSD 14.4, 14.5 and 15.1, OpenBSD 7.9 and 8.0,
+NetBSD 10.1 and 11.0 -- each built with that system's own package tool on
+that release, and installed, checked and removed there before the release is
+published. Check it against the release's `SHA256SUMS` first, then, for
+example:
+
+```bash
+pkg add restate-VERSION-freebsd-15.1-amd64.pkg               # FreeBSD
+pkg_add -D unsigned restate-VERSION-openbsd-8.0-amd64.tgz    # OpenBSD
+pkg_add restate-VERSION-netbsd-11.0-amd64.tgz                # NetBSD
+```
+
+Each puts `restate` in `/usr/local/sbin`, its manual in section 8 and its
+hooks in `/usr/local/libexec/restate/hooks`, all of them root's. OpenBSD's
+own packages are signed by OpenBSD's means, which these are not -- hence
+`-D unsigned`: the release's checksums and its signed attestation vouch for
+them instead. `pkg delete restate` (FreeBSD) or `pkg_delete restate` removes
+it. `make bsd-pkg` builds the same package on the system it runs on.
+
+A package for macOS comes later; see the [roadmap](ROADMAP.md). Everywhere
+else, and for what is not released yet,
 restate is built from source and installed into `/usr/local`, which is the
 place for software the administrator installs by hand and is never touched by
 the package manager.
@@ -1815,6 +1838,7 @@ Run `make` with no arguments for the full list.
 | `make install` / `make uninstall` | into / out of `$(prefix)`, default `/usr/local` |
 | `make deb` / `make deb-source` | the binary `.deb`, or the signed source package Launchpad builds from |
 | `make deb-sbuild` | build the package in a clean chroot with no network, as a Launchpad builder does |
+| `make bsd-pkg` | this BSD's binary package, into `dist/`: FreeBSD's `.pkg`, OpenBSD's or NetBSD's `.tgz` |
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
 | `make install-dev` | the development tools and the git hooks |
 | `make man` | regenerate the manpage and the README's Usage block |

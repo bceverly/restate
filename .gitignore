@@ -92,6 +92,10 @@ restate-lucky13.*
 *.restate.json
 /index.json
 
+# --- BSD packages (make bsd-pkg) -------------------------------------------
+/dist/
+/pkg-stage/
+
 # --- Debian packaging ------------------------------------------------------
 #
 # debian/ itself IS committed — it is the packaging source, and Launchpad

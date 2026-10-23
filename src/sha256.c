@@ -129,9 +129,8 @@ void rs_sha256_update(struct rs_sha256 *ctx, const void *data, size_t n)
     }
 }
 
-void rs_sha256_final(struct rs_sha256 *ctx, char hex[RS_SHA256_HEX_SIZE])
+void rs_sha256_final_raw(struct rs_sha256 *ctx, unsigned char out[RS_SHA256_SIZE])
 {
-    static const char digits[] = "0123456789abcdef";
     uint64_t bits = ctx->length * 8u;
     size_t   i;
 
@@ -151,17 +150,28 @@ void rs_sha256_final(struct rs_sha256 *ctx, char hex[RS_SHA256_HEX_SIZE])
     }
     sha256_block(ctx->state, ctx->block);
 
-    for (i = 0; i < 32; i++)
+    for (i = 0; i < RS_SHA256_SIZE; i++)
     {
-        unsigned byte = (unsigned)(ctx->state[i / 4] >> ((3 - i % 4) * 8u)) & 0xffu;
-
-        hex[i * 2] = digits[byte >> 4];
-        hex[i * 2 + 1] = digits[byte & 0x0fu];
+        out[i] = (unsigned char)(ctx->state[i / 4] >> ((3 - i % 4) * 8u));
     }
-    hex[RS_SHA256_HEX_LEN] = '\0';
     /* The context held the tail of whatever was hashed; do not leave it lying
      * around for the next use of this stack frame to read. */
     memset(ctx, 0, sizeof(*ctx));
+}
+
+void rs_sha256_final(struct rs_sha256 *ctx, char hex[RS_SHA256_HEX_SIZE])
+{
+    static const char digits[] = "0123456789abcdef";
+    unsigned char     raw[RS_SHA256_SIZE];
+    size_t            i;
+
+    rs_sha256_final_raw(ctx, raw);
+    for (i = 0; i < RS_SHA256_SIZE; i++)
+    {
+        hex[i * 2] = digits[raw[i] >> 4];
+        hex[i * 2 + 1] = digits[raw[i] & 0x0fu];
+    }
+    hex[RS_SHA256_HEX_LEN] = '\0';
 }
 
 void rs_sha256_hex(const void *data, size_t n, char hex[RS_SHA256_HEX_SIZE])
