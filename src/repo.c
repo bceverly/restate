@@ -25,6 +25,12 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #endif
+#if defined(__FreeBSD__)
+#include <sys/acl.h>
+#endif
+#if defined(__FreeBSD__) && defined(_PC_ACL_NFS4)
+#define RS_NFS4_ACLS 1
+#endif
 
 #include "glob.h"
 #include "gzip.h"
@@ -1081,6 +1087,93 @@ static bool parse_marker(const char *text, struct rs_repo *r, bool *newer)
     return r->id[0] != '\0';
 }
 
+#ifdef RS_NFS4_ACLS
+/* A directory a group adds to, where its filesystem has NFSv4 ACLs (see
+ * PROTECT_SHARED). Its owner removes anything from it, as from a sticky one,
+ * and its group nothing; what one of them makes -- a file, or a directory --
+ * its maker may rename and remove, until protect makes it root's and its
+ * chmod drops what it was given. */
+static const char protect_aces[] = "owner@:----D---------:-------:allow,"
+                                   "owner@:-----d--------:-d-----:allow,"
+                                   "owner@:-----d--------:f------:allow,"
+                                   "group@:----D---------:-------:deny";
+
+static bool nfs4_acls(int fd)
+{
+    return fpathconf(fd, _PC_ACL_NFS4) > 0;
+}
+
+/* The ACL of `fd`, a directory the machines add to: protect_aces ahead of
+ * what its mode gives. 1 if it was set, 0 if it was so, -1 if it could not
+ * be, with errno. */
+static int protect_acl(int fd)
+{
+    acl_t       now = acl_get_fd_np(fd, ACL_TYPE_NFS4);
+    acl_t       want = now ? acl_strip_np(now, 0) : NULL;
+    acl_t       aces = acl_from_text(protect_aces);
+    char       *have = now ? acl_to_text_np(now, NULL, 0) : NULL;
+    char       *wanted = NULL;
+    acl_entry_t from;
+    acl_entry_t to;
+    int         at = 0;
+    int         which = ACL_FIRST_ENTRY;
+    int         did = -1;
+    int         saved;
+
+    while (want && aces && have && acl_get_entry(aces, which, &from) == 1 &&
+           acl_create_entry_np(&want, &to, at) == 0 && acl_copy_entry(to, from) == 0)
+    {
+        which = ACL_NEXT_ENTRY;
+        at++;
+    }
+    if (at == 4)
+    {
+        wanted = acl_to_text_np(want, NULL, 0);
+    }
+    if (wanted)
+    {
+        did = strcmp(wanted, have) == 0 ? 0 : acl_set_fd_np(fd, want, ACL_TYPE_NFS4) == 0 ? 1 : -1;
+    } else if (errno == 0)
+    {
+        errno = EINVAL;
+    }
+    saved = errno;
+    acl_free(wanted);
+    acl_free(have);
+    acl_free(aces);
+    acl_free(want);
+    acl_free(now);
+    errno = saved;
+    return did;
+}
+
+/* Whether `fd` has an ACL that is more than its mode: one made ready. */
+static bool acl_made_ready(int fd)
+{
+    acl_t acl = nfs4_acls(fd) ? acl_get_fd_np(fd, ACL_TYPE_NFS4) : NULL;
+    int   trivial = 1;
+
+    if (acl)
+    {
+        (void)acl_is_trivial_np(acl, &trivial);
+        acl_free(acl);
+    }
+    return !trivial;
+}
+#else
+static bool nfs4_acls(int fd)
+{
+    (void)fd;
+    return false;
+}
+
+static bool acl_made_ready(int fd)
+{
+    (void)fd;
+    return false;
+}
+#endif
+
 bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
 {
     static const char *const subdirs[] = { "packs", "snapshots" };
@@ -1126,9 +1219,11 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
         {
             (void)closedir(d);
         }
-        /* Its owner's alone, as a new one is made -- unless it is sticky:
-         * made ready by root for a group to add to (rs_repo_protect). */
-        if (!has && fd >= 0 && fstat(fd, &st) == 0 && !(st.st_mode & S_ISVTX))
+        /* Its owner's alone, as a new one is made -- unless it is sticky,
+         * or has an ACL: made ready by root for a group to add to
+         * (rs_repo_protect). */
+        if (!has && fd >= 0 && fstat(fd, &st) == 0 && !(st.st_mode & S_ISVTX) &&
+            !acl_made_ready(fd))
         {
             (void)fchmod(fd, 0700);
         }
@@ -5549,12 +5644,21 @@ static void protect_failed(struct rs_repo_protected *out, const char *dir, const
 }
 
 /*
+ * The mode of a directory the machines add to: sticky, so that each removes
+ * only what is its own. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD),
+ * it is 0770 and an ACL says the same instead: FreeBSD's NFS server makes a
+ * file in a sticky directory, then answers EACCES, so no capture could write.
+ */
+#define PROTECT_SHARED ((mode_t)01770)
+
+/*
  * Makes `name` in the directory `dfd` (`dir`, for messages) `owner`'s and
  * `group`'s, with `mode`, where it is not so already: 1 if it was changed, 0
  * if it was so, -1 if it could not be, saying why. Only a regular file or a
  * directory, never through a symlink, and a file only with one name: the
  * machines that write here could plant a link to anything for root to give
  * away. One that is not there (a prune took it meanwhile) is left out, as 2.
+ * PROTECT_SHARED is a directory the machines add to.
  */
 static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, uid_t owner,
                        gid_t group, mode_t mode, struct rs_repo_protected *out)
@@ -5563,6 +5667,7 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
     struct stat st;
     int         fd;
     int         changed;
+    bool        acl;
 
     if (fstatat(dfd, name, &before, AT_SYMLINK_NOFOLLOW) != 0)
     {
@@ -5590,7 +5695,12 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
         }
         return -1;
     }
-    if (!is_dir && st.st_nlink != 1)
+    acl = mode == PROTECT_SHARED && nfs4_acls(fd);
+    mode = acl ? 0770 : mode;
+    changed = st.st_uid != owner || st.st_gid != group || (st.st_mode & 07777) != mode;
+    /* One already protected is left as it is, whatever names it has: a
+     * machine may link to it, and not give it away. */
+    if (changed && !is_dir && st.st_nlink != 1)
     {
         protect_failed(out, dir, name, "it has other names (hard links), and is left as it is");
         changed = -1;
@@ -5599,10 +5709,20 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
     {
         protect_failed(out, dir, name, strerror(errno));
         changed = -1;
-    } else
-    {
-        changed = st.st_uid != owner || st.st_gid != group || (st.st_mode & 07777) != mode;
     }
+#ifdef RS_NFS4_ACLS
+    /* The ACL after the mode: a chmod can drop what an ACL adds. */
+    if (changed >= 0 && acl)
+    {
+        int set = protect_acl(fd);
+
+        if (set < 0)
+        {
+            protect_failed(out, dir, name, strerror(errno));
+        }
+        changed = set != 0 ? set : changed;
+    }
+#endif
     (void)close(fd);
     return changed;
 }
@@ -5800,15 +5920,15 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
             }
             (void)close(fd);
         }
-        /* Sticky: anyone in the group adds to it, and removes only what is
-         * their own -- what they have not finished. */
-        did = protect_one(top, dir, subs[i], true, owner, group, 01770, out);
+        /* Anyone in the group adds to it, and removes only what is their
+         * own -- what they have not finished. */
+        did = protect_one(top, dir, subs[i], true, owner, group, PROTECT_SHARED, out);
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;
         free(path);
     }
     {
-        int did = protect_one(top, dir, ".", true, owner, group, 01770, out);
+        int did = protect_one(top, dir, ".", true, owner, group, PROTECT_SHARED, out);
 
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;

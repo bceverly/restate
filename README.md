@@ -298,9 +298,10 @@ Commands:
   protect REPO            run as root on the storage a repository is on, after
                           each capture: make every finished pack and snapshot
                           root's and read-only, and the repository's
-                          directories sticky, so the machines that capture into
-                          it can add snapshots but change or remove none that
-                          are there
+                          directories sticky (or, with NFSv4 ACLs, given an ACL
+                          that says the same), so the machines that capture
+                          into it can add snapshots but change or remove none
+                          that are there
   check REPO              check a repository: read every pack through, each
                           chunk against the digest its index gives, and check
                           that every snapshot's index and kit can be read and
@@ -1306,7 +1307,10 @@ restate du /srv/restate/web01
   repository's group's, and read-only (files 0440, each snapshot's directory
   0550), and the repository, `packs/` and `snapshots/` root's and the
   group's, 1770: sticky, so the machines in the group make files there and
-  remove only their own unfinished ones. A machine that has been taken over
+  remove only their own unfinished ones. Where the filesystem has NFSv4 ACLs
+  (ZFS on FreeBSD) they are 0770 instead, with an ACL that says the same:
+  FreeBSD's NFS server refuses a file made in a sticky directory, after making
+  it, so no capture could write. A machine that has been taken over
   can then add snapshots and read them, but not change, rename or remove one
   that is there. The marker, `lock` and `readers`, which a capture and a
   restore open as their own, are left as they are, and so is anything being
@@ -1317,11 +1321,17 @@ restate du /srv/restate/web01
   is refused. Prune, repack and check, run as root on the NAS, go on as
   before. A snapshot cannot be signed once it is protected, so sign it as it
   is captured. `capture --create` works into an empty directory made ready
-  for it -- root's and the group's, 1770 -- and leaves it so.
+  for it -- root's and the group's, 1770, or 0770 with that ACL -- and leaves
+  it so.
 
   ```bash
   # On the NAS, once: a directory for the machine to make its repository in.
-  install -d -o root -g restate -m 1770 /tank/restate/web01
+  # On ZFS (FreeBSD), 0770 and the ACL protect gives it; elsewhere, 1770.
+  install -d -o root -g restate -m 0770 /tank/restate/web01
+  setfacl -a 0 group@:D::deny /tank/restate/web01
+  setfacl -a 0 owner@:d:f:allow /tank/restate/web01
+  setfacl -a 0 owner@:d:d:allow /tank/restate/web01
+  setfacl -a 0 owner@:D::allow /tank/restate/web01
   # /etc/exports (FreeBSD): map every machine to the user AND the group, by
   # name -- with the user alone, the group's right to make files was refused.
   /tank/restate -mapall=restate:restate -network 10.0.0.0/24

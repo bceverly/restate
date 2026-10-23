@@ -1476,7 +1476,7 @@ static void test_adopted(const char *dir)
     r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
     CHECK(snap(r, tree, "2026-05-01T00:00:00.000000000Z", NULL, &st, &name));
     rs_repo_close(r);
-    odd = rs_xasprintf("find '%s' ! -group %u | wc -l", repo, (unsigned)other);
+    odd = rs_xasprintf("find '%s' ! -group %u | wc -l | tr -d ' '", repo, (unsigned)other);
     cmd = first_line(odd);
     CHECK_STR(cmd, "0");
     free(cmd);
@@ -1494,15 +1494,15 @@ static void test_adopted(const char *dir)
     CHECK_STR(cmd, "0");
     free(cmd);
     /* Written where the group reads, the group reads it. */
-    cmd = rs_xasprintf("find '%s/packs' -type f ! -perm -0040 | wc -l", repo);
+    cmd = rs_xasprintf("find '%s/packs' -type f ! -perm -0040 | wc -l | tr -d ' '", repo);
     free(odd);
     odd = cmd;
     cmd = first_line(odd);
     CHECK_STR(cmd, "0");
     free(cmd);
-    free(odd);
-    odd = rs_xasprintf("find '%s' ! -group %u | wc -l", repo, (unsigned)other);
 
+    /* Its mode, not its group: on a BSD, what is made takes its directory's
+     * group whoever makes it. */
     TEST_CASE("repo: not root, what it makes is its own");
     rs_repo_set_adopting(false);
     cmd = rs_xasprintf("rm -f '%s/packs/'*.seek", repo);
@@ -2871,6 +2871,58 @@ static bool failed_with(const struct rs_repo_protected *p, const char *needle)
     return false;
 }
 
+/* Whether this process is in group `gid`. */
+static bool in_group(gid_t gid)
+{
+    gid_t groups[256];
+    int   n = getgroups((int)(sizeof(groups) / sizeof(groups[0])), groups);
+    int   i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (groups[i] == gid)
+        {
+            return true;
+        }
+    }
+    return getegid() == gid;
+}
+
+#if defined(__FreeBSD__) && defined(_PC_ACL_NFS4)
+#define ACL_TESTS 1
+
+/* Whether `dir` is on a filesystem with NFSv4 ACLs. */
+static bool nfs4_acls_here(const char *dir)
+{
+    return pathconf(dir, _PC_ACL_NFS4) > 0;
+}
+
+/* Whether `path` has protect's ACL: its group removes nothing from it. */
+static bool group_removes_nothing(const char *path)
+{
+    char *cmd = rs_xasprintf("getfacl -q '%s' | grep -q '^ *group@:----D---------:-------:deny$'",
+                             path);
+    bool  yes = system(cmd) == 0;
+
+    free(cmd);
+    return yes;
+}
+#endif
+
+/* What protect makes a directory the machines add to, in `dir`: sticky, or
+ * 0770 with an ACL where the filesystem has NFSv4 ACLs. */
+static unsigned shared_mode(const char *dir)
+{
+#ifdef ACL_TESTS
+    if (nfs4_acls_here(dir))
+    {
+        return 0770;
+    }
+#endif
+    (void)dir;
+    return 01770;
+}
+
 static void test_protected(const char *dir)
 {
     char                    *repo = rs_xasprintf("%s/prot", dir);
@@ -2917,15 +2969,23 @@ static void test_protected(const char *dir)
     put(path, "info", "{}", 0600);
     free(path);
 
-    TEST_CASE("repo: protected, everything finished is read-only and the directories sticky");
+    TEST_CASE("repo: protected, everything finished is read-only and the directories shared");
     CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
     CHECK_INT(p.nfailed, 0);
     CHECK_INT(p.dirs, 3);
     CHECK_INT(p.snapshots, 2);
     CHECK(p.files > 8);
-    CHECK_INT(mode_of(repo, "."), 01770);
-    CHECK_INT(mode_of(repo, "packs"), 01770);
-    CHECK_INT(mode_of(repo, "snapshots"), 01770);
+    CHECK_INT(mode_of(repo, "."), shared_mode(repo));
+    CHECK_INT(mode_of(repo, "packs"), shared_mode(repo));
+    CHECK_INT(mode_of(repo, "snapshots"), shared_mode(repo));
+#ifdef ACL_TESTS
+    if (nfs4_acls_here(repo))
+    {
+        CHECK(group_removes_nothing(repo));
+        CHECK(group_removes_nothing(packs));
+        CHECK(group_removes_nothing(snaps));
+    }
+#endif
     CHECK_INT(mode_of(snaps, first), 0550);
     CHECK_INT(mode_of(snaps, second), 0550);
     path = rs_xasprintf("%s/%s", snaps, first);
@@ -2972,6 +3032,21 @@ static void test_protected(const char *dir)
     CHECK_INT(p.nfailed, 0);
     CHECK(p.unchanged > 0 && p.unchanged <= total);
     rs_repo_protected_free(&p);
+
+    TEST_CASE("repo: protected again, a link to what is protected changes nothing");
+    {
+        char *from = rs_xasprintf("%s/%s/index.json.gz", snaps, first);
+        char *to = rs_xasprintf("%s/linked-to-protected", repo);
+
+        CHECK(link(from, to) == 0);
+        CHECK(rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+        CHECK_INT(p.nfailed, 0);
+        CHECK_INT(p.files + p.dirs + p.snapshots, 0);
+        rs_repo_protected_free(&p);
+        CHECK(unlink(to) == 0);
+        free(from);
+        free(to);
+    }
 
     TEST_CASE("repo: protected, a capture --append-only still adds, and it is read back");
     cmd = rs_xasprintf("rm -rf '%s' '%s/unfinished.tar.gz' '%s/.unfinished.tar.gz.tmp'", path,
@@ -3038,9 +3113,9 @@ static void test_protected(const char *dir)
     free(path);
 
     TEST_CASE("repo: protect says what it could not make another's");
-    if (geteuid() != 0)
+    if (geteuid() != 0 && !in_group(0))
     {
-        /* Root's group, which no one else may give a file to. */
+        /* Root's group, which no one outside it may give a file to. */
         CHECK(rs_repo_protect(repo, geteuid(), 0, &p, &err));
         CHECK(p.nfailed > 0);
         CHECK(failed_with(&p, strerror(EPERM)));
@@ -3060,6 +3135,19 @@ static void test_protected(const char *dir)
     CHECK(rs_repo_init(path, false, &err));
     CHECK_INT(mode_of(path, "."), 01770);
     free(path);
+#ifdef ACL_TESTS
+    if (nfs4_acls_here(dir))
+    {
+        path = rs_xasprintf("%s/ready-acl", dir);
+        cmd = rs_xasprintf("mkdir -m 0770 '%s' && setfacl -a 0 group@:D::deny '%s'", path, path);
+        CHECK(system(cmd) == 0);
+        CHECK(rs_repo_init(path, false, &err));
+        CHECK_INT(mode_of(path, "."), 0770);
+        CHECK(group_removes_nothing(path));
+        free(cmd);
+        free(path);
+    }
+#endif
     path = rs_xasprintf("%s/plain", dir);
     CHECK(mkdir(path, 0755) == 0);
     CHECK(rs_repo_init(path, false, &err));

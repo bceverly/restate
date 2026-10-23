@@ -1487,7 +1487,8 @@ expect 0 "restore --include from it" -- \
 check "puts back what it should" test -f rkout/etc/one
 expect 2 "repack what is not a repository" -- "$BIN" repack ptree
 
-# protect: what is finished made read-only, the directories sticky. For this
+# protect: what is finished made read-only, the directories sticky -- or, where
+# the filesystem has NFSv4 ACLs, 0770 with an ACL that says the same. For this
 # user's group -- or nobody's, as root, whose own group protect refuses.
 pgroup="--group=$(id -gn)"
 if [ "$(id -u)" = 0 ]; then
@@ -1501,7 +1502,12 @@ contains "$(cat pr.json)" '"not_protected": 0' "with nothing it could not"
 check "a pack is read-only" test "$(file_mode "$(find pprot/packs -name '*.idx' | head -n 1)")" = 440
 check "and so is a snapshot" \
   test "$(file_mode "$(find pprot/snapshots -mindepth 1 -maxdepth 1 | head -n 1)")" = 550
-check "packs/ is sticky" test "$(file_mode pprot/packs)" = 1770
+if getfacl -q pprot/packs 2> /dev/null | grep -q '^ *group@:----D---------:-------:deny$'; then
+  check "packs/ is its group's to add to, and to remove nothing from" \
+    test "$(file_mode pprot/packs)" = 770
+else
+  check "packs/ is sticky" test "$(file_mode pprot/packs)" = 1770
+fi
 check "the lock is left as it was" test "$(file_mode pprot/lock)" = 600
 expect 0 "protect again" -- "$BIN" protect "$pgroup" --result pr2.json pprot
 contains "$(cat pr2.json)" '"files_protected": 0' "changes nothing"

@@ -1630,7 +1630,10 @@ and
 .I snapshots
 become root's and the group's, 1770: sticky, so the machines in the group
 make files there, and remove only their own \- what they have not
-finished. A machine that has been taken over can then add snapshots, and
+finished. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD) they are
+0770 instead, with an ACL that says the same: FreeBSD's NFS server refuses
+a file made in a sticky directory, after making it, so no capture could
+write. A machine that has been taken over can then add snapshots, and
 read them, but not change, rename or remove one that is there. The marker,
 .I lock
 and
@@ -1649,7 +1652,7 @@ go on as before, and what they write is the group's to read. A snapshot
 already protected cannot be signed afterwards: sign it as it is captured.
 .B capture \-\-create
 works into an empty directory made ready for it, root's and the group's,
-1770, and leaves it so. Over NFS, map every machine to one user and the
+1770 \- or 0770 with that ACL \- and leaves it so. Over NFS, map every machine to one user and the
 group by name \- on FreeBSD,
 .B \-mapall=restate:restate
 in

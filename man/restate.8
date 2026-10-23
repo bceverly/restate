@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "October 22, 2026" "restate 2.1.0.1" "System Manager's Manual"
+.TH RESTATE 8 "October 23, 2026" "restate 2.1.0.1" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -82,7 +82,7 @@ drop the snapshots \-\-keep\-last, \-\-keep\-daily, \-\-keep\-weekly and \-\-kee
 write again each pack an older restate wrote, which can be read only from its start, so that a restore of a few files reads only the parts of each pack that hold them; every snapshot is kept, and what none of them needs is dropped on the way
 .TP
 \fBprotect\fR \fIREPO\fR
-run as root on the storage a repository is on, after each capture: make every finished pack and snapshot root's and read\-only, and the repository's directories sticky, so the machines that capture into it can add snapshots but change or remove none that are there
+run as root on the storage a repository is on, after each capture: make every finished pack and snapshot root's and read\-only, and the repository's directories sticky (or, with NFSv4 ACLs, given an ACL that says the same), so the machines that capture into it can add snapshots but change or remove none that are there
 .TP
 \fBcheck\fR \fIREPO\fR
 check a repository: read every pack through, each chunk against the digest its index gives, and check that every snapshot's index and kit can be read and the content of each of its files is whole; with \-\-read\-all, read every snapshot in full too
@@ -1770,7 +1770,10 @@ and
 .I snapshots
 become root's and the group's, 1770: sticky, so the machines in the group
 make files there, and remove only their own \- what they have not
-finished. A machine that has been taken over can then add snapshots, and
+finished. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD) they are
+0770 instead, with an ACL that says the same: FreeBSD's NFS server refuses
+a file made in a sticky directory, after making it, so no capture could
+write. A machine that has been taken over can then add snapshots, and
 read them, but not change, rename or remove one that is there. The marker,
 .I lock
 and
@@ -1789,7 +1792,7 @@ go on as before, and what they write is the group's to read. A snapshot
 already protected cannot be signed afterwards: sign it as it is captured.
 .B capture \-\-create
 works into an empty directory made ready for it, root's and the group's,
-1770, and leaves it so. Over NFS, map every machine to one user and the
+1770 \- or 0770 with that ACL \- and leaves it so. Over NFS, map every machine to one user and the
 group by name \- on FreeBSD,
 .B \-mapall=restate:restate
 in
