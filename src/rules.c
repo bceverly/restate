@@ -920,6 +920,32 @@ static size_t source_group_len(const char *source)
     return (size_t)(colon - source);
 }
 
+bool rs_rules_from_json(struct rs_rules *rs, const struct rs_jval *classification,
+                        const char *source)
+{
+    const struct rs_jval *list = rs_jobject_get(classification, "rules");
+    size_t                i;
+
+    if (!list || list->type != RS_JARRAY)
+    {
+        return false;
+    }
+    for (i = 0; i < list->n; i++)
+    {
+        const struct rs_jval *r = &list->items[i];
+        enum rs_class         cls;
+
+        if (r->type != RS_JARRAY || r->n != 2 || r->items[0].type != RS_JSTRING ||
+            r->items[1].type != RS_JSTRING || !r->items[1].s[0] ||
+            !rs_class_parse(r->items[0].s, strlen(r->items[0].s), &cls))
+        {
+            return false;
+        }
+        rs_rules_add(rs, cls, r->items[1].s, source, NULL);
+    }
+    return true;
+}
+
 void rs_rules_write(const struct rs_rules *rs, FILE *out)
 {
     size_t      i;

@@ -685,7 +685,7 @@ void rs_job_reporting(const char *text, size_t len, struct rs_job *job)
     }
     while (next_line(&p, end, &ks, &ke, &eq, &vs, &ve))
     {
-        char *value;
+        const char *value;
 
         if (!eq)
         {

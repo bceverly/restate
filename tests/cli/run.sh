@@ -195,10 +195,11 @@ contains "$OUT" '/home/u/with space' "a name with a space"
 contains "$OUT" '/home/u/tab\tname' "a tab in a name is a JSON escape"
 contains "$OUT" '"target": "../etc/hostname"' "a symlink's target"
 contains "$OUT" "\"target\": \"$WORK/outside\"" "a symlink out of the tree is recorded"
-lacks "$OUT" "secret" "the walk does not follow a symlink"
+# Paths only: the rules the index records name a secret or two of their own.
+lacks "$OUT" '/secret"' "the walk does not follow a symlink"
 contains "$OUT" '"type": "fifo"' "a FIFO is recorded"
-lacks "$OUT" "/tmp/scratch" "ephemeral paths are skipped"
-lacks "$OUT" "/var/cache" "expendable paths are skipped"
+lacks "$OUT" '"path": "/tmp/scratch' "ephemeral paths are skipped"
+lacks "$OUT" '"path": "/var/cache' "expendable paths are skipped"
 lacks "$OUT" ".cache/thumb" "per-user caches are skipped"
 lacks "$OUT" "app.pid" "PID files are skipped"
 contains "$ERR" "recorded" "the summary goes to stderr"
@@ -1410,6 +1411,8 @@ contains "$OUT" '"run"' "its commands"
 contains "$OUT" '"quiesce_with"' "its options, as job keys spell them"
 contains "$OUT" '"job_keys": [' "the keys a job takes"
 contains "$OUT" '"job_commands": [' "the commands a job can be"
+contains "$OUT" '"job_command_keys": {' "the keys each takes"
+contains "$OUT" '"status.capture_rules"' "and that status says how it classified"
 contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
 
@@ -1722,6 +1725,40 @@ chmod 644 jobs/list.conf
 expect 0 "run a list job" -- "$BIN" run -q "$WORK/jobs/list.conf"
 contains "$(cat jls.json)" '"path": "/srv"' "its result names the directory"
 contains "$(cat jls.json)" '"name": "data"' "and what is in it"
+# A status job classifies as the capture did: what its rules left out is not
+# "added", unless the job gives rules of its own.
+printf 'expendable /srv/data\n' > jskip.rules
+printf 'command = capture\nrepository = %s/jrepo2\nroot = %s/ptree\ncreate = true\nrules = %s/jskip.rules\n' \
+  "$WORK" "$WORK" "$WORK" > jobs/cap2.conf
+chmod 644 jobs/cap2.conf
+expect 0 "run a capture job with rules of its own" -- "$BIN" run -q "$WORK/jobs/cap2.conf"
+printf 'command = status\nrepository = %s/jrepo2\nroot = %s/ptree\nresult = %s/jst2.json\n' \
+  "$WORK" "$WORK" "$WORK" > jobs/status2.conf
+chmod 644 jobs/status2.conf
+expect 0 "a status job classifies by the capture's rules" -- "$BIN" run -q "$WORK/jobs/status2.conf"
+contains "$(cat jst2.json)" '"capture_rules": true' "says so"
+contains "$(cat jst2.json)" '"added": 0' "and nothing they left out is added"
+: > jnone.rules
+printf 'rules = %s/jnone.rules\nall = false\none_file_system = false\n' "$WORK" >> jobs/status2.conf
+expect 1 "a status job with rules of its own" -- "$BIN" run -q "$WORK/jobs/status2.conf"
+contains "$(cat jst2.json)" '"capture_rules": false' "classifies by those"
+contains "$(cat jst2.json)" '"path": "/srv/data/big"' "and finds what the capture left out"
+expect 1 "status --all adds to the capture's rules" -- \
+  "$BIN" status --all --root ptree --result jst3.json jrepo2
+contains "$(cat jst3.json)" '"capture_rules": true' "keeping them"
+contains "$(cat jst3.json)" '"path": "/srv/data"' "and reports the expendable"
+printf '{"format": "restate-index", "version": 1, "classification": {"rules": 5}, "entries": []}' \
+  > badcl.json
+expect 2 "status of an index whose classification is not rules" -- "$BIN" status badcl.json
+contains "$ERR" "the index's classification is not a list of rules" "says so"
+# A refused job still writes its result, if it names one.
+printf 'command = status\nrepository = %s/jrepo2\npath = /etc\nresult = %s/jbad.json\n' \
+  "$WORK" "$WORK" > jobs/refused.conf
+chmod 644 jobs/refused.conf
+expect 2 "a job refused" -- "$BIN" run -q "$WORK/jobs/refused.conf"
+contains "$(cat jbad.json)" '"status": "failed"' "writes a failed run's result"
+contains "$(cat jbad.json)" '"command": "status"' "for the command it names"
+contains "$(cat jbad.json)" 'path means nothing to a status job' "with why"
 
 # ---------------------------------------------------------------------------
 # classify and rules

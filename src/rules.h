@@ -41,6 +41,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "json.h"
 #include "util.h"
 
 enum rs_class {
@@ -107,6 +108,14 @@ enum rs_class rs_rules_classify(const struct rs_rules *rs, const char *path,
  * it leaves the rest out.
  */
 bool rs_rules_below(const struct rs_rules *rs, const char *dir, long which, bool all);
+
+/*
+ * Appends the rules an index's classification records (index.h): its
+ * "rules", [[CLASS, PATTERN], ...], each with `source`. False, with the rules
+ * before the first that is not one added, if it is not such a list.
+ */
+bool rs_rules_from_json(struct rs_rules *rs, const struct rs_jval *classification,
+                        const char *source);
 
 /* Writes the rules as a rules file, which `restate -N -R FILE` reads back. */
 void rs_rules_write(const struct rs_rules *rs, FILE *out);

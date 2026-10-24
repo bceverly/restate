@@ -142,6 +142,9 @@ void test_index(void)
         ix.host = rs_xstrdup("h\x01\xff");
         /* Identity goes out as state that says so, and comes back. */
         ix.entries[2].cls = RS_CLASS_IDENTITY;
+        /* And how it was classified, as it was. */
+        rs_jval_set_object(&ix.classification);
+        rs_jobj_bool(&ix.classification, "all", true);
         CHECK(fp != NULL);
         if (fp)
         {
@@ -177,6 +180,8 @@ void test_index(void)
         }
         /* The host is not a path, so it goes through lossily. */
         CHECK_STR(back.host, "h\x01\xef\xbf\xbd");
+        CHECK_INT(back.classification.type, RS_JOBJECT);
+        CHECK(rs_jobject_get(&back.classification, "all") != NULL);
         rs_index_free(&back);
         rs_buf_reset(&err);
         CHECK(!rs_index_load(&back, "/nonexistent/ix.json", &err));
@@ -207,6 +212,11 @@ void test_index(void)
     CHECK_CONTAINS(err.data, "index version 2");
     CHECK(!parse(&ix, "{\"format\": \"restate-index\", \"root\": 5, \"entries\": []}", &err));
     CHECK_CONTAINS(err.data, "\"root\" is not a string");
+    CHECK(!parse(&ix, "{\"format\": \"restate-index\", \"classification\": [], \"entries\": []}",
+                 &err));
+    CHECK_CONTAINS(err.data, "\"classification\" is not an object");
+    CHECK(!parse(&ix, "{\"format\": \"restate-index\", \"classification\": {, \"entries\": []}",
+                 &err));
     CHECK(!parse(&ix, HEAD TAIL " x", &err));
     CHECK_CONTAINS(err.data, "data after the index");
     CHECK(!parse(&ix, "{\"format\": \"restate-index\", \"entries\": [], \"entries\": []}", &err));

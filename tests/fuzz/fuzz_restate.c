@@ -355,6 +355,14 @@ static void fuzz_jobs(const char *text, size_t len)
     } else if (!err.data || !*err.data)
     {
         abort();   /* a job refused says why */
+    } else
+    {
+        /* Where a refused job reports: a path that is a path, if any. */
+        rs_job_reporting(text, len, &job);
+        if (job.opts.result && job.opts.result[0] != '/')
+        {
+            abort();
+        }
     }
     rs_job_free(&job);
     rs_buf_free(&err);
@@ -686,6 +694,24 @@ static void fuzz_index(const char *text, size_t len)
             }
             rs_index_free(&back);
             free(copy);
+        }
+        /* The rules it recorded, if it did, classifying what it holds. */
+        if (ix.classification.type == RS_JOBJECT)
+        {
+            struct rs_rules rules;
+
+            rs_rules_init(&rules);
+            if (rs_rules_from_json(&rules, &ix.classification, "fuzz"))
+            {
+                size_t i;
+                long   which;
+
+                for (i = 0; i < ix.count && i < 64; i++)
+                {
+                    (void)rs_rules_classify(&rules, ix.entries[i].path, &which);
+                }
+            }
+            rs_rules_free(&rules);
         }
         /* What is in each directory: every name a child of it, and each
          * entry's own name where it has one. */

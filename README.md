@@ -1150,6 +1150,14 @@ $ restate export --encrypt-to offsite.pub /var/backups/web01 -o web01-20261012.t
 `verify`'s comparison, but reading only the files whose size, times or inode
 say they changed.
 
+Both classify the tree by the rules the capture was made with, which the
+index records -- the built-in ones it ran with and every `--rules` file --
+so a path the capture left out on purpose is not reported as added.
+`--rules`, `--no-default-rules` or `--os` classify by those instead, and
+`--all`, `--one-file-system` and `--rules-only` add to what was recorded. An
+index from a restate before this one records no rules, and is classified by
+the options alone, as it always was.
+
 **`list`** says what is directly in one directory of a snapshot -- each
 name's type, mode, owner, size and time, and a symlink's target -- from its
 index alone, reading no pack: to look through what a snapshot holds and pick
@@ -1417,7 +1425,15 @@ report_group = restate-report
 A job can be a `capture`, `prune`, `check`, `copy`, `snapshots`, `restore`,
 `estimate`, `du`, `repack`, `protect`, `status` or `list`; a `status` or `list`
 job reads the newest snapshot unless `snapshot` names one, and a `list` job
-lists the directory `path` says (`/` if it says none).
+lists the directory `path` says (`/` if it says none). A `status` job takes
+`rules`, `all` and `one_file_system` as a capture does, though it seldom
+needs them: it classifies by the capture's own rules unless given others.
+
+A job refused -- a key restate does not know or the command has no use for,
+a value of the wrong kind -- still writes its `result`, if it names one, as
+a failed run's: `"status": "failed"`, exit 2, and why in `errors`. A job file
+that is not safely owned is not read at all, so only the command line's
+`--result` hears of that.
 
 `restate-job@.service` runs `/etc/restate/jobs.d/NAME.conf` for the instance
 `NAME` -- at a low priority and idle I/O, for up to a day, letting restate
@@ -1464,12 +1480,14 @@ of change -- added, deleted, modified -- in `diff.changes`, with
 `diff.truncated` if there were more; `list` gives the first 5000 names in
 `list.entries`, with `list.truncated`; and `verify`, `status` and `list` name
 the `snapshot` they read (a repository's newest as `REPO::NAME`) or the
-`image`. A capture into an encrypted repository gives `"cache": {"path":
+`image`, and say in `capture_rules` whether they classified by the rules the
+capture recorded. A capture into an encrypted repository gives `"cache": {"path":
 ..., "bytes": ...}`, this machine's cache of it, and `"cache": null` into one
 that is not. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `list`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate
-can do -- commands, options, job keys and the commands a job can be, schemas,
+can do -- commands, options, job keys, the commands a job can be and the keys
+each takes (`job_command_keys`), schemas,
 what results have gained since schema 1 began (`result_members`, such as
 `capture.cache`), the hooks here (each hook is
 asked `HOOK present NAME`, and one that answers `absent` is left out, so a

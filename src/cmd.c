@@ -55,35 +55,6 @@
 /* Rules                                                                     */
 /* ------------------------------------------------------------------------- */
 
-/* The rules an index's classification records (index.h), in `rules`: false,
- * having said why, if they are not rules. */
-static bool recorded_rules(const struct rs_jval *cl, struct rs_rules *rules)
-{
-    const struct rs_jval *list = rs_jobject_get(cl, "rules");
-    size_t                i;
-
-    for (i = 0; list && list->type == RS_JARRAY && i < list->n; i++)
-    {
-        const struct rs_jval *r = &list->items[i];
-        enum rs_class         cls;
-
-        if (r->type != RS_JARRAY || r->n != 2 || r->items[0].type != RS_JSTRING ||
-            r->items[1].type != RS_JSTRING || !r->items[1].s[0] ||
-            !rs_class_parse(r->items[0].s, strlen(r->items[0].s), &cls))
-        {
-            break;
-        }
-        rs_rules_add(rules, cls, r->items[1].s, "the capture's rules", NULL);
-    }
-    if (!list || list->type != RS_JARRAY || i < list->n)
-    {
-        rs_error("the index's classification is not a list of rules; give --rules (or "
-                 "--no-default-rules) to classify by instead");
-        return false;
-    }
-    return true;
-}
-
 /* The rules the capture recorded, `o->classified`, if verify or status has
  * them; otherwise the built-in rules for the chosen system, then every
  * --rules file in the order given. `os_used` is set to the system whose
@@ -98,8 +69,10 @@ static bool load_rules(const struct rs_options *o, struct rs_rules *rules,
     *os_used = o->os ? o->os : rs_rules_host_os();
     if (o->classified)
     {
-        if (!recorded_rules(o->classified, rules))
+        if (!rs_rules_from_json(rules, o->classified, "the capture's rules"))
         {
+            rs_error("the index's classification is not a list of rules; give --rules (or "
+                     "--no-default-rules) to classify by instead");
             rs_rules_free(rules);
             return false;
         }
@@ -2983,7 +2956,8 @@ int rs_cmd_features(const struct rs_options *o)
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
     static const char *const members[] = { "capture.cache", "diff.changes", "list",
-                                           "snapshot" };
+                                           "snapshot", "status.capture_rules",
+                                           "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;
@@ -3393,18 +3367,19 @@ static int compare_live(const struct rs_options *o, bool incremental)
     {
         return status;
     }
-    /* Classified as the capture was, unless told how: otherwise everything
-     * its rules left out would be "added". */
+    /* Classified by the rules the capture was, unless given others:
+     * otherwise everything they left out would be "added". --all,
+     * --one-file-system and --rules-only add to what it recorded. */
     by = *o;
     if (recorded.classification.type == RS_JOBJECT && !o->nrules_files &&
-        !o->no_default_rules && !o->os && !o->all && !o->one_fs && !o->rules_only)
+        !o->no_default_rules && !o->os)
     {
         const struct rs_jval *cl = &recorded.classification;
 
         by.classified = cl;
-        by.all = true_in(cl, "all");
-        by.one_fs = true_in(cl, "one_file_system");
-        by.rules_only = true_in(cl, "rules_only");
+        by.all = o->all || true_in(cl, "all");
+        by.one_fs = o->one_fs || true_in(cl, "one_file_system");
+        by.rules_only = o->rules_only || true_in(cl, "rules_only");
         o = &by;
     }
     rs_jobj_bool(rs_result(), "capture_rules", o->classified != NULL);

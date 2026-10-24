@@ -1455,6 +1455,21 @@ they write unpack an image's file.
 says what has changed since a snapshot or an image, quickly: the comparison
 .B verify
 makes, reading only the files whose size, times or inode say they changed.
+Both classify the tree by the rules the capture was made with, which the
+index records \- the built-in ones it ran with and every
+.B \-\-rules
+file \- so a path the capture left out on purpose is not reported as added.
+.BR \-\-rules ,
+.B \-\-no\-default\-rules
+or
+.B \-\-os
+classify by those instead, and
+.BR \-\-all ,
+.B \-\-one\-file\-system
+and
+.B \-\-rules\-only
+add to what was recorded. An index from an older restate records no rules
+and is classified by the options alone.
 .B list
 says what is directly in one directory of a snapshot or an image \- each
 name's type, mode, owner, size and time, and a symbolic link's target \-
@@ -1874,8 +1889,12 @@ capture, estimate and status, and restore: the tree.
 .B path
 list: the directory to list; / if not given.
 .TP
-.BR rules " (repeatable), " all ", " baseline_content ", " one_file_system
-capture, estimate (rules for restore too).
+.BR rules " (repeatable), " all ", " one_file_system
+capture, estimate and status (rules for restore too); a status job
+classifies by the capture's own rules unless given these.
+.TP
+.B baseline_content
+capture and estimate.
 .TP
 .BR quiesce ", " quiesce_with " (repeatable), " append_only ", " create ", " sign_with ", " tmpdir
 capture.
@@ -1915,7 +1934,11 @@ for capture, prune, repack, protect, check and copy.
 .PP
 A key restate does not know, a key the command has no use for, a key given
 twice that is not repeatable, or a value of the wrong kind refuses the whole
-job, saying where. Nothing in a job can name a program to run, or a hook by
+job, saying where; if the job names a
+.BR result ,
+the refusal is written there as a failed run's, with why in
+.BR errors .
+Nothing in a job can name a program to run, or a hook by
 path: a hook is a name, found as
 .B \-\-quiesce\-with
 finds it. The file has to be a regular file, not a symlink, and it and the
@@ -2061,7 +2084,10 @@ for one that is not encrypted. verify, status and list name the
 they read, or the
 .BR image ,
 a repository's newest as
-.IR REPO :: NAME .
+.IR REPO :: NAME ;
+verify and status say in
+.B capture_rules
+whether they classified by the rules the capture recorded.
 A job's result names the job, in
 .BR job .
 .PP
@@ -2078,7 +2104,9 @@ and
 .BR features .
 .B restate features \-\-json
 says what this restate can do \- its version, commands, options, the keys a
-job takes and the commands a job can be, the schemas, what results have
+job takes, the commands a job can be and the keys each takes
+.RB ( job_command_keys ),
+the schemas, what results have
 gained since schema 1 began
 .RB ( result_members ,
 such as

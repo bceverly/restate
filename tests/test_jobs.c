@@ -187,6 +187,38 @@ static void other_jobs(void)
     CHECK_STR(job.opts.root, "/mnt/old");
     CHECK_INT(job.opts.ntrusted, 1);
     rs_job_free(&job);
+    CHECK(parse(&job, "command = status\nrepository = /r\nrules = /a.rules\nrules = /b.rules\n"
+                      "all = true\none_file_system = yes\n", &why));
+    free(why);
+    CHECK_INT(job.opts.nrules_files, 2);
+    CHECK(job.opts.all && job.opts.one_fs);
+    rs_job_free(&job);
+
+    TEST_CASE("jobs: where a refused job says to report");
+    {
+        static const char text[] = "# refused\n"
+                                   "result = relative.json\n"
+                                   "result = /var/lib/r.json\n"
+                                   "result = /var/lib/second.json\n"
+                                   "not a pair\n"
+                                   "report_group = bad group\n"
+                                   "report_group = restate-report\n"
+                                   "command = nonsense\n"
+                                   "command = status\n"
+                                   "command = list\n"
+                                   "keep_last = 3\n";
+
+        rs_job_init(&job);
+        rs_job_reporting(text, sizeof(text) - 1, &job);
+        CHECK_STR(job.opts.result, "/var/lib/r.json");
+        CHECK_STR(job.opts.report_group, "restate-report");
+        CHECK_INT(job.opts.command, CMD_STATUS);
+        rs_job_reporting("result = /a\0", 12, &job);
+        CHECK(job.opts.result == NULL);
+        rs_job_reporting("", 0, &job);
+        CHECK(job.opts.result == NULL && job.opts.command == CMD_NONE);
+        rs_job_free(&job);
+    }
 
     TEST_CASE("jobs: list, a directory of a snapshot, or its top");
     CHECK(parse(&job, "command = list\nsnapshot = /r::20261020T030000Z\npath = /etc\n", &why));

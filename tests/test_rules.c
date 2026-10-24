@@ -4,6 +4,7 @@
  */
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -36,6 +37,47 @@ static int parse_slash(const void *arg)
     return ok ? 1 : 0;
 }
 
+/* Whether the classification `json` reads as rules, appended to `rs`. */
+static bool from_json(struct rs_rules *rs, const char *json)
+{
+    struct rs_json_parser jp;
+    struct rs_jval        v;
+    struct rs_buf         err;
+    bool                  ok;
+
+    rs_buf_init(&err);
+    rs_json_init(&jp, json, strlen(json), &err);
+    memset(&v, 0, sizeof(v));
+    ok = rs_json_value(&jp, &v) && rs_rules_from_json(rs, &v, "recorded");
+    rs_jval_free(&v);
+    rs_buf_free(&err);
+    return ok;
+}
+
+static void recorded(void)
+{
+    struct rs_rules rs;
+    long            which;
+
+    TEST_CASE("rules: as an index records them");
+    rs_rules_init(&rs);
+    CHECK(from_json(&rs, "{\"rules\": [[\"ephemeral\", \"/tmp\"], "
+                         "[\"expendable\", \"/srv/sync\"]], \"all\": false}"));
+    CHECK_INT(rs.count, 2);
+    CHECK_INT(rs_rules_classify(&rs, "/srv/sync/x", &which), RS_CLASS_EXPENDABLE);
+    CHECK_STR(rs.rules[1].source, "recorded");
+    CHECK(from_json(&rs, "{\"rules\": []}"));
+    CHECK(!from_json(&rs, "{}"));
+    CHECK(!from_json(&rs, "{\"rules\": {}}"));
+    CHECK(!from_json(&rs, "{\"rules\": [[\"state\"]]}"));
+    CHECK(!from_json(&rs, "{\"rules\": [[\"nonsense\", \"/x\"]]}"));
+    CHECK(!from_json(&rs, "{\"rules\": [[\"state\", \"\"]]}"));
+    CHECK(!from_json(&rs, "{\"rules\": [[\"state\", 5]]}"));
+    CHECK(!from_json(&rs, "{\"rules\": [5]}"));
+    CHECK_INT(rs.count, 2);
+    rs_rules_free(&rs);
+}
+
 void test_rules(void)
 {
     struct rs_rules rs;
@@ -46,6 +88,7 @@ void test_rules(void)
     size_t          i;
 
     rs_buf_init(&err);
+    recorded();
 
     TEST_CASE("rules: class names");
     CHECK_STR(rs_class_name(RS_CLASS_EPHEMERAL), "ephemeral");
