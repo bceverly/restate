@@ -27,7 +27,8 @@
 static const char *const server_json[] = {
     "{\"notes\": [\"something was not readable\"],"
     " \"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"version\": \"26.04.1 LTS\","
-    "   \"pretty_name\": \"Ubuntu 26.04.1 LTS\", \"architecture\": \"x86_64\", \"hostname\": \"web01\","
+    "   \"pretty_name\": \"Ubuntu 26.04.1 LTS\", \"architecture\": \"x86_64\", \"hostname\": "
+    "\"web01\","
     "   \"type\": \"server\", \"type_evidence\": \"no desktop\", \"virtualization\": \"none\","
     "   \"locale\": \"en_GB.UTF-8\", \"keyboard_layout\": \"gb\", \"keyboard_variant\": \"extd\","
     "   \"timezone\": \"Europe/London\", \"ssh_server\": true,"
@@ -35,29 +36,36 @@ static const char *const server_json[] = {
     "     {\"name\": \"Bad Name\", \"uid\": 900},"
     "     {\"name\": \"pat\", \"uid\": 1000, \"gecos\": \"Pat Smith,,,\"}],"
     "   \"hardware_packages\": [\"mdadm\", \"intel-microcode\"], \"guest_packages\": []},"
-    " \"hardware\": {\"sys_vendor\": \"Example\", \"product_name\": \"Box 1\", \"cpu\": \"Fast CPU\","
+    " \"hardware\": {\"sys_vendor\": \"Example\", \"product_name\": \"Box 1\", \"cpu\": \"Fast "
+    "CPU\","
     "   \"cpus\": 16, \"memory\": 34359738368,"
     "   \"network\": [{\"name\": \"eno1\", \"mac\": \"52:54:00:00:00:01\"},"
     "                {\"name\": \"wlp2s0\", \"mac\": \"52:54:00:00:00:02\"},"
     "                {\"name\": \"eno2\"}]},"
     " \"firmware\": {\"mode\": \"uefi\", \"secure_boot\": true, \"boot_loaders\": [\"grub\"]},"
     " \"disks\": ["
-    "  {\"name\": \"sda\", \"size\": 107374182400, \"logical_block_size\": 512, \"model\": \"Disk A\","
+    "  {\"name\": \"sda\", \"size\": 107374182400, \"logical_block_size\": 512, \"model\": \"Disk "
+    "A\","
     "   \"serial\": \"SN-A\", \"table\": {\"type\": \"gpt\", \"uuid\": \"table-a\"},"
     "   \"partitions\": ["
     "    {\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 536870912,"
-    "     \"type\": \"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\", \"uuid\": \"p-a1\", \"label\": \"EFI \\\"System\\\"\","
+    "     \"type\": \"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\", \"uuid\": \"p-a1\", \"label\": \"EFI "
+    "\\\"System\\\"\","
     "     \"flags\": \"0x8000000000000005\","
-    "     \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\", \"uuid\": \"ABCD-1234\", \"version\": \"FAT32\", \"label\": \"ESP\"}},"
+    "     \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\", \"uuid\": \"ABCD-1234\", "
+    "\"version\": \"FAT32\", \"label\": \"ESP\"}},"
     "    {\"name\": \"sda2\", \"number\": 2, \"start\": 537919488, \"size\": 1073741824,",
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\", \"uuid\": \"p-a2\","
-    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"boot-uuid\", \"label\": \"boot\"}},"
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"boot-uuid\", "
+    "\"label\": \"boot\"}},"
     "    {\"name\": \"sda3\", \"number\": 3, \"start\": 1611661312, \"size\": 105000000000,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\", \"uuid\": \"p-a3\","
-    "     \"content\": {\"type\": \"crypto_LUKS\", \"usage\": \"crypto\", \"uuid\": \"luks-uuid\", \"version\": \"2\"},"
+    "     \"content\": {\"type\": \"crypto_LUKS\", \"usage\": \"crypto\", \"uuid\": \"luks-uuid\", "
+    "\"version\": \"2\"},"
     "     \"luks\": {\"version\": 2, \"cipher\": \"aes-xts-plain64\", \"key_size\": 512,"
     "               \"tokens\": [{\"type\": \"systemd-tpm2\"}]}}]},"
-    "  {\"name\": \"sdb\", \"size\": 21474836480, \"logical_block_size\": 512, \"rotational\": true,"
+    "  {\"name\": \"sdb\", \"size\": 21474836480, \"logical_block_size\": 512, \"rotational\": "
+    "true,"
     "   \"table\": {\"type\": \"gpt\"},"
     "   \"partitions\": ["
     "    {\"name\": \"sdb1\", \"number\": 1, \"start\": 1048576, \"size\": 10737418240,"
@@ -65,19 +73,23 @@ static const char *const server_json[] = {
     "     \"content\": {\"type\": \"linux_raid_member\", \"usage\": \"raid\"}},"
     "    {\"name\": \"sdb2\", \"number\": 2, \"start\": 10738466816, \"size\": 2147483648,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
-    "     \"content\": {\"type\": \"btrfs\", \"usage\": \"filesystem\", \"uuid\": \"btrfs-uuid\", \"label\": \"data\"}},"
+    "     \"content\": {\"type\": \"btrfs\", \"usage\": \"filesystem\", \"uuid\": \"btrfs-uuid\", "
+    "\"label\": \"data\"}},"
     "    {\"name\": \"sdb3\", \"number\": 3, \"start\": 12885950464, \"size\": 1073741824,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
-    "     \"content\": {\"type\": \"exfat\", \"usage\": \"filesystem\", \"uuid\": \"1063-C485\", \"label\": \"x\"}},"
+    "     \"content\": {\"type\": \"exfat\", \"usage\": \"filesystem\", \"uuid\": \"1063-C485\", "
+    "\"label\": \"x\"}},"
     "    {\"name\": \"sdb4\", \"number\": 4, \"start\": 13959692288, \"size\": 1073741824,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
     "     \"content\": {\"type\": \"f2fs\", \"usage\": \"filesystem\", \"uuid\": \"f2fs-uuid\"}},",
     "    {\"name\": \"sdb5\", \"number\": 5, \"start\": 15033434112, \"size\": 1073741824,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
-    "     \"content\": {\"type\": \"xfs\", \"usage\": \"filesystem\", \"uuid\": \"xfs-uuid2\", \"label\": \"scratch\"}},"
+    "     \"content\": {\"type\": \"xfs\", \"usage\": \"filesystem\", \"uuid\": \"xfs-uuid2\", "
+    "\"label\": \"scratch\"}},"
     "    {\"name\": \"sdb6\", \"number\": 6, \"start\": 16107175936, \"size\": 1073741824,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
-    "     \"content\": {\"type\": \"swap\", \"usage\": \"other\", \"uuid\": \"swap-uuid2\", \"label\": \"sw\"}},"
+    "     \"content\": {\"type\": \"swap\", \"usage\": \"other\", \"uuid\": \"swap-uuid2\", "
+    "\"label\": \"sw\"}},"
     "    {\"name\": \"sdb7\", \"number\": 7, \"start\": 17180917760, \"size\": 1073741824,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
     "     \"content\": {\"type\": \"ext3\", \"usage\": \"filesystem\"}}]},"
@@ -87,13 +99,17 @@ static const char *const server_json[] = {
     "    {\"name\": \"sdc1\", \"number\": 1, \"start\": 1048576, \"size\": 10737418240,"
     "     \"type\": \"a19d880f-05fc-4d3b-a006-743f0f84911e\","
     "     \"content\": {\"type\": \"linux_raid_member\", \"usage\": \"raid\"}}]},"
-    "  {\"name\": \"sdz\", \"size\": 8000000000, \"removable\": true, \"table\": {\"type\": \"dos\"},"
-    "   \"partitions\": [{\"name\": \"sdz1\", \"number\": 1, \"start\": 1048576, \"size\": 7000000000,"
+    "  {\"name\": \"sdz\", \"size\": 8000000000, \"removable\": true, \"table\": {\"type\": "
+    "\"dos\"},"
+    "   \"partitions\": [{\"name\": \"sdz1\", \"number\": 1, \"start\": 1048576, \"size\": "
+    "7000000000,"
     "     \"type\": \"0x0c\", \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\"}}]},"
-    "  {\"name\": \"nvme9n1\", \"size\": 1000000000, \"content\": {\"type\": \"LVM2_member\", \"usage\": \"raid\"}},"
+    "  {\"name\": \"nvme9n1\", \"size\": 1000000000, \"content\": {\"type\": \"LVM2_member\", "
+    "\"usage\": \"raid\"}},"
     "  {\"size\": 5}],"
     " \"mapped\": ["
-    "  {\"device\": \"dm-0\", \"name\": \"sda3_crypt\", \"kind\": \"luks\", \"devices\": [\"sda3\"],",
+    "  {\"device\": \"dm-0\", \"name\": \"sda3_crypt\", \"kind\": \"luks\", \"devices\": "
+    "[\"sda3\"],",
     "   \"content\": {\"type\": \"LVM2_member\", \"usage\": \"raid\"}},"
     "  {\"device\": \"dm-1\", \"name\": \"vg0-root\", \"kind\": \"lvm\", \"devices\": [\"dm-0\"],"
     "   \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"root-uuid\"}},"
@@ -102,24 +118,33 @@ static const char *const server_json[] = {
     "  {\"device\": \"dm-3\", \"name\": \"plain0\", \"kind\": \"crypt\", \"devices\": [\"sdb7\"]},"
     "  {\"device\": \"dm-4\", \"name\": \"odd-name\", \"kind\": \"lvm\"},"
     "  {\"kind\": \"luks\"}],"
-    " \"raid\": [{\"device\": \"md0\", \"level\": \"raid1\", \"metadata\": \"1.2\", \"uuid\": \"aa:bb:cc:dd\","
+    " \"raid\": [{\"device\": \"md0\", \"level\": \"raid1\", \"metadata\": \"1.2\", \"uuid\": "
+    "\"aa:bb:cc:dd\","
     "   \"chunk_size\": 524288, \"devices\": [\"sdb1\", \"sdc1\", 7],"
     "   \"content\": {\"type\": \"xfs\", \"usage\": \"filesystem\", \"uuid\": \"xfs-uuid\"}}, {}],"
     " \"mounts\": ["
-    "  {\"mountpoint\": \"/\", \"source\": \"/dev/mapper/vg0-root\", \"size\": 53687091200, \"used\": 4294967296},"
-    "  {\"mountpoint\": \"/srv\", \"source\": \"/dev/md0\", \"size\": 10000000000, \"used\": 1000000000},"
-    "  {\"mountpoint\": \"/data\", \"source\": \"/dev/sdb2\", \"size\": 2000000000, \"used\": 100}],"
+    "  {\"mountpoint\": \"/\", \"source\": \"/dev/mapper/vg0-root\", \"size\": 53687091200, "
+    "\"used\": 4294967296},"
+    "  {\"mountpoint\": \"/srv\", \"source\": \"/dev/md0\", \"size\": 10000000000, \"used\": "
+    "1000000000},"
+    "  {\"mountpoint\": \"/data\", \"source\": \"/dev/sdb2\", \"size\": 2000000000, \"used\": "
+    "100}],"
     " \"fstab\": ["
-    "  {\"spec\": \"/dev/mapper/vg0-root\", \"file\": \"/\", \"type\": \"ext4\", \"options\": \"errors=remount-ro\"},"
-    "  {\"spec\": \"UUID=boot-uuid\", \"file\": \"/boot\", \"type\": \"ext4\", \"options\": \"defaults\"},"
-    "  {\"spec\": \"LABEL=ESP\", \"file\": \"/boot/efi\", \"type\": \"vfat\", \"options\": \"umask=0077\"},"
+    "  {\"spec\": \"/dev/mapper/vg0-root\", \"file\": \"/\", \"type\": \"ext4\", \"options\": "
+    "\"errors=remount-ro\"},"
+    "  {\"spec\": \"UUID=boot-uuid\", \"file\": \"/boot\", \"type\": \"ext4\", \"options\": "
+    "\"defaults\"},"
+    "  {\"spec\": \"LABEL=ESP\", \"file\": \"/boot/efi\", \"type\": \"vfat\", \"options\": "
+    "\"umask=0077\"},"
     "  {\"spec\": \"/dev/disk/by-uuid/xfs-uuid\", \"file\": \"/srv\", \"type\": \"xfs\"},"
     "  {\"spec\": \"UUID=swap-uuid\", \"file\": \"none\", \"type\": \"swap\"},"
     "  {\"spec\": \"PARTUUID=nope\", \"file\": \"/nowhere\", \"type\": \"ext4\"},",
-    "  {\"spec\": \"nas:/export\", \"file\": \"/mnt/nas\", \"type\": \"nfs4\", \"options\": \"_netdev\"},"
+    "  {\"spec\": \"nas:/export\", \"file\": \"/mnt/nas\", \"type\": \"nfs4\", \"options\": "
+    "\"_netdev\"},"
     "  {\"spec\": \"//nas/share\", \"file\": \"/mnt/share\", \"type\": \"cifs\"},"
     "  {\"spec\": \"tmpfs\", \"file\": \"/tmp\", \"type\": \"tmpfs\"}],"
-    " \"crypttab\": [{\"name\": \"sda3_crypt\", \"device\": \"UUID=luks-uuid\", \"keyfile\": \"/etc/keys/root.key\"},"
+    " \"crypttab\": [{\"name\": \"sda3_crypt\", \"device\": \"UUID=luks-uuid\", \"keyfile\": "
+    "\"/etc/keys/root.key\"},"
     "               {\"name\": \"plain0\", \"device\": \"/dev/sdb7\", \"keyfile\": \"none\"}],"
     " \"swap\": [{\"file\": \"/swapfile\", \"type\": \"file\", \"size\": 2147483648},"
     "          {\"file\": \"/dev/dm-2\", \"type\": \"partition\", \"size\": 1}]"
@@ -158,15 +183,21 @@ static const char guest_json[] =
     "   \"guest_packages\": [\"qemu-guest-agent\"], \"hardware_packages\": []},"
     " \"hardware\": {\"network\": [{\"name\": \"enp1s0\", \"mac\": \"52:54:00:aa:bb:cc\"}]},"
     " \"firmware\": {\"mode\": \"bios\"},"
-    " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": \"dos\", \"uuid\": \"12345678\"},"
+    " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": \"dos\", "
+    "\"uuid\": \"12345678\"},"
     "   \"partitions\": ["
-    "    {\"name\": \"vda1\", \"number\": 1, \"start\": 1048576, \"size\": 20000000000, \"type\": \"0x83\","
-    "     \"flags\": \"0x80\", \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"g-root\"}},"
-    "    {\"name\": \"vda2\", \"number\": 2, \"start\": 20001048576, \"size\": 1073741824, \"type\": \"0x82\","
+    "    {\"name\": \"vda1\", \"number\": 1, \"start\": 1048576, \"size\": 20000000000, \"type\": "
+    "\"0x83\","
+    "     \"flags\": \"0x80\", \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", "
+    "\"uuid\": \"g-root\"}},"
+    "    {\"name\": \"vda2\", \"number\": 2, \"start\": 20001048576, \"size\": 1073741824, "
+    "\"type\": \"0x82\","
     "     \"content\": {\"type\": \"swap\", \"usage\": \"other\", \"uuid\": \"g-swap\"}}]},"
-    "   {\"name\": \"vdb\", \"size\": 10737418240, \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\","
+    "   {\"name\": \"vdb\", \"size\": 10737418240, \"content\": {\"type\": \"ext4\", \"usage\": "
+    "\"filesystem\","
     "     \"uuid\": \"g-data\"}}],"
-    " \"fstab\": [{\"spec\": \"UUID=g-root\", \"file\": \"/\", \"type\": \"ext4\", \"options\": \"defaults\"},"
+    " \"fstab\": [{\"spec\": \"UUID=g-root\", \"file\": \"/\", \"type\": \"ext4\", \"options\": "
+    "\"defaults\"},"
     "            {\"spec\": \"UUID=g-swap\", \"file\": \"none\", \"type\": \"swap\"},"
     "            {\"spec\": \"/dev/vdb\", \"file\": \"/data\", \"type\": \"ext4\"}]"
     "}";
@@ -193,7 +224,8 @@ static const char dual_json[] =
     "    {\"name\": \"nvme0n1p6\", \"number\": 6, \"start\": 400122683392, \"size\": 99000000000,"
     "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
     "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"lap-root\"}}]}],"
-    " \"mapped\": [{\"device\": \"dm-0\", \"name\": \"veracrypt1\", \"kind\": \"other\", \"devices\": [\"nvme0n1p4\"],"
+    " \"mapped\": [{\"device\": \"dm-0\", \"name\": \"veracrypt1\", \"kind\": \"other\", "
+    "\"devices\": [\"nvme0n1p4\"],"
     "   \"content\": {\"type\": \"exfat\", \"usage\": \"filesystem\"}}],"
     " \"fstab\": [{\"spec\": \"UUID=lap-root\", \"file\": \"/\", \"type\": \"ext4\"},"
     "            {\"spec\": \"UUID=AAAA-BBBB\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
@@ -211,13 +243,16 @@ static const char *const packages_json[] = {
     "   {\"path\": \"/usr/share/keyrings/gone.gpg\", \"missing\": true},"
     "   {\"data\": \"AAAA\"}],",
     "  \"packages\": ["
-    "   {\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1-1\", \"manual\": true,"
+    "   {\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1-1\", \"manual\": "
+    "true,"
     "    \"origins\": [\"http://archive stable/main\"]},"
-    "   {\"name\": \"libfoo\", \"architecture\": \"i386\", \"version\": \"1.0~rc1\", \"manual\": true,"
+    "   {\"name\": \"libfoo\", \"architecture\": \"i386\", \"version\": \"1.0~rc1\", \"manual\": "
+    "true,"
     "    \"origins\": [\"x\"], \"hold\": true},"
     "   {\"name\": \"tzdata\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": true,"
     "    \"origins\": [\"x\"]},"
-    "   {\"name\": \"evil\", \"architecture\": \"amd64\", \"version\": \"1$(reboot)'\", \"manual\": true,"
+    "   {\"name\": \"evil\", \"architecture\": \"amd64\", \"version\": \"1$(reboot)'\", "
+    "\"manual\": true,"
     "    \"origins\": [\"x\"]},"
     "   {\"name\": \"dep\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": false,"
     "    \"origins\": [\"x\"]},"
@@ -245,7 +280,8 @@ static const char *const packages_json[] = {
     "   \"kept\": \"/var/lib/snapd/snaps/asana_x1.snap\"}],"
     " \"alternatives\": [{\"name\": \"java\", \"path\": \"/usr/lib/jvm/21/bin/java\"},"
     "  {\"name\": \"nopath\"}],",
-    " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": \"https://dl.flathub.org/repo/\","
+    " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": "
+    "\"https://dl.flathub.org/repo/\","
     "   \"scope\": \"system\"}, {\"name\": \"mine\", \"url\": \"https://x/repo\","
     "   \"scope\": \"user /home/pat\"}, {\"name\": \"nourl\"}],"
     "  \"apps\": [{\"id\": \"org.example.App\", \"branch\": \"stable\", \"remote\": \"flathub\","
@@ -257,7 +293,8 @@ static const char *const packages_json[] = {
     "  {\"name\": \"httpie\", \"version\": \"3.2\","
     "   \"where\": \"/home/pat/.local/lib/python3.13/site-packages\"}, {\"name\": \"nowhere\"}],"
     " \"npm\": [{\"name\": \"npm\", \"version\": \"10\", \"where\": \"/usr/lib/node_modules\"},"
-    "  {\"name\": \"left-pad\", \"version\": \"1.3.0\", \"where\": \"/usr/local/lib/node_modules\"}],"
+    "  {\"name\": \"left-pad\", \"version\": \"1.3.0\", \"where\": "
+    "\"/usr/local/lib/node_modules\"}],"
     " \"pipx\": [{\"name\": \"black\", \"where\": \"/home/pat/.local/share/pipx/venvs\"}],"
     " \"cargo\": [{\"name\": \"ripgrep\", \"version\": \"14.1.0\", \"where\": \"/root\","
     "   \"source\": \"registry+https://github.com/rust-lang/crates.io-index\"},"
@@ -313,7 +350,8 @@ static void server(struct rs_jval *m)
     vg = rs_jarr_add(lvm);
     rs_jval_set_object(vg);
     rs_jobj_str(vg, "name", "lost");
-    rs_jobj_str(vg, "metadata", "lost {\n\tphysical_volumes {\n\t\tpv0 {\n\t\t\tdevice = \"/dev/gone2\"\n"
+    rs_jobj_str(vg, "metadata", "lost {\n\tphysical_volumes {\n\t\tpv0 {\n\t\t\tdevice = "
+                                "\"/dev/gone2\"\n"
                                 "\t\t}\n\t}\n}\n");
     vg = rs_jarr_add(lvm);
     rs_jval_set_object(vg);
@@ -404,7 +442,9 @@ static void layout_cases(void)
     CHECK(rs_layout_find(&l, "dm-0") == v);
     v = rs_layout_find(&l, "old");
     CHECK(v != SIZE_MAX && l.vols[v].kind == RS_VOL_LV);
-    CHECK_STR(rs_layout_find(&l, "md0") != SIZE_MAX ? l.vols[rs_layout_find(&l, "md0")].mountpoint : NULL, "/srv");
+    CHECK_STR(rs_layout_find(&l, "md0") != SIZE_MAX ? l.vols[rs_layout_find(&l, "md0")].mountpoint
+                                                    : NULL,
+              "/srv");
     CHECK_STR(l.vols[rs_layout_find(&l, "vg0-swap")].mountpoint, "[swap]");
     CHECK_STR(l.vols[rs_layout_find(&l, "sda1")].mountpoint, "/boot/efi");
     CHECK(l.vols[rs_layout_find(&l, "sdz1")].foreign);
@@ -428,7 +468,8 @@ static void layout_cases(void)
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sda1"), RS_TARGET_VM) == 536870912);
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sda3"), RS_TARGET_VM) < 105000000000);
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sdb1"), RS_TARGET_VM) > 0);
-    CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sdb2"), RS_TARGET_VM) == (uint64_t)2 * 1024 * 1024 * 1024);
+    CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sdb2"), RS_TARGET_VM) ==
+          (uint64_t)2 * 1024 * 1024 * 1024);
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "sdb6"), RS_TARGET_VM) == 1073741824);
     CHECK(rs_layout_fit(&l, rs_layout_find(&l, "nvme9n1"), RS_TARGET_VM) == 12 * 1024 * 1024);
 
@@ -437,10 +478,13 @@ static void layout_cases(void)
         struct rs_jval   c;
         struct rs_layout cl;
 
-        parse("{\"disks\": [{\"name\": \"sda\", \"size\": 107374182400, \"table\": {\"type\": \"gpt\"},"
-              " \"partitions\": [{\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 100000000000,"
+        parse("{\"disks\": [{\"name\": \"sda\", \"size\": 107374182400, \"table\": {\"type\": "
+              "\"gpt\"},"
+              " \"partitions\": [{\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": "
+              "100000000000,"
               " \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"u\"}}]}],"
-              " \"mounts\": [{\"mountpoint\": \"/\", \"source\": \"/dev/sda1\", \"size\": 99000000000,"
+              " \"mounts\": [{\"mountpoint\": \"/\", \"source\": \"/dev/sda1\", \"size\": "
+              "99000000000,"
               " \"used\": 90000000000, \"captured\": 0}]}", &c);
         CHECK(rs_layout_build(&c, &cl));
         CHECK(cl.vols[0].captured_known);
@@ -485,14 +529,16 @@ static void sheet_cases(void)
     CHECK_CONTAINS(s, "restate installer fetch web01.tgz");
     CHECK_CONTAINS(s, "label-id: table-a");
     CHECK_CONTAINS(s, "sda1 : start=2048, size=1048576, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
-    CHECK_CONTAINS(s, "name=\"EFI  System \", attrs=\"RequiredPartition,LegacyBIOSBootable,GUID:63\"");
+    CHECK_CONTAINS(s, "name=\"EFI  System \", "
+                      "attrs=\"RequiredPartition,LegacyBIOSBootable,GUID:63\"");
     CHECK_CONTAINS(s, "mkfs.vfat -F 32 -i ABCD1234 -n 'ESP' \"$(part \"$DISK1\" 1)\"");
     CHECK_CONTAINS(s, "mkfs.ext4 -F -U boot-uuid -L 'boot'");
     CHECK_CONTAINS(s, "cryptsetup luksFormat --batch-mode --type luks2 --uuid luks-uuid "
                       "--cipher aes-xts-plain64 --key-size 512");
     CHECK_CONTAINS(s, "cryptsetup open \"$(part \"$DISK1\" 3)\" sda3_crypt");
     CHECK_CONTAINS(s, "cat > /tmp/restate-vg0.vg <<'RESTATE_LVM_END'");
-    CHECK_CONTAINS(s, "pvcreate --yes --uuid pv-uuid --restorefile /tmp/restate-vg0.vg /dev/mapper/sda3_crypt");
+    CHECK_CONTAINS(s, "pvcreate --yes --uuid pv-uuid --restorefile /tmp/restate-vg0.vg "
+                      "/dev/mapper/sda3_crypt");
     CHECK_CONTAINS(s, "vgcfgrestore -f /tmp/restate-vg0.vg vg0");
     CHECK_CONTAINS(s, "mkfs.ext4 -F -U root-uuid /dev/vg0/root");
     CHECK_CONTAINS(s, "mkswap -U swap-uuid /dev/vg0/swap");
@@ -612,6 +658,49 @@ static void sheet_cases(void)
     }
 }
 
+static void system_package_cases(void)
+{
+    struct rs_jval m;
+    struct rs_jval pk;
+    char          *s;
+
+    TEST_CASE("buildsheet: the other systems' packages, those asked for");
+    server(&m);
+    parse("{\"managers\": [],"
+          " \"freebsd-pkg\": [{\"name\": \"bash\", \"automatic\": false},"
+          "  {\"name\": \"gettext\", \"automatic\": true}],"
+          " \"pkg\": [{\"name\": \"curl\"}], \"pkgsrc\": [{\"name\": \"hello\"}],"
+          " \"rpm\": [{\"name\": \"httpd\"}], \"pacman\": [{\"name\": \"vim\"}],"
+          " \"apk\": [{\"name\": \"busybox\"}],"
+          " \"homebrew\": [{\"name\": \"wget\"}, {\"name\": \"firefox\", \"cask\": true}],"
+          " \"nix\": [{\"name\": \"hello\"}], \"guix\": [{\"name\": \"coreutils\"}],"
+          " \"conda\": [{\"name\": \"python\", \"version\": \"3.12.4\", \"where\": \"/opt/conda\"},"
+          "  {\"name\": \"flask\", \"where\": \"/opt/conda/envs/web\"},"
+          "  {\"name\": \"numpy\", \"version\": \"2\", \"where\": \"/opt/conda\"}, {\"name\": "
+          "\"x\"}],"
+          " \"macos-receipts\": [{\"name\": \"com.apple.pkg.Core\"},"
+          "  {\"name\": \"com.example.tool\"}]}",
+          &pk);
+    s = sheet_with(&m, RS_TARGET_VM, NULL, &pk);
+    CHECK_CONTAINS(s, "    pkg install -y bash\n");
+    CHECK(strstr(s, "gettext") == NULL);
+    CHECK_CONTAINS(s, "    pkg_add curl\n");
+    CHECK_CONTAINS(s, "    pkgin -y install hello\n");
+    CHECK_CONTAINS(s, "    dnf install -y httpd\n");
+    CHECK_CONTAINS(s, "    pacman -S --needed vim\n");
+    CHECK_CONTAINS(s, "    apk add busybox\n");
+    CHECK_CONTAINS(s, "    brew install wget\n");
+    CHECK_CONTAINS(s, "    brew install --cask firefox\n");
+    CHECK_CONTAINS(s, "    nix profile install hello\n");
+    CHECK_CONTAINS(s, "    guix install coreutils\n");
+    CHECK_CONTAINS(s, "    conda install -y -p /opt/conda python=3.12.4 numpy=2\n");
+    CHECK_CONTAINS(s, "    conda install -y -p /opt/conda/envs/web flask\n");
+    CHECK_CONTAINS(s, "1 packages were installed here with macOS's installer");
+    free(s);
+    rs_jval_free(&pk);
+    rs_jval_free(&m);
+}
+
 static void package_cases(void)
 {
     struct rs_jval m;
@@ -676,7 +765,8 @@ static void package_cases(void)
                       "''/usr/sbin/restate ''/usr/bin/restate; do "
                       "[ -x \"$p\" ] && r=$p && break; done; if [ -n \"$r\" ]; then "
                       "\"$r\" restore --root / --exclude /etc/fstab --exclude /etc/crypttab "
-                      "web01.tgz || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image to "
+                      "web01.tgz || [ \"$?\" -eq 3 ]; else echo 'restate: no restate in the image "
+                      "to "
                       "restore with; tar instead, owners by number' >&2; tar -xOf web01.tgz");
     CHECK_CONTAINS(s, "restate restore reads an encrypted image");
     CHECK_CONTAINS(s, "update-alternatives --set java /usr/lib/jvm/21/bin/java");
@@ -720,11 +810,13 @@ static void package_cases(void)
                       "restate/files/etc/apt");
     CHECK_CONTAINS(s, "The image keeps these; install them from it:");
     CHECK_CONTAINS(s, "mkdir -p /tmp/restate && tar -xpzf web01.tgz -C /tmp/restate "
-                      "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+                      "--strip-components=2 restate/files/var/cache/apt/archives/"
+                      "chef_18_amd64.deb");
     CHECK_CONTAINS(s, "apt-get install -y /tmp/restate/var/cache/apt/archives/chef_18_amd64.deb");
     CHECK_CONTAINS(s, "restate/files/var/lib/snapd/snaps/asana_x1.snap && snap install --dangerous "
                       "/tmp/restate/var/lib/snapd/snaps/asana_x1.snap");
-    CHECK_CONTAINS(s, "    tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 restate/files\n");
+    CHECK_CONTAINS(s, "    tar -xpzf web01.tgz --numeric-owner -C / --strip-components=2 "
+                      "restate/files\n");
     CHECK(strstr(s, "kit.tar.gz") == NULL);
     free(s);
     old_layout = false;
@@ -845,7 +937,8 @@ static void autoinstall_package_cases(void)
                       "--exclude=restate/files/etc/shadow --exclude=restate/files/etc/gshadow\"");
     CHECK_CONTAINS(s, "mkdir -p /target/var/lib/restate/snaps && { [ ! -f "
                       "/target/var/lib/snapd/snaps/asana_x1.snap ] || cp "
-                      "/target/var/lib/snapd/snaps/asana_x1.snap /target/var/lib/restate/snaps/; }");
+                      "/target/var/lib/snapd/snaps/asana_x1.snap "
+                      "/target/var/lib/restate/snaps/; }");
     CHECK_CONTAINS(s, "mkdir -p /target/usr/share/keyrings/ && echo dmVuZG9yIGtleQ== | base64 -d > "
                       "/target/usr/share/keyrings/vendor.gpg");
     CHECK(strstr(s, "local.gpg") == NULL);
@@ -872,19 +965,23 @@ static void autoinstall_package_cases(void)
     CHECK(strstr(s, "remote-add --if-not-exists mine") == NULL);
     CHECK_CONTAINS(s, "curtin in-target -- flatpak install -y --noninteractive flathub "
                       "org.example.App//stable");
-    CHECK_CONTAINS(s, "curtin in-target -- pip install --break-system-packages requests==2.31.0 ||");
+    CHECK_CONTAINS(s, "curtin in-target -- pip install --break-system-packages "
+                      "requests==2.31.0 ||");
     CHECK(strstr(s, "httpie") == NULL);
     CHECK_CONTAINS(s, "curtin in-target -- npm install -g left-pad@1.3.0 ||");
     CHECK_CONTAINS(s, "curtin in-target -- gem install rake:13.0.6 ||");
-    CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java /usr/lib/jvm/21/bin/java");
+    CHECK_CONTAINS(s, "curtin in-target -- update-alternatives --set java "
+                      "/usr/lib/jvm/21/bin/java");
     CHECK_CONTAINS(s, "for p in /target/usr/local/sbin/restate /target/usr/local/bin/restate "
                       "/target/usr/sbin/restate /target/usr/bin/restate; do");
     CHECK_CONTAINS(s, "\\\"$r\\\" restore --root /target --exclude /etc/fstab --exclude "
                       "/etc/crypttab '/media/restate/web 01.tgz' || [ \\\"$?\\\" -eq 3 ]; else "
                       "echo 'restate: no restate in the image to restore with; tar instead, "
-                      "owners by number' >&2; tar -xOf '/media/restate/web 01.tgz' restate/files.tar.gz | tar -xzpf - "
+                      "owners by number' >&2; tar -xOf '/media/restate/web 01.tgz' "
+                      "restate/files.tar.gz | tar -xzpf - "
                       "--numeric-owner -C /target --strip-components=2 "
-                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab; fi\"");
+                      "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab; "
+                      "fi\"");
     CHECK_CONTAINS(s, "curtin in-target -- update-grub");
     CHECK(strstr(s, "update-alternatives") < strstr(s, "--exclude=restate/files/etc/fstab"));
     CHECK(strstr(s, "#   snap install --dangerous") == NULL);
@@ -903,7 +1000,8 @@ static void autoinstall_package_cases(void)
     s = autoinst_with(&m, RS_TARGET_VM, &pk, "/i.tgz");
     CHECK_CONTAINS(s, "tar -xpzf /i.tgz --numeric-owner -C /target --strip-components=2 "
                       "restate/files/etc/apt");
-    CHECK_CONTAINS(s, "--strip-components=2 restate/files/var/cache/apt/archives/chef_18_amd64.deb");
+    CHECK_CONTAINS(s, "--strip-components=2 "
+                      "restate/files/var/cache/apt/archives/chef_18_amd64.deb");
     CHECK_CONTAINS(s, "--exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab "
                       "restate/files\"");
     CHECK(strstr(s, "kit.tar.gz") == NULL);
@@ -954,7 +1052,8 @@ static void autoinstall_cases(void)
     CHECK_CONTAINS(s, "      - type: dm_crypt\n        id: \"crypt-sda3_crypt\"");
     CHECK_CONTAINS(s, "        key: \"CHANGE-ME\"");
     CHECK_CONTAINS(s, "      - type: lvm_volgroup\n        id: \"vg-vg0\"");
-    CHECK_CONTAINS(s, "      - type: lvm_partition\n        id: \"lv-vg0-root\"\n        name: \"root\"");
+    CHECK_CONTAINS(s, "      - type: lvm_partition\n        id: \"lv-vg0-root\"\n        name: "
+                      "\"root\"");
     CHECK_CONTAINS(s, "      - type: raid\n        id: \"md-md0\"");
     CHECK_CONTAINS(s, "        raidlevel: \"raid1\"\n        metadata: \"1.2\"");
     CHECK_CONTAINS(s, "        fstype: \"fat32\"\n        label: \"ESP\"");
@@ -1006,7 +1105,8 @@ static void autoinstall_cases(void)
 
     TEST_CASE("autoinstall: what it refuses");
     {
-        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false, NULL, NULL, NULL, NULL, NULL, NULL };
+        struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false,
+                                  NULL, NULL, NULL, NULL, NULL, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 
@@ -1332,7 +1432,8 @@ static void clones_cases(void)
     s = text.data;
     CHECK_CONTAINS(s, "#cloud-config\n");
     CHECK_CONTAINS(s, "# One file for 2 copies of the machine, from lab.csv.");
-    CHECK_CONTAINS(s, "#   web1                 52:54:00:00:00:01 -                    10.0.0.11/24\n");
+    CHECK_CONTAINS(s, "#   web1                 52:54:00:00:00:01 -                    "
+                      "10.0.0.11/24\n");
     CHECK_CONTAINS(s, "#   web2                 -                 SER-2                DHCP\n");
     CHECK_CONTAINS(s, "# The restore is made with --as");
     CHECK_CONTAINS(s, "\nautoinstall:\n  version: 1\n  early-commands:\n    - |\n");
@@ -1413,6 +1514,7 @@ static void clones_cases(void)
 void test_rebuild(void)
 {
     package_cases();
+    system_package_cases();
     firmware_cases();
     autoinstall_package_cases();
     layout_cases();

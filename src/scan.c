@@ -12,11 +12,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "blake2b.h"
 #include "image.h"
 #include "md5.h"
 #include "meta.h"
 #include "progress.h"
 #include "result.h"
+#include "sha1.h"
 
 /* O_DIRECTORY and O_NOFOLLOW are POSIX.1-2008, but be tolerant of a libc that
  * only exposes them under a feature macro this build did not ask for. */
@@ -514,16 +516,23 @@ static void name_package(const struct walk *w, struct rs_entry *e, const struct 
     e->package = rs_xstrndup(pkg, len);
 }
 
-/* The digests the packages at one path recorded -- MD5 (dpkg, pkgsrc),
- * SHA-256 (OpenBSD) -- of what is read, and how much of it there was. */
+/* The digests the packages at one path recorded -- MD5 (dpkg, pkgsrc, an
+ * old rpm), SHA-256 (OpenBSD, rpm, FreeBSD's pkg), BLAKE2b (FreeBSD's pkg
+ * 2.8), SHA-1 (apk) -- of what is read, and how much of it there was. */
 struct pkg_digests {
-    bool             want_md5;
-    bool             want_sha256;
-    struct rs_md5    md5;
-    struct rs_sha256 sha256;
-    unsigned char    md5_out[RS_MD5_SIZE];
-    unsigned char    sha256_out[RS_SHA256_SIZE];
-    uint64_t         bytes;
+    bool              want_md5;
+    bool              want_sha256;
+    bool              want_blake2b;
+    bool              want_sha1;
+    struct rs_md5     md5;
+    struct rs_sha256  sha256;
+    struct rs_blake2b blake2b;
+    struct rs_sha1    sha1;
+    unsigned char     md5_out[RS_MD5_SIZE];
+    unsigned char     sha256_out[RS_SHA256_SIZE];
+    unsigned char     blake2b_out[RS_BLAKE2B_SIZE];
+    unsigned char     sha1_out[RS_SHA1_SIZE];
+    uint64_t          bytes;
 };
 
 static void digests_start(struct pkg_digests *d)
@@ -531,6 +540,8 @@ static void digests_start(struct pkg_digests *d)
     d->bytes = 0;
     rs_md5_init(&d->md5);
     rs_sha256_init(&d->sha256);
+    rs_blake2b_init(&d->blake2b);
+    rs_sha1_init(&d->sha1);
 }
 
 static void digests_init(struct pkg_digests *d, const struct rs_pkgfile *f, size_t n)
@@ -542,6 +553,8 @@ static void digests_init(struct pkg_digests *d, const struct rs_pkgfile *f, size
     {
         d->want_md5 = d->want_md5 || f[i].digest_kind == RS_PKGDIGEST_MD5;
         d->want_sha256 = d->want_sha256 || f[i].digest_kind == RS_PKGDIGEST_SHA256;
+        d->want_blake2b = d->want_blake2b || f[i].digest_kind == RS_PKGDIGEST_BLAKE2B;
+        d->want_sha1 = d->want_sha1 || f[i].digest_kind == RS_PKGDIGEST_SHA1;
     }
     digests_start(d);
 }
@@ -556,6 +569,14 @@ static void digests_update(struct pkg_digests *d, const void *data, size_t n)
     {
         rs_sha256_update(&d->sha256, data, n);
     }
+    if (d->want_blake2b)
+    {
+        rs_blake2b_update(&d->blake2b, data, n);
+    }
+    if (d->want_sha1)
+    {
+        rs_sha1_update(&d->sha1, data, n);
+    }
     d->bytes += n;
 }
 
@@ -569,6 +590,14 @@ static void digests_final(struct pkg_digests *d)
     {
         rs_sha256_final_raw(&d->sha256, d->sha256_out);
     }
+    if (d->want_blake2b)
+    {
+        rs_blake2b_final(&d->blake2b, d->blake2b_out);
+    }
+    if (d->want_sha1)
+    {
+        rs_sha1_final(&d->sha1, d->sha1_out);
+    }
 }
 
 /* Whether what was read is what `f`'s package installed. */
@@ -580,6 +609,10 @@ static bool digests_match(const struct pkg_digests *d, const struct rs_pkgfile *
         return d->want_md5 && memcmp(f->digest, d->md5_out, RS_MD5_SIZE) == 0;
     case RS_PKGDIGEST_SHA256:
         return d->want_sha256 && memcmp(f->digest, d->sha256_out, RS_SHA256_SIZE) == 0;
+    case RS_PKGDIGEST_BLAKE2B:
+        return d->want_blake2b && memcmp(f->digest, d->blake2b_out, RS_SHA256_SIZE) == 0;
+    case RS_PKGDIGEST_SHA1:
+        return d->want_sha1 && memcmp(f->digest, d->sha1_out, RS_SHA1_SIZE) == 0;
     default:
         return false;
     }

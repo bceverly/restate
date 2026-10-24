@@ -278,6 +278,10 @@ Commands:
   status IMAGE            what has changed since a capture, quickly: as verify,
                           but a file whose size, times and inode are unchanged
                           is not read
+  list IMAGE [PATH]       list what is directly in the directory PATH (default
+                          /) of an image or snapshot, from its index alone:
+                          each name's type, mode, owner, size and time, with no
+                          content read
   sign IMAGE              sign an image or snapshot already written, with
                           --sign-with: so a capture run unattended needs no
                           secret key on the machine
@@ -383,10 +387,10 @@ Options:
                           with the OpenPGP secret key in KEYFILE (gpg
                           --export-secret-keys)
       --trusted-key=KEYFILE
-                          restore, verify, diff, status, export: accept an
-                          image or snapshot only if it is signed by the OpenPGP
-                          public key in KEYFILE (gpg --export); autoinstall:
-                          have the restore check that; repeatable
+                          restore, verify, diff, status, list, export: accept
+                          an image or snapshot only if it is signed by the
+                          OpenPGP public key in KEYFILE (gpg --export);
+                          autoinstall: have the restore check that; repeatable
       --allow-unverified  restore: restore an image that is unsigned, or not
                           signed by a --trusted-key, warning of it; by default
                           it is refused
@@ -427,7 +431,7 @@ Options:
                           make the --result and --progress-file files readable
                           by GROUP too (0640), so a monitoring program that is
                           not root can read them
-      --json              snapshots, diff, verify, status, du, estimate,
+      --json              snapshots, diff, verify, status, list, du, estimate,
                           features: write JSON rather than text (see RESULTS)
       --fetch-sources     capture, packages: also fetch each apt source's index
                           as its repository serves it now (with curl), and
@@ -691,9 +695,15 @@ was installed since, and from where, and `restate packages` prints it:
 - **flatpak:** remotes and apps, system-wide and per user.
 - **pip, npm, cargo, pipx, gems:** what was installed outside any project,
   system-wide and in each home.
-- **OpenBSD and NetBSD packages.** rpm, pacman, apk, Nix, Guix, Homebrew,
-  conda, FreeBSD's pkg and macOS receipts are noted as present, without an
-  inventory yet.
+- **The other systems' package managers:** rpm (on the running system, as
+  `rpm` says), pacman, apk, FreeBSD's pkg (on the running system, as `pkg`
+  says), OpenBSD's packages and pkgsrc -- each package's name and version,
+  and, where the manager says, whether it was asked for or came as what
+  another needs (`"automatic": true`), which a rebuild need not ask for.
+- **Homebrew, conda, Nix and Guix:** Homebrew's formulae and casks, conda's
+  packages in each environment, and what each Nix and Guix profile holds --
+  the default, each user's and each home's.
+- **macOS's installer receipts**, by package ID.
 - **Alternatives** chosen by hand (`update-alternatives --set`).
 
 Every apt source is **checked**, too, as apt checks it: its index as apt last
@@ -842,8 +852,10 @@ moved on from comes from the archive's snapshot as of the capture instead
 (`apt-get --snapshot`: snapshot.ubuntu.com and snapshot.debian.org), where
 apt can reach one -- the machine as it was, rather than with the security
 updates since, which is why it is not the default. Then the kept `.deb` files, the snaps by
-channel, the flatpak apps, what pip, npm, pipx, cargo and gem installed, and
-the alternatives chosen by hand. The packages no repository has are listed
+channel, the flatpak apps, what pip, npm, pipx, cargo and gem installed, the
+packages asked for of the other systems' managers (`pkg install`, `pkg_add`,
+`pkgin`, `dnf`, `pacman`, `apk`, `brew`, `nix profile`, `guix`, and conda
+in each environment), and the alternatives chosen by hand. The packages no repository has are listed
 with what to do about them.
 
 `restate autoinstall` writes the same layout as an Ubuntu autoinstall file for
@@ -1123,7 +1135,7 @@ is one chunk.
 
 **A snapshot is named `REPO::NAME`**, or `REPO` alone for the newest, and
 everything that reads an image reads one: `restore`, `verify`, `diff`,
-`status`, `packages`, `installer` and `sign`. `export` writes one out as an
+`status`, `list`, `packages`, `installer` and `sign`. `export` writes one out as an
 image, to take elsewhere -- encrypted with `--encrypt-to` and signed with
 `--sign-with` -- and to make a build sheet or an autoinstall file from, since
 the commands they write unpack an image's file:
@@ -1137,6 +1149,18 @@ $ restate export --encrypt-to offsite.pub /var/backups/web01 -o web01-20261012.t
 **`status`** says what has changed since a snapshot (or an image), quickly:
 `verify`'s comparison, but reading only the files whose size, times or inode
 say they changed.
+
+**`list`** says what is directly in one directory of a snapshot -- each
+name's type, mode, owner, size and time, and a symlink's target -- from its
+index alone, reading no pack: to look through what a snapshot holds and pick
+what to restore.
+
+```console
+$ restate list /var/backups/web01 /etc/nginx
+d 0755 root     root                0 2026-10-11T09:12:40.118362511Z  conf.d
+f 0644 root     root             1447 2026-10-11T09:12:40.118362511Z  nginx.conf
+l 0777 root     root               34 2026-10-11T09:12:40.122362530Z  sites-enabled -> /etc/nginx/sites-available
+```
 
 **`prune`** drops the snapshots it is not told to keep -- the newest
 `--keep-last N`, and the newest of each of the last `--keep-daily N` days,
@@ -1390,6 +1414,11 @@ progress     = /var/lib/restate/nightly.progress
 report_group = restate-report
 ```
 
+A job can be a `capture`, `prune`, `check`, `copy`, `snapshots`, `restore`,
+`estimate`, `du`, `repack`, `protect`, `status` or `list`; a `status` or `list`
+job reads the newest snapshot unless `snapshot` names one, and a `list` job
+lists the directory `path` says (`/` if it says none).
+
 `restate-job@.service` runs `/etc/restate/jobs.d/NAME.conf` for the instance
 `NAME` -- at a low priority and idle I/O, for up to a day, letting restate
 resume what it paused if it is stopped -- and `restate-job@.timer` runs it
@@ -1418,7 +1447,7 @@ into `FILE` when the run ends, replaced whole:
   "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
   "paths": 821158, "kept": 455640, "read_bytes": 2254857216,
   "reused": 454431, "reused_bytes": 167503724544, "new_bytes": 431996928,
-  "repository_bytes": 178241380352,
+  "repository_bytes": 178241380352, "cache": null,
   "unreadable": {"count": 0, "first": []},
   "quiesce": [{"kind": "postgresql", "name": "18-main", "paused_at": "2026-10-20T03:12:40Z",
                "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "message": ""}],
@@ -1430,10 +1459,19 @@ Every warning is collected, `--quiet` or not, every error -- so a run that
 failed says why in its result, not only on standard error -- and every path a
 walk could not read with why; prune, repack, protect, check, restore (its plan, in a dry run,
 and `"content_read": false` for a `--plan`), copy, du, estimate and diff add
-what they did. `--json` writes the output itself as JSON
-for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `du`,
+what they did. `diff`, `verify` and `status` give the first 1000 of each kind
+of change -- added, deleted, modified -- in `diff.changes`, with
+`diff.truncated` if there were more; `list` gives the first 5000 names in
+`list.entries`, with `list.truncated`; and `verify`, `status` and `list` name
+the `snapshot` they read (a repository's newest as `REPO::NAME`) or the
+`image`. A capture into an encrypted repository gives `"cache": {"path":
+..., "bytes": ...}`, this machine's cache of it, and `"cache": null` into one
+that is not. `--json` writes the output itself as JSON
+for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `list`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate
-can do -- commands, options, job keys, schemas, the hooks here (each hook is
+can do -- commands, options, job keys and the commands a job can be, schemas,
+what results have gained since schema 1 began (`result_members`, such as
+`capture.cache`), the hooks here (each hook is
 asked `HOOK present NAME`, and one that answers `absent` is left out, so a
 host lists only what it has) -- for a program to ask before it asks. The result and progress files are their
 owner's alone unless `--report-group GROUP` makes them that group's to read
@@ -1590,16 +1628,33 @@ leading `/`, or with `**` in its first component, never leads the walk in.
 `*` matches within one component, `**` across components, `**/` zero or more
 whole directories, and a pattern with no leading `/` matches at any depth.
 
-Where dpkg manages the system, the rules are only the start. Every regular
-file the rules call baseline or state is checked against the digest dpkg
-recorded when its package installed it:
+Where a package manager restate reads manages the system, the rules are only
+the start. Every regular file the rules call baseline or state is checked
+against the digest its package manager recorded when it installed it:
+
+| Package manager | What restate reads | Digest |
+|---|---|---|
+| dpkg | `/var/lib/dpkg/info/*.md5sums`, `status`'s conffiles, diversions | MD5 |
+| rpm | `rpm -qa`, on the running system (its database is SQLite) | SHA-256, or MD5 from an old rpm |
+| pacman | `/var/lib/pacman/local/*/mtree` | SHA-256 |
+| apk | `/lib/apk/db/installed` | SHA-1 |
+| FreeBSD's pkg | `pkg query`, on the running system (SQLite again) | SHA-256, or BLAKE2b from pkg 2.8 |
+| OpenBSD's packages | `/var/db/pkg/*/+CONTENTS` | SHA-256 |
+| pkgsrc (NetBSD) | `/usr/pkg/pkgdb/*/+CONTENTS` and `+INSTALL` | MD5 |
+
+restate runs `rpm` and `pkg` the way it runs gzip: from a fixed path, owned
+by root, and only for the system it is running on -- a tree mounted from
+another disk has no database they can read, and that tree is classified by
+its rules. The rest are read as files, beneath the tree scanned.
 
 - one that still matches is **baseline**, and the index names its package —
   an untouched conffile in `/etc`, a vendor's files in `/opt` are not kept,
   since reinstalling the package puts them back;
 - one that does not is **state**, `"modified": true` in the index, and kept;
 - one in a baseline tree (`/usr`, `/boot`) that no package installed is
-  **state**, and kept: it was put there by hand.
+  **state**, and kept: it was put there by hand. On the BSDs, whose base
+  system no package owns, that is only beneath the packages' own prefix
+  (`/usr/local`, `/usr/pkg`).
 
 What packages' own scripts generate there — initramfs images, module
 indexes, font and icon caches — no package owns either, and the built-in

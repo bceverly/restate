@@ -157,14 +157,21 @@ static void resolve_cases(void)
     TEST_CASE("installer: picking the image from SHA256SUMS");
     {
         static const char sums[] =
-            "1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n"
-            "2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.2-live-server-amd64.iso\n"
-            "3333333333333333333333333333333333333333333333333333333333333333 *ubuntu-26.04.1-live-server-amd64.iso\r\n"
-            "4444444444444444444444444444444444444444444444444444444444444444  ubuntu-26.04.3-desktop-amd64.iso\n"
-            "5555555555555555555555555555555555555555555555555555555555555555 *ubuntu-26.04.9-live-server-amd64.iso/x\n"
-            "6666666666666666666666666666666666666666666666666666666666666666 *ubuntu-26.04.x-live-server-amd64.iso\n"
+            "1111111111111111111111111111111111111111111111111111111111111111"
+            " *ubuntu-26.04-live-server-amd64.iso\n"
+            "2222222222222222222222222222222222222222222222222222222222222222"
+            " *ubuntu-26.04.2-live-server-amd64.iso\n"
+            "3333333333333333333333333333333333333333333333333333333333333333"
+            " *ubuntu-26.04.1-live-server-amd64.iso\r\n"
+            "4444444444444444444444444444444444444444444444444444444444444444"
+            "  ubuntu-26.04.3-desktop-amd64.iso\n"
+            "5555555555555555555555555555555555555555555555555555555555555555"
+            " *ubuntu-26.04.9-live-server-amd64.iso/x\n"
+            "6666666666666666666666666666666666666666666666666666666666666666"
+            " *ubuntu-26.04.x-live-server-amd64.iso\n"
             "zzzz *short\n"
-            "777777777777777777777777777777777777777777777777777777777777777G *ubuntu-26.04.8-live-server-amd64.iso\n";
+            "777777777777777777777777777777777777777777777777777777777777777G"
+            " *ubuntu-26.04.8-live-server-amd64.iso\n";
         char *name = NULL;
         char  hash[RS_SHA256_HEX_SIZE];
 
@@ -438,12 +445,14 @@ void test_installer(void)
         (void)mkdir(home, 0700);
         (void)mkdir(mirror, 0755);
         cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --pinentry-mode loopback --passphrase '' "
-                           "--quick-gen-key 'restate test <test@example.invalid>' ed25519 sign never",
+                           "--quick-gen-key 'restate test <test@example.invalid>' "
+                           "ed25519 sign never",
                            home);
         CHECK(quiet_system(cmd) == 0);
         free(cmd);
         cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --export > '%s' 2>/dev/null; "
-                           "GNUPGHOME='%s' gpg --batch --with-colons --list-keys > '%s' 2>/dev/null",
+                           "GNUPGHOME='%s' gpg --batch --with-colons "
+                           "--list-keys > '%s' 2>/dev/null",
                            home, keyfile, home, listing);
         CHECK(system(cmd) == 0);
         free(cmd);

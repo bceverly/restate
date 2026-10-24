@@ -110,7 +110,8 @@ void test_pgp(void)
     (void)mkdir(home, 0700);
     (void)mkdir(empty, 0700);
     cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --pinentry-mode loopback --passphrase '' "
-                       "--quick-gen-key 'restate test <test@example.invalid>' default default never",
+                       "--quick-gen-key 'restate test <test@example.invalid>' "
+                       "default default never",
                        home);
     CHECK(quiet_system(cmd) == 0);
     free(cmd);

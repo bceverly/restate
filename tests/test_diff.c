@@ -173,6 +173,31 @@ void test_diff(void)
     CHECK_STR(text, "");
     CHECK_INT(st.added + st.deleted + st.modified, 0);
     free(text);
+
+    TEST_CASE("diff: the first of each kind of change, for a result");
+    {
+        struct rs_jval        first;
+        const struct rs_jval *c;
+
+        (void)rs_diff_collect(&first, 1);
+        text = diff_text(&m1, &m2, &st);
+        CHECK(rs_diff_collect(NULL, 0));
+        CHECK_STR(text, "M\t/a\tmode\nD\t/gone\nA\t/new\\tname\nA\t/zz\n");
+        CHECK_INT(first.type == RS_JARRAY ? first.n : 0, 3);
+        c = first.type == RS_JARRAY && first.n == 3 ? &first.items[0] : NULL;
+        CHECK(c && strcmp(rs_jobject_str(c, "change"), "M") == 0 &&
+              strcmp(rs_jobject_str(c, "what"), "mode") == 0);
+        c = first.type == RS_JARRAY && first.n == 3 ? &first.items[2] : NULL;
+        CHECK(c && strcmp(rs_jobject_str(c, "path"), "/new\tname") == 0);
+        free(text);
+        rs_jval_free(&first);
+        (void)rs_diff_collect(&first, 5);
+        text = diff_text(&m1, &m2, &st);
+        CHECK(!rs_diff_collect(NULL, 0));
+        CHECK_INT(first.type == RS_JARRAY ? first.n : 0, 4);
+        free(text);
+        rs_jval_free(&first);
+    }
     rs_index_free(&m2);
     rs_index_init(&m2);
     text = diff_text(&m1, &m2, &st);

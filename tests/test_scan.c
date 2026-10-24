@@ -178,7 +178,8 @@ void test_scan(void)
         CHECK_INT(e->cls, RS_CLASS_STATE);
     }
     e = rs_index_find(&m, "/etc/empty");
-    CHECK(e && strcmp(e->hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+    CHECK(e && strcmp(e->hash, "e3b0c44298fc1c149afbf4c8996fb924"
+                               "27ae41e4649b934ca495991b7852b855") == 0);
     e = rs_index_find(&m, "/etc/link");
     CHECK(e && e->type == 'l' && e->target && strcmp(e->target, "hosts") == 0);
     e = rs_index_find(&m, "/etc/fifo");

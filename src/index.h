@@ -150,6 +150,21 @@ bool rs_index_sort(struct rs_index *ix, struct rs_buf *err);
 /* Binary search; the index must be sorted. */
 const struct rs_entry *rs_index_find(const struct rs_index *ix, const char *path);
 
+/*
+ * What is directly in the directory `dir` (a clean absolute path), as the
+ * index has it, sorted by name: each name with its entry, or with NULL for a
+ * directory the index has paths beneath but no entry of its own for. NULL,
+ * with *n 0, when there is nothing in it; the caller frees the array, with
+ * rs_index_children_free.
+ */
+struct rs_child {
+    char                  *name;
+    const struct rs_entry *entry;
+};
+
+struct rs_child *rs_index_children(const struct rs_index *ix, const char *dir, size_t *n);
+void             rs_index_children_free(struct rs_child *c, size_t n);
+
 bool rs_index_write(const struct rs_index *ix, FILE *out);
 
 bool rs_index_parse(struct rs_index *ix, const char *text, size_t len,

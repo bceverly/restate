@@ -27,9 +27,22 @@
  * older one): every file, relative to the "@cwd" before it, with its
  * SHA-256 ("@sha", base64; OpenBSD) or its MD5 ("@comment MD5:", hex;
  * pkgsrc), and, for pkgsrc, the configuration files its +INSTALL copied from
- * the package's examples ("# FILE:"). Their base system is not packaged, so a file no package owns was
- * put there by hand only beneath the packages' own directories ("@cwd": the
- * scope of rs_pkgdb_scoped).
+ * the package's examples ("# FILE:"). Their base system is not packaged, so
+ * a file no package owns was put there by hand only beneath the packages'
+ * own directories ("@cwd": the scope of rs_pkgdb_scoped).
+ *
+ * FreeBSD's pkg and rpm keep theirs in SQLite, which restate does not read:
+ * it asks their own tools instead, and only of the running system (a tree
+ * mounted from elsewhere is not theirs to answer for). `pkg query` gives each
+ * file of each package with the package's prefix -- its scope, as "@cwd" is
+ * -- and the file's SHA-256 ("1$", hex) or, from pkg 2.8, its BLAKE2b ("2$",
+ * in pkg's own base32); `rpm -qa` each file with its digest (SHA-256, or MD5
+ * from an older rpm), whether it is a configuration file, and whether it was
+ * installed at all. rpm, like dpkg, puts every file of the system there.
+ *
+ * pacman's are files: /var/lib/pacman/local/NAME-VERSION/desc names the
+ * package, and its mtree, gzip'd, lists its files with their SHA-256; and
+ * apk's are in one, /lib/apk/db/installed, each file with its SHA-1.
  *
  * From those a scan knows, for any path, whether a package owns it and what
  * its content was when the package put it there: a file that still matches
@@ -49,6 +62,7 @@
 #include <stdint.h>
 
 #include "md5.h"
+#include "sha1.h"
 #include "sha256.h"
 
 #define RS_PKGFILE_CONFFILE 0x02u
@@ -58,7 +72,10 @@
 enum rs_pkgdigest {
     RS_PKGDIGEST_NONE = 0,
     RS_PKGDIGEST_MD5,               /* dpkg, pkgsrc */
-    RS_PKGDIGEST_SHA256             /* OpenBSD */
+    RS_PKGDIGEST_SHA256,            /* OpenBSD, FreeBSD's pkg, rpm */
+    RS_PKGDIGEST_BLAKE2B,           /* FreeBSD's pkg 2.8 and later: the first 32 bytes of
+                                     * its 64, which are as safe to compare with */
+    RS_PKGDIGEST_SHA1               /* apk */
 };
 
 struct rs_pkgfile {
@@ -99,7 +116,8 @@ void rs_pkgdb_free(struct rs_pkgdb *db);
 
 /*
  * Reads dpkg's database beneath `root` -- or, where there is none, OpenBSD's
- * or pkgsrc's. False if there is none -- no packages installed, or not a
+ * or pkgsrc's; or, where `root` is this system's own "/", what FreeBSD's pkg
+ * or rpm says. False if there is none -- no packages installed, or not a
  * system whose packages restate reads -- which is not an error: the scan then
  * classifies by its rules alone.
  */
@@ -146,6 +164,22 @@ bool rs_pkgdb_parse_contents(struct rs_pkgdb *db, const char *text);
  * configuration file it installed with the example's digest. */
 void rs_pkgdb_parse_install(struct rs_pkgdb *db, uint32_t pkg, const char *prefix,
                             const char *text);
-void rs_pkgdb_sort(struct rs_pkgdb *db);
+/* What `pkg query '%n\t%p\t%Fs\t%Fp'` writes: a line a file, its package's
+ * name and prefix, its sum and its path. Returns how many files it added. */
+size_t rs_pkgdb_parse_pkg(struct rs_pkgdb *db, const char *text);
+/* What rpm -qa writes with RS_PKGDB_RPM_FORMAT: a line a file, its package's
+ * name, the package's digest algorithm, the file's flags, its state, its
+ * digest and its path. Returns how many files it added. */
+#define RS_PKGDB_RPM_FORMAT \
+    "[%{=NAME}\t%{=FILEDIGESTALGO}\t%{FILEFLAGS}\t%{FILESTATES}\t%{FILEDIGESTS}\t%{FILENAMES}\n]"
+size_t rs_pkgdb_parse_rpm(struct rs_pkgdb *db, const char *text);
+/* A pacman package's mtree, uncompressed: its files ("./PATH", "\\ooo" for
+ * an unusual byte), with "sha256digest=" for each regular one. */
+void   rs_pkgdb_parse_mtree(struct rs_pkgdb *db, uint32_t pkg, const char *text);
+/* apk's installed database: "P:" a package, "F:" a directory, "R:" a file in
+ * it and "Z:Q1" its SHA-1, base64 ("Z:Q2", SHA-256). Returns how many files
+ * it added. */
+size_t rs_pkgdb_parse_apk(struct rs_pkgdb *db, const char *text);
+void   rs_pkgdb_sort(struct rs_pkgdb *db);
 
 #endif /* RESTATE_PKGDB_H */

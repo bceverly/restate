@@ -1794,6 +1794,43 @@ bool rs_repo_encrypted(const struct rs_repo *r)
     return r->encrypted;
 }
 
+const char *rs_repo_cache_path(const struct rs_repo *r)
+{
+    return r->cache;
+}
+
+uint64_t rs_repo_cache_bytes(const struct rs_repo *r)
+{
+    static const char *const subs[] = { "packs", "snapshots" };
+    uint64_t                 bytes = 0;
+    size_t                   k;
+
+    for (k = 0; r->cache && k < sizeof(subs) / sizeof(subs[0]); k++)
+    {
+        char                *dir = rs_xasprintf("%s/%s", r->cache, subs[k]);
+        DIR                 *d = opendir(dir);
+        const struct dirent *de;
+
+        while (d && (de = readdir(d)) != NULL)
+        {
+            char       *path = rs_xasprintf("%s/%s", dir, de->d_name);
+            struct stat st;
+
+            if (lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+            {
+                bytes += (uint64_t)st.st_size;
+            }
+            free(path);
+        }
+        if (d)
+        {
+            (void)closedir(d);
+        }
+        free(dir);
+    }
+    return bytes;
+}
+
 void rs_repo_set_recipients(struct rs_repo *r, const char *const *recips, size_t n)
 {
     r->recips = recips;
@@ -3431,8 +3468,8 @@ static bool put_chunk(struct rs_repo_writer *w, const unsigned char *p, size_t l
             return true;
         }
     }
-    if (!ensure_pack(w, w->err) || !pack_header(&w->pk, len, w->err) || !rs_tar_data(&w->pk.tar, p, len) ||
-        !rs_tar_pad(&w->pk.tar))
+    if (!ensure_pack(w, w->err) || !pack_header(&w->pk, len, w->err) ||
+        !rs_tar_data(&w->pk.tar, p, len) || !rs_tar_pad(&w->pk.tar))
     {
         if (w->err->len == 0)
         {

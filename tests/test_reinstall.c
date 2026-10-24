@@ -24,8 +24,10 @@ static const char inventory[] =
     "  {\"path\": \"/usr/share/keyrings/odd.gpg\", \"data\": \"$(reboot)\"}],"
     " \"packages\": ["
     "  {\"name\": \"jq\", \"architecture\": \"amd64\", \"version\": \"1.7\", \"manual\": true},"
-    "  {\"name\": \"libjq1\", \"architecture\": \"amd64\", \"version\": \"1.7\", \"manual\": false},"
-    "  {\"name\": \"tzdata\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": false},"
+    "  {\"name\": \"libjq1\", \"architecture\": \"amd64\", \"version\": \"1.7\", \"manual\": "
+    "false},"
+    "  {\"name\": \"tzdata\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": "
+    "false},"
     "  {\"name\": \"htop\", \"architecture\": \"amd64\", \"version\": \"3.3\", \"manual\": true,"
     "   \"hold\": true},"
     "  {\"name\": \"zoom\", \"architecture\": \"amd64\", \"version\": \"6.0\", \"manual\": true,"
@@ -41,7 +43,8 @@ static const char inventory[] =
     "   \"kept\": \"/var/lib/snapd/snaps/mine_x1.snap\"},"
     "  {\"name\": \"lost\", \"revision\": \"x2\", \"local\": true},"
     "  {\"name\": \"Bad Snap\", \"revision\": \"4\"}],"
-    " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": \"https://dl.flathub.org/repo/\","
+    " \"flatpak\": {\"remotes\": [{\"name\": \"flathub\", \"url\": "
+    "\"https://dl.flathub.org/repo/\","
     "   \"scope\": \"system\"}],"
     "  \"apps\": [{\"id\": \"org.gimp.GIMP\", \"branch\": \"stable\", \"remote\": \"flathub\","
     "   \"scope\": \"system\"},"
@@ -49,7 +52,8 @@ static const char inventory[] =
     "   \"scope\": \"user\"}]},"
     " \"pip\": [{\"name\": \"requests\", \"version\": \"2.31\", \"where\": \"/usr/local/lib\"},"
     "  {\"name\": \"mine\", \"version\": \"1\", \"where\": \"/home/pat/.local\"}],"
-    " \"npm\": [{\"name\": \"left-pad\", \"version\": \"1.3\", \"where\": \"/usr/local/lib/node_modules\"},"
+    " \"npm\": [{\"name\": \"left-pad\", \"version\": \"1.3\", \"where\": "
+    "\"/usr/local/lib/node_modules\"},"
     "  {\"name\": \"npm\", \"version\": \"9\", \"where\": \"/usr/lib/node_modules\"}],"
     " \"gem\": [{\"name\": \"rake\", \"version\": \"13\", \"where\": \"/var/lib/gems\"}],"
     " \"alternatives\": [{\"name\": \"editor\", \"path\": \"/usr/bin/vim.basic\"}]}";
@@ -274,7 +278,8 @@ void test_reinstall(void)
             "echo \"apt-get $*\" >> \"$LOG\"\n"
             "if [ \"$1\" = update ] && [ -n \"$APT_CONFIG\" ]; then\n"
             "  cat \"$APT_CONFIG\" \"${APT_CONFIG%/apt.conf}/sources.list\" \\\n"
-            "      \"${APT_CONFIG%/apt.conf}/repo/Packages\" \"${APT_CONFIG%/apt.conf}/repo/Release\" "
+            "      \"${APT_CONFIG%/apt.conf}/repo/Packages\" "
+            "\"${APT_CONFIG%/apt.conf}/repo/Release\" "
             ">> \"$LOG\"\n"
             "fi\n";
         static const char fake_dpkg_deb[] =
@@ -354,13 +359,15 @@ void test_reinstall(void)
         CHECK_CONTAINS(log.data, "deb [trusted=yes] file:");
         CHECK_CONTAINS(log.data, "Package: jq\nVersion: 1.7\nArchitecture: amd64\nDepends: libjq1\n"
                                  "Filename: ./jq_1.7_amd64.deb\nSize: 3\nSHA256: "
-                                 "9cfa1468c93fc18652e34a000f0c6614b0fa18f6f4887477ad9b0d36ca6a7eaa\n");
+                                 "9cfa1468c93fc18652e34a000f0c6614"
+                                 "b0fa18f6f4887477ad9b0d36ca6a7eaa\n");
         CHECK(strstr(log.data, "lie") == NULL);
         CHECK_CONTAINS(log.data, "\nSHA256:\n ");
         CHECK_CONTAINS(log.data, "apt-get install -y jq=1.7 htop=3.3\n");
         rs_buf_free(&log);
         CHECK(rs_read_beneath(t, "/out", 65536, &log));
-        CHECK_CONTAINS(log.data, "restate: offline: apt installs from 1 packages, and nothing else");
+        CHECK_CONTAINS(log.data, "restate: offline: apt installs from 1 packages, "
+                                 "and nothing else");
         rs_buf_free(&log);
     offline_done:;
     }

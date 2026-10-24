@@ -76,5 +76,7 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job);
 
 /* The keys a job can have, in the order the manual lists them. */
 const char *const *rs_job_keys(size_t *n);
+/* The commands a job can be, by name, for restate features. */
+const char *const *rs_job_commands(size_t *n);
 
 #endif /* RESTATE_JOBS_H */

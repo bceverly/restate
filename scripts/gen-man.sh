@@ -538,17 +538,28 @@ and a note. A snap installed from a file rather than the store is marked
 For flatpak it records the remotes and the apps of each installation, the
 system's and each user's. For pip, npm, cargo, pipx and Ruby gems it records
 what was installed outside any project: system-wide, and in the home
-directory of root and of each user who logs in. On OpenBSD and NetBSD it
-records the installed packages. It records the alternatives chosen by hand
+directory of root and of each user who logs in. For rpm, pacman, apk,
+FreeBSD's
+.BR pkg ,
+OpenBSD's packages and pkgsrc it records each package and its version, and,
+where the manager says, whether it was asked for or came as what another
+needs
+.RB ( """automatic""" );
+rpm and
+.BR pkg ,
+whose databases are SQLite, are asked, on the running system only. It
+records Homebrew's formulae and casks, conda's packages in each environment,
+what each Nix and Guix profile holds, and macOS's installer receipts. It
+records the alternatives chosen by hand
 .RB ( "update-alternatives \-\-set" ),
 and what each points at; the rest follow the packages by themselves.
-Other package managers \- rpm, pacman, apk,
-Nix, Guix, Homebrew, conda, FreeBSD's
-.BR pkg ,
-macOS receipts \- are listed in
-.B """managers"""
-as present, with no inventory in this version, so that an image says what it
-is missing rather than leaving it out silently.
+Every package manager found is listed in
+.BR """managers""" ,
+and one whose inventory could not be taken \- rpm's or
+.BR pkg 's
+of a tree that is not the running system \- as present with no inventory,
+so that an image says what it is missing rather than leaving it out
+silently.
 .PP
 With
 .BR \-\-keep\-local\-packages ,
@@ -601,16 +612,26 @@ packages put files:
 .IR /boot ,
 and the equivalents on each system, as
 .B restate rules
-lists them. On a system dpkg manages, the package manager then says which
-files those are. dpkg records, for every package installed, each file it put
-there and an MD5 digest of what it put there
+lists them. Where a package manager restate reads manages the system, it
+then says which files those are. dpkg records, for every package installed,
+each file it put there and an MD5 digest of what it put there
 .RI ( /var/lib/dpkg/info/*.md5sums ,
 and for configuration files the
 .B Conffiles
 of
-.IR /var/lib/dpkg/status ),
-and every regular file the rules call baseline or state is checked against
-it:
+.IR /var/lib/dpkg/status );
+pacman a SHA-256 of each
+.RI ( /var/lib/pacman/local/*/mtree );
+apk a SHA-1
+.RI ( /lib/apk/db/installed );
+OpenBSD a SHA-256 and pkgsrc an MD5, in each package's
+.IR +CONTENTS ;
+and rpm and FreeBSD's pkg, which keep theirs in SQLite, are asked
+.RB ( "rpm \-qa" ,
+.BR "pkg query" ,
+run as gzip is), on the running system alone, for each file's SHA-256 \-
+or an old rpm's MD5, or pkg 2.8's BLAKE2b. Every regular file the rules call
+baseline or state is checked against it:
 .IP \(bu 2
 A file that still matches what its package installed is baseline, and the
 index names the package, wherever the file is \- an unchanged configuration
@@ -625,7 +646,11 @@ A file that no longer matches is state, marked
 in the index, and kept: an edited configuration file, a patched binary.
 .IP \(bu 2
 A file in a baseline tree that no package installed is state, and kept: it
-was put there by hand.
+was put there by hand. On the BSDs, whose base system no package owns, that
+is only beneath the packages' own prefix:
+.I /usr/local
+or
+.IR /usr/pkg .
 .PP
 What packages' own scripts generate beneath those trees \- initramfs images,
 module indexes, icon and font caches, the compiled MIME and schema databases,
@@ -889,7 +914,10 @@ ones held again;
 the ones the image keeps, installed from it; the ones no repository has any
 more, or ever had, listed with what to do about them; then the snaps by
 channel, the flatpak apps by remote, what pip, npm, pipx, cargo and gem
-installed, each by its owner, and the alternatives chosen by hand. Every name and version in those commands is
+installed, each by its owner, the packages asked for of the other systems'
+managers \- FreeBSD's and OpenBSD's packages, pkgsrc, rpm, pacman, apk,
+Homebrew, Nix, Guix, and conda in each environment \- and the alternatives
+chosen by hand. Every name and version in those commands is
 quoted where it needs to be, because the inventory says whatever the
 captured tree said. The restore that follows puts the old configuration
 back over the packages' own.
@@ -1427,6 +1455,11 @@ they write unpack an image's file.
 says what has changed since a snapshot or an image, quickly: the comparison
 .B verify
 makes, reading only the files whose size, times or inode say they changed.
+.B list
+says what is directly in one directory of a snapshot or an image \- each
+name's type, mode, owner, size and time, and a symbolic link's target \-
+from its index alone, reading no pack: to look through what a snapshot holds
+and choose what to restore.
 .PP
 .B prune
 drops the snapshots it is not told to keep \- the newest
@@ -1819,22 +1852,27 @@ and the commands each means something to:
 .BR restore ,
 .BR estimate ,
 .BR du ,
-.B repack
+.BR repack ,
+.BR protect ,
+.B status
 or
-.BR protect .
+.BR list .
 .TP
 .B repository
 the repository; every command but estimate.
 .TP
 .B snapshot
-restore, copy: the snapshot's name, or
+restore, copy, status, list: the snapshot's name, or
 .IR REPO :: NAME
 in place of
 .BR repository ;
 the newest if not given.
 .TP
 .BR root ", " restore_root
-capture and estimate, and restore: the tree.
+capture, estimate and status, and restore: the tree.
+.TP
+.B path
+list: the directory to list; / if not given.
 .TP
 .BR rules " (repeatable), " all ", " baseline_content ", " one_file_system
 capture, estimate (rules for restore too).
@@ -1855,7 +1893,7 @@ for prune, repack and check.
 .BR read_all ", " metadata_only
 check;
 .BR trusted_key " (repeatable)"
-for check and restore.
+for check, restore, status and list.
 .TP
 .BR include ", " exclude " (repeatable), " check_first ", " plan ", " allow_unverified
 restore;
@@ -1926,6 +1964,7 @@ this run's whole result or the last one's:
  "snapshot": "/mnt/nas/restate/web01::20261020T030000Z",
  "paths": 812345, "kept": 20311, "read_bytes": 1048576, "reused": 811902,
  "reused_bytes": 9876543210, "new_bytes": 4096, "repository_bytes": 123456789,
+ "cache": null,
  "unreadable": {"count": 1, "first": [{"path": "/srv/x", "reason": "..."}]},
  "quiesce": [{"kind": "postgresql", "name": "16\-main",
    "paused_at": "...", "resumed_at": "...", "status": "ok", "message": ""}],
@@ -1992,7 +2031,38 @@ an object
 .B estimate
 and
 .BR diff ,
-objects of their own names; a job's,
+objects of their own names \- and
+.B verify
+and
+.BR status ,
+.B diff
+too \- with, in
+.BR diff ,
+the first 1000 of each kind of change, added, deleted and modified, as
+.B \-\-json
+writes them, and
+.B truncated
+if there were more;
+.BR list ,
+an object
+.B list
+with the first 5000 names in the directory, and
+.B truncated
+if there were more. A capture into an encrypted repository gives
+.BR cache ,
+the
+.B path
+of this machine's cache of it and the
+.B bytes
+it holds, and
+.B null
+for one that is not encrypted. verify, status and list name the
+.B snapshot
+they read, or the
+.BR image ,
+a repository's newest as
+.IR REPO :: NAME .
+A job's result names the job, in
 .BR job .
 .PP
 .B \-\-json
@@ -2001,13 +2071,19 @@ writes the output itself as JSON for
 .BR diff " (and " "diff \-\-packages" ),
 .BR verify ,
 .BR status ,
+.BR list ,
 .BR du ,
 .B estimate
 and
 .BR features .
 .B restate features \-\-json
 says what this restate can do \- its version, commands, options, the keys a
-job takes, the schemas, the hooks here and the programs it can use \- for a
+job takes and the commands a job can be, the schemas, what results have
+gained since schema 1 began
+.RB ( result_members ,
+such as
+.BR capture.cache ),
+the hooks here and the programs it can use \- for a
 program to ask before it asks for any of them. A hook that answers
 .B absent
 to

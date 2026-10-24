@@ -15,7 +15,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "gzip.h"
 #include "index.h"
+#include "run.h"
 #include "sha256.h"
 
 /* A key file is a few kilobytes; one that is not is not a key file. */
@@ -162,6 +164,47 @@ bool rs_read_beneath(const char *root, const char *rel, size_t max, struct rs_bu
     {
         (void)close(fd);
     }
+    if (!ok)
+    {
+        rs_buf_free(out);
+    }
+    return ok;
+}
+
+bool rs_read_beneath_gz(const char *root, const char *rel, size_t max, struct rs_buf *out)
+{
+    struct rs_gzip gz;
+    struct rs_buf  err;
+    char           chunk[8192];
+    ssize_t        n = 0;
+    int            fd = open_file(root, rel);
+    bool           ok;
+
+    rs_buf_init(out);
+    rs_buf_add(out, "", 0);
+    rs_buf_init(&err);
+    ok = fd >= 0 && rs_gzip_decompress(fd, &gz, &err);
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+    while (ok)
+    {
+        n = read(gz.fd, chunk, sizeof(chunk));
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n <= 0 || out->len + (size_t)n > max)
+        {
+            break;
+        }
+        rs_buf_add(out, chunk, (size_t)n);
+    }
+    /* Stopped short -- too large, or a read that failed -- gzip is told to
+     * stop, and what it held is not used. */
+    ok = ok && rs_gzip_finish(&gz, n != 0, &err) && n == 0;
+    rs_buf_free(&err);
     if (!ok)
     {
         rs_buf_free(out);
@@ -2117,7 +2160,8 @@ static void dated_block(const struct rs_jval *packages, const struct rs_jval *sk
                   "    fi\n"
                   "  fi\n"
                   "  name=${want%%=*}\n"
-                  "  if [ -n \"$usable\" ] && apt-get install -y --allow-downgrades --snapshot \"$id\" "
+                  "  if [ -n \"$usable\" ] && apt-get install -y --allow-downgrades "
+                  "--snapshot \"$id\" "
                   "\"$want\" < /dev/null; then\n"
                   "    echo \"restate: $want, from the archive's snapshot as of $id\" >&2\n"
                   "    ok=\"$ok $want\"\n"
@@ -2215,7 +2259,8 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
     rs_buf_addstr(out,
                   "done\n"
                   "if [ -n \"$gone\" ]; then\n"
-                  "  echo \"restate: apt cannot install these (no repository has them, or what\" \\\n"
+                  "  echo \"restate: apt cannot install these (no repository has them, or "
+                  "what\" \\\n"
                   "       \"they need):$gone\" >&2\n"
                   "fi\n"
                   "if [ -n \"$kept\" ]; then\n"
@@ -2239,7 +2284,8 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                       "  exact=''\n"
                       "  if apt-get update --snapshot \"$snap\" > /dev/null 2>&1; then\n"
                       "    for want in $older; do\n"
-                      "      if apt-get -s install --snapshot \"$snap\" \"$want\" > /dev/null 2>&1; "
+                      "      if apt-get -s install --snapshot \"$snap\" \"$want\" > /dev/null "
+                      "2>&1; "
                       "then\n"
                       "        exact=\"$exact $want\"\n"
                       "      else\n"
@@ -2247,21 +2293,24 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                       "      fi\n"
                       "    done\n"
                       "  else\n"
-                      "    echo \"restate: apt could not use the archive's snapshot as of $snap;\" \\\n"
+                      "    echo \"restate: apt could not use the archive's snapshot as of "
+                      "$snap;\" \\\n"
                       "         \"the versions there are now instead\" >&2\n"
                       "    for want in $older; do\n"
                       "      newer=\"$newer ${want%%=*}\"\n"
                       "    done\n"
                       "  fi\n"
                       "  if [ -n \"$exact\" ]; then\n"
-                      "    echo \"restate: from the archive's snapshot as of $snap, at the versions\" "
+                      "    echo \"restate: from the archive's snapshot as of $snap, at the "
+                      "versions\" "
                       "\\\n"
                       "         \"recorded:$exact\" >&2\n"
                       "    # shellcheck disable=SC2086\n"
                       "    if ! apt-get install -y --allow-downgrades --snapshot \"$snap\" $exact; "
                       "then\n"
                       "      for p in $exact; do\n"
-                      "        apt-get install -y --allow-downgrades --snapshot \"$snap\" \"$p\" || "
+                      "        apt-get install -y --allow-downgrades --snapshot \"$snap\" "
+                      "\"$p\" || "
                       "true\n"
                       "      done\n"
                       "    fi\n"
@@ -2280,14 +2329,16 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
     }
     rs_buf_addstr(out,
                   "if [ -n \"$newer\" ]; then\n"
-                  "  echo \"restate: the version recorded has gone; the current one instead:$newer\" >&2\n"
+                  "  echo \"restate: the version recorded has gone; the current one "
+                  "instead:$newer\" >&2\n"
                   "fi\n"
                   "# What dpkg says is installed, not what apt-get exited with: one package\n"
                   "# that will not configure makes every later apt-get fail, whatever it did.\n"
                   "missing=''\n"
                   "for p in $ok; do\n"
                   "  name=${p%%=*}\n"
-                  "  if [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$name\" 2> /dev/null)\" != installed ]; then\n"
+                  "  if [ \"$(dpkg-query -W -f='${db:Status-Status}' \"$name\" 2> /dev/null)\" "
+                  "!= installed ]; then\n"
                   "    missing=\"$missing $name\"\n"
                   "  fi\n"
                   "done\n"
@@ -2518,8 +2569,10 @@ static void describe_flatpak(const char *root, char **home, size_t nhome, struct
 /* Language package managers                                                  */
 /* ------------------------------------------------------------------------- */
 
-static void add_item(struct rs_jval *arr, const char *name, const char *version,
-                     const char *where)
+/* An item added to `arr`, returned to add more to: good only until the next
+ * is added. */
+static struct rs_jval *add_item(struct rs_jval *arr, const char *name, const char *version,
+                                const char *where)
 {
     struct rs_jval *o = rs_jarr_add(arr);
 
@@ -2530,6 +2583,7 @@ static void add_item(struct rs_jval *arr, const char *name, const char *version,
         rs_jobj_str(o, "version", version);
     }
     rs_jobj_str(o, "where", where);
+    return o;
 }
 
 /*
@@ -2784,35 +2838,1020 @@ static bool gem_dirs(const char *root, struct rs_jval *out)
     return any;
 }
 
-/* OpenBSD's and NetBSD's packages: one directory each, NAME-VERSION. */
-static bool bsd_pkgs(const char *root, const char *rel, struct rs_jval *out)
+/* ------------------------------------------------------------------------- */
+/* The system's package managers, beyond apt and snap                         */
+/* ------------------------------------------------------------------------- */
+
+/* "NAME-VERSION" split where the BSDs and Nix split one: at the first '-'
+ * before a digit. False, with nothing made, if there is no such '-'. */
+static bool split_version(const char *s, char **name, char **version)
 {
-    char **names;
+    size_t i;
+
+    for (i = 1; s[i] != '\0'; i++)
+    {
+        if (s[i] == '-' && s[i + 1] >= '0' && s[i + 1] <= '9')
+        {
+            *name = rs_xstrndup(s, i);
+            *version = rs_xstrdup(s + i + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Whether `text` has a line that is exactly `want`. */
+static bool has_line(const char *text, const char *want)
+{
+    size_t      n = strlen(want);
+    const char *p = text;
+
+    while (p && *p)
+    {
+        if (strncmp(p, want, n) == 0 && (p[n] == '\n' || p[n] == '\0'))
+        {
+            return true;
+        }
+        p = strchr(p, '\n');
+        p = p ? p + 1 : NULL;
+    }
+    return false;
+}
+
+/*
+ * OpenBSD's packages (/var/db/pkg) or pkgsrc's (/usr/pkg/pkgdb): one
+ * directory each, NAME-VERSION, with a +CONTENTS. Each says whether it was
+ * asked for or came as what another needs: OpenBSD's +CONTENTS has
+ * "@option manual-installation" for one asked for, pkgsrc's +INSTALLED_INFO
+ * "automatic=yes" for one that was not.
+ */
+/* One of bsd_pkgs's: the package in the directory rel/dir, if it is one. */
+static bool bsd_pkg(const char *root, const char *rel, const char *dir, const char *key,
+                    struct rs_jval *out)
+{
+    char *contents = rs_xasprintf("%s/%s/+CONTENTS", rel, dir);
+    char *info = rs_xasprintf("%s/%s/+INSTALLED_INFO", rel, dir);
+    char *name = NULL;
+    char *version = NULL;
+    bool  pkgsrc = strcmp(key, "pkgsrc") == 0;
+    bool  is = exists(root, contents) && split_version(dir, &name, &version);
+
+    if (is)
+    {
+        struct rs_buf text;
+        bool          automatic = false;
+
+        if (rs_read_beneath(root, pkgsrc ? info : contents, STATE_MAX, &text))
+        {
+            automatic = pkgsrc ? has_line(text.data, "automatic=yes")
+                               : !has_line(text.data, "@option manual-installation");
+            rs_buf_free(&text);
+        }
+        rs_jobj_bool(add_item(array_member(out, key), name, version, rel), "automatic", automatic);
+    }
+    free(name);
+    free(version);
+    free(contents);
+    free(info);
+    return is;
+}
+
+static bool bsd_pkgs(const char *root, const char *rel, const char *key, struct rs_jval *out)
+{
     size_t n;
+    char **names = rs_list_beneath(root, rel, &n);
     size_t i;
     bool   any = false;
 
-    names = rs_list_beneath(root, rel, &n);
     for (i = 0; i < n; i++)
     {
-        char *contents = rs_xasprintf("%s/%s/+CONTENTS", rel, names[i]);
-
-        if (exists(root, contents))
-        {
-            add_item(array_member(out, "pkg"), names[i], NULL, rel);
-            any = true;
-        }
-        free(contents);
+        any = bsd_pkg(root, rel, names[i], key, out) || any;
     }
     rs_free_names(names, n);
     return any;
+}
+
+/* Whether `root` is this system's own "/": all a package manager that keeps
+ * its database in SQLite, and is asked rather than read, can answer for. */
+static bool running_system(const char *root)
+{
+    char *real = realpath(root, NULL); /* Flawfinder: ignore */
+    bool  yes = real && strcmp(real, "/") == 0;
+
+    free(real);
+    return yes;
+}
+
+/* What `prog` writes given `argv`, into `out`, if it is there to run and
+ * says it succeeded. */
+static bool tool_output(enum rs_program prog, char *const argv[], struct rs_buf *out)
+{
+    struct rs_buf errtext;
+    struct rs_buf err;
+    int           code = -1;
+    bool          ok;
+
+    rs_buf_init(out);
+    rs_buf_init(&errtext);
+    rs_buf_init(&err);
+    ok = rs_program_path(prog) && rs_run(prog, argv, out, &errtext, &code, &err) && code == 0 &&
+         out->len > 0;
+    rs_buf_free(&errtext);
+    rs_buf_free(&err);
+    if (!ok)
+    {
+        rs_buf_free(out);
+    }
+    return ok;
+}
+
+/* The tab-separated fields of each line of `text`: `n` of them, the last
+ * running to the line's end, into `cb`. */
+static void each_row(const char *text, size_t n, void (*cb)(char **f, void *ctx), void *ctx)
+{
+    const char *p = text;
+
+    while (p && *p)
+    {
+        const char *nl = strchr(p, '\n');
+        size_t      len = nl ? (size_t)(nl - p) : strlen(p);
+        char       *line = rs_xstrndup(p, len);
+        char       *f[8];
+        char       *at = line;
+        size_t      k;
+
+        for (k = 0; k < n && k < 8 && at; k++)
+        {
+            char *tab = k + 1 < n ? strchr(at, '\t') : NULL;
+
+            f[k] = at;
+            if (tab)
+            {
+                *tab = '\0';
+            }
+            at = tab ? tab + 1 : NULL;
+        }
+        if (k == n && f[0][0] != '\0')
+        {
+            cb(f, ctx);
+        }
+        free(line);
+        p = nl ? nl + 1 : NULL;
+    }
+}
+
+static void freebsd_row(char **f, void *ctx)
+{
+    struct rs_jval *item = add_item(ctx, f[0], f[1], "/var/db/pkg");
+
+    rs_jobj_bool(item, "automatic", strcmp(f[2], "1") == 0);
+    rs_jobj_str(item, "origin", f[3]);
+}
+
+/* FreeBSD's packages, as pkg says them: its database is SQLite. */
+static bool freebsd_pkgs(const char *root, struct rs_jval *out)
+{
+    static char   pkg[] = "pkg";
+    static char   query[] = "query";
+    static char   format[] = "%n\t%v\t%a\t%o";
+    char *const   argv[] = { pkg, query, format, NULL };
+    struct rs_buf text;
+
+    if (!exists(root, "/var/db/pkg/local.sqlite") || !running_system(root) ||
+        !tool_output(RS_PROG_PKG, argv, &text))
+    {
+        return false;
+    }
+    each_row(text.data, 4, freebsd_row, array_member(out, "freebsd-pkg"));
+    rs_buf_free(&text);
+    return true;
+}
+
+static void rpm_row(char **f, void *ctx)
+{
+    /* The keys rpm --import adds are no package to install. */
+    if (strcmp(f[0], "gpg-pubkey") != 0)
+    {
+        rs_jobj_str(add_item(ctx, f[0], f[1], "/var/lib/rpm"), "architecture", f[2]);
+    }
+}
+
+/* rpm's packages, as rpm says them: its database is SQLite. */
+static bool rpm_pkgs(const char *root, struct rs_jval *out)
+{
+    static char   rpm[] = "rpm";
+    static char   all[] = "-qa";
+    static char   qf[] = "--qf";
+    static char   format[] = "%{NAME}\t%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\t%{ARCH}\n";
+    char *const   argv[] = { rpm, all, qf, format, NULL };
+    struct rs_buf text;
+
+    if ((!is_dir(root, "/var/lib/rpm") && !is_dir(root, "/usr/lib/sysimage/rpm")) ||
+        !running_system(root) || !tool_output(RS_PROG_RPM, argv, &text))
+    {
+        return false;
+    }
+    each_row(text.data, 3, rpm_row, array_member(out, "rpm"));
+    rs_buf_free(&text);
+    return true;
+}
+
+/* The line after `field` ("%NAME%") in a pacman desc, or NULL. */
+static char *desc_field(const char *text, const char *field)
+{
+    size_t      n = strlen(field);
+    const char *p = text;
+
+    while (p && *p)
+    {
+        const char *nl = strchr(p, '\n');
+
+        if (nl && (size_t)(nl - p) == n && strncmp(p, field, n) == 0)
+        {
+            const char *v = nl + 1;
+            size_t      len = strcspn(v, "\n");
+
+            return len > 0 ? rs_xstrndup(v, len) : NULL;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    return NULL;
+}
+
+/* pacman's packages: a directory each in /var/lib/pacman/local, its desc
+ * saying its name, its version and why it is there (%REASON% 1: as what
+ * another needs). */
+static bool pacman_pkgs(const char *root, struct rs_jval *out)
+{
+    static const char *const rel = "/var/lib/pacman/local";
+    size_t                   n;
+    char                   **names = rs_list_beneath(root, rel, &n);
+    size_t                   i;
+    bool                     any = false;
+
+    for (i = 0; i < n; i++)
+    {
+        char         *path = rs_xasprintf("%s/%s/desc", rel, names[i]);
+        struct rs_buf text;
+
+        if (rs_read_beneath(root, path, SMALL_MAX, &text))
+        {
+            char *name = desc_field(text.data, "%NAME%");
+            char *version = desc_field(text.data, "%VERSION%");
+            char *reason = desc_field(text.data, "%REASON%");
+
+            if (name)
+            {
+                struct rs_jval *item = add_item(array_member(out, "pacman"), name, version, rel);
+
+                rs_jobj_bool(item, "automatic", reason && strcmp(reason, "1") == 0);
+                any = true;
+            }
+            free(name);
+            free(version);
+            free(reason);
+            rs_buf_free(&text);
+        }
+        free(path);
+    }
+    rs_free_names(names, n);
+    return any;
+}
+
+/* Whether `name` is one /etc/apk/world asks for: a line each, the name
+ * before any version constraint or tag. */
+static bool in_world(const char *world, const char *name)
+{
+    size_t      n = strlen(name);
+    const char *p = world;
+
+    while (p && *p)
+    {
+        size_t len = strcspn(p, "=<>~@ \n");
+
+        if (len == n && strncmp(p, name, n) == 0)
+        {
+            return true;
+        }
+        p = strchr(p, '\n');
+        p = p ? p + 1 : NULL;
+    }
+    return false;
+}
+
+/* apk's packages: /lib/apk/db/installed, "P:" a name and "V:" a version a
+ * record, a blank line between; asked for if /etc/apk/world names it. */
+static bool apk_pkgs(const char *root, struct rs_jval *out)
+{
+    struct rs_buf text;
+    struct rs_buf world;
+    const char   *p;
+    char         *name = NULL;
+    char         *version = NULL;
+    char         *arch = NULL;
+    bool          any = false;
+    bool          have_world;
+
+    if (!rs_read_beneath(root, "/lib/apk/db/installed", STATE_MAX, &text))
+    {
+        return false;
+    }
+    have_world = rs_read_beneath(root, "/etc/apk/world", SMALL_MAX, &world);
+    for (p = text.data; p; )
+    {
+        const char *nl = strchr(p, '\n');
+        size_t      len = nl ? (size_t)(nl - p) : strlen(p);
+
+        if (len > 2 && p[1] == ':' && (p[0] == 'P' || p[0] == 'V' || p[0] == 'A'))
+        {
+            char **slot = p[0] == 'P' ? &name : p[0] == 'V' ? &version : &arch;
+
+            free(*slot);
+            *slot = rs_xstrndup(p + 2, len - 2);
+        } else if (len == 0 || !nl)
+        {
+            if (name)
+            {
+                struct rs_jval *item = add_item(array_member(out, "apk"), name, version,
+                                                "/lib/apk/db/installed");
+
+                rs_jobj_str(item, "architecture", arch);
+                if (have_world)
+                {
+                    rs_jobj_bool(item, "automatic", !in_world(world.data, name));
+                }
+                any = true;
+            }
+            free(name);
+            free(version);
+            free(arch);
+            name = version = arch = NULL;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    rs_buf_free(&text);
+    if (have_world)
+    {
+        rs_buf_free(&world);
+    }
+    return any;
+}
+
+/* Homebrew's formulae and casks beneath `prefix`: PREFIX/Cellar/NAME/VERSION,
+ * each with an INSTALL_RECEIPT.json that says whether it was asked for, and
+ * PREFIX/Caskroom/NAME/VERSION. */
+static bool brew_pkgs(const char *root, const char *prefix, struct rs_jval *out)
+{
+    static const char *const kinds[] = { "Cellar", "Caskroom" };
+    size_t                   k;
+    bool                     any = false;
+
+    for (k = 0; k < 2; k++)
+    {
+        char  *dir = rs_xasprintf("%s/%s", prefix, kinds[k]);
+        size_t n;
+        char **names = rs_list_beneath(root, dir, &n);
+        size_t i;
+
+        for (i = 0; i < n; i++)
+        {
+            char  *sub = rs_xasprintf("%s/%s", dir, names[i]);
+            size_t nv;
+            char **versions = rs_list_beneath(root, sub, &nv);
+            size_t j;
+
+            for (j = 0; j < nv; j++)
+            {
+                struct rs_jval *item = add_item(array_member(out, "homebrew"), names[i],
+                                                versions[j], prefix);
+                char           *receipt = rs_xasprintf("%s/%s/INSTALL_RECEIPT.json", sub,
+                                                       versions[j]);
+                struct rs_buf   text;
+
+                if (k == 1)
+                {
+                    rs_jobj_bool(item, "cask", true);
+                } else if (rs_read_beneath(root, receipt, SMALL_MAX, &text))
+                {
+                    struct rs_json_parser jp;
+                    struct rs_jval        doc;
+                    struct rs_buf         err;
+                    const struct rs_jval *asked = NULL;
+
+                    memset(&doc, 0, sizeof(doc));
+                    rs_buf_init(&err);
+                    rs_json_init(&jp, text.data, text.len, &err);
+                    if (rs_json_value(&jp, &doc))
+                    {
+                        asked = rs_jobject_get(&doc, "installed_on_request");
+                    }
+                    if (asked && asked->type == RS_JBOOL)
+                    {
+                        rs_jobj_bool(item, "automatic", !asked->b);
+                    }
+                    rs_jval_free(&doc);
+                    rs_buf_free(&err);
+                    rs_buf_free(&text);
+                }
+                free(receipt);
+                any = true;
+            }
+            rs_free_names(versions, nv);
+            free(sub);
+        }
+        rs_free_names(names, n);
+        free(dir);
+    }
+    return any;
+}
+
+/* The packages in one conda environment: ENV/conda-meta/NAME-VERSION-BUILD.json. */
+static bool conda_env(const char *root, const char *env, struct rs_jval *out)
+{
+    char  *meta = rs_xasprintf("%s/conda-meta", env);
+    size_t n;
+    char **names = rs_list_beneath(root, meta, &n);
+    size_t i;
+    bool   any = false;
+
+    for (i = 0; i < n; i++)
+    {
+        size_t len = strlen(names[i]);
+        size_t last = 0;      /* the '-' before the build */
+        size_t second = 0;    /* and the one before the version */
+        size_t k;
+        char  *stem;
+
+        if (len <= 5 || strcmp(names[i] + len - 5, ".json") != 0)
+        {
+            continue;
+        }
+        stem = rs_xstrndup(names[i], len - 5);
+        for (k = 0; stem[k] != '\0'; k++)
+        {
+            if (stem[k] == '-')
+            {
+                second = last;
+                last = k;
+            }
+        }
+        if (second > 0)
+        {
+            stem[second] = '\0';
+            stem[last] = '\0';
+            add_item(array_member(out, "conda"), stem, stem + second + 1, env);
+            any = true;
+        }
+        free(stem);
+    }
+    rs_free_names(names, n);
+    free(meta);
+    return any;
+}
+
+/* A conda installation at `base`: its own environment and each in envs/. */
+static bool conda_pkgs(const char *root, const char *base, struct rs_jval *out)
+{
+    char  *envs = rs_xasprintf("%s/envs", base);
+    size_t n;
+    char **names = rs_list_beneath(root, envs, &n);
+    size_t i;
+    bool   any = conda_env(root, base, out);
+
+    for (i = 0; i < n; i++)
+    {
+        char *env = rs_xasprintf("%s/%s", envs, names[i]);
+
+        any = conda_env(root, env, out) || any;
+        free(env);
+    }
+    rs_free_names(names, n);
+    free(envs);
+    return any;
+}
+
+/* macOS's installer receipts: /var/db/receipts/ID.plist, one a package. */
+static bool macos_receipts(const char *root, struct rs_jval *out)
+{
+    size_t n;
+    char **names = rs_list_beneath(root, "/var/db/receipts", &n);
+    size_t i;
+    bool   any = false;
+
+    for (i = 0; i < n; i++)
+    {
+        size_t len = strlen(names[i]);
+
+        if (len > 6 && strcmp(names[i] + len - 6, ".plist") == 0)
+        {
+            char *id = rs_xstrndup(names[i], len - 6);
+
+            add_item(array_member(out, "macos-receipts"), id, NULL, "/var/db/receipts");
+            free(id);
+            any = true;
+        }
+    }
+    rs_free_names(names, n);
+    return any;
+}
+
+/* `path` with ".", ".." and repeated slashes taken out, ".." going no higher
+ * than "/". */
+static char *clean_path(const char *path)
+{
+    char       *out = rs_xmalloc(strlen(path) + 2);
+    size_t      k = 0;
+    const char *p = path;
+
+    out[k++] = '/';
+    while (*p)
+    {
+        size_t len;
+
+        while (*p == '/')
+        {
+            p++;
+        }
+        len = strcspn(p, "/");
+        if (len == 0 || (len == 1 && p[0] == '.'))
+        {
+            p += len;
+            continue;
+        }
+        if (len == 2 && p[0] == '.' && p[1] == '.')
+        {
+            while (k > 1 && out[k - 1] != '/')
+            {
+                k--;
+            }
+            if (k > 1)
+            {
+                k--;
+            }
+            p += len;
+            continue;
+        }
+        if (k > 1)
+        {
+            out[k++] = '/';
+        }
+        memcpy(out + k, p, len);
+        k += len;
+        p += len;
+    }
+    out[k] = '\0';
+    return out;
+}
+
+/*
+ * `rel` with each symlink on the way followed, as if `root` were "/" -- so
+ * none leads out of it -- and at most 40 of them; the caller's to free, or
+ * NULL. Nix's and Guix's profiles are chains of symlinks into their stores.
+ */
+static char *resolve_beneath(const char *root, const char *rel)
+{
+    char  *path = clean_path(rel);
+    size_t done = 0;
+    int    hops = 0;
+
+    while (path[done] != '\0')
+    {
+        size_t end = done + 1 + strcspn(path + done + 1, "/");
+        char  *prefix = rs_xstrndup(path, end);
+        char   target[4096];
+
+        if (read_link(root, prefix, target, sizeof(target)))
+        {
+            char *dir = rs_xstrdup(prefix);
+            char *slash = strrchr(dir, '/');    /* there is one: the path is absolute */
+            char *joined;
+
+            if (slash)
+            {
+                *slash = '\0';
+            }
+            joined = target[0] == '/' ? rs_xasprintf("%s%s", target, path + end)
+                                      : rs_xasprintf("%s/%s%s", dir, target, path + end);
+            free(dir);
+            free(path);
+            path = clean_path(joined);
+            free(joined);
+            done = 0;
+            if (++hops > 40)
+            {
+                free(prefix);
+                free(path);
+                return NULL;
+            }
+        } else
+        {
+            done = end;
+        }
+        free(prefix);
+        if (strcmp(path, "/") == 0)
+        {
+            break;
+        }
+    }
+    return path;
+}
+
+/* The file at `rel`, its symlinks followed beneath root, read. */
+static bool read_resolved(const char *root, const char *rel, size_t max, struct rs_buf *out)
+{
+    char *real = resolve_beneath(root, rel);
+    bool  ok = real && rs_read_beneath(root, real, max, out);
+
+    free(real);
+    return ok;
+}
+
+/* A Nix store path's name: what follows its hash, "/nix/store/HASH-". */
+static void nix_item(struct rs_jval *arr, const char *store_path, const char *profile)
+{
+    const char *base = strrchr(store_path, '/');
+    char       *name;
+    char       *version;
+
+    base = base ? base + 1 : store_path;
+    if (strlen(base) <= 33 || base[32] != '-')
+    {
+        return;
+    }
+    base += 33;
+    if (split_version(base, &name, &version))
+    {
+        add_item(arr, name, version, profile);
+        free(name);
+        free(version);
+    } else
+    {
+        add_item(arr, base, NULL, profile);
+    }
+}
+
+/* The packages in a profile's manifest.json (nix profile): "elements", an
+ * array (version 1) or an object by name (2 and later), each with its
+ * "storePaths". */
+static bool nix_json(const char *text, size_t len, const char *profile, struct rs_jval *arr)
+{
+    struct rs_json_parser jp;
+    struct rs_jval        doc;
+    struct rs_buf         err;
+    const struct rs_jval *elements = NULL;
+    bool                  any = false;
+
+    memset(&doc, 0, sizeof(doc));
+    rs_buf_init(&err);
+    rs_json_init(&jp, text, len, &err);
+    if (rs_json_value(&jp, &doc))
+    {
+        elements = rs_jobject_get(&doc, "elements");
+    }
+    if (elements && (elements->type == RS_JARRAY || elements->type == RS_JOBJECT))
+    {
+        size_t i;
+
+        for (i = 0; i < elements->n; i++)
+        {
+            const struct rs_jval *paths = rs_jobject_get(&elements->items[i], "storePaths");
+
+            if (paths && paths->type == RS_JARRAY && paths->n > 0 &&
+                paths->items[0].type == RS_JSTRING)
+            {
+                nix_item(arr, paths->items[0].s, profile);
+                any = true;
+            }
+        }
+    }
+    rs_jval_free(&doc);
+    rs_buf_free(&err);
+    return any;
+}
+
+/* The packages in a profile's manifest.nix (nix-env): each derivation's
+ * `name = "...";`, at the top of its attribute set, not inside its meta. */
+static bool nix_expr(const char *text, const char *profile, struct rs_jval *arr)
+{
+    const char *p = text;
+    int         depth = 0;
+    bool        any = false;
+
+    while (*p)
+    {
+        if (*p == '"')
+        {
+            for (p++; *p && *p != '"'; p++)
+            {
+                if (*p == '\\' && p[1])
+                {
+                    p++;
+                }
+            }
+            p += *p ? 1 : 0;
+            continue;
+        }
+        if (*p == '{')
+        {
+            depth++;
+        } else if (*p == '}')
+        {
+            depth--;
+        } else if (depth == 1 && strncmp(p, "name = \"", 8) == 0 &&
+                   (p == text || p[-1] == ' ' || p[-1] == '{' || p[-1] == ';'))
+        {
+            const char *v = p + 8;
+            size_t      len = strcspn(v, "\"\\");
+            char       *full = rs_xstrndup(v, len);
+            char       *name;
+            char       *version;
+
+            if (split_version(full, &name, &version))
+            {
+                add_item(arr, name, version, profile);
+                free(name);
+                free(version);
+            } else
+            {
+                add_item(arr, full, NULL, profile);
+            }
+            free(full);
+            any = true;
+            p = v + len + (v[len] == '"' ? 1 : 0);
+            continue;
+        }
+        p++;
+    }
+    return any;
+}
+
+/* One Nix profile's packages, from whichever manifest it has. */
+static bool nix_profile(const char *root, const char *profile, struct rs_jval *out)
+{
+    char         *json = rs_xasprintf("%s/manifest.json", profile);
+    char         *expr = rs_xasprintf("%s/manifest.nix", profile);
+    struct rs_buf text;
+    bool          any = false;
+
+    if (read_resolved(root, json, STATE_MAX, &text))
+    {
+        any = nix_json(text.data, text.len, profile, array_member(out, "nix"));
+        rs_buf_free(&text);
+    } else if (read_resolved(root, expr, STATE_MAX, &text))
+    {
+        any = nix_expr(text.data, profile, array_member(out, "nix"));
+        rs_buf_free(&text);
+    }
+    free(json);
+    free(expr);
+    return any;
+}
+
+/* Nix's profiles: the default one, each user's, and each home's. */
+static bool nix_pkgs(const char *root, char **home, size_t nhome, struct rs_jval *out)
+{
+    static const char *const per_user = "/nix/var/nix/profiles/per-user";
+    size_t                   n;
+    char                   **users = rs_list_beneath(root, per_user, &n);
+    size_t                   i;
+    bool                     any = nix_profile(root, "/nix/var/nix/profiles/default", out);
+
+    for (i = 0; i < n; i++)
+    {
+        char *profile = rs_xasprintf("%s/%s/profile", per_user, users[i]);
+
+        any = nix_profile(root, profile, out) || any;
+        free(profile);
+    }
+    rs_free_names(users, n);
+    for (i = 0; i < nhome; i++)
+    {
+        char *profile = rs_xasprintf("%s/.nix-profile", home[i]);
+        char *state = rs_xasprintf("%s/.local/state/nix/profiles/profile", home[i]);
+
+        any = nix_profile(root, profile, out) || any;
+        any = nix_profile(root, state, out) || any;
+        free(profile);
+        free(state);
+    }
+    if (exists(root, "/nix/var/nix/profiles/system"))
+    {
+        note(out, "NixOS: the system's own packages are what /etc/nixos's configuration "
+                  "declares, and are not listed");
+    }
+    return any;
+}
+
+/* The packages in a Guix profile's manifest: each ("NAME" "VERSION" "OUTPUT"
+ * "/gnu/store/..." ...) at the depth of the manifest's own packages, not the
+ * inputs each one propagates. */
+static bool guix_manifest(const char *text, const char *profile, struct rs_jval *arr)
+{
+    const char *p = text;
+    int         depth = 0;
+    bool        any = false;
+
+    while (*p)
+    {
+        if (*p == '"')
+        {
+            for (p++; *p && *p != '"'; p++)
+            {
+                if (*p == '\\' && p[1])
+                {
+                    p++;
+                }
+            }
+            p += *p ? 1 : 0;
+            continue;
+        }
+        if (*p == ')')
+        {
+            depth--;
+        } else if (*p == '(')
+        {
+            const char *q = p + 1;
+            const char *s[4];
+            size_t      len[4];
+            size_t      k;
+
+            depth++;
+            for (k = 0; k < 4; k++)
+            {
+                while (*q == ' ' || *q == '\n' || *q == '\t')
+                {
+                    q++;
+                }
+                if (*q != '"')
+                {
+                    break;
+                }
+                s[k] = q + 1;
+                len[k] = strcspn(s[k], "\"\\");
+                if (s[k][len[k]] != '"')
+                {
+                    break;
+                }
+                q = s[k] + len[k] + 1;
+            }
+            if (depth == 4 && k == 4 && strncmp(s[3], "/gnu/store/", 11) == 0)
+            {
+                char *name = rs_xstrndup(s[0], len[0]);
+                char *version = rs_xstrndup(s[1], len[1]);
+
+                add_item(arr, name, version, profile);
+                free(name);
+                free(version);
+                any = true;
+            }
+        }
+        p++;
+    }
+    return any;
+}
+
+static bool guix_profile(const char *root, const char *profile, struct rs_jval *out)
+{
+    char         *path = rs_xasprintf("%s/manifest", profile);
+    struct rs_buf text;
+    bool          any = false;
+
+    if (read_resolved(root, path, STATE_MAX, &text))
+    {
+        any = guix_manifest(text.data, profile, array_member(out, "guix"));
+        rs_buf_free(&text);
+    }
+    free(path);
+    return any;
+}
+
+/* Guix's profiles: the system's, each user's and each home's. */
+static bool guix_pkgs(const char *root, char **home, size_t nhome, struct rs_jval *out)
+{
+    static const char *const per_user = "/var/guix/profiles/per-user";
+    size_t                   n;
+    char                   **users = rs_list_beneath(root, per_user, &n);
+    size_t                   i;
+    bool                     any = guix_profile(root, "/var/guix/profiles/system/profile", out);
+
+    for (i = 0; i < n; i++)
+    {
+        char *profile = rs_xasprintf("%s/%s/guix-profile", per_user, users[i]);
+
+        any = guix_profile(root, profile, out) || any;
+        free(profile);
+    }
+    rs_free_names(users, n);
+    for (i = 0; i < nhome; i++)
+    {
+        char *profile = rs_xasprintf("%s/.guix-profile", home[i]);
+
+        any = guix_profile(root, profile, out) || any;
+        free(profile);
+    }
+    return any;
+}
+
+/* The managers restate reads beyond apt, snap and the languages', each
+ * listed in "managers" where it has an inventory. */
+static void describe_systems(const char *root, char **home, size_t nhome, struct rs_jval *out)
+{
+    static const char *const brews[] = { "/opt/homebrew", "/usr/local",
+                                         "/home/linuxbrew/.linuxbrew" };
+    static const char *const condas[] = { "/opt/conda", "/opt/miniconda3", "/opt/anaconda3",
+                                          "/opt/miniforge3" };
+    static const char *const user_condas[] = { "miniconda3", "anaconda3", "miniforge3" };
+    size_t                   i;
+    size_t                   k;
+
+    if (bsd_pkgs(root, "/var/db/pkg", "pkg", out))
+    {
+        add_manager(out, "pkg", "/var/db/pkg", true);
+    }
+    if (bsd_pkgs(root, "/usr/pkg/pkgdb", "pkgsrc", out))
+    {
+        add_manager(out, "pkgsrc", "/usr/pkg/pkgdb", true);
+    }
+    if (freebsd_pkgs(root, out))
+    {
+        add_manager(out, "freebsd-pkg", "/var/db/pkg/local.sqlite", true);
+    }
+    if (rpm_pkgs(root, out))
+    {
+        add_manager(out, "rpm", "/var/lib/rpm", true);
+    }
+    if (pacman_pkgs(root, out))
+    {
+        add_manager(out, "pacman", "/var/lib/pacman/local", true);
+    }
+    if (apk_pkgs(root, out))
+    {
+        add_manager(out, "apk", "/lib/apk/db/installed", true);
+    }
+    for (i = 0; i < sizeof(brews) / sizeof(brews[0]); i++)
+    {
+        if (brew_pkgs(root, brews[i], out))
+        {
+            add_manager(out, "homebrew", brews[i], true);
+        }
+    }
+    for (i = 0; i < sizeof(condas) / sizeof(condas[0]); i++)
+    {
+        if (conda_pkgs(root, condas[i], out))
+        {
+            add_manager(out, "conda", condas[i], true);
+        }
+    }
+    for (i = 0; i < nhome; i++)
+    {
+        for (k = 0; k < sizeof(user_condas) / sizeof(user_condas[0]); k++)
+        {
+            char *base = rs_xasprintf("%s/%s", home[i], user_condas[k]);
+
+            if (conda_pkgs(root, base, out))
+            {
+                add_manager(out, "conda", base, true);
+            }
+            free(base);
+        }
+    }
+    if (macos_receipts(root, out))
+    {
+        add_manager(out, "macos-receipts", "/var/db/receipts", true);
+    }
+    if (nix_pkgs(root, home, nhome, out))
+    {
+        add_manager(out, "nix", "/nix/var/nix/profiles", true);
+    }
+    if (guix_pkgs(root, home, nhome, out))
+    {
+        add_manager(out, "guix", "/var/guix/profiles", true);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
 /* Every package manager                                                      */
 /* ------------------------------------------------------------------------- */
 
-/* Package managers seen, but whose inventory this version does not take. */
+/* Whether a manager called `name` is listed already. */
+static bool has_manager(struct rs_jval *out, const char *name)
+{
+    const struct rs_jval *arr = array_member(out, "managers");
+    size_t                i;
+
+    for (i = 0; i < arr->n; i++)
+    {
+        if (strcmp(rs_jobject_str(&arr->items[i], "name"), name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Package managers seen whose inventory was not taken: FreeBSD's pkg and
+ * rpm of a tree that is not this system, which only their own tools read,
+ * and any that has nothing restate could read. */
 static void other_managers(const char *root, struct rs_jval *out)
 {
     static const struct {
@@ -2820,6 +3859,7 @@ static void other_managers(const char *root, struct rs_jval *out)
         const char *path;
     } others[] = {
         { "rpm", "/var/lib/rpm" },
+        { "rpm", "/usr/lib/sysimage/rpm" },
         { "pacman", "/var/lib/pacman/local" },
         { "apk", "/lib/apk/db/installed" },
         { "nix", "/nix/store" },
@@ -2838,7 +3878,7 @@ static void other_managers(const char *root, struct rs_jval *out)
 
     for (i = 0; i < sizeof(others) / sizeof(others[0]); i++)
     {
-        if (exists(root, others[i].path))
+        if (!has_manager(out, others[i].name) && exists(root, others[i].path))
         {
             add_manager(out, others[i].name, others[i].path, false);
         }
@@ -2909,10 +3949,7 @@ void rs_packages_describe(const char *root, struct rs_jval *out)
     home = homes(root, &nhome);
     describe_flatpak(root, home, nhome, out);
     describe_languages(root, home, nhome, out);
-    if (bsd_pkgs(root, "/var/db/pkg", out))
-    {
-        add_manager(out, "pkg", "/var/db/pkg", true);
-    }
+    describe_systems(root, home, nhome, out);
     other_managers(root, out);
     rs_free_names(home, nhome);
 }

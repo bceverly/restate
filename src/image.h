@@ -260,8 +260,9 @@ bool rs_image_export(const char *ref, struct rs_index *ix, struct rs_image_write
 /*
  * Reads an index from `path`: an image -- in parts, or from before 1.1 one
  * gzip'd stream -- a snapshot in a repository (repo.h), or a bare index.json,
- * and sets ix->in_parts for an image in parts or a snapshot. "-" is standard input, which must be a bare index -- a stream
- * cannot be handed to gzip after its first bytes are read.
+ * and sets ix->in_parts for an image in parts or a snapshot. "-" is standard
+ * input, which must be a bare index -- a stream cannot be handed to gzip
+ * after its first bytes are read.
  */
 bool rs_index_load(struct rs_index *ix, const char *path, struct rs_buf *err);
 

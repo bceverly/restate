@@ -26,6 +26,9 @@ RS_CMD(CMD_VERIFY,   "verify",   "IMAGE",      1,  1,
 RS_CMD(CMD_STATUS,   "status",   "IMAGE",      1,  1,
        "what has changed since a capture, quickly: as verify, but a file whose size, "
        "times and inode are unchanged is not read")
+RS_CMD(CMD_LIST,     "list",     "IMAGE [PATH]", 1, 2,
+       "list what is directly in the directory PATH (default /) of an image or snapshot, from "
+       "its index alone: each name's type, mode, owner, size and time, with no content read")
 RS_CMD(CMD_SIGN,     "sign",     "IMAGE",      1,  1,
        "sign an image or snapshot already written, with --sign-with: so a capture run "
        "unattended needs no secret key on the machine")

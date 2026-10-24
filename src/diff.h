@@ -79,6 +79,14 @@ bool rs_diff_write_packages(const struct rs_index *old, const struct rs_index *n
  */
 void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages);
 
+/*
+ * The changes for a result as well, however they are written: the first
+ * `cap` of each kind -- added, deleted, modified -- appended to `changes` as
+ * rs_diff_json makes them, `changes` made an empty array here. NULL stops
+ * collecting, and says whether any change was left out for the cap.
+ */
+bool rs_diff_collect(struct rs_jval *changes, size_t cap);
+
 /* "content,mode" and so on, into `out`. */
 void rs_diff_describe(unsigned what, struct rs_buf *out);
 

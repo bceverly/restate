@@ -128,29 +128,71 @@ void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages)
     }
 }
 
+/* Where a result's changes go (rs_diff_collect), how many of each kind it
+ * takes, how many of each it has, and whether it has had to leave any out. */
+static struct rs_jval *collected;
+static size_t          collect_cap;
+static size_t          ncollected[3];
+static bool            left_out;
+
+bool rs_diff_collect(struct rs_jval *changes, size_t cap)
+{
+    bool was = left_out;
+
+    collected = changes;
+    collect_cap = cap;
+    memset(ncollected, 0, sizeof(ncollected));
+    left_out = false;
+    if (changes)
+    {
+        memset(changes, 0, sizeof(*changes));
+        rs_jval_set_array(changes);
+    }
+    return was;
+}
+
+/* `kind` and `path` as a change object, appended to `list`. */
+static void json_line(struct rs_jval *list, char kind, const char *path, unsigned what)
+{
+    struct rs_jval *c = rs_jarr_add(list);
+    const char      k[2] = { kind, '\0' };
+    char           *p = rs_utf8_lossy(path, strlen(path));
+
+    rs_jval_set_object(c);
+    rs_jobj_str(c, "change", k);
+    rs_jobj_str(c, "path", p);
+    free(p);
+    if (what)
+    {
+        struct rs_buf names;
+
+        rs_buf_init(&names);
+        rs_diff_describe(what, &names);
+        rs_jobj_str(c, "what", names.data);
+        rs_buf_free(&names);
+    }
+}
+
 static void line(FILE *out, char kind, const char *path, unsigned what)
 {
     struct rs_buf shown;
 
+    if (collected)
+    {
+        size_t *n = &ncollected[kind == 'A' ? 0 : kind == 'D' ? 1 : 2];
+
+        if (*n < collect_cap)
+        {
+            json_line(collected, kind, path, what);
+            (*n)++;
+        } else
+        {
+            left_out = true;
+        }
+    }
     if (json_changes)
     {
-        struct rs_jval *c = rs_jarr_add(json_changes);
-        const char      k[2] = { kind, '\0' };
-        char           *p = rs_utf8_lossy(path, strlen(path));
-
-        rs_jval_set_object(c);
-        rs_jobj_str(c, "change", k);
-        rs_jobj_str(c, "path", p);
-        free(p);
-        if (what)
-        {
-            struct rs_buf names;
-
-            rs_buf_init(&names);
-            rs_diff_describe(what, &names);
-            rs_jobj_str(c, "what", names.data);
-            rs_buf_free(&names);
-        }
+        json_line(json_changes, kind, path, what);
         return;
     }
     rs_buf_init(&shown);

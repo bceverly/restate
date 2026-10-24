@@ -234,8 +234,9 @@ static void intro(struct sheet *s)
     }
     if (vendor || model)
     {
-        say(s, "  Hardware   %s %s%s%s%s", vendor ? vendor : "", product ? product : (model ? model : ""),
-            (product && model) ? " (" : "", (product && model) ? model : "", (product && model) ? ")" : "");
+        say(s, "  Hardware   %s %s%s%s%s", vendor ? vendor : "",
+            product ? product : (model ? model : ""), (product && model) ? " (" : "",
+            (product && model) ? model : "", (product && model) ? ")" : "");
     }
     if (virt && strcmp(virt, "none") != 0)
     {
@@ -311,8 +312,9 @@ static void needs(struct sheet *s)
                 disk->model ? disk->model : "", size_text(disk->size, buf2, sizeof(buf2)));
         } else
         {
-            say(s, "  - Disk %zu: at least %s (it was %s, %s).", d + 1, size_text(need, buf, sizeof(buf)),
-                disk->name, size_text(disk->size, buf2, sizeof(buf2)));
+            say(s, "  - Disk %zu: at least %s (it was %s, %s).", d + 1,
+                size_text(need, buf, sizeof(buf)), disk->name,
+                size_text(disk->size, buf2, sizeof(buf2)));
         }
     }
     if (s->l.firmware && strcmp(s->l.firmware, "uefi") == 0)
@@ -324,12 +326,13 @@ static void needs(struct sheet *s)
     }
     if (s->have_installer)
     {
-        char *iso = s->in.point ? rs_xasprintf("ubuntu-%s-%s-%s.iso", s->in.point, s->in.flavor, s->in.arch)
+        char *iso = s->in.point ? rs_xasprintf("ubuntu-%s-%s-%s.iso", s->in.point, s->in.flavor,
+                                               s->in.arch)
                                 : rs_xstrdup(s->in.pattern);
 
         say(s, "  - The installer: %s, on a USB stick.", s->in.description);
-        say(s, "      restate installer fetch%s%s   # downloads and verifies %s", s->o->image ? " " : "",
-            s->o->image ? s->o->image : "", iso);
+        say(s, "      restate installer fetch%s%s   # downloads and verifies %s",
+            s->o->image ? " " : "", s->o->image ? s->o->image : "", iso);
         free(iso);
     } else
     {
@@ -399,7 +402,8 @@ static void layout(struct sheet *s)
     {
         const struct rs_disk *disk = &s->l.disks[d];
 
-        say(s, "%s%s %s  %s%s%s", d ? "\n" : "", disk->name, size_text(disk->size, buf, sizeof(buf)),
+        say(s, "%s%s %s  %s%s%s", d ? "\n" : "", disk->name,
+            size_text(disk->size, buf, sizeof(buf)),
             disk->table ? (strcmp(disk->table, "dos") == 0 ? "MBR" : "GPT") : "no partition table",
             disk->model ? ", " : "", disk->model ? disk->model : "");
         for (i = 0; i < s->l.nvols; i++)
@@ -420,7 +424,8 @@ static void shell(struct sheet *s)
     heading(s, "Boot the installer and open a root shell");
     if (s->o->target == RS_TARGET_VM)
     {
-        say(s, "%s", "Start the virtual machine; it boots the installer. On the desktop installer,");
+        say(s, "%s", "Start the virtual machine; it boots the installer. On the desktop "
+                     "installer,");
     } else
     {
         say(s, "%s", "Boot the new machine from the USB stick. On the desktop installer,");
@@ -453,12 +458,15 @@ static void shell(struct sheet *s)
             s->l.disks[d].model ? s->l.disks[d].model : "");
         free(def);
     }
-    say(s, "%s", "    part() { case \"$1\" in *[0-9]) echo \"${1}p$2\" ;; *) echo \"$1$2\" ;; esac; }");
+    say(s, "%s", "    part() { case \"$1\" in *[0-9]) echo \"${1}p$2\" ;; "
+                 "*) echo \"$1$2\" ;; esac; }");
     if (s->o->target == RS_TARGET_METAL)
     {
         say(s, "%s", "");
-        say(s, "%s", "Set each DISK to the new machine's disk from the lsblk listing: the names on");
-        say(s, "%s", "other hardware are not knowable in advance, and /dev/CHANGE-ME fails safely.");
+        say(s, "%s", "Set each DISK to the new machine's disk from the lsblk listing: the "
+                     "names on");
+        say(s, "%s", "other hardware are not knowable in advance, and /dev/CHANGE-ME fails "
+                     "safely.");
     }
 }
 
@@ -476,7 +484,8 @@ static void partition(struct sheet *s)
         say(s, "%s", "     in afterwards; the other system's partitions are recreated empty, at");
         say(s, "%s", "     the same places, ready for its own restore.");
         say(s, "%s", "  B. The same disk, keeping the other system: SKIP this step, and skip");
-        say(s, "%s", "     every command marked \"new disk only\" below. The partition table stays,");
+        say(s, "%s", "     every command marked \"new disk only\" below. The partition "
+                     "table stays,");
         say(s, "%s", "     and with it the other system and its boot loader.");
         say(s, "%s", "");
     }
@@ -547,7 +556,8 @@ static void partition(struct sheet *s)
             }
             if (v->ptype)
             {
-                rs_buf_addf(&line, ", type=%s", rs_starts_with(v->ptype, "0x") ? v->ptype + 2 : v->ptype);
+                rs_buf_addf(&line, ", type=%s",
+                            rs_starts_with(v->ptype, "0x") ? v->ptype + 2 : v->ptype);
             }
             if (gpt && v->puuid)
             {
@@ -1034,19 +1044,21 @@ static void after(struct sheet *s)
     }
     if (nfs || cifs)
     {
-        say(s, "    apt-get install -y%s%s    # for the network mounts in /etc/fstab", nfs ? " nfs-common" : "",
-            cifs ? " cifs-utils" : "");
+        say(s, "    apt-get install -y%s%s    # for the network mounts in /etc/fstab",
+            nfs ? " nfs-common" : "", cifs ? " cifs-utils" : "");
     }
     for (i = 0; i < s->l.nswapfiles; i++)
     {
         const char *f = s->l.swapfiles[i].file;
 
         say(s, "    fallocate -l %" PRIu64 "M %s && chmod 600 %s && mkswap %s    # %s swap file",
-            (s->l.swapfiles[i].size + MIB / 2) / MIB, f, f, f, size_text(s->l.swapfiles[i].size, buf, sizeof(buf)));
+            (s->l.swapfiles[i].size + MIB / 2) / MIB, f, f, f,
+            size_text(s->l.swapfiles[i].size, buf, sizeof(buf)));
     }
     if (s->o->target == RS_TARGET_VM)
     {
-        say(s, "%s", "    apt-get install -y qemu-guest-agent    # the hypervisor's view into the guest");
+        say(s, "%s", "    apt-get install -y qemu-guest-agent    # the hypervisor's view into "
+                     "the guest");
         if (hwp && hwp->type == RS_JARRAY && hwp->n > 0)
         {
             struct rs_buf b;
@@ -1085,7 +1097,8 @@ static void after(struct sheet *s)
             say(s, "    apt-get purge -y%s    # a virtual machine's, no use on hardware", b.data);
             rs_buf_free(&b);
         }
-        say(s, "%s", "    apt-get install -y intel-microcode    # or amd64-microcode, for the new CPU");
+        say(s, "%s", "    apt-get install -y intel-microcode    # or amd64-microcode, for the "
+                     "new CPU");
     }
     for (i = 0; i < s->l.nvols; i++)
     {
@@ -1136,8 +1149,10 @@ static void after(struct sheet *s)
         say(s, "%s", "`ip link` after the restore. They were:");
         for (i = 0; net && net->type == RS_JARRAY && i < net->n; i++)
         {
-            say(s, "      was %s (%s)", rs_jobject_str(&net->items[i], "name") ? rs_jobject_str(&net->items[i], "name") : "?",
-                rs_jobject_str(&net->items[i], "mac") ? rs_jobject_str(&net->items[i], "mac") : "no MAC recorded");
+            const char *was = rs_jobject_str(&net->items[i], "name");
+            const char *mac = rs_jobject_str(&net->items[i], "mac");
+
+            say(s, "      was %s (%s)", was ? was : "?", mac ? mac : "no MAC recorded");
         }
         say(s, "%s", "If the old machine hibernated, remove its resume device:");
         say(s, "%s", "    rm -f /etc/initramfs-tools/conf.d/resume");
@@ -1618,7 +1633,8 @@ static void reinstall_flatpak(struct sheet *s, const struct rs_jval *fp)
         rs_shell_word(&line, name);
         rs_buf_addc(&line, ' ');
         rs_shell_word(&line, url);
-        say(s, "%s    # %s", line.data, rs_jobject_str(r, "scope") ? rs_jobject_str(r, "scope") : "");
+        say(s, "%s    # %s", line.data,
+            rs_jobject_str(r, "scope") ? rs_jobject_str(r, "scope") : "");
         rs_buf_free(&line);
     }
     for (i = 0; i < apps->n; i++)
@@ -1648,7 +1664,8 @@ static void reinstall_flatpak(struct sheet *s, const struct rs_jval *fp)
         ref = rs_xasprintf("%s//%s", id, branch);
         rs_shell_word(&line, ref);
         free(ref);
-        say(s, "%s    # %s", line.data, rs_jobject_str(a, "scope") ? rs_jobject_str(a, "scope") : "");
+        say(s, "%s    # %s", line.data,
+            rs_jobject_str(a, "scope") ? rs_jobject_str(a, "scope") : "");
         rs_buf_free(&line);
     }
 }
@@ -1693,7 +1710,8 @@ static void reinstall_lang(struct sheet *s, const struct rs_jval *arr, const cha
     }
     for (j = 0; j < nwheres; j++)
     {
-        bool        home = rs_starts_with(wheres[j], "/home/") || rs_starts_with(wheres[j], "/root");
+        bool        home = rs_starts_with(wheres[j], "/home/") ||
+                           rs_starts_with(wheres[j], "/root");
         char       *owner = home ? home_of(wheres[j]) : NULL;
         struct wrap w;
 
@@ -1727,6 +1745,131 @@ static void reinstall_lang(struct sheet *s, const struct rs_jval *arr, const cha
         free(wheres[j]);
     }
     free(wheres);
+}
+
+/*
+ * A system package manager's packages, each asked for (not "automatic": come
+ * as what another needs, which installing the rest brings back), with
+ * `command`, the newest each repository has: an old version is seldom still
+ * there to install. Only those `cask` says, for Homebrew's casks.
+ */
+static void reinstall_system(struct sheet *s, const struct rs_jval *arr, const char *what,
+                             const char *command, int cask)
+{
+    struct wrap w;
+    size_t      i;
+    size_t      n = 0;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        n += !flag_set(&arr->items[i], "automatic") &&
+             flag_set(&arr->items[i], "cask") == (cask != 0);
+    }
+    if (n == 0)
+    {
+        return;
+    }
+    say(s, "%s", "");
+    say(s, "%s:", what);
+    say(s, "%s", "");
+    wrap_start(&w, s, command);
+    for (i = 0; i < arr->n; i++)
+    {
+        const struct rs_jval *e = &arr->items[i];
+        const char           *name = rs_jobject_str(e, "name");
+
+        if (name && !flag_set(e, "automatic") && flag_set(e, "cask") == (cask != 0))
+        {
+            wrap_word(&w, name);
+        }
+    }
+    wrap_end(&w);
+}
+
+/* conda's packages, an environment at a time, at the versions they were. */
+static void reinstall_conda(struct sheet *s, const struct rs_jval *arr)
+{
+    size_t i;
+    size_t j;
+
+    for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
+    {
+        const char   *env = rs_jobject_str(&arr->items[i], "where");
+        struct rs_buf command;
+        struct wrap   w;
+        bool          first = env != NULL;
+
+        /* Each environment once, where it is first named. */
+        for (j = 0; first && j < i; j++)
+        {
+            first = !eq(rs_jobject_str(&arr->items[j], "where"), env);
+        }
+        if (!first)
+        {
+            continue;
+        }
+        rs_buf_init(&command);
+        rs_buf_addstr(&command, "conda install -y -p ");
+        rs_shell_word(&command, env);
+        say(s, "%s", "");
+        say(s, "conda's packages in %s:", env);
+        say(s, "%s", "");
+        wrap_start(&w, s, command.data);
+        for (j = i; j < arr->n; j++)
+        {
+            const struct rs_jval *e = &arr->items[j];
+            const char           *name = rs_jobject_str(e, "name");
+            const char           *version = rs_jobject_str(e, "version");
+
+            if (name && eq(rs_jobject_str(e, "where"), env))
+            {
+                char *word = version ? rs_xasprintf("%s=%s", name, version) : rs_xstrdup(name);
+
+                wrap_word(&w, word);
+                free(word);
+            }
+        }
+        wrap_end(&w);
+        rs_buf_free(&command);
+    }
+}
+
+/* The other system package managers' packages, and macOS's receipts, which
+ * are a note: what installed them is not a package manager to ask. */
+static void reinstall_systems(struct sheet *s, const struct rs_jval *pk)
+{
+    const struct rs_jval *receipts = rs_jobject_get(pk, "macos-receipts");
+    size_t                i;
+    size_t                others = 0;
+
+    reinstall_system(s, rs_jobject_get(pk, "freebsd-pkg"), "FreeBSD's packages",
+                     "pkg install -y", 0);
+    reinstall_system(s, rs_jobject_get(pk, "pkg"), "OpenBSD's packages", "pkg_add", 0);
+    reinstall_system(s, rs_jobject_get(pk, "pkgsrc"), "pkgsrc's packages", "pkgin -y install", 0);
+    reinstall_system(s, rs_jobject_get(pk, "rpm"), "rpm's packages", "dnf install -y", 0);
+    reinstall_system(s, rs_jobject_get(pk, "pacman"), "pacman's packages",
+                     "pacman -S --needed", 0);
+    reinstall_system(s, rs_jobject_get(pk, "apk"), "apk's packages", "apk add", 0);
+    reinstall_system(s, rs_jobject_get(pk, "homebrew"), "Homebrew's formulae, as their owner",
+                     "brew install", 0);
+    reinstall_system(s, rs_jobject_get(pk, "homebrew"), "Homebrew's casks, as their owner",
+                     "brew install --cask", 1);
+    reinstall_system(s, rs_jobject_get(pk, "nix"), "Nix's packages, as each profile's owner",
+                     "nix profile install", 0);
+    reinstall_system(s, rs_jobject_get(pk, "guix"), "Guix's packages, as each profile's owner",
+                     "guix install", 0);
+    reinstall_conda(s, rs_jobject_get(pk, "conda"));
+    for (i = 0; receipts && receipts->type == RS_JARRAY && i < receipts->n; i++)
+    {
+        const char *id = rs_jobject_str(&receipts->items[i], "name");
+
+        others += id && !rs_starts_with(id, "com.apple.");
+    }
+    if (others > 0)
+    {
+        note(s, "%zu packages were installed here with macOS's installer (see "
+             "/var/db/receipts): install each again from where it came from.", others);
+    }
 }
 
 static void reinstall(struct sheet *s)
@@ -1782,6 +1925,7 @@ static void reinstall(struct sheet *s)
     }
     reinstall_lang(s, cargo, "Rust programs", "cargo install", "cargo install", "@", NULL);
     reinstall_lang(s, gems, "Ruby gems", "gem install", "gem install", ":", NULL);
+    reinstall_systems(s, pk);
     if (alts && alts->type == RS_JARRAY && alts->n > 0)
     {
         say(s, "%s", "");
@@ -1836,7 +1980,8 @@ static void restore(struct sheet *s)
         say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
         say(s, "%s", "");
         say(s, "    tar -xpzf %s --numeric-owner -C / --strip-components=2 \\", img);
-        say(s, "%s", "        --exclude=restate/files/etc/fstab --exclude=restate/files/etc/crypttab \\");
+        say(s, "%s", "        --exclude=restate/files/etc/fstab "
+                     "--exclude=restate/files/etc/crypttab \\");
         say(s, "%s", "        restate/files");
     } else
     {
@@ -1861,12 +2006,15 @@ static void restore(struct sheet *s)
         say(s, "%s", "");
         if (s->o->trust && strcmp(s->o->trust, "--allow-unverified") == 0)
         {
-            say(s, "%s", "--allow-unverified restores the image whoever made it; with the public key");
-            say(s, "%s", "of whoever signed it (capture --sign-with), --trusted-key KEYFILE in its");
+            say(s, "%s", "--allow-unverified restores the image whoever made it; with the "
+                         "public key");
+            say(s, "%s", "of whoever signed it (capture --sign-with), --trusted-key KEYFILE "
+                         "in its");
             say(s, "%s", "place makes restore refuse an image that key did not sign.");
             say(s, "%s", "");
         }
-        say(s, "%s", "restate restore reads an encrypted image (capture --encrypt-to) as the holder");
+        say(s, "%s", "restate restore reads an encrypted image (capture --encrypt-to) as the "
+                     "holder");
         say(s, "%s", "of its secret key; by hand, each part ends in .gpg, and `gpg -d |` goes");
         say(s, "%s", "between the two tars.");
     }
@@ -1919,7 +2067,8 @@ static void vm(struct sheet *s)
 
         for (i = 0; i < s->l.nvols; i++)
         {
-            if (s->l.vols[i].disk == d && (s->l.vols[i].kind == RS_VOL_PART || s->l.vols[i].kind == RS_VOL_DISK))
+            if (s->l.vols[i].disk == d &&
+                (s->l.vols[i].kind == RS_VOL_PART || s->l.vols[i].kind == RS_VOL_DISK))
             {
                 need += rs_layout_fit(&s->l, i, RS_TARGET_VM);
             }
@@ -1947,8 +2096,8 @@ static void vm(struct sheet *s)
     {
         if (s->in.point)
         {
-            say(s, "        --cdrom %s/%s/%s/ubuntu-%s-%s-%s.iso", rs_installer_default_cache(), s->in.vendor,
-                s->in.release, s->in.point, s->in.flavor, s->in.arch);
+            say(s, "        --cdrom %s/%s/%s/ubuntu-%s-%s-%s.iso", rs_installer_default_cache(),
+                s->in.vendor, s->in.release, s->in.point, s->in.flavor, s->in.arch);
         } else
         {
             say(s, "        --cdrom %s/%s/%s/%s", rs_installer_default_cache(), s->in.vendor,
@@ -1969,8 +2118,10 @@ static void vm(struct sheet *s)
     say(s, "%s", "the virtio drivers, so the initramfs needs nothing added.");
     if (s->l.secure_boot)
     {
-        say(s, "%s", "For Secure Boot in the guest, use firmware with the Microsoft keys enrolled:");
-        say(s, "%s", "--boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=yes");
+        say(s, "%s", "For Secure Boot in the guest, use firmware with the Microsoft keys "
+                     "enrolled:");
+        say(s, "%s", "--boot uefi,firmware.feature0.name=secure-boot,"
+                     "firmware.feature0.enabled=yes");
     }
 }
 
@@ -1992,13 +2143,14 @@ static void notes(struct sheet *s)
     for (i = 0; i < s->l.nnetmounts; i++)
     {
         note(s, "%s is mounted from %s (%s): it comes back with /etc/fstab, and needs the "
-             "server reachable from the new machine.", s->l.netmounts[i].file, s->l.netmounts[i].spec,
-             s->l.netmounts[i].type);
+             "server reachable from the new machine.", s->l.netmounts[i].file,
+             s->l.netmounts[i].spec, s->l.netmounts[i].type);
     }
     for (i = 0; mn && mn->type == RS_JARRAY && i < mn->n; i++)
     {
         /* Said already, with what it means for the rebuild. */
-        if (mn->items[i].type == RS_JSTRING && !strstr(mn->items[i].s, "LUKS header could not be read"))
+        if (mn->items[i].type == RS_JSTRING &&
+            !strstr(mn->items[i].s, "LUKS header could not be read"))
         {
             note(s, "%s", mn->items[i].s);
         }
@@ -2056,14 +2208,16 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
     s.vg_done = rs_xcalloc(s.l.nvgs + 1, sizeof(*s.vg_done));
     for (i = 0; i < s.l.nvols; i++)
     {
-        if (s.l.vols[i].foreign && (s.l.vols[i].kind == RS_VOL_PART || s.l.vols[i].kind == RS_VOL_DISK))
+        if (s.l.vols[i].foreign &&
+            (s.l.vols[i].kind == RS_VOL_PART || s.l.vols[i].kind == RS_VOL_DISK))
         {
             s.any_foreign = true;
         }
     }
     for (i = 0; i < s.l.nvols; i++)
     {
-        s.shared_esp = s.shared_esp || (s.any_foreign && o->target == RS_TARGET_SAME && is_esp(&s.l.vols[i]));
+        s.shared_esp = s.shared_esp ||
+                       (s.any_foreign && o->target == RS_TARGET_SAME && is_esp(&s.l.vols[i]));
     }
 
     intro(&s);

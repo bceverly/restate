@@ -780,8 +780,29 @@ expect 2 "snapshots of what is not a repository" -- "$BIN" snapshots rtree
 expect 0 "status, nothing changed since" -- "$BIN" status repo
 contains "$ERR" "0 added, 0 deleted, 0 modified" "status finds nothing changed"
 echo "doc, edited" > "rtree/home/u/with space"
-expect 1 "status, a file changed since" -- "$BIN" status repo
+expect 1 "status, a file changed since" -- "$BIN" status repo --result st.json
 contains "$OUT" "/home/u/with space" "status names it"
+contains "$(cat st.json)" '"snapshot": "repo::20260102T000000Z"' "its result names the newest snapshot"
+contains "$(cat st.json)" '"path": "/home/u/with space", "what": "content"' "and the change, and how"
+contains "$(cat st.json)" '"truncated": false' "all of them"
+
+# list: a snapshot's directories, from its index alone.
+expect 0 "list a snapshot's top" -- "$BIN" list repo
+contains "$OUT" "  etc" "names what is in it"
+expect 0 "list a directory of it" -- "$BIN" list repo::20260101T000000Z /etc/ --result ls.json
+contains "$OUT" "  hosts" "names its files"
+contains "$OUT" "  app" "and its directories"
+contains "$(cat ls.json)" '"path": "/etc"' "the result names the directory"
+contains "$(cat ls.json)" '"name": "hosts", "type": "file", "size": ' "and what is in it"
+contains "$(cat ls.json)" '"truncated": false' "all of it"
+expect 0 "list --json" -- "$BIN" list --json repo /home/u
+contains "$OUT" '"type": "link"' "says a symlink is one"
+contains "$OUT" '"target": "../../etc/hosts"' "and where it points"
+expect 2 "list a file" -- "$BIN" list repo /etc/hosts
+contains "$ERR" "is a file in repo, not a directory" "is refused"
+expect 2 "list what is not there" -- "$BIN" list repo /nowhere
+contains "$ERR" "has no /nowhere" "is refused"
+expect 2 "list a path that is not clean" -- "$BIN" list repo etc
 expect 1 "diff two snapshots" -- "$BIN" diff repo::20260101T000000Z repo
 contains "$OUT" "/etc/hosts" "diff names what changed between them"
 expect 2 "a snapshot that is not there" -- "$BIN" diff repo::19990101T000000Z repo
@@ -1087,7 +1108,11 @@ if usable gpg && usable gpgv && usable gpgconf; then
   check "and its snapshots' indexes" sh -c '! gzip -t erepo/snapshots/*/index.json.gz 2> /dev/null'
   expect 0 "capture into it again, with no secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
-    "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo
+    "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo --result ecap.json
+  contains "$(cat ecap.json)" "\"cache\": {\"path\": \"$WORK/cache/restate/repositories/" \
+    "the result names this machine's cache of it"
+  check "and how much it holds" \
+    sh -c '! grep -q "\"cache\": {[^}]*\"bytes\": 0}" ecap.json && grep -q "\"bytes\": " ecap.json'
   contains "$ERR" "unchanged since the last snapshot were not read" "reads only what changed"
   mkdir -p erout
   expect 2 "restore it without the secret key" -- \
@@ -1384,6 +1409,8 @@ contains "$OUT" '"result_schema": 1' "the result schema"
 contains "$OUT" '"run"' "its commands"
 contains "$OUT" '"quiesce_with"' "its options, as job keys spell them"
 contains "$OUT" '"job_keys": [' "the keys a job takes"
+contains "$OUT" '"job_commands": [' "the commands a job can be"
+contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
 
 expect 0 "estimate" -- "$BIN" estimate -N -r ptree
@@ -1408,6 +1435,7 @@ contains "$res" '"status": "ok"' "how it ended"
 contains "$res" '"snapshot": "prepo::' "the snapshot"
 contains "$res" '"new_bytes": ' "what was new"
 contains "$res" '"repository_bytes": ' "and what the repository holds now"
+contains "$res" '"cache": null' "and that it has no cache, not being encrypted"
 check "the result is its owner's alone" test "$(file_mode cap.json)" = 600
 contains "$(cat cap.ndjson)" '"phase": "walk"' "progress, a line at a time"
 contains "$(cat cap.ndjson)" '"phase": "finish"' "to the end"
@@ -1683,6 +1711,17 @@ chmod 644 jobs/create.conf
 expect 0 "run a capture job that makes its repository" -- "$BIN" run -q "$WORK/jobs/create.conf"
 check "makes it" test -f jrepo/restate-repository
 contains "$(cat jcr.json)" '"created_repository": true' "and says so in the result"
+printf 'command = status\nrepository = %s/jrepo\nresult = %s/jst.json\n' "$WORK" "$WORK" > jobs/status.conf
+chmod 644 jobs/status.conf
+expect 0 "run a status job" -- "$BIN" run -q "$WORK/jobs/status.conf"
+contains "$(cat jst.json)" '"command": "status"' "its result"
+contains "$(cat jst.json)" '"snapshot": "'"$WORK"'/jrepo::' "names the newest snapshot"
+contains "$(cat jst.json)" '"changes": []' "and what changed since: nothing"
+printf 'command = list\nrepository = %s/jrepo\npath = /srv\nresult = %s/jls.json\n' "$WORK" "$WORK" > jobs/list.conf
+chmod 644 jobs/list.conf
+expect 0 "run a list job" -- "$BIN" run -q "$WORK/jobs/list.conf"
+contains "$(cat jls.json)" '"path": "/srv"' "its result names the directory"
+contains "$(cat jls.json)" '"name": "data"' "and what is in it"
 
 # ---------------------------------------------------------------------------
 # classify and rules

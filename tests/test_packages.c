@@ -674,7 +674,8 @@ static void test_languages(void)
 
     arr = rs_jobject_get(&out, "pkg");
     CHECK_INT(arr ? arr->n : 0, 1);
-    CHECK_STR(rs_jobject_str(&arr->items[0], "name"), "curl-8.5.0");
+    CHECK_STR(rs_jobject_str(&arr->items[0], "name"), "curl");
+    CHECK_STR(rs_jobject_str(&arr->items[0], "version"), "8.5.0");
 
     managers = rs_jobject_get(&out, "managers");
     CHECK(find(managers, "name", "pip") != NULL);
@@ -694,6 +695,148 @@ static void test_languages(void)
     free(t);
 }
 
+/* A symlink at dir/rel to `target`. */
+static void link_to(const char *dir, const char *rel, const char *target)
+{
+    char *path = rs_xasprintf("%s/%s", dir, rel);
+
+    CHECK(symlink(target, path) == 0);
+    free(path);
+}
+
+#define HASH32 "0123456789abcdfghijklmnpqrsvwxyz"
+
+static void test_systems(void)
+{
+    char                 *t = rs_test_tmpdir();
+    struct rs_jval        out;
+    const struct rs_jval *arr;
+    const struct rs_jval *e;
+    const struct rs_jval *managers;
+
+    TEST_CASE("the BSDs', pacman's, apk's, Homebrew's, conda's, macOS's, Nix's and Guix's");
+    put(t, "etc/passwd", "pat:x:1000:1000::/home/pat:/bin/sh\n");
+    put(t, "var/db/pkg/curl-8.5.0/+CONTENTS", "@name curl-8.5.0\n@option manual-installation\n");
+    put(t, "var/db/pkg/libz-1.3p0/+CONTENTS", "@name libz-1.3p0\n");
+    put(t, "var/db/pkg/nover/+CONTENTS", "");
+    put(t, "usr/pkg/pkgdb/hello-2.12nb1/+CONTENTS", "");
+    put(t, "usr/pkg/pkgdb/hello-2.12nb1/+INSTALLED_INFO", "automatic=yes\n");
+    put(t, "usr/pkg/pkgdb/bash-5.2.37/+CONTENTS", "");
+    put(t, "var/lib/pacman/local/acl-2.4.0-1/desc",
+        "%NAME%\nacl\n\n%VERSION%\n2.4.0-1\n\n%REASON%\n1\n");
+    put(t, "var/lib/pacman/local/vim-9.1-1/desc", "%NAME%\nvim\n\n%VERSION%\n9.1-1\n");
+    put(t, "var/lib/pacman/local/broken/desc", "%VERSION%\n1\n");
+    put(t, "var/lib/pacman/local/empty/desc", "%NAME%\n");
+    put(t, "lib/apk/db/installed", "P:musl\nV:1.2.5-r9\nA:x86_64\n\nP:busybox\nV:1.37.0-r1\n"
+                                   "A:x86_64\nF:bin\nR:busybox\n\nV:noname\n");
+    put(t, "etc/apk/world", "busybox>=1.30\nalpine-base\n");
+    put(t, "opt/homebrew/Cellar/wget/1.24.5/INSTALL_RECEIPT.json",
+        "{\"installed_on_request\": true}");
+    put(t, "opt/homebrew/Cellar/openssl@3/3.3.0/INSTALL_RECEIPT.json",
+        "{\"installed_on_request\": false}");
+    put(t, "opt/homebrew/Cellar/noreceipt/1.0/", "");
+    put(t, "opt/homebrew/Caskroom/firefox/130.0/", "");
+    put(t, "opt/conda/conda-meta/python-3.12.4-h5148396_1.json", "{}");
+    put(t, "opt/conda/conda-meta/history", "");
+    put(t, "opt/conda/conda-meta/nodash.json", "{}");
+    put(t, "opt/conda/conda-meta/one-dash.json", "{}");
+    put(t, "opt/conda/envs/web/conda-meta/flask-3.0.3-pyhd8ed1ab_0.json", "{}");
+    put(t, "home/pat/miniconda3/conda-meta/numpy-2.0.0-py312_0.json", "{}");
+    put(t, "var/db/receipts/com.apple.pkg.Core.plist", "");
+    put(t, "var/db/receipts/com.example.tool.plist", "");
+    put(t, "var/db/receipts/com.example.tool.bom", "");
+    /* Nix's profiles: symlinks into the store, each its own way. */
+    put(t, "nix/store/" HASH32 "-user-environment/", "");
+    put(t, "nix/store/" HASH32 "-env-manifest.json",
+        "{\"version\": 3, \"elements\": {\"hello\": {\"storePaths\": [\"/nix/store/" HASH32
+        "-hello-2.12.1\"]}, \"bad\": {\"storePaths\": [\"/nix/store/short\"]},"
+        "\"noversion\": {\"storePaths\": [\"/nix/store/" HASH32 "-tool\"]}, \"none\": {}}}");
+    link_to(t, "nix/store/" HASH32 "-user-environment/manifest.json",
+            "../" HASH32 "-env-manifest.json");
+    put(t, "nix/var/nix/profiles/per-user/pat/", "");
+    link_to(t, "nix/var/nix/profiles/default-1-link", "/nix/store/" HASH32 "-user-environment");
+    link_to(t, "nix/var/nix/profiles/default", "default-1-link");
+    put(t, "nix/store/abcdabcdabcdabcdabcdabcdabcdabcd-env/manifest.nix",
+        "[ { meta = { maintainers = [ { name = \"Pat Q\"; } ]; description = \"a \\\"q\\\" {\"; };"
+        " name = \"ripgrep-14.1.0\"; out = { outPath = \"/nix/store/x\"; }; }"
+        " { name = \"plain\"; } ]");
+    link_to(t, "nix/var/nix/profiles/per-user/pat/profile",
+            "../../../../../store/abcdabcdabcdabcdabcdabcdabcdabcd-env");
+    link_to(t, "home/pat/.nix-profile", ".nix-profile");
+    put(t, "nix/var/nix/profiles/system/", "");
+    /* And Guix's. */
+    put(t, "gnu/store/" HASH32 "-profile/manifest",
+        "(manifest (version 4) (packages ((\"coreutils\" \"9.1\" \"out\" \"/gnu/store/" HASH32
+        "-coreutils-9.1\" (propagated-inputs ((\"dep\" \"1\" \"out\" \"/gnu/store/x-dep-1\" ())))"
+        " (search-paths ()) (properties ())) (\"bad\" \"1\" \"out\" \"/elsewhere\"))))");
+    put(t, "var/guix/profiles/per-user/pat/", "");
+    link_to(t, "var/guix/profiles/per-user/pat/guix-profile", "/gnu/store/" HASH32 "-profile");
+    memset(&out, 0, sizeof(out));
+    rs_packages_describe(t, &out);
+
+    arr = rs_jobject_get(&out, "pkg");
+    CHECK_INT(arr ? arr->n : 0, 2);
+    e = find(arr, "name", "curl");
+    CHECK(e && !is_true(e, "automatic"));
+    e = find(arr, "name", "libz");
+    CHECK_STR(rs_jobject_str(e, "version"), "1.3p0");
+    CHECK(is_true(e, "automatic"));
+    arr = rs_jobject_get(&out, "pkgsrc");
+    CHECK_INT(arr ? arr->n : 0, 2);
+    CHECK(is_true(find(arr, "name", "hello"), "automatic"));
+    CHECK(!is_true(find(arr, "name", "bash"), "automatic"));
+    arr = rs_jobject_get(&out, "pacman");
+    CHECK_INT(arr ? arr->n : 0, 2);
+    CHECK(is_true(find(arr, "name", "acl"), "automatic"));
+    CHECK_STR(rs_jobject_str(find(arr, "name", "vim"), "version"), "9.1-1");
+    CHECK(!is_true(find(arr, "name", "vim"), "automatic"));
+    arr = rs_jobject_get(&out, "apk");
+    CHECK_INT(arr ? arr->n : 0, 2);
+    CHECK(is_true(find(arr, "name", "musl"), "automatic"));
+    CHECK(!is_true(find(arr, "name", "busybox"), "automatic"));
+    CHECK_STR(rs_jobject_str(find(arr, "name", "busybox"), "architecture"), "x86_64");
+    arr = rs_jobject_get(&out, "homebrew");
+    CHECK_INT(arr ? arr->n : 0, 4);
+    CHECK(!is_true(find(arr, "name", "wget"), "automatic"));
+    CHECK(is_true(find(arr, "name", "openssl@3"), "automatic"));
+    CHECK(rs_jobject_get(find(arr, "name", "noreceipt"), "automatic") == NULL);
+    CHECK(is_true(find(arr, "name", "firefox"), "cask"));
+    arr = rs_jobject_get(&out, "conda");
+    CHECK_INT(arr ? arr->n : 0, 3);
+    CHECK_STR(rs_jobject_str(find(arr, "name", "python"), "version"), "3.12.4");
+    CHECK_STR(rs_jobject_str(find(arr, "name", "flask"), "where"), "/opt/conda/envs/web");
+    CHECK_STR(rs_jobject_str(find(arr, "name", "numpy"), "where"), "/home/pat/miniconda3");
+    arr = rs_jobject_get(&out, "macos-receipts");
+    CHECK_INT(arr ? arr->n : 0, 2);
+    CHECK(find(arr, "name", "com.example.tool") != NULL);
+    arr = rs_jobject_get(&out, "nix");
+    CHECK_INT(arr ? arr->n : 0, 4);
+    CHECK_STR(rs_jobject_str(find(arr, "name", "hello"), "version"), "2.12.1");
+    CHECK_STR(rs_jobject_str(find(arr, "name", "hello"), "where"),
+              "/nix/var/nix/profiles/default");
+    CHECK(find(arr, "name", "tool") != NULL);
+    CHECK_STR(rs_jobject_str(find(arr, "name", "ripgrep"), "version"), "14.1.0");
+    CHECK(find(arr, "name", "plain") != NULL);
+    CHECK(find(arr, "name", "Pat Q") == NULL);
+    CHECK(any_contains(rs_jobject_get(&out, "notes"), "NixOS"));
+    arr = rs_jobject_get(&out, "guix");
+    CHECK_INT(arr ? arr->n : 0, 1);
+    CHECK_STR(rs_jobject_str(find(arr, "name", "coreutils"), "version"), "9.1");
+
+    managers = rs_jobject_get(&out, "managers");
+    CHECK(is_true(find(managers, "name", "pkgsrc"), "inventory"));
+    CHECK(is_true(find(managers, "name", "pacman"), "inventory"));
+    CHECK(is_true(find(managers, "name", "apk"), "inventory"));
+    CHECK(is_true(find(managers, "name", "homebrew"), "inventory"));
+    CHECK_INT(rs_jobject_get(find(managers, "name", "conda"), "where")->n, 2);
+    CHECK(is_true(find(managers, "name", "macos-receipts"), "inventory"));
+    CHECK(is_true(find(managers, "name", "nix"), "inventory"));
+    CHECK(is_true(find(managers, "name", "guix"), "inventory"));
+    rs_jval_free(&out);
+    rs_test_rmtree(t);
+    free(t);
+}
+
 static void test_alternatives(void)
 {
     char                 *t = rs_test_tmpdir();
@@ -702,7 +845,8 @@ static void test_alternatives(void)
     char                 *ln;
 
     TEST_CASE("the alternatives chosen by hand");
-    put(t, "var/lib/dpkg/alternatives/editor", "manual\n/usr/bin/editor\n\n/usr/bin/vim.basic\n30\n");
+    put(t, "var/lib/dpkg/alternatives/editor", "manual\n/usr/bin/editor\n\n"
+                                               "/usr/bin/vim.basic\n30\n");
     put(t, "var/lib/dpkg/alternatives/pager", "auto\n/usr/bin/pager\n\n/bin/less\n77\n");
     put(t, "var/lib/dpkg/alternatives/nolink", "manual\n/usr/bin/x\n");
     put(t, "var/lib/alternatives/java", "manual\n/usr/bin/java\n");
@@ -761,8 +905,10 @@ static void test_keep(void)
     put(t, "var/cache/apt/archives/repacked_1.5_amd64.deb", "deb");
     put(t, "var/lib/snapd/state.json",
         "{\"data\": {\"snaps\": {"
-        "\"mine\": {\"type\": \"app\", \"current\": \"x1\", \"sequence\": [{\"revision\": \"x1\"}]},"
-        "\"lost\": {\"type\": \"app\", \"current\": \"x2\", \"sequence\": [{\"revision\": \"x2\"}]},"
+        "\"mine\": {\"type\": \"app\", \"current\": \"x1\","
+        " \"sequence\": [{\"revision\": \"x1\"}]},"
+        "\"lost\": {\"type\": \"app\", \"current\": \"x2\","
+        " \"sequence\": [{\"revision\": \"x2\"}]},"
         "\"store\": {\"type\": \"app\", \"current\": \"5\", \"sequence\": [{\"revision\": \"5\","
         " \"snap-id\": \"abc\"}]}}}}");
     put(t, "var/lib/snapd/snaps/mine_x1.snap", "snap");
@@ -844,7 +990,8 @@ static void test_apt_words(void)
 {
     static const char json[] =
         "{\"apt\": {\"architectures\": [\"amd64\", \"i386\"], \"packages\": ["
-        "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1\", \"manual\": true},"
+        "{\"name\": \"vim\", \"architecture\": \"amd64\", \"version\": \"2:9.1\","
+        " \"manual\": true},"
         "{\"name\": \"libx\", \"architecture\": \"i386\", \"version\": \"1\", \"manual\": true},"
         "{\"name\": \"tz\", \"architecture\": \"all\", \"version\": \"2026a\", \"manual\": true},"
         "{\"name\": \"old\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true,"
@@ -852,10 +999,12 @@ static void test_apt_words(void)
         "{\"name\": \"zoom\", \"architecture\": \"amd64\", \"version\": \"6\", \"manual\": true,"
         " \"unavailable\": \"local\"},"
         "{\"name\": \"dep\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": false},"
-        "{\"name\": \"grub-pc\", \"architecture\": \"amd64\", \"version\": \"2\", \"manual\": true},"
+        "{\"name\": \"grub-pc\", \"architecture\": \"amd64\", \"version\": \"2\","
+        " \"manual\": true},"
         "{\"name\": \"linux-image-generic\", \"architecture\": \"amd64\", \"version\": \"7\","
         " \"manual\": true},"
-        "{\"name\": \"thermald\", \"architecture\": \"amd64\", \"version\": \"2\", \"manual\": true},"
+        "{\"name\": \"thermald\", \"architecture\": \"amd64\", \"version\": \"2\","
+        " \"manual\": true},"
         "{\"name\": \"bare\", \"manual\": true}]}}";
     struct rs_jval        pk;
     struct rs_jval        skip;
@@ -904,10 +1053,14 @@ static void test_apt_words(void)
             "{\"apt\": {\"architectures\": [\"amd64\"], \"packages\": ["
             "{\"name\": \"ok-pkg\", \"architecture\": \"amd64\", \"version\": \"1:2.0~rc1+b1\","
             " \"manual\": true},"
-            "{\"name\": \"Upper\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
-            "{\"name\": \"-dash\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
-            "{\"name\": \"sp\", \"architecture\": \"amd64\", \"version\": \"1 2\", \"manual\": true},"
-            "{\"name\": \"PACKAGES\", \"architecture\": \"amd64\", \"version\": \"1\", \"manual\": true},"
+            "{\"name\": \"Upper\", \"architecture\": \"amd64\", \"version\": \"1\","
+            " \"manual\": true},"
+            "{\"name\": \"-dash\", \"architecture\": \"amd64\", \"version\": \"1\","
+            " \"manual\": true},"
+            "{\"name\": \"sp\", \"architecture\": \"amd64\", \"version\": \"1 2\","
+            " \"manual\": true},"
+            "{\"name\": \"PACKAGES\", \"architecture\": \"amd64\", \"version\": \"1\","
+            " \"manual\": true},"
             "{\"name\": \"noversion\", \"architecture\": \"amd64\", \"manual\": true},"
             "{\"name\": \"emptyver\", \"architecture\": \"amd64\", \"version\": \"\","
             " \"manual\": true}]}}";
@@ -982,7 +1135,8 @@ static void test_apt_words(void)
         CHECK_STR(got.data ? got.data : "", "install -y nodejs=22.1 npm=9.2.0\n");
         rs_buf_free(&got);
         CHECK(rs_read_beneath(t, "/out", 4096, &got));
-        CHECK_CONTAINS(got.data ? got.data : "", "apt cannot install these (no repository has them, "
+        CHECK_CONTAINS(got.data ? got.data : "",
+                       "apt cannot install these (no repository has them, "
                        "or what they need): vanished");
         CHECK(strstr(got.data ? got.data : "", "npm\n") == NULL);
         rs_buf_free(&got);
@@ -1032,7 +1186,8 @@ static void test_apt_words(void)
                       "esac\n", 0755);
         rs_test_write(t, "dpkg",
                       "#!/bin/sh\n"
-                      "[ \"$*\" = '--compare-versions 2:1.8.13-1ubuntu0.1 gt 2:1.8.13-1' ]\n", 0755);
+                      "[ \"$*\" = '--compare-versions 2:1.8.13-1ubuntu0.1 "
+                      "gt 2:1.8.13-1' ]\n", 0755);
         cmd = rs_xasprintf("cd '%s' && LOG=log PATH='%s':/usr/bin:/bin sh install.sh > out 2>&1",
                            t, t);
         CHECK(system(cmd) == 0);
@@ -1315,6 +1470,7 @@ void test_packages(void)
     test_snap();
     test_flatpak();
     test_languages();
+    test_systems();
     test_alternatives();
     test_keep();
     test_apt_words();

@@ -32,7 +32,9 @@ enum {
     J_DU        = 1u << 7,
     J_REPACK    = 1u << 8,
     J_PROTECT   = 1u << 9,
-    J_ANY       = 0x3ffu
+    J_STATUS    = 1u << 10,
+    J_LIST      = 1u << 11,
+    J_ANY       = 0xfffu
 };
 
 static const struct {
@@ -45,6 +47,7 @@ static const struct {
     { "snapshots", CMD_SNAPSHOTS, J_SNAPSHOTS }, { "restore", CMD_RESTORE, J_RESTORE },
     { "estimate", CMD_ESTIMATE, J_ESTIMATE },    { "du", CMD_DU, J_DU },
     { "repack", CMD_REPACK, J_REPACK },          { "protect", CMD_PROTECT, J_PROTECT },
+    { "status", CMD_STATUS, J_STATUS },          { "list", CMD_LIST, J_LIST },
 };
 
 enum kind {
@@ -61,6 +64,7 @@ enum key_id {
     KEY_COMMAND = 0,
     KEY_REPOSITORY,
     KEY_SNAPSHOT,
+    KEY_PATH,
     KEY_ROOT,
     KEY_RESTORE_ROOT,
     KEY_RULES,
@@ -106,8 +110,9 @@ static const struct key {
 } keys[KEY_COUNT] = {
     [KEY_COMMAND] = { "command", K_COMMAND, false, J_ANY },
     [KEY_REPOSITORY] = { "repository", K_PATH, false, J_ANY & ~J_ESTIMATE },
-    [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false, J_RESTORE | J_COPY },
-    [KEY_ROOT] = { "root", K_PATH, false, J_CAPTURE | J_ESTIMATE },
+    [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false, J_RESTORE | J_COPY | J_STATUS | J_LIST },
+    [KEY_PATH] = { "path", K_PATH, false, J_LIST },
+    [KEY_ROOT] = { "root", K_PATH, false, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_RESTORE_ROOT] = { "restore_root", K_PATH, false, J_RESTORE },
     [KEY_RULES] = { "rules", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_RESTORE },
     [KEY_ALL] = { "all", K_BOOL, false, J_CAPTURE | J_ESTIMATE },
@@ -117,7 +122,7 @@ static const struct key {
     [KEY_QUIESCE_WITH] = { "quiesce_with", K_NAME, true, J_CAPTURE },
     [KEY_ENCRYPT_TO] = { "encrypt_to", K_PATH, true, J_CAPTURE | J_PRUNE },
     [KEY_SIGN_WITH] = { "sign_with", K_PATH, false, J_CAPTURE },
-    [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true, J_RESTORE | J_CHECK },
+    [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true, J_RESTORE | J_CHECK | J_STATUS | J_LIST },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
     [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
@@ -154,6 +159,19 @@ const char *const *rs_job_keys(size_t *n)
         names[i] = keys[i].name;
     }
     *n = KEY_COUNT;
+    return names;
+}
+
+const char *const *rs_job_commands(size_t *n)
+{
+    static const char *names[sizeof(job_commands) / sizeof(job_commands[0])];
+    size_t             i;
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        names[i] = job_commands[i].name;
+    }
+    *n = sizeof(names) / sizeof(names[0]);
     return names;
 }
 
@@ -393,6 +411,7 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     {
     case KEY_REPOSITORY:
     case KEY_SNAPSHOT:
+    case KEY_PATH:
     case KEY_COPY_TO:
     case KEY_COMMAND:
         break;   /* made into arguments once the whole job is read */
@@ -525,6 +544,8 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
         break;
     case CMD_COPY:
     case CMD_RESTORE:
+    case CMD_STATUS:
+    case CMD_LIST:
         if (snap && strstr(snap, "::"))
         {
             if (repo)
@@ -542,6 +563,12 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
         job->args[1] = vals[KEY_COPY_TO] ? keep(job, vals[KEY_COPY_TO], strlen(vals[KEY_COPY_TO]))
                                          : NULL;
         o->nargs = o->command == CMD_COPY ? 2 : 1;
+        if (o->command == CMD_LIST)
+        {
+            job->args[1] = vals[KEY_PATH] ? keep(job, vals[KEY_PATH], strlen(vals[KEY_PATH]))
+                                          : NULL;
+            o->nargs = vals[KEY_PATH] ? 2 : 1;
+        }
         if (o->command == CMD_COPY && !vals[KEY_COPY_TO])
         {
             rs_buf_addf(err, "%s: a copy job needs copy_to, the repository to copy to", name);
@@ -555,7 +582,8 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
     if (o->command != CMD_ESTIMATE && !repo && !job->ref)
     {
         rs_buf_addf(err, "%s: a %s job needs repository%s", name, rs_command_name(o->command),
-                    o->command == CMD_RESTORE || o->command == CMD_COPY
+                    o->command == CMD_RESTORE || o->command == CMD_COPY ||
+                            o->command == CMD_STATUS || o->command == CMD_LIST
                         ? ", or snapshot as REPO::NAME"
                         : "");
         return false;
@@ -664,8 +692,8 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
             if (!cmd)
             {
                 rs_buf_addf(err, "%s:%u: command: \"%.40s\" is not one a job can run (capture, "
-                            "prune, check, copy, snapshots, restore, estimate, du, repack, protect)", name,
-                            lineno, value);
+                            "prune, check, copy, snapshots, restore, estimate, du, repack, "
+                            "protect, status, list)", name, lineno, value);
                 return false;
             }
         } else if (!value_ok(keys[k].kind, value))

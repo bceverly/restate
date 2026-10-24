@@ -232,6 +232,8 @@ int main(void)
     test_progress();
     test_scan();
     test_md5();
+    test_blake2b();
+    test_sha1();
     test_pkgdb();
     test_xattr();
     test_live();

@@ -143,6 +143,11 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
 void            rs_repo_close(struct rs_repo *r);
 const char     *rs_repo_dir(const struct rs_repo *r);
 bool            rs_repo_encrypted(const struct rs_repo *r);
+/* This machine's cache of an encrypted repository: its directory, NULL for a
+ * repository that is not encrypted (or a user with nowhere to keep one), and
+ * the bytes of the files in it, 0 while it has none. */
+const char     *rs_repo_cache_path(const struct rs_repo *r);
+uint64_t        rs_repo_cache_bytes(const struct rs_repo *r);
 /* The public key files what is written is encrypted to, for an encrypted
  * repository: borrowed, and needed by a writer and by a prune's rewrites. */
 void            rs_repo_set_recipients(struct rs_repo *r, const char *const *recips, size_t n);
@@ -350,7 +355,8 @@ struct rs_repo_snapshot_usage {
     char    *name;
     bool     listed;         /* it has a pack list; without one, nothing below is known */
     uint64_t bytes;          /* the packs it needs, on disk */
-    uint64_t unique_bytes;   /* of those, the packs no other snapshot needs: what dropping it frees */
+    uint64_t unique_bytes;   /* of those, the packs no other snapshot needs: what dropping it
+                              * frees */
     uint64_t new_bytes;      /* of those, the packs no older snapshot needs: what it added */
 };
 

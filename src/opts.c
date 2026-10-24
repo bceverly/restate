@@ -249,7 +249,8 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
     /* flawfinder recalls getopt implementations that overflowed on long
      * arguments decades ago; this is the system libc's, and the arguments are
      * only ever pointed at, never copied. */
-    while ((c = getopt_long(argc, argv, shortopts, long_options, NULL)) != -1) /* Flawfinder: ignore */
+    /* Flawfinder: ignore */
+    while ((c = getopt_long(argc, argv, shortopts, long_options, NULL)) != -1)
     {
         switch (c)
         {
@@ -652,7 +653,8 @@ void rs_print_help(FILE *out)
                        "Exit status:\n"
                        "  0  success; for diff and verify, no differences\n"
                        "  1  differences were found\n"
-                       "  2  trouble: a usage error, a bad image, index or rules file, an I/O error\n"
+                       "  2  trouble: a usage error, a bad image, index or rules file, an I/O "
+                       "error\n"
                        "  3  incomplete: files unread or not put back; check: repository damaged\n"
                        "  4  the image is not signed by a --trusted-key, and was not used\n"
                        "  5  busy: another capture or prune is running, and nothing was done\n"

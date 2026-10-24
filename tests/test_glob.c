@@ -126,7 +126,8 @@ void test_glob(void)
             "/x*", "**", "*", "/etc/systemd/system/*.wants/snap-*",
         };
         static const char *const paths[] = {
-            "/", "/usr", "/usr/lib", "/usrx", "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache",
+            "/", "/usr", "/usr/lib", "/usrx",
+            "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache",
             "/boot/initrd.img-7.0", "/boot/initrd.img-7.0/x", "/usr/share/fonts/X11/misc/fonts.dir",
             "/run/sshd.pid", "/run/sshd.pid/x", "/home/u/.cache/a/b", "/home/u/x.cache",
             "/p/node_modules/q/r", "/home/u/Downloads/f", "/a*b/c", "/ab", "/a/b/c", "/x/a/b",

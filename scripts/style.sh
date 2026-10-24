@@ -24,6 +24,7 @@
 #   includes     a file's own header first; then the system headers, then the
 #                project's, each group sorted
 #   guards       a header's include guard is RESTATE_<NAME>_H
+#   length       no line longer than 100 columns
 #   alignment    the names in a run of local declarations line up, a pointer's
 #                '*' hanging to their left (a static table is exempt, and a
 #                blank line or comment starts a new run); a continuation line
@@ -31,9 +32,10 @@
 #                its open parenthesis, under the string it continues, or -- for
 #                a wrapped ternary -- its ':' under the '?'
 #
-# What is deliberately NOT a rule, because tmd does not keep it either: a line
-# length limit. Help text and diagnostics run long, and splitting a message
-# mid-sentence to satisfy a counter makes it harder to find with grep.
+# The line length is this project's own rule, not one measured from tmd: a
+# line past 100 columns is one a side-by-side diff or a split editor wraps.
+# A long message is split into adjacent string literals at a word, which C
+# joins back into one; grep for a few words of it, not the whole.
 #
 # Not clang-format, for the reason tmd gives: clang-format cannot be asked for
 # these rules alone. It reformats everything, and the code here is full of
@@ -66,7 +68,9 @@ for f in "${FILES[@]}"; do
   fi
 done
 
-awk -v guard_prefix="$GUARD_PREFIX" '
+# Bytes, not characters, whatever the locale: a column is counted as one byte
+# that does not continue a UTF-8 sequence.
+LC_ALL=C awk -v guard_prefix="$GUARD_PREFIX" -v max_columns=100 '
 # Every finding is "file:line: what is wrong". The file and line are kept in
 # variables rather than read from FILENAME and FNR, because some findings are
 # only known later -- a misaligned declaration when its run ends, an include
@@ -262,6 +266,13 @@ FNR == 1 {
   }
   if (raw ~ /[ \t]+$/) {
     report("trailing whitespace")
+  }
+  if (length(raw) > max_columns) {
+    columns = raw
+    gsub(/[\200-\277]/, "", columns)
+    if (length(columns) > max_columns) {
+      report("longer than " max_columns " columns (" length(columns) ")")
+    }
   }
   if (raw == "" && prev_raw == "") {
     report("two blank lines in a row")

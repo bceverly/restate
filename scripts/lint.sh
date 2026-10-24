@@ -317,6 +317,8 @@ printf '#ifndef WRONG_GUARD\n#define WRONG_GUARD\n#endif\n' > "$STYLE_SAMPLE/sam
   printf '        a = 2;\n'
   printf '        break;\n'
   printf '    }\n'
+  # Past 100 columns: 111 of them.
+  printf '    a = a + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22;\n'
   printf '    return printf("%%d %%ld",\n'
   printf '        a, b);\n'
   printf '}\n'
@@ -331,7 +333,7 @@ for rule in "own header" "includes out of order" "system and project headers" \
             "a block is indented" "else on a line of its own" \
             "column of their switch" "continuation line misaligned" \
             "no blank line after the function" "blank line at the end" \
-            "include guard should be"; do
+            "include guard should be" "longer than 100 columns"; do
   grep -qF "$rule" "$WORK/style-sample.log" || missed+=("$rule")
 done
 if [ ${#missed[@]} -eq 0 ]; then

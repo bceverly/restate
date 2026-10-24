@@ -179,13 +179,19 @@ void test_image(void)
         rs_buf_reset(&r);
         /* A 93-byte value is a 97-byte body; two digits make 99, which still
          * has two digits, so it holds. */
-        rs_tar_pax_record(&r, "k", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 93);
+        rs_tar_pax_record(&r, "k",
+                          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                          93);
         CHECK(strncmp(r.data, "99 ", 3) == 0);
         CHECK_INT(r.len, 99);
         rs_buf_reset(&r);
         /* One byte more is a 98-byte body: two digits would make 100, which
          * has three, so the record is 101. */
-        rs_tar_pax_record(&r, "k", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 94);
+        rs_tar_pax_record(&r, "k",
+                          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                          "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                          94);
         CHECK(strncmp(r.data, "101 ", 4) == 0);
         CHECK_INT(r.len, 101);
         rs_buf_free(&r);
@@ -377,7 +383,8 @@ void test_image(void)
             char *cmd = rs_xasprintf("cd '%s' && tar -tf img.tgz > parts.txt && "
                                      "printf 'restate/index.json.gz\\nrestate/kit.tar.gz\\n"
                                      "restate/files.tar.gz\\n' | cmp - parts.txt && "
-                                     "tar -xf img.tgz && gzip -dc restate/files.tar.gz | tar -xf - && "
+                                     "tar -xf img.tgz && "
+                                     "gzip -dc restate/files.tar.gz | tar -xf - && "
                                      "cmp tree/etc/conf restate/files/etc/conf && "
                                      "gzip -dc restate/index.json.gz | grep -q restate-index", dir);
 

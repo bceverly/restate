@@ -167,7 +167,8 @@ static void build_fake(const char *sys, const char *root)
     put(sys, "run/udev/data/b8:1", "E:ID_PART_ENTRY_TYPE=c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n"
                                    "E:ID_PART_ENTRY_UUID=part1-guid\n"
                                    "E:ID_PART_ENTRY_NAME=EFI\\x20System\\x5cx\n"
-                                   "E:ID_FS_TYPE=vfat\nE:ID_FS_UUID=ABCD-1234\nE:ID_FS_USAGE=filesystem\n");
+                                   "E:ID_FS_TYPE=vfat\nE:ID_FS_UUID=ABCD-1234\n"
+                                   "E:ID_FS_USAGE=filesystem\n");
     put(sys, "run/udev/data/b8:2", "E:ID_PART_ENTRY_TYPE=0fc63daf-8483-4772-8e79-3d69d8477de4\n"
                                    "E:ID_FS_TYPE=crypto_LUKS\nE:ID_FS_VERSION=2\n"
                                    "E:ID_FS_UUID=11111111-2222-3333-4444-555555555555\n");
@@ -199,7 +200,8 @@ static void build_fake(const char *sys, const char *root)
     put(sys, "sys/block/dm-0/dm/name", "sda2_crypt\n");
     put(sys, "sys/block/dm-0/dm/uuid", "CRYPT-LUKS2-11111111222233334444555555555555-sda2_crypt\n");
     put(sys, "sys/block/dm-0/slaves/sda2", "");
-    put(sys, "run/udev/data/b252:0", "E:ID_FS_TYPE=ext4\nE:ID_FS_UUID=root-fs-uuid\nE:ID_FS_LABEL=root\n");
+    put(sys, "run/udev/data/b252:0", "E:ID_FS_TYPE=ext4\nE:ID_FS_UUID=root-fs-uuid\n"
+                                     "E:ID_FS_LABEL=root\n");
     put(sys, "sys/block/dm-1/dm/name", "vg0-root\n");
     put(sys, "sys/block/dm-1/dm/uuid", "LVM-abcdef\n");
     put(sys, "sys/block/dm-2/dm/name", "plain\n");
@@ -243,7 +245,8 @@ static void build_fake(const char *sys, const char *root)
         "short:x:1002\n"
         "bad:x:12x:1::/:/bin/sh\n");
     put(root, "etc/os-release", "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"26.04\"\n"
-                                "VERSION_CODENAME=resolute\nPRETTY_NAME='Ubuntu 26.04 LTS'\nBOGUS\n");
+                                "VERSION_CODENAME=resolute\n"
+                                "PRETTY_NAME='Ubuntu 26.04 LTS'\nBOGUS\n");
     put(root, "etc/hostname", "  web01  \n");
     put(root, "etc/fstab", "# a comment\nUUID=root-fs-uuid / ext4 errors=remount-ro 0 1\n"
                            "UUID=ABCD-1234 /boot/efi\\040x vfat umask=0077 0 1\n\nlonely\n");
@@ -264,7 +267,8 @@ static void build_fake(const char *sys, const char *root)
         "Package: intel-microcode\nStatus: deinstall ok config-files\n\n"
         "Package: qemu-guest-agent\nStatus: install ok installed\n\n"
         "Not-a-package: x\n");
-    put(root, "etc/default/locale", "# set by the installer\nLANG=\"en_GB.UTF-8\"\n  LANG=fr_FR.UTF-8 \n");
+    put(root, "etc/default/locale", "# set by the installer\nLANG=\"en_GB.UTF-8\"\n"
+                                    "  LANG=fr_FR.UTF-8 \n");
     put(root, "etc/default/keyboard", "XKBLAYOUT='gb'\nXKBVARIANT=\nXKBMODEL\n");
     put(root, "etc/timezone", "Europe/London\n");
 }

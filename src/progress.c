@@ -350,7 +350,8 @@ static void emit(bool final)
         }
         return;
     }
-    path_line(st.current, WIDTH - strlen(line) > 12 ? WIDTH - strlen(line) : 12, path, sizeof(path));
+    path_line(st.current, WIDTH - strlen(line) > 12 ? WIDTH - strlen(line) : 12, path,
+              sizeof(path));
     (void)fprintf(out, "restate: %s%s\n", line, final ? "" : path);
     (void)fflush(out);
 }

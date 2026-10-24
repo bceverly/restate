@@ -197,8 +197,8 @@ void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
                     struct rs_jval *table = rs_jobj_add(disk, "table");
 
                     rs_jval_set_object(table);
-                    rs_jobj_str(table, "type", eq(scheme, "GPT") ? "gpt" : eq(scheme, "MBR") ? "dos"
-                                                                                             : scheme);
+                    rs_jobj_str(table, "type",
+                                eq(scheme, "GPT") ? "gpt" : eq(scheme, "MBR") ? "dos" : scheme);
                 }
                 parts = array_member(disk, "partitions");
                 p = rs_jarr_add(parts);
@@ -291,7 +291,8 @@ void rs_bsd_add_mount(struct rs_jval *machine, const char *on, const char *from,
                       const char *type, uint64_t size, uint64_t used)
 {
     static const char *const keep[] = { "ufs", "ffs", "zfs", "msdosfs", "ext2fs", "apfs", "hfs",
-                                        "nfs", "smbfs", "exfat", "ntfs", "fusefs", "lfs", "cd9660" };
+                                        "nfs", "smbfs", "exfat", "ntfs", "fusefs", "lfs",
+                                        "cd9660" };
     struct rs_jval          *mounts;
     struct rs_jval          *m;
     size_t                   i;

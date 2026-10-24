@@ -303,7 +303,8 @@ static void make_repo(const char *dir, const char *home, const char *who)
                         "Filename: ./pool/main/t/tzdata_2026a_all.deb\nSize: %zu\nSHA256: %s\n\n"
                         "Package: broken\nVersion: 1\nArchitecture: amd64\n"
                         "Filename: pool/main/b/broken_1_amd64.deb\nSize: 3\n"
-                        "SHA256: 0000000000000000000000000000000000000000000000000000000000000000\n\n"
+                        "SHA256: 0000000000000000000000000000000000000000000000000000000000000000"
+                        "\n\n"
                         "Package: sneaky\nVersion: 1\nArchitecture: amd64\n"
                         "Filename: ../../etc/passwd\nSize: 3\nSHA256: %s\n",
                         sizeof(deb) - 1, hello_sha, sizeof(deb) - 1, hello_sha, hello_sha);
@@ -312,7 +313,8 @@ static void make_repo(const char *dir, const char *home, const char *who)
                        "Filename: pool/main/h/hello_1.0_amd64.deb\nSize: %zu\nSHA256: %s\n",
                        sizeof(deb) - 1, hello_sha);
     list_len = strlen(list);
-    cmd = rs_xasprintf("mkdir -p '%s/repo/dists/stable/main/binary-all' '%s/repo/dists/stable/main/binary-amd64' "
+    cmd = rs_xasprintf("mkdir -p '%s/repo/dists/stable/main/binary-all' "
+                       "'%s/repo/dists/stable/main/binary-amd64' "
                        "'%s/repo/pool/main/h' '%s/repo/pool/main/t' '%s/repo/pool/main/b'",
                        dir, dir, dir, dir, dir);
     CHECK(quiet(cmd) == 0);
@@ -346,7 +348,8 @@ static void make_repo(const char *dir, const char *home, const char *who)
     list_sha = sha_of(list, list_len);
     gz_sha = sha_of(gz.data ? gz.data : "", gz.len);
     all_sha = sha_of(all, strlen(all));
-    release = rs_xasprintf("Origin: test\nSuite: stable\nSHA256:\n %s %zu main/binary-amd64/Packages\n"
+    release = rs_xasprintf("Origin: test\nSuite: stable\nSHA256:\n"
+                           " %s %zu main/binary-amd64/Packages\n"
                            " %s %zu main/binary-amd64/Packages.gz\n"
                            " %s %zu main/binary-all/Packages\n",
                            list_sha, list_len, gz_sha, gz.len, all_sha, strlen(all));
@@ -500,7 +503,8 @@ static void fetching(void)
         char                   *old_json = rs_xasprintf(
             "{\"apt\": {\"architectures\": [\"amd64\"],"
             " \"sources\": [{\"file\": \"/etc/apt/sources.list.d/t.sources\", \"types\": [\"deb\"],"
-            "  \"uris\": [\"file://%s/repo\"], \"suites\": [\"stable\"], \"components\": [\"main\"],"
+            "  \"uris\": [\"file://%s/repo\"], \"suites\": [\"stable\"],"
+            " \"components\": [\"main\"],"
             "  \"signed_by\": \"/usr/share/keyrings/a.gpg\"}],"
             " \"keys\": [{\"path\": \"/usr/share/keyrings/a.gpg\", \"data\": \"%s\"}],"
             " \"packages\": ["

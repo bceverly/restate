@@ -172,6 +172,35 @@ static void other_jobs(void)
     free(why);
     CHECK(!job.opts.plan_only && !job.opts.dry_run);
     rs_job_free(&job);
+
+    TEST_CASE("jobs: status, of the newest snapshot or one named, against a root");
+    CHECK(parse(&job, "command = status\nrepository = /r\n", &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_STATUS);
+    CHECK_INT(job.opts.nargs, 1);
+    CHECK_STR(job.opts.args[0], "/r");
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = status\nrepository = /r\nsnapshot = 20261020T030000Z\n"
+                      "root = /mnt/old\ntrusted_key = /k.asc\n", &why));
+    free(why);
+    CHECK_STR(job.opts.args[0], "/r::20261020T030000Z");
+    CHECK_STR(job.opts.root, "/mnt/old");
+    CHECK_INT(job.opts.ntrusted, 1);
+    rs_job_free(&job);
+
+    TEST_CASE("jobs: list, a directory of a snapshot, or its top");
+    CHECK(parse(&job, "command = list\nsnapshot = /r::20261020T030000Z\npath = /etc\n", &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_LIST);
+    CHECK_INT(job.opts.nargs, 2);
+    CHECK_STR(job.opts.args[0], "/r::20261020T030000Z");
+    CHECK_STR(job.opts.args[1], "/etc");
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = list\nrepository = /r\n", &why));
+    free(why);
+    CHECK_INT(job.opts.nargs, 1);
+    CHECK_STR(job.opts.args[0], "/r");
+    rs_job_free(&job);
 }
 
 static void bad_jobs(void)
@@ -202,7 +231,8 @@ static void bad_jobs(void)
     refused("command = capture\nrepository = /a/..\n", "not an absolute path");
     refused("command = capture\nrepository = /a//b\n", "not an absolute path");
     refused("command = capture\nrepository = /a\tb\n", "not an absolute path");
-    refused("command = capture\nrepository = /r\nquiesce_with = ../x\n", "quiesce_with: not a name");
+    refused("command = capture\nrepository = /r\nquiesce_with = ../x\n",
+            "quiesce_with: not a name");
     refused("command = capture\nrepository = /r\nreport_group = -g\n", "not a name");
     refused("command = restore\nsnapshot = ../x\nrepository = /r\n", "snapshot: not a snapshot");
     refused("command = restore\nsnapshot = r::x\n", "not a snapshot");
@@ -213,6 +243,11 @@ static void bad_jobs(void)
     refused("command = restore\nrepository = /r\nsnapshot = /s::x\n",
             "snapshot names its repository");
     refused("command = copy\nrepository = /r\n", "a copy job needs copy_to");
+    refused("command = list\nrepository = /r\npath = etc\n", "path: not an absolute path");
+    refused("command = list\nrepository = /r\nroot = /\n", "root means nothing to a list job");
+    refused("command = status\nrepository = /r\npath = /etc\n",
+            "path means nothing to a status job");
+    refused("command = status\n", "a status job needs repository, or snapshot as REPO::NAME");
     refused("command = capture\n", "a capture job needs repository");
     refused("command = restore\n", "a restore job needs repository, or snapshot as REPO::NAME");
     {
@@ -340,7 +375,8 @@ static void loading(void)
     (void)chmod(jobs, 0755);
     rs_test_write(jobs, "nightly.conf", "command = check\nrepository = /r\n", 0644);
 
-    TEST_CASE("jobs: loaded from a file only its owner can change, with what the command line adds");
+    TEST_CASE("jobs: loaded from a file only its owner can change, "
+              "with what the command line adds");
     memset(&given, 0, sizeof(given));
     given.quiet = true;
     given.result = "/tmp/r.json";

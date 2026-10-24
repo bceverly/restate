@@ -514,7 +514,8 @@ void test_restore(void)
         restore_into(&r, img, &ix, root, &out, &errs);
         CHECK(r.ok);
         CHECK_INT(r.st.refused, 1);
-        CHECK_CONTAINS(errs, "/home/u/doc: it could not be read when it was captured; not put back");
+        CHECK_CONTAINS(errs, "/home/u/doc: it could not be read when it was captured; "
+                             "not put back");
         CHECK_INT(r.st.missing, 1);
         CHECK_CONTAINS(errs, "/home/u/ghost: the index says the image holds it, and it does not");
         if (geteuid() != 0)
@@ -897,7 +898,8 @@ void test_restore(void)
             left = st.st_size - 2048;
             while (in >= 0 && to >= 0 && left > 0)
             {
-                ssize_t n = read(in, chunk, left < (off_t)sizeof(chunk) ? (size_t)left : sizeof(chunk));
+                size_t  want = left < (off_t)sizeof(chunk) ? (size_t)left : sizeof(chunk);
+                ssize_t n = read(in, chunk, want);
 
                 if (n <= 0 || write(to, chunk, (size_t)n) != n)
                 {

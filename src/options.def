@@ -46,7 +46,7 @@ RS_OPT(OPT_SIGN_WITH, "sign-with", required_argument, "KEYFILE",
        "capture, sign, export: sign the image or snapshot with the OpenPGP secret key in "
        "KEYFILE (gpg --export-secret-keys)")
 RS_OPT(OPT_TRUSTED_KEY, "trusted-key", required_argument, "KEYFILE",
-       "restore, verify, diff, status, export: accept an image or snapshot only if it is "
+       "restore, verify, diff, status, list, export: accept an image or snapshot only if it is "
        "signed by the OpenPGP public key in KEYFILE (gpg --export); autoinstall: have the "
        "restore check that; repeatable")
 RS_OPT(OPT_ALLOW_UNVERIFIED, "allow-unverified", no_argument, NULL,
@@ -86,8 +86,8 @@ RS_OPT(OPT_REPORT_GROUP, "report-group", required_argument, "GROUP",
        "make the --result and --progress-file files readable by GROUP too (0640), so a "
        "monitoring program that is not root can read them")
 RS_OPT(OPT_JSON,   "json",          no_argument,       NULL,
-       "snapshots, diff, verify, status, du, estimate, features: write JSON rather than "
-       "text (see RESULTS)")
+       "snapshots, diff, verify, status, list, du, estimate, features: write JSON rather "
+       "than text (see RESULTS)")
 RS_OPT(OPT_FETCH_SOURCES, "fetch-sources", no_argument, NULL,
        "capture, packages: also fetch each apt source's index as its repository serves "
        "it now (with curl), and check that against the source's keys")

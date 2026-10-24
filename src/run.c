@@ -31,6 +31,9 @@ static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin
 static const char *const sh_paths[] = { "/bin/sh", "/usr/bin/sh" };
 static const char *const ssh_keygen_paths[] = { "/usr/bin/ssh-keygen", "/usr/local/bin/ssh-keygen",
                                                 "/bin/ssh-keygen" };
+/* pkg itself, not /usr/sbin/pkg, which only bootstraps it. */
+static const char *const pkg_paths[] = { "/usr/local/sbin/pkg" };
+static const char *const rpm_paths[] = { "/usr/bin/rpm", "/bin/rpm" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -72,6 +75,8 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("gpgconf", gpgconf_paths, no_env),
     PROGRAM("sh", sh_paths, sh_env),
     PROGRAM("ssh-keygen", ssh_keygen_paths, no_env),
+    PROGRAM("pkg", pkg_paths, no_env),
+    PROGRAM("rpm", rpm_paths, no_env),
 };
 
 #undef PROGRAM

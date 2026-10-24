@@ -1599,7 +1599,8 @@ static void test_encrypted(const char *dir)
     (void)mkdir(home, 0700);
     (void)mkdir(empty, 0700);
     cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --pinentry-mode loopback --passphrase '' "
-                       "--quick-gen-key 'restate test <test@example.invalid>' default default never",
+                       "--quick-gen-key 'restate test <test@example.invalid>' "
+                       "default default never",
                        home);
     CHECK(quiet_system(cmd) == 0);
     free(cmd);
@@ -2094,7 +2095,8 @@ static void test_formats(void)
     TEST_CASE("repo: a check's record, parsed");
     {
         const char *hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        char       *text = rs_xasprintf("restate-record 1\npacks/a.idx %s 10\nsnapshots/x/kit %s 0\n",
+        char       *text = rs_xasprintf("restate-record 1\npacks/a.idx %s 10\n"
+                                        "snapshots/x/kit %s 0\n",
                                         hash, hash);
         char       *bad;
 

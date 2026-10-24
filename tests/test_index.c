@@ -213,7 +213,10 @@ void test_index(void)
     CHECK_CONTAINS(err.data, "duplicate key");
     CHECK(!parse(&ix, HEAD "1," TAIL, &err));
     CHECK(!parse(&ix, "{\"format\": \"restate-index\", \"entries\": [}", &err));
-    CHECK(!parse(&ix, HEAD ENTRY("\"/a\"", "\"file\"", "\"0644\"", "") ", " ENTRY("\"/a\"", "\"file\"", "\"0644\"", "") TAIL, &err));
+    CHECK(!parse(&ix,
+                 HEAD ENTRY("\"/a\"", "\"file\"", "\"0644\"", "") ", "
+                     ENTRY("\"/a\"", "\"file\"", "\"0644\"", "") TAIL,
+                 &err));
     CHECK_CONTAINS(err.data, "/a appears more than once");
     for (i = 0; i < sizeof(bad_entries) / sizeof(bad_entries[0]); i++)
     {
@@ -223,6 +226,41 @@ void test_index(void)
         CHECK(!parse(&ix, text, &err));
         CHECK_CONTAINS(err.data, bad_entries[i][1]);
         free(text);
+    }
+
+    TEST_CASE("index: what is directly in a directory");
+    {
+        struct rs_child *c;
+        size_t           n = 99;
+
+        /* /etc/app-x sorts between /etc/app and what is beneath it, and
+         * /srv/www has paths beneath it but no entry of its own. */
+        CHECK(parse(&ix, HEAD ENTRY("\"/\"", "\"directory\"", "\"0755\"", "") ", "
+                    ENTRY("\"/etc\"", "\"directory\"", "\"0755\"", "") ", "
+                    ENTRY("\"/etc/app\"", "\"directory\"", "\"0750\"", "") ", "
+                    ENTRY("\"/etc/app-x\"", "\"file\"", "\"0644\"", "") ", "
+                    ENTRY("\"/etc/app/key\"", "\"file\"", "\"0600\"", "") ", "
+                    ENTRY("\"/etc/hosts\"", "\"file\"", "\"0644\"", "") ", "
+                    ENTRY("\"/srv/www/index.html\"", "\"file\"", "\"0644\"", "") TAIL,
+                    &err));
+        c = rs_index_children(&ix, "/", &n);
+        CHECK_INT(n, 2);
+        CHECK(c && strcmp(c[0].name, "etc") == 0 && c[0].entry && c[0].entry->type == 'd');
+        CHECK(c && strcmp(c[1].name, "srv") == 0 && !c[1].entry);
+        rs_index_children_free(c, n);
+        c = rs_index_children(&ix, "/etc", &n);
+        CHECK_INT(n, 3);
+        CHECK(c && strcmp(c[0].name, "app") == 0 && c[0].entry && c[0].entry->mode == 0750);
+        CHECK(c && strcmp(c[1].name, "app-x") == 0 && c[1].entry && c[1].entry->type == 'f');
+        CHECK(c && strcmp(c[2].name, "hosts") == 0);
+        rs_index_children_free(c, n);
+        c = rs_index_children(&ix, "/srv", &n);
+        CHECK_INT(n, 1);
+        CHECK(c && strcmp(c[0].name, "www") == 0 && !c[0].entry);
+        rs_index_children_free(c, n);
+        CHECK(rs_index_children(&ix, "/etc/hosts", &n) == NULL && n == 0);
+        CHECK(rs_index_children(&ix, "/et", &n) == NULL && n == 0);
+        CHECK(rs_index_children(&ix, "/zzz", &n) == NULL && n == 0);
     }
 
     rs_index_free(&ix);

@@ -680,7 +680,8 @@ static bool lvm_value(struct lvm_lexer *lx, struct rs_jval *out)
     }
 }
 
-static bool lvm_items(struct lvm_lexer *lx, struct rs_jval *obj, int depth, bool top) /* NOLINT(misc-no-recursion) */
+/* NOLINTNEXTLINE(misc-no-recursion) */
+static bool lvm_items(struct lvm_lexer *lx, struct rs_jval *obj, int depth, bool top)
 {
     if (depth > 16)
     {

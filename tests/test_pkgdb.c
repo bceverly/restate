@@ -8,12 +8,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "blake2b.h"
 #include "image.h"
 #include "json.h"
 #include "md5.h"
 #include "pkgdb.h"
 #include "progress.h"
 #include "scan.h"
+#include "sha1.h"
 #include "sha256.h"
 #include "test.h"
 
@@ -33,6 +35,114 @@ static void md5_hex(const char *text, char hex[RS_MD5_SIZE * 2 + 1])
         hex[i * 2 + 1] = digits[d[i] & 0x0fu];
     }
     hex[RS_MD5_SIZE * 2] = '\0';
+}
+
+/* BLAKE2b of `n` bytes at `data`, fed `step` bytes at a time, as hex. */
+static void blake2b_hex(const char *data, size_t n, size_t step, char hex[RS_BLAKE2B_SIZE * 2 + 1])
+{
+    static const char digits[] = "0123456789abcdef";
+    struct rs_blake2b ctx;
+    unsigned char     d[RS_BLAKE2B_SIZE];
+    size_t            i;
+
+    rs_blake2b_init(&ctx);
+    for (i = 0; i < n; i += step)
+    {
+        rs_blake2b_update(&ctx, data + i, n - i < step ? n - i : step);
+    }
+    rs_blake2b_final(&ctx, d);
+    for (i = 0; i < RS_BLAKE2B_SIZE; i++)
+    {
+        hex[i * 2] = digits[d[i] >> 4];
+        hex[i * 2 + 1] = digits[d[i] & 0x0fu];
+    }
+    hex[RS_BLAKE2B_SIZE * 2] = '\0';
+}
+
+void test_blake2b(void)
+{
+    char  hex[RS_BLAKE2B_SIZE * 2 + 1];
+    char *a = malloc(1000000);
+
+    TEST_CASE("blake2b: RFC 7693's vector, and the empty input");
+    blake2b_hex("abc", 3, 3, hex);
+    CHECK_STR(hex, "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1"
+                   "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923");
+    blake2b_hex("", 0, 1, hex);
+    CHECK_STR(hex, "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419"
+                   "d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce");
+
+    TEST_CASE("blake2b: a block exactly, one byte past it, and a million, in pieces");
+    CHECK(a != NULL);
+    if (!a)
+    {
+        return;
+    }
+    memset(a, 'a', 1000000);
+    blake2b_hex(a, 128, 128, hex);
+    CHECK_STR(hex, "fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a7"
+                   "6b92c2cb1047ef3fe7bf6e436ec1d0a99a9e5b216780bf7fed9d7ca91d3a8f3b");
+    blake2b_hex(a, 128, 7, hex);
+    CHECK_STR(hex, "fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a7"
+                   "6b92c2cb1047ef3fe7bf6e436ec1d0a99a9e5b216780bf7fed9d7ca91d3a8f3b");
+    blake2b_hex(a, 129, 64, hex);
+    CHECK_STR(hex, "55e6e0eb418149a8af92fd9ddc99254781b2f522a131b4f4d984404b71a00e11"
+                   "67b8124d5dcddd4c6977b299392335d6edd303da6d344d74bbef2d38101b232b");
+    blake2b_hex(a, 1000000, 1000, hex);
+    CHECK_STR(hex, "98fb3efb7206fd19ebf69b6f312cf7b64e3b94dbe1a17107913975a793f177e1"
+                   "d077609d7fba363cbba00d05f7aa4e4fa8715d6428104c0a75643b0ff3fd3eaf");
+    free(a);
+}
+
+/* SHA-1 of `n` bytes at `data`, fed `step` bytes at a time, as hex. */
+static void sha1_hex(const char *data, size_t n, size_t step, char hex[RS_SHA1_SIZE * 2 + 1])
+{
+    static const char digits[] = "0123456789abcdef";
+    struct rs_sha1    ctx;
+    unsigned char     d[RS_SHA1_SIZE];
+    size_t            i;
+
+    rs_sha1_init(&ctx);
+    for (i = 0; i < n; i += step)
+    {
+        rs_sha1_update(&ctx, data + i, n - i < step ? n - i : step);
+    }
+    rs_sha1_final(&ctx, d);
+    for (i = 0; i < RS_SHA1_SIZE; i++)
+    {
+        hex[i * 2] = digits[d[i] >> 4];
+        hex[i * 2 + 1] = digits[d[i] & 0x0fu];
+    }
+    hex[RS_SHA1_SIZE * 2] = '\0';
+}
+
+void test_sha1(void)
+{
+    char  hex[RS_SHA1_SIZE * 2 + 1];
+    char *a = malloc(1000000);
+
+    TEST_CASE("sha1: FIPS 180's vectors, and the empty input");
+    sha1_hex("abc", 3, 3, hex);
+    CHECK_STR(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
+    sha1_hex("", 0, 1, hex);
+    CHECK_STR(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+    TEST_CASE("sha1: the padding either side of a block's end, and a million, in pieces");
+    CHECK(a != NULL);
+    if (!a)
+    {
+        return;
+    }
+    memset(a, 'a', 1000000);
+    sha1_hex(a, 55, 55, hex);
+    CHECK_STR(hex, "c1c8bbdc22796e28c0e15163d20899b65621d65a");
+    sha1_hex(a, 56, 3, hex);
+    CHECK_STR(hex, "c2db330f6083854c99d4b5bfb6e8f29f201be699");
+    sha1_hex(a, 64, 64, hex);
+    CHECK_STR(hex, "0098ba824b5c16427bd7a1122a5a442a25ec644d");
+    sha1_hex(a, 1000000, 999, hex);
+    CHECK_STR(hex, "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
+    free(a);
 }
 
 void test_md5(void)
@@ -332,6 +442,282 @@ static void build_openbsd(const char *root)
     free(conf);
     free(was);
     free(contents);
+}
+
+/* `text`'s BLAKE2b as pkg writes it: base32 in its own alphabet, five bits a
+ * character, the least significant first. */
+static char *pkg_blake2b(const char *text)
+{
+    static const char alphabet[] = "ybndrfg8ejkmcpqxot1uwisza345h769";
+    struct rs_blake2b ctx;
+    unsigned char     d[RS_BLAKE2B_SIZE];
+    struct rs_buf     out;
+    uint32_t          acc = 0;
+    unsigned          bits = 0;
+    size_t            i;
+
+    rs_blake2b_init(&ctx);
+    rs_blake2b_update(&ctx, text, strlen(text));
+    rs_blake2b_final(&ctx, d);
+    rs_buf_init(&out);
+    rs_buf_addstr(&out, "2$");
+    for (i = 0; i < sizeof(d); i++)
+    {
+        acc |= (uint32_t)d[i] << bits;
+        bits += 8;
+        while (bits >= 5)
+        {
+            rs_buf_addc(&out, alphabet[acc & 31u]);
+            acc >>= 5;
+            bits -= 5;
+        }
+    }
+    if (bits > 0)
+    {
+        rs_buf_addc(&out, alphabet[acc & 31u]);
+    }
+    return rs_buf_detach(&out);
+}
+
+/* FreeBSD's pkg and rpm, as their tools write what they know. */
+static void test_tool_packages(void)
+{
+    char                    *root = rs_test_tmpdir();
+    struct rs_pkgdb          db;
+    const struct rs_pkgfile *f;
+    struct rs_rules          rules;
+    struct rs_scan_opts      o;
+    struct rs_scan_stats     st;
+    struct rs_index          m;
+    struct rs_buf            err;
+    const struct rs_entry   *e;
+    char                     hex[RS_SHA256_HEX_SIZE];
+    size_t                   len;
+    char                    *b2 = pkg_blake2b("new\n");
+    char                    *was = pkg_blake2b("as shipped\n");
+    char                    *text;
+    const char              *rules_text = "baseline /usr\nstate /etc\n";
+
+    rs_buf_init(&err);
+    rs_sha256_hex("old\n", 4, hex);
+    text = rs_xasprintf("foo\t/usr/local\t%s\t/usr/local/bin/new\n"
+                        "foo\t/usr/local\t1$%s\t/usr/local/bin/old\n"
+                        "foo\t/usr/local\t%s\t/usr/local/bin/edited\n"
+                        "foo\t/usr/local\t-\t/usr/local/bin/link\n"
+                        "foo\t/usr/local\t1$tooshort\t/usr/local/bin/short\n"
+                        "foo\t/usr/local\t2$!!\t/usr/local/bin/bad32\n"
+                        "bar\trelative\t-\t/usr/local/lib/bar\n"
+                        "a:b\t/usr/local\t-\t/usr/local/bin/badname\n"
+                        "baz\t/opt/baz\t-\t/opt/baz/bin/with\ttab\n"
+                        "too\tfew\n",
+                        b2, hex, was);
+
+    TEST_CASE("pkgdb: FreeBSD's pkg, as pkg query says it");
+    rs_pkgdb_init(&db);
+    CHECK_INT(rs_pkgdb_parse_pkg(&db, text), 8);
+    rs_pkgdb_sort(&db);
+    CHECK_INT(db.nnames, 3);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/new", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_BLAKE2B);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/old", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/link", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/short", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/bad32", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/local/bin/badname", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/opt/baz/bin/with\ttab", &f), 1);
+    /* Each package's prefix is where only packages put files. */
+    CHECK(rs_pkgdb_scoped(&db, "/usr/local/bin/handmade"));
+    CHECK(rs_pkgdb_scoped(&db, "/opt/baz/x"));
+    CHECK(!rs_pkgdb_scoped(&db, "/usr/bin/base"));
+    CHECK(!rs_pkgdb_scoped(&db, "relative/x"));
+
+    TEST_CASE("scan: pkg's files checked against their BLAKE2b and SHA-256");
+    mkdirs(root, "usr/local/bin");
+    mkdirs(root, "usr/bin");
+    rs_test_write(root, "usr/local/bin/new", "new\n", 0755);
+    rs_test_write(root, "usr/local/bin/old", "old\n", 0755);
+    rs_test_write(root, "usr/local/bin/edited", "edited since\n", 0755);
+    rs_test_write(root, "usr/local/bin/handmade", "mine\n", 0755);
+    rs_test_write(root, "usr/bin/base", "base\n", 0755);
+    rs_rules_init(&rules);
+    CHECK(rs_rules_parse(&rules, rules_text, strlen(rules_text), "test", &err));
+    memset(&o, 0, sizeof(o));
+    o.root = root;
+    o.rules = &rules;
+    o.hash = true;
+    o.pkgdb = &db;
+    rs_index_init(&m);
+    CHECK(rs_scan(&o, &m, &st, &err));
+    e = find(&m, "/usr/local/bin/new");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && e->package && !e->modified);
+    e = find(&m, "/usr/local/bin/old");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && !e->modified);
+    CHECK_STR(e ? e->hash : "", hex);
+    e = find(&m, "/usr/local/bin/edited");
+    CHECK(e && e->cls == RS_CLASS_STATE && e->modified);
+    e = find(&m, "/usr/local/bin/handmade");
+    CHECK(e && e->cls == RS_CLASS_STATE && !e->package);
+    e = find(&m, "/usr/bin/base");
+    CHECK(e && e->cls == RS_CLASS_BASELINE && !e->package);
+    rs_index_free(&m);
+    rs_pkgdb_free(&db);
+    free(text);
+
+    TEST_CASE("pkgdb: rpm, as rpm -qa says it");
+    rs_sha256_hex("rpm file\n", 9, hex);
+    text = rs_xasprintf("coreutils\t8\t0\t0\t%s\t/usr/bin/base\n"
+                        "coreutils\t8\t1\t0\t%s\t/etc/coreutils.conf\n"
+                        "coreutils\t8\t64\t0\t%s\t/var/log/ghost\n"
+                        "coreutils\t8\t2\t2\t%s\t/usr/share/doc/coreutils/README\n"
+                        "coreutils\t8\t0\t0\t\t/usr/bin\n"
+                        "old\t(none)\t0\t0\tf968f33f844c98de1d3b4fe70f2e1a0f\t/usr/lib/old\n"
+                        "old\t1\t0\t0\tf968f33f844c98de1d3b4fe70f2e1a0f\t/usr/lib/old.so\n"
+                        "old\t9\t0\t0\tf968f33f844c98de1d3b4fe70f2e1a0f\t/usr/lib/old.x\n"
+                        "old\t8\tx\t0\tf968f33f844c98de1d3b4fe70f2e1a0f\t/usr/lib/badflags\n"
+                        "old\t8\t\t0\tf968f33f844c98de1d3b4fe70f2e1a0f\t/usr/lib/noflags\n"
+                        "short\tline\n",
+                        hex, hex, hex, hex);
+    rs_pkgdb_init(&db);
+    CHECK_INT(rs_pkgdb_parse_rpm(&db, text), 7);
+    rs_pkgdb_sort(&db);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/bin/base", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256 && !(f->flags & RS_PKGFILE_CONFFILE));
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/coreutils.conf", &f), 1);
+    CHECK(f->flags & RS_PKGFILE_CONFFILE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/var/log/ghost", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/share/doc/coreutils/README", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/old", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/old.so", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_MD5);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/old.x", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/badflags", &f), 0);
+    /* rpm, like dpkg, puts every file of the system there. */
+    CHECK(rs_pkgdb_scoped(&db, "/usr/bin/handmade"));
+    rs_pkgdb_free(&db);
+    free(text);
+
+    TEST_CASE("pkgdb: a pacman package's mtree");
+    rs_sha256_hex("pacman file\n", 12, hex);
+    text = rs_xasprintf("#mtree\n"
+                        "/set type=file uid=0 gid=0 mode=644\n"
+                        "./.PKGINFO time=1 size=4 sha256digest=%s\n"
+                        "./etc time=1 mode=755 type=dir\n"
+                        "./etc/pacman.conf time=1 size=12 sha256digest=%s\n"
+                        "./usr/share/with\\040space\\134 time=1 sha256digest=%s\n"
+                        "./usr/bin/link time=1 type=link link=pacman\n"
+                        "./usr/lib/short sha256digest=abc\n"
+                        "./usr/lib/nul\\000x time=1\n"
+                        "./usr/lib/trailing\\04 time=1\n"
+                        "/set type=link\n"
+                        "./usr/lib/linked time=1 sha256digest=%s\n"
+                        "\n"
+                        "notapath time=1\n",
+                        hex, hex, hex, hex);
+    rs_pkgdb_init(&db);
+    rs_pkgdb_parse_mtree(&db, 0, text);
+    CHECK_INT(db.nfiles, 0);
+    db.names = rs_xcalloc(1, sizeof(*db.names));
+    db.names[db.nnames++] = rs_xstrdup("pacman");
+    rs_pkgdb_parse_mtree(&db, 0, text);
+    rs_pkgdb_sort(&db);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/.PKGINFO", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/pacman.conf", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/share/with space\\", &f), 1);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/bin/link", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/short", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/trailing\\04", &f), 1);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/usr/lib/linked", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(db.nfiles, 7);
+    rs_pkgdb_free(&db);
+    free(text);
+
+    TEST_CASE("pkgdb: apk's installed database");
+    rs_pkgdb_init(&db);
+    CHECK_INT(rs_pkgdb_parse_apk(&db, "C:Q18Pz9wvTaBYr2RzvEXE6rYpFiJbI=\n"
+                                      "P:alpine-baselayout\n"
+                                      "V:3.7.2-r1\n"
+                                      "F:etc\n"
+                                      "R:motd\n"
+                                      "Z:Q1SLkS9hBidUbPwwrw+XR0Whv3ww8=\n"
+                                      "F:etc/crontabs\n"
+                                      "R:root\n"
+                                      "a:0:0:600\n"
+                                      "Z:Q2R5o5D0dFEdOGd8+aM6Ni3JByOxF8QrfLzXAO+gEO9sA=\n"
+                                      "R:short\n"
+                                      "Z:Q1c2hvcnQ=\n"
+                                      "Z:Q1SLkS9hBidUbPwwrw+XR0Whv3ww8=\n"
+                                      "x\n"
+                                      "Z:Q1SLkS9hBidUbPwwrw+XR0Whv3ww8=\n"
+                                      "\n"
+                                      "R:orphan\n"
+                                      "P:musl\n"
+                                      "R:ld-musl-x86_64.so.1\n"
+                                      "Z:Q1vfk1apUWI4yLJGhhNRd0kJixfvY=\n"
+                                      "R:../escape\n"
+                                      "\n"),
+              4);
+    rs_pkgdb_sort(&db);
+    CHECK_INT(db.nnames, 2);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/motd", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA1);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/crontabs/root", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA256);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/etc/crontabs/short", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_NONE);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/orphan", &f), 0);
+    CHECK_INT(rs_pkgdb_lookup(&db, "/ld-musl-x86_64.so.1", &f), 1);
+    CHECK(f->digest_kind == RS_PKGDIGEST_SHA1);
+    CHECK_STR(rs_pkgdb_package(&db, f, &len), "musl");
+    rs_pkgdb_free(&db);
+
+    TEST_CASE("scan: an apk package's files checked against their SHA-1");
+    {
+        struct rs_sha1 ctx;
+        unsigned char  d[RS_SHA1_SIZE];
+        struct rs_buf  b64;
+        char          *db_text;
+
+        rs_sha1_init(&ctx);
+        rs_sha1_update(&ctx, "old\n", 4);
+        rs_sha1_final(&ctx, d);
+        rs_buf_init(&b64);
+        rs_base64_encode(&b64, d, sizeof(d));
+        db_text = rs_xasprintf("P:foo\nF:usr/local/bin\nR:old\nZ:Q1%s\nR:edited\nZ:Q1%s\n",
+                               b64.data, b64.data);
+        rs_pkgdb_init(&db);
+        CHECK_INT(rs_pkgdb_parse_apk(&db, db_text), 2);
+        rs_pkgdb_sort(&db);
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        e = find(&m, "/usr/local/bin/old");
+        CHECK(e && e->cls == RS_CLASS_BASELINE && e->package && !e->modified);
+        e = find(&m, "/usr/local/bin/edited");
+        CHECK(e && e->cls == RS_CLASS_STATE && e->modified);
+        rs_index_free(&m);
+        rs_pkgdb_free(&db);
+        rs_buf_free(&b64);
+        free(db_text);
+    }
+
+    rs_rules_free(&rules);
+    rs_buf_free(&err);
+    free(b2);
+    free(was);
+    rs_test_rmtree(root);
+    free(root);
 }
 
 static void test_bsd_packages(void)
@@ -855,4 +1241,5 @@ void test_pkgdb(void)
     rs_test_rmtree(root);
     free(root);
     test_bsd_packages();
+    test_tool_packages();
 }

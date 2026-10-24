@@ -115,6 +115,100 @@ const struct rs_entry *rs_index_find(const struct rs_index *ix, const char *path
     return NULL;
 }
 
+static int child_cmp(const void *a, const void *b)
+{
+    return strcmp(((const struct rs_child *)a)->name, ((const struct rs_child *)b)->name);
+}
+
+struct rs_child *rs_index_children(const struct rs_index *ix, const char *dir, size_t *n)
+{
+    char            *prefix = strcmp(dir, "/") == 0 ? rs_xstrdup("/") : rs_xasprintf("%s/", dir);
+    size_t           plen = strlen(prefix);
+    size_t           lo = 0;
+    size_t           hi = ix->count;
+    struct rs_child *out = NULL;
+    size_t           cap = 0;
+    size_t           k = 0;
+    size_t           i;
+    size_t           j;
+
+    /* Everything beneath `dir` sorts together, from the first path at or
+     * after "dir/". */
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+
+        if (strcmp(ix->entries[mid].path, prefix) < 0)
+        {
+            lo = mid + 1;
+        } else
+        {
+            hi = mid;
+        }
+    }
+    for (i = lo; i < ix->count && strncmp(ix->entries[i].path, prefix, plen) == 0; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+        const char            *rest = e->path + plen;
+        const char            *slash = strchr(rest, '/');
+        size_t                 len = slash ? (size_t)(slash - rest) : strlen(rest);
+
+        if (len == 0)
+        {
+            continue;   /* "/" itself */
+        }
+        /* What is beneath a name mostly follows it straight away. */
+        if (k > 0 && strncmp(out[k - 1].name, rest, len) == 0 && out[k - 1].name[len] == '\0')
+        {
+            out[k - 1].entry = slash ? out[k - 1].entry : e;
+            continue;
+        }
+        if (k == cap)
+        {
+            cap = cap ? cap * 2 : 16;
+            out = rs_xreallocarray(out, cap, sizeof(*out));
+        }
+        out[k].name = rs_xstrndup(rest, len);
+        out[k].entry = slash ? NULL : e;
+        k++;
+    }
+    free(prefix);
+    /* But "a/b" sorts after "a-c", so a name can be had twice: once each,
+     * with its entry where it has one. */
+    if (k > 1)
+    {
+        qsort(out, k, sizeof(*out), child_cmp);
+    }
+    for (i = 0, j = 0; i < k; i++)
+    {
+        if (j > 0 && strcmp(out[j - 1].name, out[i].name) == 0)
+        {
+            out[j - 1].entry = out[j - 1].entry ? out[j - 1].entry : out[i].entry;
+            free(out[i].name);
+            continue;
+        }
+        out[j++] = out[i];
+    }
+    *n = j;
+    if (j == 0)
+    {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+void rs_index_children_free(struct rs_child *c, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        free(c[i].name);
+    }
+    free(c);
+}
+
 /* ------------------------------------------------------------------------- */
 
 static const struct {

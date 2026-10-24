@@ -616,7 +616,9 @@ static void read_lvm(const struct rs_jval *machine, struct rs_layout *l)
             rs_buf_init(&b);
             for (c = 0; vg->name[c] != '\0'; c++)
             {
-                rs_buf_add(&b, vg->name[c] == '-' ? "--" : &vg->name[c], vg->name[c] == '-' ? 2 : 1);
+                bool dash = vg->name[c] == '-';
+
+                rs_buf_add(&b, dash ? "--" : &vg->name[c], dash ? 2 : 1);
             }
             rs_buf_add(&b, "-", 1);
             for (c = 0; lvs->keys[j][c] != '\0'; c++)
@@ -969,7 +971,8 @@ bool rs_layout_build(const struct rs_jval *machine, struct rs_layout *out)
 
 static bool is_esp(const struct rs_vol *v)
 {
-    return v->kind == RS_VOL_PART && (rs_ptype_is(v->ptype, ESP_TYPE) || rs_ptype_is(v->ptype, "0xef"));
+    return v->kind == RS_VOL_PART &&
+           (rs_ptype_is(v->ptype, ESP_TYPE) || rs_ptype_is(v->ptype, "0xef"));
 }
 
 static bool is_bios_boot(const struct rs_vol *v)
@@ -1244,7 +1247,8 @@ static uint64_t fit_fs(const struct rs_vol *v)
     return want;
 }
 
-uint64_t rs_layout_fit(const struct rs_layout *l, size_t vol, enum rs_target target) /* NOLINT(misc-no-recursion) */
+/* NOLINTNEXTLINE(misc-no-recursion) */
+uint64_t rs_layout_fit(const struct rs_layout *l, size_t vol, enum rs_target target)
 {
     const struct rs_vol *v = &l->vols[vol];
     size_t               kids[64];
@@ -1260,7 +1264,8 @@ uint64_t rs_layout_fit(const struct rs_layout *l, size_t vol, enum rs_target tar
     {
         return v->size;
     }
-    if (eq_nocase(v->ptype, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") || eq_nocase(v->ptype, "0xef") ||
+    if (eq_nocase(v->ptype, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b") ||
+        eq_nocase(v->ptype, "0xef") ||
         eq_nocase(v->ptype, "21686148-6449-6e6f-744e-656564454649"))
     {
         return v->size;
@@ -1296,7 +1301,8 @@ uint64_t rs_layout_fit(const struct rs_layout *l, size_t vol, enum rs_target tar
             {
                 if (l->vols[k].vg == i)
                 {
-                    sum += round_up(rs_layout_fit(l, k, target), l->vgs[i].extent ? l->vgs[i].extent : 4 * MIB);
+                    sum += round_up(rs_layout_fit(l, k, target),
+                                    l->vgs[i].extent ? l->vgs[i].extent : 4 * MIB);
                 }
             }
             sum = sum / l->vgs[i].npvs + 8 * MIB;

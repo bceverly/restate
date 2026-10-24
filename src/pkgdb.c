@@ -7,9 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "blake2b.h"
 #include "index.h"
 #include "json.h"
 #include "packages.h"
+#include "run.h"
 #include "util.h"
 
 /* dpkg's status file is a few megabytes on a desktop; a package's file list
@@ -61,7 +63,10 @@ void rs_pkgdb_free(struct rs_pkgdb *db)
 
 size_t rs_pkgdigest_size(unsigned kind)
 {
-    return kind == RS_PKGDIGEST_MD5 ? RS_MD5_SIZE : kind == RS_PKGDIGEST_SHA256 ? RS_SHA256_SIZE : 0;
+    return kind == RS_PKGDIGEST_MD5    ? RS_MD5_SIZE
+           : kind == RS_PKGDIGEST_SHA1 ? RS_SHA1_SIZE
+           : kind == RS_PKGDIGEST_SHA256 || kind == RS_PKGDIGEST_BLAKE2B ? RS_SHA256_SIZE
+                                                                         : 0;
 }
 
 /* One line of `text` at *p: its start and length, *p moved past it. False
@@ -762,6 +767,395 @@ void rs_pkgdb_parse_install(struct rs_pkgdb *db, uint32_t pkg, const char *prefi
 }
 
 /* By path; for one path, by package, the entry with a digest first. */
+/* ------------------------------------------------------------------------- */
+
+/* `line`'s first `n` tab-separated fields: false if it has fewer. The last
+ * runs to the end of the line, tabs and all -- a path, which may have one. */
+static bool fields(const char *line, size_t len, size_t n, const char **f, size_t *flen)
+{
+    size_t at = 0;
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        const char *tab = i + 1 < n ? memchr(line + at, '\t', len - at) : NULL;
+
+        if (i + 1 < n && !tab)
+        {
+            return false;
+        }
+        f[i] = line + at;
+        flen[i] = tab ? (size_t)(tab - f[i]) : len - at;
+        at += flen[i] + (tab ? 1 : 0);
+    }
+    return true;
+}
+
+/* The package `name` (`len` long) as an index into names: the last one
+ * again -- each tool lists a package's files together -- or a new one.
+ * UINT32_MAX for a name not to use: as stem() holds a BSD's to. */
+static uint32_t package_at(struct rs_pkgdb *db, const char *name, size_t len)
+{
+    size_t i;
+
+    if (db->nnames > 0 && strncmp(db->names[db->nnames - 1], name, len) == 0 &&
+        db->names[db->nnames - 1][len] == '\0')
+    {
+        return (uint32_t)(db->nnames - 1);
+    }
+    if (len == 0 || len > 256 || db->nnames >= UINT32_MAX)
+    {
+        return UINT32_MAX;
+    }
+    for (i = 0; i < len; i++)
+    {
+        if (name[i] <= ' ' || name[i] > '~' || name[i] == ':' || name[i] == '/')
+        {
+            return UINT32_MAX;
+        }
+    }
+    db->names = rs_xreallocarray(db->names, db->nnames + 1, sizeof(*db->names));
+    db->names[db->nnames++] = rs_xstrndup(name, len);
+    return (uint32_t)(db->nnames - 1);
+}
+
+/* `len` hex digits, either case, into `len / 2` bytes. */
+static bool hex_bytes(const char *s, size_t len, unsigned char *out)
+{
+    size_t i;
+
+    if (len % 2 != 0)
+    {
+        return false;
+    }
+    for (i = 0; i < len; i++)
+    {
+        char     c = s[i];
+        unsigned v;
+
+        if (c >= '0' && c <= '9')
+        {
+            v = (unsigned)(c - '0');
+        } else if (c >= 'a' && c <= 'f')
+        {
+            v = (unsigned)(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F')
+        {
+            v = (unsigned)(c - 'A' + 10);
+        } else
+        {
+            return false;
+        }
+        out[i / 2] = (unsigned char)(i % 2 == 0 ? v << 4 : (out[i / 2] | v));
+    }
+    return true;
+}
+
+/* pkg's base32: its own alphabet, five bits a character, the least
+ * significant first. Exactly `n` bytes, or false. */
+static bool pkg_base32(const char *s, size_t len, unsigned char *out, size_t n)
+{
+    static const char alphabet[] = "ybndrfg8ejkmcpqxot1uwisza345h769";
+    uint32_t          acc = 0;
+    unsigned          bits = 0;
+    size_t            got = 0;
+    size_t            i;
+
+    for (i = 0; i < len; i++)
+    {
+        const char *at = s[i] ? strchr(alphabet, s[i]) : NULL;
+
+        if (!at)
+        {
+            return false;
+        }
+        acc |= (uint32_t)(at - alphabet) << bits;
+        bits += 5;
+        if (bits >= 8)
+        {
+            if (got == n)
+            {
+                return false;
+            }
+            out[got++] = (unsigned char)acc;
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    return got == n && acc == 0;
+}
+
+size_t rs_pkgdb_parse_pkg(struct rs_pkgdb *db, const char *text)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+    size_t      added = 0;
+
+    db->scoped = true;
+    while (next_line(&p, &line, &len))
+    {
+        const char   *f[4];
+        size_t        fl[4];
+        unsigned char raw[RS_BLAKE2B_SIZE];
+        unsigned      kind = RS_PKGDIGEST_NONE;
+        uint32_t      pkg;
+
+        if (!fields(line, len, 4, f, fl))
+        {
+            continue;
+        }
+        /* The sum: "1$" SHA-256, "2$" BLAKE2b; one of a kind not known
+         * compares nothing. */
+        if (fl[2] == 2 + RS_SHA256_HEX_LEN && strncmp(f[2], "1$", 2) == 0 &&
+            hex_bytes(f[2] + 2, RS_SHA256_HEX_LEN, raw))
+        {
+            kind = RS_PKGDIGEST_SHA256;
+        } else if (fl[2] > 2 && strncmp(f[2], "2$", 2) == 0 &&
+                   pkg_base32(f[2] + 2, fl[2] - 2, raw, RS_BLAKE2B_SIZE))
+        {
+            kind = RS_PKGDIGEST_BLAKE2B;
+        }
+        pkg = package_at(db, f[0], fl[0]);
+        if (pkg == UINT32_MAX)
+        {
+            continue;
+        }
+        if (add_file(db, f[3], fl[3], pkg, 0, kind, kind != RS_PKGDIGEST_NONE ? raw : NULL))
+        {
+            char *prefix = rs_xstrndup(f[1], fl[1]);
+
+            added++;
+            if (prefix[0] == '/' && rs_path_is_clean(prefix))
+            {
+                add_scope(db, prefix);
+            }
+            free(prefix);
+        }
+    }
+    return added;
+}
+
+size_t rs_pkgdb_parse_rpm(struct rs_pkgdb *db, const char *text)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+    size_t      added = 0;
+
+    while (next_line(&p, &line, &len))
+    {
+        const char   *f[6];
+        size_t        fl[6];
+        unsigned char raw[RS_SHA256_SIZE];
+        unsigned      kind = RS_PKGDIGEST_NONE;
+        unsigned      flags = 0;
+        unsigned long fileflags;
+        char         *end;
+        char          num[16];
+        uint32_t      pkg;
+        bool          ghost;
+        bool          md5;
+
+        /* Installed as it is: not a file left out (--excludedocs, another
+         * architecture's), or one another package's replaced. */
+        if (!fields(line, len, 6, f, fl) || fl[3] != 1 || f[3][0] != '0' || fl[2] == 0 ||
+            fl[2] >= sizeof(num))
+        {
+            continue;
+        }
+        memcpy(num, f[2], fl[2]);
+        num[fl[2]] = '\0';
+        fileflags = strtoul(num, &end, 10);
+        if (*end != '\0')
+        {
+            continue;
+        }
+        /* SHA-256 (8) or MD5 (1, and an rpm that says none at all); a
+         * ghost (64) is the package's to name, but none of its content. */
+        ghost = (fileflags & 64u) != 0;
+        md5 = (fl[1] == 1 && f[1][0] == '1') || (fl[1] == 6 && strncmp(f[1], "(none)", 6) == 0);
+        if (!ghost && fl[4] == RS_SHA256_HEX_LEN && fl[1] == 1 && f[1][0] == '8' &&
+            hex_bytes(f[4], fl[4], raw))
+        {
+            kind = RS_PKGDIGEST_SHA256;
+        } else if (!ghost && fl[4] == RS_MD5_SIZE * 2 && md5 && hex_bytes(f[4], fl[4], raw))
+        {
+            kind = RS_PKGDIGEST_MD5;
+        }
+        if (fileflags & 1u)
+        {
+            flags |= RS_PKGFILE_CONFFILE;
+        }
+        pkg = package_at(db, f[0], fl[0]);
+        if (pkg != UINT32_MAX &&
+            add_file(db, f[5], fl[5], pkg, flags, kind, kind != RS_PKGDIGEST_NONE ? raw : NULL))
+        {
+            added++;
+        }
+    }
+    return added;
+}
+
+/* An mtree path, its "\ooo" escapes undone: NULL if it holds a NUL. */
+static char *mtree_path(const char *s, size_t len)
+{
+    char  *out = rs_xstrndup(s, len);
+    size_t i;
+    size_t k = 0;
+
+    for (i = 0; i < len; i++)
+    {
+        if (s[i] == '\\' && i + 3 < len && s[i + 1] >= '0' && s[i + 1] <= '3' &&
+            s[i + 2] >= '0' && s[i + 2] <= '7' && s[i + 3] >= '0' && s[i + 3] <= '7')
+        {
+            out[k++] = (char)(((s[i + 1] - '0') << 6) | ((s[i + 2] - '0') << 3) |
+                              (s[i + 3] - '0'));
+            i += 3;
+        } else
+        {
+            out[k++] = s[i];
+        }
+    }
+    out[k] = '\0';
+    if (strlen(out) != k)
+    {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+void rs_pkgdb_parse_mtree(struct rs_pkgdb *db, uint32_t pkg, const char *text)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+    bool        file_by_default = true;
+
+    if (pkg >= db->nnames)
+    {
+        return;
+    }
+    while (next_line(&p, &line, &len))
+    {
+        size_t        at = 0;
+        const char   *w;
+        size_t        wlen;
+        const char   *sha = NULL;
+        bool          file;
+        bool          set;
+        char         *path;
+
+        if (!word(line, len, &at, &w, &wlen))
+        {
+            continue;
+        }
+        set = wlen == 4 && strncmp(w, "/set", 4) == 0;
+        /* Only "./PATH": not "/set" and the rest, not a comment, and not
+         * pacman's own ./.PKGINFO, ./.BUILDINFO and ./.MTREE. */
+        if (!set && (wlen < 3 || strncmp(w, "./", 2) != 0 ||
+                     (w[2] == '.' && !memchr(w + 2, '/', wlen - 2))))
+        {
+            continue;
+        }
+        path = set ? NULL : mtree_path(w + 1, wlen - 1);
+        file = file_by_default;
+        while (word(line, len, &at, &w, &wlen))
+        {
+            if (wlen > 5 && strncmp(w, "type=", 5) == 0)
+            {
+                file = wlen == 9 && strncmp(w + 5, "file", 4) == 0;
+            } else if (wlen == 13 + RS_SHA256_HEX_LEN && strncmp(w, "sha256digest=", 13) == 0)
+            {
+                sha = w + 13;
+            }
+        }
+        if (set)
+        {
+            file_by_default = file;
+            continue;
+        }
+        if (path)
+        {
+            unsigned char raw[RS_SHA256_SIZE];
+            bool          known = file && sha && hex_bytes(sha, RS_SHA256_HEX_LEN, raw);
+
+            (void)add_file(db, path, strlen(path), pkg, 0,
+                           known ? RS_PKGDIGEST_SHA256 : RS_PKGDIGEST_NONE, known ? raw : NULL);
+            free(path);
+        }
+    }
+}
+
+size_t rs_pkgdb_parse_apk(struct rs_pkgdb *db, const char *text)
+{
+    const char *p = text;
+    const char *line;
+    size_t      len;
+    uint32_t    pkg = UINT32_MAX;
+    char       *dir = NULL;
+    size_t      last = SIZE_MAX;   /* the file a "Z:" after it is of */
+    size_t      added = 0;
+
+    while (next_line(&p, &line, &len))
+    {
+        if (len < 2 || line[1] != ':')
+        {
+            /* A blank line ends a package. */
+            pkg = len == 0 ? UINT32_MAX : pkg;
+            last = SIZE_MAX;
+            continue;
+        }
+        if (line[0] == 'P')
+        {
+            pkg = package_at(db, line + 2, len - 2);
+            free(dir);
+            dir = NULL;
+            last = SIZE_MAX;
+        } else if (line[0] == 'F')
+        {
+            free(dir);
+            dir = rs_xstrndup(line + 2, len - 2);
+            last = SIZE_MAX;
+        } else if (line[0] == 'R' && pkg != UINT32_MAX)
+        {
+            /* Relative to the "F:" before it, or to the root. */
+            char *path = rs_xasprintf("/%s%s%.*s", dir ? dir : "", dir && dir[0] ? "/" : "",
+                                      (int)(len - 2), line + 2);
+
+            last = SIZE_MAX;
+            if (add_file(db, path, strlen(path), pkg, 0, RS_PKGDIGEST_NONE, NULL))
+            {
+                last = db->nfiles - 1;
+                added++;
+            }
+            free(path);
+        } else if (line[0] == 'Z' && last != SIZE_MAX && len > 4 && line[2] == 'Q')
+        {
+            struct rs_buf raw;
+
+            rs_buf_init(&raw);
+            if (rs_base64_decode(line + 4, len - 4, &raw))
+            {
+                unsigned kind = line[3] == '1' && raw.len == RS_SHA1_SIZE     ? RS_PKGDIGEST_SHA1
+                                : line[3] == '2' && raw.len == RS_SHA256_SIZE ? RS_PKGDIGEST_SHA256
+                                                                              : RS_PKGDIGEST_NONE;
+
+                if (kind != RS_PKGDIGEST_NONE)
+                {
+                    db->files[last].digest_kind = (unsigned char)kind;
+                    memcpy(db->files[last].digest, raw.data, raw.len);
+                }
+            }
+            rs_buf_free(&raw);
+            last = SIZE_MAX;
+        }
+    }
+    free(dir);
+    return added;
+}
+
 static int file_cmp(const void *a, const void *b)
 {
     const struct rs_pkgfile *x = a;
@@ -944,6 +1338,139 @@ static bool load_contents(struct rs_pkgdb *db, const char *root, const char *rel
     return db->nnames > 0;
 }
 
+/* A pacman package's name: the line after "%NAME%" in its desc. */
+static char *pacman_name(const char *desc)
+{
+    const char *p = desc;
+    const char *line;
+    size_t      len;
+
+    while (next_line(&p, &line, &len))
+    {
+        if (len == 6 && strncmp(line, "%NAME%", 6) == 0)
+        {
+            return next_line(&p, &line, &len) && len > 0 ? rs_xstrndup(line, len) : NULL;
+        }
+    }
+    return NULL;
+}
+
+/* pacman's packages: a directory each in /var/lib/pacman/local, with the
+ * package's name in its desc and its files, and their SHA-256, in its
+ * gzip'd mtree. */
+static bool load_pacman(struct rs_pkgdb *db, const char *root)
+{
+    static const char *const rel = "/var/lib/pacman/local";
+    size_t                   n;
+    char                   **names = rs_list_beneath(root, rel, &n);
+    size_t                   i;
+
+    for (i = 0; i < n; i++)
+    {
+        char         *path = rs_xasprintf("%s/%s/desc", rel, names[i]);
+        struct rs_buf text;
+        char         *name = NULL;
+        uint32_t      pkg;
+
+        if (rs_read_beneath(root, path, INFO_MAX, &text))
+        {
+            name = pacman_name(text.data);
+            rs_buf_free(&text);
+        }
+        free(path);
+        pkg = name ? package_at(db, name, strlen(name)) : UINT32_MAX;
+        free(name);
+        path = rs_xasprintf("%s/%s/mtree", rel, names[i]);
+        if (pkg != UINT32_MAX && rs_read_beneath_gz(root, path, INFO_MAX, &text))
+        {
+            rs_pkgdb_parse_mtree(db, pkg, text.data);
+            rs_buf_free(&text);
+        }
+        free(path);
+    }
+    rs_free_names(names, n);
+    return db->nfiles > 0;
+}
+
+/* apk's packages: all in /lib/apk/db/installed. */
+static bool load_apk(struct rs_pkgdb *db, const char *root)
+{
+    struct rs_buf text;
+
+    if (!rs_read_beneath(root, "/lib/apk/db/installed", STATUS_MAX, &text))
+    {
+        return false;
+    }
+    (void)rs_pkgdb_parse_apk(db, text.data);
+    rs_buf_free(&text);
+    return db->nfiles > 0;
+}
+
+/* Whether `root` is this system's own "/": all pkg and rpm can answer for. */
+static bool running_root(const char *root)
+{
+    char *real = realpath(root, NULL); /* Flawfinder: ignore */
+    bool  yes = real && strcmp(real, "/") == 0;
+
+    free(real);
+    return yes;
+}
+
+/* What `prog` writes to its standard output given `argv`, into `out`, if it
+ * is there to run and says it succeeded; what it says on its standard error
+ * is not restate's to repeat. */
+static bool ask(enum rs_program prog, char *const argv[], struct rs_buf *out)
+{
+    struct rs_buf errtext;
+    struct rs_buf err;
+    int           code = -1;
+    bool          ok;
+
+    rs_buf_init(out);
+    rs_buf_init(&errtext);
+    rs_buf_init(&err);
+    ok = rs_program_path(prog) && rs_run(prog, argv, out, &errtext, &code, &err) && code == 0 &&
+         out->len > 0;
+    rs_buf_free(&errtext);
+    rs_buf_free(&err);
+    if (!ok)
+    {
+        rs_buf_free(out);
+    }
+    return ok;
+}
+
+/* FreeBSD's pkg's database, or rpm's, as each tool says it. */
+static void load_tools(struct rs_pkgdb *db)
+{
+    static char   pkg[] = "pkg";
+    static char   query[] = "query";
+    static char   pkg_format[] = "%n\t%p\t%Fs\t%Fp";
+    static char   rpm[] = "rpm";
+    static char   all[] = "-qa";
+    static char   qf[] = "--qf";
+    static char   rpm_format[] = RS_PKGDB_RPM_FORMAT;
+    char *const   pkg_argv[] = { pkg, query, pkg_format, NULL };
+    char *const   rpm_argv[] = { rpm, all, qf, rpm_format, NULL };
+    struct rs_buf out;
+
+    if (ask(RS_PROG_PKG, pkg_argv, &out))
+    {
+        if (rs_pkgdb_parse_pkg(db, out.data) > 0)
+        {
+            db->unscoped = rs_xreallocarray(db->unscoped, db->nunscoped + 1,
+                                            sizeof(*db->unscoped));
+            db->unscoped[db->nunscoped++] = rs_xstrdup("/var/db/pkg");
+        }
+        rs_buf_free(&out);
+    }
+    if (db->nfiles == 0 && ask(RS_PROG_RPM, rpm_argv, &out))
+    {
+        (void)rs_pkgdb_parse_rpm(db, out.data);
+        rs_buf_free(&out);
+    }
+}
+
 bool rs_pkgdb_load(struct rs_pkgdb *db, const char *root)
 {
     static const char *const bsd[] = { "/var/db/pkg", "/usr/pkg/pkgdb" };
@@ -958,12 +1485,18 @@ bool rs_pkgdb_load(struct rs_pkgdb *db, const char *root)
     }
     if (!rs_read_beneath(root, "/var/lib/dpkg/status", STATUS_MAX, &text))
     {
-        /* No dpkg: OpenBSD's packages, or pkgsrc's. (FreeBSD's pkg keeps its
-         * own in /var/db/pkg too, in local.sqlite, with no +CONTENTS.) */
+        /* No dpkg: OpenBSD's packages, or pkgsrc's, pacman's or apk's; or, on this
+         * system, what FreeBSD's pkg or rpm says (pkg keeps its database in /var/db/pkg
+         * too, in local.sqlite, with no +CONTENTS). */
         rs_pkgdb_free(db);
         for (i = 0; i < sizeof(bsd) / sizeof(bsd[0]) && db->nnames == 0; i++)
         {
             (void)load_contents(db, root, bsd[i]);
+        }
+        if (db->nnames == 0 && !load_pacman(db, root) && !load_apk(db, root) &&
+            running_root(root))
+        {
+            load_tools(db);
         }
         rs_pkgdb_sort(db);
         if (db->nfiles == 0)

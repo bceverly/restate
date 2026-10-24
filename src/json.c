@@ -558,7 +558,8 @@ static bool number(struct rs_json_parser *jp, struct rs_jval *out)
 
 static bool value(struct rs_json_parser *jp, struct rs_jval *out, int depth);
 
-static bool container(struct rs_json_parser *jp, struct rs_jval *out, int depth, /* NOLINT(misc-no-recursion) */
+/* NOLINTNEXTLINE(misc-no-recursion) */
+static bool container(struct rs_json_parser *jp, struct rs_jval *out, int depth,
                       bool is_object)
 {
     size_t        cap = 0;
@@ -631,7 +632,8 @@ static bool container(struct rs_json_parser *jp, struct rs_jval *out, int depth,
     }
 }
 
-static bool value(struct rs_json_parser *jp, struct rs_jval *out, int depth) /* NOLINT(misc-no-recursion) */
+/* NOLINTNEXTLINE(misc-no-recursion) */
+static bool value(struct rs_json_parser *jp, struct rs_jval *out, int depth)
 {
     char c;
 
@@ -893,7 +895,8 @@ static bool scalars_only(const struct rs_jval *v)
     return true;
 }
 
-void rs_json_write(struct rs_buf *out, const struct rs_jval *v, int indent, int level) /* NOLINT(misc-no-recursion) */
+/* NOLINTNEXTLINE(misc-no-recursion) */
+void rs_json_write(struct rs_buf *out, const struct rs_jval *v, int indent, int level)
 {
     size_t i;
     bool   spread;

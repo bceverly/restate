@@ -84,6 +84,8 @@ int   rs_test_capture(int (*fn)(const void *), const void *arg, char **out, char
 void test_util(void);
 void test_sha256(void);
 void test_md5(void);
+void test_blake2b(void);
+void test_sha1(void);
 void test_pkgdb(void);
 void test_xattr(void);
 void test_live(void);

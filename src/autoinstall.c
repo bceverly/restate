@@ -147,13 +147,14 @@ static void header(struct gen *g)
     };
 
     rs_buf_addstr(g->out, "#cloud-config\n");
-    rs_buf_addf(g->out, "# restate autoinstall: %s, rebuilt as %s.\n", host ? host : "(no host name)",
-                targets[g->o->target]);
+    rs_buf_addf(g->out, "# restate autoinstall: %s, rebuilt as %s.\n",
+                host ? host : "(no host name)", targets[g->o->target]);
     rs_buf_addf(g->out, "# Made by restate %s from %s.\n", g->o->version ? g->o->version : "",
                 g->o->image ? g->o->image : "the running system");
     rs_buf_addstr(g->out,
                   "#\n"
-                  "# Before using it, replace every CHANGE-ME below. Each LUKS passphrase has to be\n"
+                  "# Before using it, replace every CHANGE-ME below. Each LUKS passphrase has "
+                  "to be\n"
                   "# in this file -- the installer formats the volume with it -- so keep the file\n"
                   "# as private as the passphrase, and change the passphrase after the install\n"
                   "# (cryptsetup luksChangeKey) if the file is shared.\n"
@@ -251,7 +252,8 @@ static void identity(struct gen *g)
     }
     rs_buf_addstr(g->out,
                   "    # Locked until the restore brings back /etc/shadow and the real accounts.\n"
-                  "    # To log in before that, replace it with a hash from `mkpasswd -m sha-512`.\n");
+                  "    # To log in before that, replace it with a hash from "
+                  "`mkpasswd -m sha-512`.\n");
     kv(g, 4, "password", "!CHANGE-ME");
     if (ssh && ssh->type == RS_JBOOL && ssh->b)
     {
@@ -396,10 +398,12 @@ static void put_partitions(struct gen *g, size_t d)
         rs_buf_addstr(g->out, "      - type: partition\n");
         kv(g, 8, "id", id);
         kv(g, 8, "device", disk_id);
-        rs_buf_addf(g->out, "        number: %u\n", g->o->target == RS_TARGET_SAME ? v->number : num);
+        rs_buf_addf(g->out, "        number: %u\n",
+                    g->o->target == RS_TARGET_SAME ? v->number : num);
         if (g->o->target == RS_TARGET_SAME)
         {
-            rs_buf_addf(g->out, "        offset: %" PRIu64 "\n        size: %" PRIu64 "\n", v->start, v->size);
+            rs_buf_addf(g->out, "        offset: %" PRIu64 "\n        size: %" PRIu64 "\n",
+                        v->start, v->size);
         } else if (i == last)
         {
             rs_buf_addstr(g->out, "        size: -1    # the rest of the disk\n");
@@ -452,8 +456,8 @@ static void put_format(struct gen *g, size_t i)
     {
         kv(g, 8, "label", v->label);
     }
-    if (v->uuid && (rs_starts_with(v->fstype, "ext") || eq(v->fstype, "xfs") || eq(v->fstype, "btrfs") ||
-                    eq(v->fstype, "swap")))
+    if (v->uuid && (rs_starts_with(v->fstype, "ext") || eq(v->fstype, "xfs") ||
+                    eq(v->fstype, "btrfs") || eq(v->fstype, "swap")))
     {
         kv(g, 8, "uuid", v->uuid);
     }
@@ -724,7 +728,8 @@ static void late_file(struct gen *g, const char *path, const char *content, cons
     rs_buf_init(&b64);
     rs_buf_init(&cmd);
     rs_base64_encode(&b64, content, strlen(content));
-    rs_buf_addf(&cmd, "mkdir -p /target%.*s && echo %s | base64 -d > /target%s && chmod %s /target%s",
+    rs_buf_addf(&cmd, "mkdir -p /target%.*s && echo %s | base64 -d > /target%s && "
+                "chmod %s /target%s",
                 (int)(slash - path), path, b64.data ? b64.data : "", path, mode, path);
     late(g, cmd.data);
     rs_buf_free(&cmd);
@@ -1068,7 +1073,8 @@ static void first_boot(struct gen *g)
         {
             if (!listed)
             {
-                late_comment(g, "Left for after the first boot (the build sheet has the commands):");
+                late_comment(g, "Left for after the first boot (the build sheet has the "
+                                "commands):");
                 listed = true;
             }
             rs_buf_addf(&g->late, "    #   %s, from its .deb (no repository has it)\n",
@@ -1187,7 +1193,8 @@ static void late_packages(struct gen *g)
             }
             w[0] = rs_xstrdup(rs_jobject_str(r, "name"));
             w[1] = rs_xstrdup(rs_jobject_str(r, "url"));
-            late_in_target(g, "flatpak remote-add --if-not-exists", w, 2, "a flatpak remote was not added");
+            late_in_target(g, "flatpak remote-add --if-not-exists", w, 2,
+                           "a flatpak remote was not added");
             free(w[0]);
             free(w[1]);
         }
@@ -1203,13 +1210,15 @@ static void late_packages(struct gen *g)
             }
             w[0] = rs_xstrdup(rs_jobject_str(a, "remote"));
             w[1] = rs_xasprintf("%s//%s", rs_jobject_str(a, "id"), rs_jobject_str(a, "branch"));
-            late_in_target(g, "flatpak install -y --noninteractive", w, 2, "a flatpak app did not install");
+            late_in_target(g, "flatpak install -y --noninteractive", w, 2,
+                           "a flatpak app did not install");
             free(w[0]);
             free(w[1]);
         }
     }
     words = system_words(rs_jobject_get(pk, "pip"), "==", NULL, &n);
-    late_in_target(g, "pip install --break-system-packages", words, n, "the Python packages did not all install");
+    late_in_target(g, "pip install --break-system-packages", words, n,
+                   "the Python packages did not all install");
     free_words(words, n);
     words = system_words(rs_jobject_get(pk, "npm"), "@", "/usr/lib/node_modules", &n);
     late_in_target(g, "npm install -g", words, n, "the npm packages did not all install");
@@ -1281,7 +1290,8 @@ static void extras(struct gen *g)
         rs_buf_addstr(g->out, "  packages:\n    - \"qemu-guest-agent\"\n");
     } else if (g->o->target == RS_TARGET_METAL)
     {
-        rs_buf_addstr(g->out, "  packages:\n    - \"intel-microcode\"    # or amd64-microcode, for the new CPU\n");
+        rs_buf_addstr(g->out, "  packages:\n    - \"intel-microcode\"    "
+                              "# or amd64-microcode, for the new CPU\n");
     }
     for (i = 0; i < g->l.nvols; i++)
     {
@@ -1513,8 +1523,10 @@ static void copies_file(struct gen *g, const struct rs_buf *config)
     rs_buf_addstr(&script,
                   "RESTATE-CONFIG\n"
                   "awk -v name=\"$name\" -v net=\"$work/network\" '\n"
-                  "  $0 == \"" NETWORK_HERE "\" { while ((getline line < net) > 0) print line; next }\n"
-                  "  { gsub(/" RS_AUTO_COPY "/, name); print }' \"$work/config\" > \"$work/out\" &&\n"
+                  "  $0 == \"" NETWORK_HERE "\" { while ((getline line < net) > 0) "
+                  "print line; next }\n"
+                  "  { gsub(/" RS_AUTO_COPY "/, name); print }' \"$work/config\" > "
+                  "\"$work/out\" &&\n"
                   "  cp \"$work/out\" \"$conf\" || exit 1\n"
                   "rm -rf \"$work\"\n");
     rs_buf_addstr(g->out, "autoinstall:\n  version: 1\n  early-commands:\n    - |\n");
@@ -1536,7 +1548,8 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     if (!eq(rs_jobject_str(g.sys, "id"), "ubuntu"))
     {
         rs_buf_addf(err, "autoinstall files are for Ubuntu; this machine is %s",
-                    rs_jobject_str(g.sys, "id") ? rs_jobject_str(g.sys, "id") : "of an unknown system");
+                    rs_jobject_str(g.sys, "id") ? rs_jobject_str(g.sys, "id")
+                                                : "of an unknown system");
         return false;
     }
     if (!rs_layout_build(machine, &g.l))

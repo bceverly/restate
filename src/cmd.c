@@ -1219,7 +1219,8 @@ static bool signing_possible(const char *keyfile)
 static void say_signer(const char *what, const struct rs_pgp_signer *s)
 {
     (void)fflush(stdout);
-    (void)fprintf(stderr, "restate: %s %s (%.4s %.4s %.4s %.4s %.4s  %.4s %.4s %.4s %.4s %.4s)%s%s\n",
+    (void)fprintf(stderr,
+                  "restate: %s %s (%.4s %.4s %.4s %.4s %.4s  %.4s %.4s %.4s %.4s %.4s)%s%s\n",
                   what, s->who[0] ? s->who : "a key with no user ID", s->fpr, s->fpr + 4,
                   s->fpr + 8, s->fpr + 12, s->fpr + 16, s->fpr + 20, s->fpr + 24, s->fpr + 28,
                   s->fpr + 32, s->fpr + 36, s->when[0] ? " on " : "", s->when);
@@ -1757,9 +1758,18 @@ static void capture_result(const struct rs_options *o, const struct rs_scan_stat
         r = rs_repo_open(o->output, RS_REPO_LOOK, &busy, &err);
         if (r)
         {
+            struct rs_jval *cache;
+
             rs_repo_du(r, &u);
             rs_jobj_u64(res, "repository_bytes", u.bytes);
             rs_repo_usage_free(&u);
+            cache = rs_jobj_add(res, "cache");
+            if (rs_repo_cache_path(r))
+            {
+                rs_jval_set_object(cache);
+                rs_jobj_str(cache, "path", rs_repo_cache_path(r));
+                rs_jobj_u64(cache, "bytes", rs_repo_cache_bytes(r));
+            }
             rs_repo_close(r);
         }
         rs_buf_free(&err);
@@ -2898,6 +2908,8 @@ int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
+    static const char *const members[] = { "capture.cache", "diff.changes", "list",
+                                           "snapshot" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;
@@ -2945,6 +2957,21 @@ int rs_cmd_features(const struct rs_options *o)
     for (i = 0; i < nkeys; i++)
     {
         rs_jval_set_string(rs_jarr_add(list), keys[i]);
+    }
+    list = rs_jobj_add(&doc, "job_commands");
+    rs_jval_set_array(list);
+    keys = rs_job_commands(&nkeys);
+    for (i = 0; i < nkeys; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), keys[i]);
+    }
+    /* What results have gained since schema 1 began, for a program to ask
+     * of a restate before it reads them. */
+    list = rs_jobj_add(&doc, "result_members");
+    rs_jval_set_array(list);
+    for (i = 0; i < sizeof(members) / sizeof(members[0]); i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), members[i]);
     }
     list = rs_jobj_add(&doc, "hooks");
     rs_jval_set_array(list);
@@ -3023,14 +3050,20 @@ static void diff_summary(const struct rs_options *o, const struct rs_diff_stats 
                   d->modified);
 }
 
+/* How many changes of each kind -- added, deleted, modified -- a result
+ * names, of all a diff, verify or status finds. */
+#define RESULT_CHANGES 1000
+
 static int write_diff(const struct rs_options *o, const struct rs_index *a,
                       const struct rs_index *b, struct rs_diff_stats *d)
 {
     struct output   out;
     struct rs_jval  changes;
     struct rs_jval  packages;
+    struct rs_jval  first;
     struct rs_jval *res;
     bool            by_package = o->packages && o->command == CMD_DIFF;
+    bool            truncated;
     bool            ok;
 
     if (!output_open(o, &out))
@@ -3043,7 +3076,9 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     {
         rs_diff_json(&changes, &packages);
     }
+    (void)rs_diff_collect(&first, RESULT_CHANGES);
     ok = by_package ? rs_diff_write_packages(a, b, out.fp, d) : rs_diff_write(a, b, out.fp, d);
+    truncated = rs_diff_collect(NULL, 0);
     if (o->json)
     {
         struct rs_jval doc;
@@ -3079,6 +3114,7 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     }
     if (!output_close(&out, ok))
     {
+        rs_jval_free(&first);
         return RESTATE_EXIT_TROUBLE;
     }
     res = rs_jobj_add(rs_result(), "diff");
@@ -3090,6 +3126,8 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     {
         rs_jobj_u64(res, "packages_changed", d->packages);
     }
+    *rs_jobj_add(res, "changes") = first;
+    rs_jobj_bool(res, "truncated", truncated);
     diff_summary(o, d);
     return (d->added || d->deleted || d->modified || d->packages) ? RESTATE_EXIT_DIFFERENT
                                                    : RESTATE_EXIT_OK;
@@ -3144,44 +3182,120 @@ int rs_cmd_diff(const struct rs_options *o)
     return status;
 }
 
-int rs_cmd_verify(const struct rs_options *o)
+/* `path` as what it names now: a repository's newest snapshot as REPO::NAME,
+ * so that what is read and what the result names are the same snapshot,
+ * however many are added meanwhile. Anything else as it is, and so is a
+ * reference that does not resolve, for what reads it to say why. */
+static char *pinned(const char *path)
+{
+    struct rs_repo *r;
+    struct rs_buf   err;
+    char           *dir;
+    char           *name;
+    char           *found = NULL;
+    char           *out;
+    bool            busy;
+
+    if (!rs_repo_ref(path, &dir, &name))
+    {
+        return rs_xstrdup(path);
+    }
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_LOOK, &busy, &err);
+    if (r)
+    {
+        found = rs_repo_resolve(r, name, &err);
+        rs_repo_close(r);
+    }
+    out = found ? rs_xasprintf("%s::%s", dir, found) : rs_xstrdup(path);
+    free(found);
+    free(dir);
+    free(name);
+    rs_buf_free(&err);
+    return out;
+}
+
+/* Names what was read in the result: a snapshot, or an image or index. */
+static void result_source(const char *ref)
+{
+    char *dir;
+    char *name;
+
+    if (rs_repo_ref(ref, &dir, &name))
+    {
+        rs_jobj_str(rs_result(), "snapshot", ref);
+        free(dir);
+        free(name);
+    } else
+    {
+        rs_jobj_str(rs_result(), "image", ref);
+    }
+}
+
+/*
+ * The index of the image or snapshot `path` names, pinned (see pinned) and
+ * named in the result, and checked against --trusted-key if any is given:
+ * RESTATE_EXIT_OK with it in `ix`, which the caller frees, or what went wrong,
+ * said, with nothing to free.
+ */
+static int load_trusted(const struct rs_options *o, const char *path, struct rs_index *ix)
+{
+    struct rs_buf err;
+    struct trust  tr;
+    char         *ref = pinned(path);
+    int           status;
+
+    rs_index_init(ix);
+    result_source(ref);
+    status = trust_check(o, ref, o->ntrusted > 0, &tr);
+    if (status == RESTATE_EXIT_OK)
+    {
+        rs_buf_init(&err);
+        if (!rs_index_load(ix, ref, &err))
+        {
+            rs_error("%s", err.data);
+            status = RESTATE_EXIT_TROUBLE;
+        } else
+        {
+            status = trust_matches(o, ref, &tr, ix);
+        }
+        rs_buf_free(&err);
+    }
+    if (status != RESTATE_EXIT_OK)
+    {
+        rs_index_free(ix);
+    }
+    free(ref);
+    return status;
+}
+
+/*
+ * verify and status: an image or snapshot compared against the tree as it is
+ * now. `incremental` is status's walk: a file whose size, times and inode are
+ * what the capture recorded is taken to be unchanged and not read, so it
+ * takes as long as reading what did change.
+ */
+static int compare_live(const struct rs_options *o, bool incremental)
 {
     struct rs_index      recorded;
     struct rs_index      live;
     struct rs_scan_stats st;
     struct rs_diff_stats d;
-    struct rs_buf        err;
-    struct trust         tr;
+    struct sink          sink;
     const char          *root;
-    int                  status;
+    int                  status = load_trusted(o, o->args[0], &recorded);
 
-    status = trust_check(o, o->args[0], o->ntrusted > 0, &tr);
     if (status != RESTATE_EXIT_OK)
     {
         return status;
     }
-    rs_index_init(&recorded);
-    rs_buf_init(&err);
-    if (!rs_index_load(&recorded, o->args[0], &err))
-    {
-        rs_error("%s", err.data);
-        rs_buf_free(&err);
-        rs_index_free(&recorded);
-        return RESTATE_EXIT_TROUBLE;
-    }
-    rs_buf_free(&err);
-    status = trust_matches(o, o->args[0], &tr, &recorded);
-    if (status != RESTATE_EXIT_OK)
-    {
-        rs_index_free(&recorded);
-        return status;
-    }
-
     /* The root the index was taken from, unless told otherwise: verifying an
      * index of /mnt/old against / would report every file as changed. */
     root = o->root ? o->root : (recorded.root ? recorded.root : "/");
-    if (!run_scan(o, root, recorded.hashed && !o->no_hash, NULL, &live, &st,
-                  &recorded.packages))
+    memset(&sink, 0, sizeof(sink));
+    sink.prev = &recorded;
+    if (!run_scan(o, root, recorded.hashed && !o->no_hash, incremental ? &sink : NULL, &live,
+                  &st, &recorded.packages))
     {
         rs_index_free(&live);
         rs_index_free(&recorded);
@@ -3197,62 +3311,205 @@ int rs_cmd_verify(const struct rs_options *o)
     return status;
 }
 
-/*
- * What has changed since a capture, quickly: the walk verify makes, but
- * incremental -- a file whose size, times and inode are what the capture
- * recorded is taken to be unchanged and not read -- so it takes as long as
- * reading what did change.
- */
+int rs_cmd_verify(const struct rs_options *o)
+{
+    return compare_live(o, false);
+}
+
+/* What has changed since a capture, quickly: the walk verify makes, but
+ * incremental (see compare_live). */
 int rs_cmd_status(const struct rs_options *o)
 {
-    struct rs_index      recorded;
-    struct rs_index      live;
-    struct rs_scan_stats st;
-    struct rs_diff_stats d;
-    struct rs_buf        err;
-    struct trust         tr;
-    struct sink          sink;
-    const char          *root;
-    int                  status;
+    return compare_live(o, true);
+}
 
-    status = trust_check(o, o->args[0], o->ntrusted > 0, &tr);
-    if (status != RESTATE_EXIT_OK)
+/* How many of a directory's names a list's result gives; its output gives
+ * them all. */
+#define LIST_RESULT_MAX 5000
+
+/* `value` as the index writes a name: as it is, if it is UTF-8; otherwise
+ * made so, and exactly as it is, base64, in KEY_base64. */
+static void json_bytes(struct rs_jval *obj, const char *key, const char *value)
+{
+    size_t len = strlen(value);
+
+    if (rs_utf8_valid(value, len))
     {
-        return status;
+        rs_jobj_str(obj, key, value);
+    } else
+    {
+        char         *lossy = rs_utf8_lossy(value, len);
+        char         *key64 = rs_xasprintf("%s_base64", key);
+        struct rs_buf b64;
+
+        rs_buf_init(&b64);
+        rs_base64_encode(&b64, value, len);
+        rs_jobj_str(obj, key, lossy);
+        rs_jobj_str(obj, key64, b64.data);
+        rs_buf_free(&b64);
+        free(key64);
+        free(lossy);
     }
-    rs_index_init(&recorded);
-    rs_buf_init(&err);
-    if (!rs_index_load(&recorded, o->args[0], &err))
+}
+
+/* A directory's names into `doc`, at most `max` of them, as list's output and
+ * result give them. */
+static void list_json(struct rs_jval *doc, const char *dir, const struct rs_child *kids, size_t n,
+                      size_t max)
+{
+    struct rs_jval *list;
+    size_t          i;
+
+    memset(doc, 0, sizeof(*doc));
+    rs_jval_set_object(doc);
+    json_bytes(doc, "path", dir);
+    list = rs_jobj_add(doc, "entries");
+    rs_jval_set_array(list);
+    for (i = 0; i < n && i < max; i++)
     {
-        rs_error("%s", err.data);
-        rs_buf_free(&err);
-        rs_index_free(&recorded);
+        const struct rs_entry *e = kids[i].entry;
+        struct rs_jval        *j = rs_jarr_add(list);
+        char                   t = 'd';
+
+        if (e)
+        {
+            t = e->type;
+        }
+        rs_jval_set_object(j);
+        json_bytes(j, "name", kids[i].name);
+        rs_jobj_str(j, "type", t == 'f' ? "file" : t == 'd' ? "dir" : t == 'l' ? "link" : "other");
+        if (e)
+        {
+            char mode[8];
+            char when[RS_TIME_STR_MAX];
+
+            (void)snprintf(mode, sizeof(mode), "%04o", (unsigned)e->mode);
+            rs_time_format(&e->mtime, when);
+            rs_jobj_u64(j, "size", e->size);
+            rs_jobj_str(j, "mode", mode);
+            rs_jobj_str(j, "mtime", when);
+            rs_jobj_str(j, "user", e->user);
+            rs_jobj_str(j, "group", e->group);
+            if (e->target)
+            {
+                json_bytes(j, "target", e->target);
+            }
+        }
+    }
+    rs_jobj_bool(doc, "truncated", n > max);
+}
+
+/* A directory's names as lines, much as ls -l writes them. */
+static void list_text(struct rs_buf *text, const struct rs_child *kids, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        const struct rs_entry *e = kids[i].entry;
+
+        if (e)
+        {
+            char when[RS_TIME_STR_MAX];
+            char uid[24];
+            char gid[24];
+
+            rs_time_format(&e->mtime, when);
+            (void)snprintf(uid, sizeof(uid), "%" PRIu64, e->uid); /* Flawfinder: ignore */
+            (void)snprintf(gid, sizeof(gid), "%" PRIu64, e->gid); /* Flawfinder: ignore */
+            rs_buf_addf(text, "%c %04o %-8s %-8s %12" PRIu64 " %s  ", e->type, (unsigned)e->mode,
+                        e->user ? e->user : uid, e->group ? e->group : gid, e->size, when);
+        } else
+        {
+            /* Paths beneath it, but no entry of its own: rules left it out. */
+            rs_buf_addf(text, "d %4s %-8s %-8s %12s %s  ", "-", "-", "-", "-", "-");
+        }
+        rs_escape(text, kids[i].name);
+        if (e && e->target)
+        {
+            rs_buf_addstr(text, " -> ");
+            rs_escape(text, e->target);
+        }
+        rs_buf_addc(text, '\n');
+    }
+}
+
+/* What is in one directory of an image or snapshot, from its index alone:
+ * no pack, and no content, is read. */
+int rs_cmd_list(const struct rs_options *o)
+{
+    const struct rs_entry *self;
+    struct rs_child       *kids = NULL;
+    struct rs_index        ix;
+    struct rs_jval         doc;
+    struct rs_buf          text;
+    struct output          out;
+    char                  *dir = rs_xstrdup(o->nargs > 1 ? o->args[1] : "/");
+    size_t                 len = strlen(dir);
+    size_t                 n = 0;
+    int                    status;
+
+    while (len > 1 && dir[len - 1] == '/')
+    {
+        dir[--len] = '\0';
+    }
+    if (!rs_path_is_clean(dir))
+    {
+        rs_error("list: %s is not an absolute path with no \".\" or \"..\" in it", dir);
+        free(dir);
         return RESTATE_EXIT_TROUBLE;
     }
-    rs_buf_free(&err);
-    status = trust_matches(o, o->args[0], &tr, &recorded);
+    status = load_trusted(o, o->args[0], &ix);
     if (status != RESTATE_EXIT_OK)
     {
-        rs_index_free(&recorded);
+        free(dir);
         return status;
     }
-    root = o->root ? o->root : (recorded.root ? recorded.root : "/");
-    memset(&sink, 0, sizeof(sink));
-    sink.prev = &recorded;
-    if (!run_scan(o, root, recorded.hashed && !o->no_hash, &sink, &live, &st,
-                  &recorded.packages))
+    self = rs_index_find(&ix, dir);
+    kids = rs_index_children(&ix, dir, &n);
+    if (self && self->type != 'd')
     {
-        rs_index_free(&live);
-        rs_index_free(&recorded);
-        return RESTATE_EXIT_TROUBLE;
-    }
-    status = write_diff(o, &recorded, &live, &d);
-    if (status == RESTATE_EXIT_OK && st.unreadable > 0)
+        rs_error("list: %s is a %s in %s, not a directory", dir, rs_type_name(self->type),
+                 o->args[0]);
+        status = RESTATE_EXIT_TROUBLE;
+    } else if (!self && n == 0 && strcmp(dir, "/") != 0)
     {
-        status = RESTATE_EXIT_INCOMPLETE;
+        rs_error("list: %s has no %s", o->args[0], dir);
+        status = RESTATE_EXIT_TROUBLE;
     }
-    rs_index_free(&live);
-    rs_index_free(&recorded);
+    if (status == RESTATE_EXIT_OK)
+    {
+        bool ok;
+
+        list_json(&doc, dir, kids, n, LIST_RESULT_MAX);
+        *rs_jobj_add(rs_result(), "list") = doc;
+        rs_buf_init(&text);
+        if (o->json)
+        {
+            list_json(&doc, dir, kids, n, SIZE_MAX);
+            rs_json_write(&text, &doc, 2, 0);
+            rs_buf_addc(&text, '\n');
+            rs_jval_free(&doc);
+        } else
+        {
+            list_text(&text, kids, n);
+        }
+        ok = output_open(o, &out);
+        if (ok)
+        {
+            ok = text.len == 0 || fwrite(text.data, 1, text.len, out.fp) == text.len;
+            if (!ok)
+            {
+                rs_error("%s: %s", out.tmp ? out.tmp : "standard output", strerror(errno));
+            }
+            ok = output_close(&out, ok);
+        }
+        rs_buf_free(&text);
+        status = ok ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
+    }
+    rs_index_children_free(kids, n);
+    rs_index_free(&ix);
+    free(dir);
     return status;
 }
 
@@ -3987,7 +4244,8 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
                 continue;
             }
             under = strcmp(mp, "/") == 0 ||
-                    (strncmp(e->path, mp, len) == 0 && (e->path[len] == '/' || e->path[len] == '\0'));
+                    (strncmp(e->path, mp, len) == 0 &&
+                     (e->path[len] == '/' || e->path[len] == '\0'));
             if (under && (best == SIZE_MAX || len > best_len))
             {
                 best = k;
@@ -4781,6 +5039,8 @@ static int dispatch(const struct rs_options *o)
         return rs_cmd_export(o);
     case CMD_STATUS:
         return rs_cmd_status(o);
+    case CMD_LIST:
+        return rs_cmd_list(o);
     case CMD_COPY:
         return rs_cmd_copy(o);
     case CMD_DU:

@@ -102,13 +102,13 @@
  * its own name and its merged-/usr one. */
 static void fuzz_pkgdb(const char *text, size_t len)
 {
-    char           *parts[6];
+    char           *parts[10];
     const char     *p = text;
     const char     *end = text + len;
     struct rs_pkgdb db;
     size_t          i;
 
-    for (i = 0; i < 6; i++)
+    for (i = 0; i < 10; i++)
     {
         const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
         size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
@@ -130,6 +130,11 @@ static void fuzz_pkgdb(const char *text, size_t len)
         rs_pkgdb_parse_install(&db, (uint32_t)(db.nnames - 1), "/usr/pkg", parts[5]);
     }
     rs_pkgdb_parse_install(&db, (uint32_t)db.nnames, "/usr/pkg", parts[5]);
+    (void)rs_pkgdb_parse_pkg(&db, parts[6]);
+    (void)rs_pkgdb_parse_rpm(&db, parts[7]);
+    (void)rs_pkgdb_parse_apk(&db, parts[8]);
+    rs_pkgdb_parse_mtree(&db, (uint32_t)(db.nnames > 0 ? db.nnames - 1 : 0), parts[9]);
+    rs_pkgdb_parse_mtree(&db, (uint32_t)db.nnames, parts[9]);
     rs_pkgdb_sort(&db);
     for (i = 0; i < db.nfiles; i++)
     {
@@ -158,7 +163,7 @@ static void fuzz_pkgdb(const char *text, size_t len)
         free(other);
     }
     rs_pkgdb_free(&db);
-    for (i = 0; i < 6; i++)
+    for (i = 0; i < 10; i++)
     {
         free(parts[i]);
     }
@@ -321,7 +326,8 @@ static void fuzz_jobs(const char *text, size_t len)
         const struct rs_options *o = &job.opts;
         size_t                   i;
 
-        if (o->command == CMD_NONE || (o->command == CMD_CAPTURE && (!o->output || o->output[0] != '/')))
+        if (o->command == CMD_NONE ||
+            (o->command == CMD_CAPTURE && (!o->output || o->output[0] != '/')))
         {
             abort();
         }
@@ -680,6 +686,28 @@ static void fuzz_index(const char *text, size_t len)
             }
             rs_index_free(&back);
             free(copy);
+        }
+        /* What is in each directory: every name a child of it, and each
+         * entry's own name where it has one. */
+        {
+            size_t i;
+
+            for (i = 0; i < ix.count && i < 64; i++)
+            {
+                size_t           nkids;
+                size_t           k;
+                struct rs_child *c = rs_index_children(&ix, ix.entries[i].path, &nkids);
+
+                for (k = 0; k < nkids; k++)
+                {
+                    if (c[k].name[0] == '\0' || strchr(c[k].name, '/') ||
+                        (c[k].entry && strcmp(strrchr(c[k].entry->path, '/') + 1, c[k].name) != 0))
+                    {
+                        abort();
+                    }
+                }
+                rs_index_children_free(c, nkids);
+            }
         }
     }
     rs_index_free(&ix);

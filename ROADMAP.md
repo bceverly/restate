@@ -94,8 +94,11 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       ("managers" in the inventory, `restate packages`)
 - [x] Inventories of apt, snap, flatpak, pip, npm, cargo, pipx, gems, and
       OpenBSD and NetBSD packages
-- [ ] Inventories of the rest: rpm, pacman, apk, Nix, Guix, Homebrew, conda,
-      FreeBSD pkg (SQLite), macOS receipts
+- [x] **Inventories of the rest:** rpm and FreeBSD pkg (asked of `rpm` and
+      `pkg`, on the running system: their databases are SQLite), pacman,
+      apk, OpenBSD packages and pkgsrc with what was asked for and what came
+      as a dependency, Homebrew formulae and casks, conda environments, Nix
+      and Guix profiles, macOS receipts; and each in the build sheet
 - [x] **The apt inventory:** every package, version and architecture; manual
       or automatic; held or half-configured; the repositories each installed
       version can be had from, or that none can — superseded, or installed
@@ -112,7 +115,10 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       package owns stored -- dpkg's md5sums and conffile digests, with
       diversions and merged /usr; what packages' scripts generate made
       expendable by rule; `--rules-only` to turn it off
-- [ ] The same for rpm, FreeBSD pkg, OpenBSD and NetBSD `+CONTENTS`
+- [x] **The same for rpm, FreeBSD pkg, pacman, apk, OpenBSD and NetBSD:**
+      rpm's and pkg's digests asked of their tools (SHA-256, MD5, pkg 2.8's
+      BLAKE2b), pacman's mtree, apk's SHA-1, `+CONTENTS` and pkgsrc's
+      `+INSTALL` copies; on the BSDs only the packages' prefix is theirs
 - [x] **Package-aware diff:** `diff --packages` -- each package installed,
       removed or upgraded (apt and snap) a line of its own, with the number of
       files its change accounts for, and only the file changes no package

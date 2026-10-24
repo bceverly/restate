@@ -133,6 +133,9 @@ void rs_apt_uri_file(struct rs_buf *out, const char *uri);
  * must be a regular file.
  */
 bool rs_read_beneath(const char *root, const char *rel, size_t max, struct rs_buf *out);
+/* The same of a gzip'd file, uncompressed: up to `max` bytes of what it
+ * holds, read through gzip. */
+bool rs_read_beneath_gz(const char *root, const char *rel, size_t max, struct rs_buf *out);
 
 /*
  * The names in the directory root + rel, reached as rs_read_beneath reaches

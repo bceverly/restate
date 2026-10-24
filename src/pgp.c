@@ -722,7 +722,8 @@ static bool gpg_in(const char *home, const char *const *args, size_t n, struct r
         {
             len--;
         }
-        rs_buf_addf(err, "gpg %s failed: %.*s", args[0], (int)len, errtext.data ? errtext.data : "");
+        rs_buf_addf(err, "gpg %s failed: %.*s", args[0], (int)len,
+                    errtext.data ? errtext.data : "");
         ok = false;
     }
     rs_buf_free(&out);

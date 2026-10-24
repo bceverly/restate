@@ -467,7 +467,8 @@ static bool within(const char *path, const char *dir)
 {
     size_t n = strlen(dir);
 
-    return strncmp(path, dir, n) == 0 && (path[n] == '\0' || path[n] == '/' || strcmp(dir, "/") == 0);
+    return strncmp(path, dir, n) == 0 &&
+           (path[n] == '\0' || path[n] == '/' || strcmp(dir, "/") == 0);
 }
 
 static void add_path(struct rs_live *l, const char *path)
@@ -1095,8 +1096,9 @@ const char *rs_live_what(const struct rs_live *l)
     {
         if (strcmp(names[i].kind, l->kind) == 0)
         {
-            return strcmp(l->kind, "mysql") == 0 && strcmp(l->name, "mariadb") == 0 ? "MariaDB"
-                                                                                     : names[i].what;
+            bool maria = strcmp(l->kind, "mysql") == 0 && strcmp(l->name, "mariadb") == 0;
+
+            return maria ? "MariaDB" : names[i].what;
         }
     }
     return l->kind;

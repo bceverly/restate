@@ -120,7 +120,8 @@ void test_progress(void)
     CHECK_CONTAINS(text, "  /b\n");
     free(text);
     fake_now = 22 * SEC;
-    rs_progress_path("/a/path/long/enough/that/it/has/to/be/cut/down/to/fit/beside/the/counts/on/one/line");
+    rs_progress_path("/a/path/long/enough/that/it/has/to/be/cut/down/to/fit/"
+                     "beside/the/counts/on/one/line");
     text = contents(fp);
     CHECK_CONTAINS(text, "...");
     free(text);
@@ -229,7 +230,8 @@ void test_progress(void)
     rs_progress_done();
     rs_progress_finish();
     text = contents(fp);
-    CHECK_CONTAINS(text, "{\"phase\": \"count\", \"paths\": 0, \"read_bytes\": 0, \"new_bytes\": 0, "
+    CHECK_CONTAINS(text, "{\"phase\": \"count\", \"paths\": 0, \"read_bytes\": 0, "
+                         "\"new_bytes\": 0, "
                          "\"total_bytes\": null, \"hook\": null, \"at\": \"");
     CHECK_CONTAINS(text, "\"phase\": \"walk\", \"paths\": 0, \"read_bytes\": 0, \"new_bytes\": 0, "
                          "\"total_bytes\": 4096");
