@@ -141,7 +141,7 @@ OpenBSD)
     -D FULLPKGPATH="sysutils/$NAME" \
     -D HOMEPAGE="$WWW" \
     -D MAINTAINER="$MAINTAINER" \
-    -d "-$(cat "$WORK/desc")" \
+    -d "$WORK/desc" \
     -f "$WORK/plist" \
     -B "$STAGE" \
     -p "$PREFIX" \

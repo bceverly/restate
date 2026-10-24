@@ -986,7 +986,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
   # headers ('x') before it; a header's size is the octal at 124, its type at 156.
   cp simg.tar forged.tar
   check "the index is the image's first member" \
-    eval 'tar -tf forged.tar | head -n 1 | grep -x restate/index.json.gz > /dev/null'
+    eval 'tar -tf forged.tar | sed -n 1p | grep -x restate/index.json.gz > /dev/null'
   hat=0
   while :; do
     isize="$(printf '%d' "0$(dd if=forged.tar bs=1 skip=$((hat + 124)) count=11 2> /dev/null)")"

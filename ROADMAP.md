@@ -462,6 +462,36 @@ place:
       than one overwriting the other; long paths, past `MAX_PATH`, through
       the `\\?\` prefix; and a Windows build of restate itself
 
+## Then — other processor architectures
+
+restate is built and tested on amd64. It is portable C that links only libc,
+so it should build anywhere; the work is in proving it and in the parts that
+name an architecture:
+
+- [ ] **arm64** (aarch64), **ppc64le**, **riscv64** and **s390x**
+      (big-endian): built and the unit and end-to-end tests run on each in
+      CI, natively where a runner exists and under QEMU otherwise, so
+      s390x, the one big-endian among them, proves that every on-disk format
+      (the index, packs, pax headers, digests, signatures) is read and
+      written byte for byte the same as on a little-endian machine, and that
+      a repository or image captured on one is restored on another
+- [ ] **Each architecture's names**: Debian's (`arm64`, `ppc64el`,
+      `riscv64`, `s390x`), RPM's (`aarch64`, `ppc64le`, `riscv64`, `s390x`)
+      and the BSDs' (`aarch64`, `powerpc64le`, `riscv64`) mapped to one
+      another, in the package baseline, the build sheet, the fetched
+      packages and the repositories' `binary-ARCH` paths
+- [ ] **The installer and the boot underneath**: the Ubuntu server ISO for
+      each architecture that has one (the installer's architecture map
+      knows all four already, but only amd64 is exercised); the bootloader
+      each uses (GRUB EFI on arm64 and riscv64, PReP and GRUB on ppc64le,
+      zipl on s390x) recorded in the layout and put back, and the disks
+      s390x sees (DASD and zFCP) recognized rather than skipped
+- [ ] **A capture moved across architectures**: restoring an arm64 machine's
+      state onto amd64 or the reverse, with the packages reinstalled for the
+      new architecture rather than copied, and the files that are
+      architecture-specific -- binaries no package owns, under `/usr/local`
+      or `/opt` -- named in the build sheet as needing a rebuild
+
 ## Packaging
 
 - [x] A Launchpad PPA for Ubuntu (`ppa:bceverly/restate`): 22.04, 24.04 and

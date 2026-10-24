@@ -73,16 +73,14 @@ char *rs_xstrdup(const char *s)
 
 char *rs_xstrndup(const char *s, size_t n)
 {
-    char  *p;
-    size_t len = 0;
+    /* libc's: a copy by hand has gcc 12's fortified memcpy see a length
+     * past PTRDIFF_MAX it cannot rule out (-Wstringop-overflow). */
+    char *p = strndup(s, n);
 
-    while (len < n && s[len] != '\0')
+    if (!p)
     {
-        len++;
+        out_of_memory(n);
     }
-    p = rs_xmalloc(len + 1);
-    memcpy(p, s, len);
-    p[len] = '\0';
     return p;
 }
 

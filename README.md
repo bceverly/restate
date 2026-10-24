@@ -1744,9 +1744,13 @@ example:
 
 ```bash
 pkg add restate-VERSION-freebsd-15.1-amd64.pkg               # FreeBSD
-pkg_add -D unsigned restate-VERSION-openbsd-8.0-amd64.tgz    # OpenBSD
+cp restate-VERSION-openbsd-8.0-amd64.tgz restate-VERSION.tgz   # OpenBSD
+pkg_add -D unsigned ./restate-VERSION.tgz
 pkg_add restate-VERSION-netbsd-11.0-amd64.tgz                # NetBSD
 ```
+
+OpenBSD's `pkg_add` refuses a file whose name is not the package's own
+(`restate-VERSION`), hence the copy.
 
 Each puts `restate` in `/usr/local/sbin`, its manual in section 8 and its
 hooks in `/usr/local/libexec/restate/hooks`, all of them root's. OpenBSD's

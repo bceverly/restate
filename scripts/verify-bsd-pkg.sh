@@ -39,7 +39,13 @@ FreeBSD)
 OpenBSD)
   # Not signed by OpenBSD's means: the release's checksums and attestation
   # are what vouch for it.
-  pkg_add -D unsigned "$PKG"
+  # pkg_add takes the package's name from the file's and refuses a file
+  # named otherwise, so the release's name (with its system and release in
+  # it) is installed from a copy named as the package is.
+  named="$(mktemp -d "${TMPDIR:-/tmp}/restate-verify.XXXXXX")"
+  trap 'rm -rf "$named"' EXIT
+  cp "$PKG" "$named/restate-$VERSION.tgz"
+  pkg_add -D unsigned "$named/restate-$VERSION.tgz"
   remove() { pkg_delete restate; }
   mandir="$PREFIX/man"
   ;;
