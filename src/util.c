@@ -73,14 +73,21 @@ char *rs_xstrdup(const char *s)
 
 char *rs_xstrndup(const char *s, size_t n)
 {
-    /* libc's: a copy by hand has gcc 12's fortified memcpy see a length
-     * past PTRDIFF_MAX it cannot rule out (-Wstringop-overflow). */
-    char *p = strndup(s, n);
+    /* Not strndup: s need not be terminated within n (readlink's buffer is
+     * not), and sanitizers' strndup reads one byte past it. */
+    const char *end = memchr(s, '\0', n);
+    size_t      len = end ? (size_t)(end - s) : n;
+    char       *p;
 
-    if (!p)
+    /* No object is that large; saying so lets gcc 12's fortified memcpy
+     * rule out a length it would otherwise warn of (-Wstringop-overflow). */
+    if (len >= PTRDIFF_MAX)
     {
-        out_of_memory(n);
+        out_of_memory(len);
     }
+    p = rs_xmalloc(len + 1);
+    memcpy(p, s, len);
+    p[len] = '\0';
     return p;
 }
 
