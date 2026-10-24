@@ -66,6 +66,12 @@ void rs_job_free(struct rs_job *job);
  */
 bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job *job,
                   struct rs_buf *err);
+/*
+ * What a job that rs_job_parse refused says of where to report: its first
+ * well-formed result and report_group, and its command if it names one, in
+ * job->opts (job is freed first), so that the refusal can be written there.
+ */
+void rs_job_reporting(const char *text, size_t len, struct rs_job *job);
 
 /*
  * The job given->args[0] names: checked to be a file only its owner can
@@ -78,5 +84,8 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job);
 const char *const *rs_job_keys(size_t *n);
 /* The commands a job can be, by name, for restate features. */
 const char *const *rs_job_commands(size_t *n);
+/* The keys a job of the command rs_job_commands names `which` can have, in
+ * the order of rs_job_keys. */
+const char *const *rs_job_command_keys(size_t which, size_t *n);
 
 #endif /* RESTATE_JOBS_H */

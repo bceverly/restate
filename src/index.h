@@ -133,6 +133,10 @@ struct rs_index {
     bool             hashed;
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
     struct rs_jval   packages;  /* what is installed, or null; see packages.h */
+    /* How it was classified, or null: {"rules": [[CLASS, PATTERN], ...], "all",
+     * "one_file_system", "rules_only"}, what verify and status classify the
+     * tree by again (cmd.c). */
+    struct rs_jval   classification;
     bool             in_parts;  /* read from an image in parts (image.h); not written */
     /* The SHA-256 of the index part's bytes as read from the image, "" if
      * it was not read from one: what its signature covers. Not written. */

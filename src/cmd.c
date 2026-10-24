@@ -55,8 +55,39 @@
 /* Rules                                                                     */
 /* ------------------------------------------------------------------------- */
 
-/* The built-in rules for the chosen system, then every --rules file in the
- * order given. `os_used` is set to the system whose built-ins were taken. */
+/* The rules an index's classification records (index.h), in `rules`: false,
+ * having said why, if they are not rules. */
+static bool recorded_rules(const struct rs_jval *cl, struct rs_rules *rules)
+{
+    const struct rs_jval *list = rs_jobject_get(cl, "rules");
+    size_t                i;
+
+    for (i = 0; list && list->type == RS_JARRAY && i < list->n; i++)
+    {
+        const struct rs_jval *r = &list->items[i];
+        enum rs_class         cls;
+
+        if (r->type != RS_JARRAY || r->n != 2 || r->items[0].type != RS_JSTRING ||
+            r->items[1].type != RS_JSTRING || !r->items[1].s[0] ||
+            !rs_class_parse(r->items[0].s, strlen(r->items[0].s), &cls))
+        {
+            break;
+        }
+        rs_rules_add(rules, cls, r->items[1].s, "the capture's rules", NULL);
+    }
+    if (!list || list->type != RS_JARRAY || i < list->n)
+    {
+        rs_error("the index's classification is not a list of rules; give --rules (or "
+                 "--no-default-rules) to classify by instead");
+        return false;
+    }
+    return true;
+}
+
+/* The rules the capture recorded, `o->classified`, if verify or status has
+ * them; otherwise the built-in rules for the chosen system, then every
+ * --rules file in the order given. `os_used` is set to the system whose
+ * built-ins were taken. */
 static bool load_rules(const struct rs_options *o, struct rs_rules *rules,
                        const char **os_used)
 {
@@ -65,6 +96,15 @@ static bool load_rules(const struct rs_options *o, struct rs_rules *rules,
 
     rs_rules_init(rules);
     *os_used = o->os ? o->os : rs_rules_host_os();
+    if (o->classified)
+    {
+        if (!recorded_rules(o->classified, rules))
+        {
+            rs_rules_free(rules);
+            return false;
+        }
+        return true;
+    }
     if (!o->no_default_rules)
     {
         if (!*os_used)
@@ -88,6 +128,39 @@ static bool load_rules(const struct rs_options *o, struct rs_rules *rules,
     }
     rs_buf_free(&err);
     return true;
+}
+
+/* How a scan classifies, as the index records it (index.h): every rule in
+ * effect, built-in or read, so that verify and status classify by exactly
+ * these whatever restate later runs them. Left out (null) if a pattern is
+ * not UTF-8, which the index's JSON cannot hold as a string. */
+static void record_classification(const struct rs_options *o, const struct rs_rules *rules,
+                                  struct rs_jval *out)
+{
+    struct rs_jval *list;
+    size_t          i;
+
+    for (i = 0; i < rules->count; i++)
+    {
+        if (!rs_utf8_valid(rules->rules[i].pattern, strlen(rules->rules[i].pattern)))
+        {
+            return;
+        }
+    }
+    rs_jval_set_object(out);
+    list = rs_jobj_add(out, "rules");
+    rs_jval_set_array(list);
+    for (i = 0; i < rules->count; i++)
+    {
+        struct rs_jval *pair = rs_jarr_add(list);
+
+        rs_jval_set_array(pair);
+        rs_jval_set_string(rs_jarr_add(pair), rs_class_name(rules->rules[i].cls));
+        rs_jval_set_string(rs_jarr_add(pair), rules->rules[i].pattern);
+    }
+    rs_jobj_bool(out, "all", o->all);
+    rs_jobj_bool(out, "one_file_system", o->one_fs);
+    rs_jobj_bool(out, "rules_only", o->rules_only);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1029,6 +1102,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         }
     }
     m->content = rs_xstrdup(!storing ? "none" : o->baseline_content ? "state+baseline" : "state");
+    record_classification(o, &rules, &m->classification);
     /* What is running and writing to files the image keeps: named, or with
      * --quiesce left to the end and paused while it is copied. */
     if (storing && is_live_root(root))
@@ -2965,6 +3039,27 @@ int rs_cmd_features(const struct rs_options *o)
     {
         rs_jval_set_string(rs_jarr_add(list), keys[i]);
     }
+    /* Which of those keys each command takes: a key sent to a job only
+     * when its command is listed with it. */
+    list = rs_jobj_add(&doc, "job_command_keys");
+    rs_jval_set_object(list);
+    {
+        const char *const *cmds = rs_job_commands(&nkeys);
+        size_t             c;
+
+        for (c = 0; c < nkeys; c++)
+        {
+            struct rs_jval    *of = rs_jobj_add(list, cmds[c]);
+            size_t             nof;
+            const char *const *ks = rs_job_command_keys(c, &nof);
+
+            rs_jval_set_array(of);
+            for (i = 0; i < nof; i++)
+            {
+                rs_jval_set_string(rs_jarr_add(of), ks[i]);
+            }
+        }
+    }
     /* What results have gained since schema 1 began, for a program to ask
      * of a restate before it reads them. */
     list = rs_jobj_add(&doc, "result_members");
@@ -3269,6 +3364,14 @@ static int load_trusted(const struct rs_options *o, const char *path, struct rs_
     return status;
 }
 
+/* Whether the object `obj` has `key` true. */
+static bool true_in(const struct rs_jval *obj, const char *key)
+{
+    const struct rs_jval *v = rs_jobject_get(obj, key);
+
+    return v && v->type == RS_JBOOL && v->b;
+}
+
 /*
  * verify and status: an image or snapshot compared against the tree as it is
  * now. `incremental` is status's walk: a file whose size, times and inode are
@@ -3282,6 +3385,7 @@ static int compare_live(const struct rs_options *o, bool incremental)
     struct rs_scan_stats st;
     struct rs_diff_stats d;
     struct sink          sink;
+    struct rs_options    by;
     const char          *root;
     int                  status = load_trusted(o, o->args[0], &recorded);
 
@@ -3289,6 +3393,21 @@ static int compare_live(const struct rs_options *o, bool incremental)
     {
         return status;
     }
+    /* Classified as the capture was, unless told how: otherwise everything
+     * its rules left out would be "added". */
+    by = *o;
+    if (recorded.classification.type == RS_JOBJECT && !o->nrules_files &&
+        !o->no_default_rules && !o->os && !o->all && !o->one_fs && !o->rules_only)
+    {
+        const struct rs_jval *cl = &recorded.classification;
+
+        by.classified = cl;
+        by.all = true_in(cl, "all");
+        by.one_fs = true_in(cl, "one_file_system");
+        by.rules_only = true_in(cl, "rules_only");
+        o = &by;
+    }
+    rs_jobj_bool(rs_result(), "capture_rules", o->classified != NULL);
     /* The root the index was taken from, unless told otherwise: verifying an
      * index of /mnt/old against / would report every file as changed. */
     root = o->root ? o->root : (recorded.root ? recorded.root : "/");

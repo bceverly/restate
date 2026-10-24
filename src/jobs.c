@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "restate.h"
+#include "result.h"
 
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW 0
@@ -114,10 +115,11 @@ static const struct key {
     [KEY_PATH] = { "path", K_PATH, false, J_LIST },
     [KEY_ROOT] = { "root", K_PATH, false, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_RESTORE_ROOT] = { "restore_root", K_PATH, false, J_RESTORE },
-    [KEY_RULES] = { "rules", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_RESTORE },
-    [KEY_ALL] = { "all", K_BOOL, false, J_CAPTURE | J_ESTIMATE },
+    [KEY_RULES] = { "rules", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_RESTORE | J_STATUS },
+    [KEY_ALL] = { "all", K_BOOL, false, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_BASELINE_CONTENT] = { "baseline_content", K_BOOL, false, J_CAPTURE | J_ESTIMATE },
-    [KEY_ONE_FILE_SYSTEM] = { "one_file_system", K_BOOL, false, J_CAPTURE | J_ESTIMATE },
+    [KEY_ONE_FILE_SYSTEM] = { "one_file_system", K_BOOL, false,
+                              J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_QUIESCE] = { "quiesce", K_BOOL, false, J_CAPTURE },
     [KEY_QUIESCE_WITH] = { "quiesce_with", K_NAME, true, J_CAPTURE },
     [KEY_ENCRYPT_TO] = { "encrypt_to", K_PATH, true, J_CAPTURE | J_PRUNE },
@@ -172,6 +174,22 @@ const char *const *rs_job_commands(size_t *n)
         names[i] = job_commands[i].name;
     }
     *n = sizeof(names) / sizeof(names[0]);
+    return names;
+}
+
+const char *const *rs_job_command_keys(size_t which, size_t *n)
+{
+    static const char *names[KEY_COUNT];
+    size_t             i;
+
+    *n = 0;
+    for (i = 0; i < KEY_COUNT; i++)
+    {
+        if (keys[i].commands & job_commands[which].bit)
+        {
+            names[(*n)++] = keys[i].name;
+        }
+    }
     return names;
 }
 
@@ -592,6 +610,108 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
     return true;
 }
 
+/* One line of a job, from *p, which is moved past it: false at the end.
+ * Otherwise its key in [*ks, *ke) and its value in [*vs, *ve), each without
+ * the spaces around them, and *eq NULL if it is not "key = value". A blank
+ * line or a comment has *ks == *ve. */
+static bool next_line(const char **p, const char *end, const char **ks, const char **ke,
+                      const char **eq, const char **vs, const char **ve)
+{
+    const char *nl;
+    const char *stop;
+
+    if (*p >= end)
+    {
+        return false;
+    }
+    nl = memchr(*p, '\n', (size_t)(end - *p));
+    stop = nl ? nl : end;
+    *ks = *p;
+    while (*ks < stop && (**ks == ' ' || **ks == '\t'))
+    {
+        (*ks)++;
+    }
+    *ve = stop;
+    while (*ve > *ks && ((*ve)[-1] == ' ' || (*ve)[-1] == '\t' || (*ve)[-1] == '\r'))
+    {
+        (*ve)--;
+    }
+    *p = nl ? nl + 1 : end;
+    if (*ks == *ve || **ks == '#')
+    {
+        *ks = *ve;
+        *eq = NULL;
+        return true;
+    }
+    *eq = memchr(*ks, '=', (size_t)(*ve - *ks));
+    if (!*eq)
+    {
+        return true;
+    }
+    *ke = *eq;
+    while (*ke > *ks && ((*ke)[-1] == ' ' || (*ke)[-1] == '\t'))
+    {
+        (*ke)--;
+    }
+    *vs = *eq + 1;
+    while (*vs < *ve && (**vs == ' ' || **vs == '\t'))
+    {
+        (*vs)++;
+    }
+    return true;
+}
+
+/* Whether [ks, ke) is the key `name`. */
+static bool is_key(const char *ks, const char *ke, const char *name)
+{
+    return (size_t)(ke - ks) == strlen(name) && memcmp(ks, name, (size_t)(ke - ks)) == 0;
+}
+
+void rs_job_reporting(const char *text, size_t len, struct rs_job *job)
+{
+    const char *p = text;
+    const char *end = text + len;
+    const char *ks;
+    const char *ke = NULL;
+    const char *eq;
+    const char *vs = NULL;
+    const char *ve;
+    size_t      i;
+
+    rs_job_free(job);
+    if (len > RS_JOB_MAX || memchr(text, '\0', len))
+    {
+        return;
+    }
+    while (next_line(&p, end, &ks, &ke, &eq, &vs, &ve))
+    {
+        char *value;
+
+        if (!eq)
+        {
+            continue;
+        }
+        value = keep(job, vs, (size_t)(ve - vs));
+        if (is_key(ks, ke, "result") && !job->opts.result && value_ok(K_PATH, value))
+        {
+            job->opts.result = value;
+        } else if (is_key(ks, ke, "report_group") && !job->opts.report_group &&
+                   value_ok(K_NAME, value))
+        {
+            job->opts.report_group = value;
+        } else if (is_key(ks, ke, "command") && job->opts.command == CMD_NONE)
+        {
+            for (i = 0; i < sizeof(job_commands) / sizeof(job_commands[0]); i++)
+            {
+                if (strcmp(job_commands[i].name, value) == 0)
+                {
+                    job->opts.command = job_commands[i].cmd;
+                }
+            }
+        }
+    }
+}
+
 bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job *job,
                   struct rs_buf *err)
 {
@@ -617,49 +737,29 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
         rs_buf_addf(err, "%s: it has a NUL byte in it: not a job", name);
         return false;
     }
-    while (p < end)
+    for (;;)
     {
-        const char *nl = memchr(p, '\n', (size_t)(end - p));
-        const char *stop = nl ? nl : end;
         const char *eq;
         const char *ks;
-        const char *ke;
-        const char *vs;
+        const char *ke = NULL;
+        const char *vs = NULL;
         const char *ve;
         char       *key;
         char       *value;
 
+        if (!next_line(&p, end, &ks, &ke, &eq, &vs, &ve))
+        {
+            break;
+        }
         lineno++;
-        ks = p;
-        while (ks < stop && (*ks == ' ' || *ks == '\t'))
-        {
-            ks++;
-        }
-        ve = stop;
-        while (ve > ks && (ve[-1] == ' ' || ve[-1] == '\t' || ve[-1] == '\r'))
-        {
-            ve--;
-        }
-        p = nl ? nl + 1 : end;
-        if (ks == ve || *ks == '#')
+        if (ks == ve)
         {
             continue;
         }
-        eq = memchr(ks, '=', (size_t)(ve - ks));
         if (!eq)
         {
             rs_buf_addf(err, "%s:%u: not \"key = value\"", name, lineno);
             return false;
-        }
-        ke = eq;
-        while (ke > ks && (ke[-1] == ' ' || ke[-1] == '\t'))
-        {
-            ke--;
-        }
-        vs = eq + 1;
-        while (vs < ve && (*vs == ' ' || *vs == '\t'))
-        {
-            vs++;
         }
         key = rs_xstrndup(ks, (size_t)(ke - ks));
         for (k = 0; k < KEY_COUNT && strcmp(keys[k].name, key) != 0; k++)
@@ -765,6 +865,35 @@ static bool only_reporting(const struct rs_options *o)
     return !said;
 }
 
+/*
+ * A job not run, for `why` (which is freed): said, and written as a failed
+ * run's result to the result the job names -- `job` holding what
+ * rs_job_reporting found in it, or nothing if it was not read -- or else the
+ * command line's, if either names one. Whoever reads results learns why,
+ * as from a run that failed later.
+ */
+static int refused(const struct rs_options *given, const char *path, struct rs_job *job,
+                   char *why)
+{
+    const char *to = job->opts.result ? job->opts.result : given->result;
+    const char *group = job->opts.report_group ? job->opts.report_group : given->report_group;
+
+    if (to)
+    {
+        rs_result_begin(job->opts.command != CMD_NONE ? rs_command_name(job->opts.command)
+                                                      : "run");
+        rs_jobj_str(rs_result(), "job", path);
+    }
+    rs_error("%s", why);
+    free(why);
+    if (to)
+    {
+        (void)rs_result_write(RESTATE_EXIT_TROUBLE, to, group);
+    }
+    rs_job_free(job);
+    return RESTATE_EXIT_TROUBLE;
+}
+
 int rs_job_load(const struct rs_options *given, struct rs_job *job)
 {
     const char   *path = given->args[0];
@@ -782,10 +911,10 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     rs_job_init(job);
     if (!only_reporting(given))
     {
-        rs_error("run %s: what to do is the job's to say; the command line can add only -q, -v, "
-                 "-P, --syslog, --result, --progress-file, --report-group and --passphrase-fd",
-                 path);
-        return RESTATE_EXIT_TROUBLE;
+        return refused(given, path, job,
+                       rs_xasprintf("run %s: what to do is the job's to say; the command line "
+                                    "can add only -q, -v, -P, --syslog, --result, "
+                                    "--progress-file, --report-group and --passphrase-fd", path));
     }
     dir = slash ? (slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path)))
                 : rs_xstrdup(".");
@@ -796,22 +925,25 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
 
         /* Asked by lstat, not by errno: O_NOFOLLOW's is ELOOP on Linux and
          * OpenBSD, EMLINK on FreeBSD and EFTYPE on NetBSD. */
-        rs_error("run %s: %s", path,
-                 lstat(path, &st) == 0 && S_ISLNK(st.st_mode)
-                     ? "a symlink; a job has to be the file itself"
-                     : strerror(saved));
         free(dir);
-        return RESTATE_EXIT_TROUBLE;
+        return refused(given, path, job,
+                       rs_xasprintf("run %s: %s", path,
+                                    lstat(path, &st) == 0 && S_ISLNK(st.st_mode)
+                                        ? "a symlink; a job has to be the file itself"
+                                        : strerror(saved)));
     }
     ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && owned_safely(&st) &&
          lstat(dir, &dst) == 0 && S_ISDIR(dst.st_mode) && owned_safely(&dst);
     if (!ok)
     {
-        rs_error("run %s: not run: it has to be a regular file, and it and %s have to be root's "
-                 "(or yours) and writable by no one else", path, dir);
+        /* Not read, so nothing in it is taken: not even where to report. */
+        char *why = rs_xasprintf("run %s: not run: it has to be a regular file, and it and %s "
+                                 "have to be root's (or yours) and writable by no one else",
+                                 path, dir);
+
         (void)close(fd);
         free(dir);
-        return RESTATE_EXIT_TROUBLE;
+        return refused(given, path, job, why);
     }
     free(dir);
     rs_buf_init(&text);
@@ -824,24 +956,27 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
         }
         if (n < 0 || text.len + (size_t)n > RS_JOB_MAX)
         {
-            rs_error("run %s: %s", path, n < 0 ? strerror(errno) : "larger than a job can be");
+            char *why = rs_xasprintf("run %s: %s", path,
+                                     n < 0 ? strerror(errno) : "larger than a job can be");
+
             (void)close(fd);
             rs_buf_free(&text);
-            return RESTATE_EXIT_TROUBLE;
+            return refused(given, path, job, why);
         }
         rs_buf_add(&text, chunk, (size_t)n);
     }
     (void)close(fd);
     rs_buf_init(&err);
     ok = rs_job_parse(text.data, text.len, path, job, &err);
-    rs_buf_free(&text);
     if (!ok)
     {
-        rs_error("%s", err.data);
-        rs_buf_free(&err);
-        rs_job_free(job);
-        return RESTATE_EXIT_TROUBLE;
+        /* Its own file, safely owned, so where it says to report is taken
+         * from it even though the rest is refused. */
+        rs_job_reporting(text.data, text.len, job);
+        rs_buf_free(&text);
+        return refused(given, path, job, rs_buf_detach(&err));
     }
+    rs_buf_free(&text);
     rs_buf_free(&err);
     /* What the command line adds: how much to say, and where to say it. */
     job->opts.quiet = given->quiet;

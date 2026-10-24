@@ -142,6 +142,9 @@ struct rs_options {
     int             passphrase_fd;  /* --passphrase-fd N, where passphrase_given */
     bool            passphrase_given;
     bool            one_fs;
+    /* verify, status: the index's classification (index.h), classified by
+     * instead of the rules options. Set by them, never by an option. */
+    const struct rs_jval *classified;
     bool            no_hash;
     bool            quiet;
     bool            progress;
