@@ -35,7 +35,9 @@ enum {
     J_PROTECT   = 1u << 9,
     J_STATUS    = 1u << 10,
     J_LIST      = 1u << 11,
-    J_ANY       = 0xfffu
+    J_ANY       = 0xfffu,
+    /* Every one that can read what is encrypted, and so may need a key. */
+    J_DECRYPTS  = J_ANY & ~(J_ESTIMATE | J_PROTECT)
 };
 
 static const struct {
@@ -76,6 +78,8 @@ enum key_id {
     KEY_QUIESCE_WITH,
     KEY_ENCRYPT_TO,
     KEY_SIGN_WITH,
+    KEY_DECRYPT_WITH,
+    KEY_PASSPHRASE_FILE,
     KEY_TRUSTED_KEY,
     KEY_ALLOW_UNVERIFIED,
     KEY_APPEND_ONLY,
@@ -124,6 +128,8 @@ static const struct key {
     [KEY_QUIESCE_WITH] = { "quiesce_with", K_NAME, true, J_CAPTURE },
     [KEY_ENCRYPT_TO] = { "encrypt_to", K_PATH, true, J_CAPTURE | J_PRUNE },
     [KEY_SIGN_WITH] = { "sign_with", K_PATH, false, J_CAPTURE },
+    [KEY_DECRYPT_WITH] = { "decrypt_with", K_PATH, true, J_DECRYPTS },
+    [KEY_PASSPHRASE_FILE] = { "passphrase_file", K_PATH, false, J_DECRYPTS },
     [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true, J_RESTORE | J_CHECK | J_STATUS | J_LIST },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
@@ -460,6 +466,12 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_SIGN_WITH:
         o->sign_with = v;
+        break;
+    case KEY_DECRYPT_WITH:
+        add(&o->decrypt_with, &o->ndecrypt_with, v);
+        break;
+    case KEY_PASSPHRASE_FILE:
+        o->passphrase_file = v;
         break;
     case KEY_TRUSTED_KEY:
         add(&o->trusted, &o->ntrusted, v);
@@ -852,7 +864,8 @@ static bool only_reporting(const struct rs_options *o)
 {
     bool said = o->root || o->output || o->nrules_files || o->no_default_rules || o->os ||
                 o->cache || o->mirror || o->target || o->firmware || o->nrecipients ||
-                o->sign_with || o->ntrusted || o->allow_unverified || o->all || o->rules_only ||
+                o->sign_with || o->ndecrypt_with || o->ntrusted || o->allow_unverified ||
+                o->all || o->rules_only ||
                 o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
                 o->keep_daily || o->keep_weekly || o->keep_monthly || o->exact_versions ||
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||
@@ -894,11 +907,48 @@ static int refused(const struct rs_options *given, const char *path, struct rs_j
     return RESTATE_EXIT_TROUBLE;
 }
 
+/* The directory `path` is in. */
+static char *dir_of(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+
+    return slash ? (slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path)))
+                 : rs_xstrdup(".");
+}
+
+/*
+ * Why the file a job's `key` names for a secret -- its decrypt_with or
+ * passphrase_file -- is not taken, or NULL if it is: it has to be a regular
+ * file, not a symlink, root's or the user's and readable and writable by no
+ * one else, in a directory only its owner can change, as the job is.
+ */
+static char *secret_refused(const char *job, const char *key, const char *path)
+{
+    char       *dir = dir_of(path);
+    struct stat st;
+    struct stat dst;
+    char       *why = NULL;
+
+    if (lstat(path, &st) != 0)
+    {
+        why = rs_xasprintf("run %s: %s %s: %s", job, key, path, strerror(errno));
+    } else if (!S_ISREG(st.st_mode) || !owned_safely(&st) || (st.st_mode & 077) != 0 ||
+               lstat(dir, &dst) != 0 || !S_ISDIR(dst.st_mode) || !owned_safely(&dst))
+    {
+        why = rs_xasprintf("run %s: not run: %s %s has to be a regular file, root's (or yours) "
+                           "and readable and writable by no one else, in a directory only its "
+                           "owner can change (%s)", job, key, path, dir);
+    }
+    free(dir);
+    return why;
+}
+
 int rs_job_load(const struct rs_options *given, struct rs_job *job)
 {
     const char   *path = given->args[0];
     char         *dir;
-    const char   *slash = strrchr(path, '/');
+    char         *why;
+    size_t        i;
     struct stat   st;
     struct stat   dst;
     struct rs_buf text;
@@ -916,8 +966,7 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
                                     "can add only -q, -v, -P, --syslog, --result, "
                                     "--progress-file, --report-group and --passphrase-fd", path));
     }
-    dir = slash ? (slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path)))
-                : rs_xstrdup(".");
+    dir = dir_of(path);
     fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
     {
@@ -937,10 +986,8 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     if (!ok)
     {
         /* Not read, so nothing in it is taken: not even where to report. */
-        char *why = rs_xasprintf("run %s: not run: it has to be a regular file, and it and %s "
-                                 "have to be root's (or yours) and writable by no one else",
-                                 path, dir);
-
+        why = rs_xasprintf("run %s: not run: it has to be a regular file, and it and %s have "
+                           "to be root's (or yours) and writable by no one else", path, dir);
         (void)close(fd);
         free(dir);
         return refused(given, path, job, why);
@@ -956,9 +1003,8 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
         }
         if (n < 0 || text.len + (size_t)n > RS_JOB_MAX)
         {
-            char *why = rs_xasprintf("run %s: %s", path,
-                                     n < 0 ? strerror(errno) : "larger than a job can be");
-
+            why = rs_xasprintf("run %s: %s", path,
+                               n < 0 ? strerror(errno) : "larger than a job can be");
             (void)close(fd);
             rs_buf_free(&text);
             return refused(given, path, job, why);
@@ -978,6 +1024,22 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     }
     rs_buf_free(&text);
     rs_buf_free(&err);
+    why = NULL;
+    for (i = 0; !why && i < job->opts.ndecrypt_with; i++)
+    {
+        why = secret_refused(path, "decrypt_with", job->opts.decrypt_with[i]);
+    }
+    if (!why && job->opts.passphrase_file)
+    {
+        why = given->passphrase_given
+                  ? rs_xasprintf("run %s: passphrase_file and --passphrase-fd both give the "
+                                 "passphrase; give it one way", path)
+                  : secret_refused(path, "passphrase_file", job->opts.passphrase_file);
+    }
+    if (why)
+    {
+        return refused(given, path, job, why);
+    }
     /* What the command line adds: how much to say, and where to say it. */
     job->opts.quiet = given->quiet;
     job->opts.verbose = given->verbose;

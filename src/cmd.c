@@ -5154,9 +5154,9 @@ static int dispatch(const struct rs_options *o)
     }
 }
 
-/* --passphrase-fd N: the passphrase, read once from N -- to its end, or its
- * first line -- and held for every gpg the run starts. */
-static bool read_passphrase(int fd)
+/* The passphrase, read once from `fd` -- to its end, or its first line --
+ * and held for every gpg the run starts; `from` says where, in a message. */
+static bool read_passphrase(int fd, const char *from)
 {
     char    buf[1024];
     size_t  len = 0;
@@ -5170,7 +5170,7 @@ static bool read_passphrase(int fd)
         }
         if (n < 0)
         {
-            rs_error("--passphrase-fd %d: %s", fd, strerror(errno));
+            rs_error("%s: %s", from, strerror(errno));
             return false;
         }
         len += (size_t)n;
@@ -5192,6 +5192,47 @@ static bool read_passphrase(int fd)
         }
     }
     return true;
+}
+
+/*
+ * The secrets the run is given, taken before it starts: the passphrase, from
+ * --passphrase-fd or a job's passphrase_file, and the key --decrypt-with
+ * names, imported. False, having said why, if one cannot be.
+ */
+static bool take_secrets(const struct rs_options *o)
+{
+    struct rs_buf err;
+    bool          ok = true;
+
+    if (o->passphrase_given)
+    {
+        char *from = rs_xasprintf("--passphrase-fd %d", o->passphrase_fd);
+
+        ok = read_passphrase(o->passphrase_fd, from);
+        free(from);
+    } else if (o->passphrase_file)
+    {
+        int fd = open(o->passphrase_file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_error("passphrase_file %s: %s", o->passphrase_file, strerror(errno));
+            return false;
+        }
+        ok = read_passphrase(fd, o->passphrase_file);
+        (void)close(fd);
+    }
+    if (ok && o->ndecrypt_with > 0)
+    {
+        rs_buf_init(&err);
+        ok = rs_pgp_use_secret_key(o->decrypt_with, o->ndecrypt_with, &err);
+        if (!ok)
+        {
+            rs_error("--decrypt-with: %s", err.data);
+        }
+        rs_buf_free(&err);
+    }
+    return ok;
 }
 
 /*
@@ -5240,11 +5281,6 @@ int rs_cmd_run(const struct rs_options *given)
         }
         o = &job.opts;
     }
-    if (o->passphrase_given && !read_passphrase(o->passphrase_fd))
-    {
-        rs_job_free(&job);
-        return RESTATE_EXIT_TROUBLE;
-    }
     rs_image_set_stage_dir(o->tmpdir);
     rs_result_begin(rs_command_name(o->command));
     rs_progress_enable(o->progress);
@@ -5266,7 +5302,9 @@ int rs_cmd_run(const struct rs_options *given)
     {
         rs_jobj_str(rs_result(), "job", given->args[0]);
     }
-    status = dispatch(o);
+    /* Taken once the result is begun, so that whoever reads it learns why
+     * the run did not start. */
+    status = take_secrets(o) ? dispatch(o) : RESTATE_EXIT_TROUBLE;
     rs_progress_finish();
     rs_progress_json(NULL);
     if (progress && fclose(progress) != 0)
@@ -5277,6 +5315,8 @@ int rs_cmd_run(const struct rs_options *given)
     {
         status = RESTATE_EXIT_TROUBLE;
     }
+    /* The key goes before a held signal ends restate, which would leave it. */
+    rs_pgp_forget_secret_key();
     let_stops();
     rs_pgp_set_passphrase(NULL);
     rs_image_set_stage_dir(NULL);

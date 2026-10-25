@@ -21,7 +21,8 @@
  * Encrypting needs no keyring: gpg runs in an empty home directory of its own
  * and reads each recipient's key from the file named. Reading an image back
  * runs gpg the other way, in the invoking user's own GnuPG home, which is
- * where the secret key is and where gpg-agent asks for its passphrase.
+ * where the secret key is and where gpg-agent asks for its passphrase -- or,
+ * given --decrypt-with, in a home of restate's own with that key in it.
  */
 #ifndef RESTATE_PGP_H
 #define RESTATE_PGP_H
@@ -126,5 +127,20 @@ bool rs_pgp_key_bytes(const char *path, struct rs_buf *out, struct rs_buf *err);
  */
 bool rs_pgp_sign(const char *keyfile, const char *data, struct rs_buf *sig,
                  struct rs_pgp_signer *signer, struct rs_buf *err);
+
+/*
+ * The OpenPGP secret keys in the `n` files `keyfiles` (gpg
+ * --export-secret-keys, armored or not) imported into a GnuPG home made for
+ * them -- in memory where the system has a place for that -- which every gpg
+ * decrypting after this runs in, rather than the invoking user's own; gpg
+ * tries each key a message is encrypted to. False, with the reason in `err`,
+ * if gpg is not there or a file holds no secret key. rs_pgp_forget_secret_key
+ * stops gpg-agent there and removes the home and the keys with it.
+ */
+bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf *err);
+void rs_pgp_forget_secret_key(void);
+/* Where the secret key decrypting needs would be, for saying it was not:
+ * "this user's GnuPG home", or the --decrypt-with key file. */
+const char *rs_pgp_key_place(void);
 
 #endif /* RESTATE_PGP_H */

@@ -2,8 +2,12 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
+#include <dirent.h>
+#include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "cmd.h"
@@ -25,6 +29,98 @@ static int quiet_system(const char *cmd)
 static int run(const void *arg)
 {
     return rs_cmd_run(arg);
+}
+
+/* How many GnuPG homes for a secret key there are, this user's. */
+static size_t secret_homes(void)
+{
+    static const char *const dirs[] = { "/tmp", "/dev/shm", "/run" };
+    size_t                   n = 0;
+    size_t                   i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+    {
+        DIR           *d = opendir(dirs[i]);
+        struct dirent *e;
+
+        while (d && (e = readdir(d)) != NULL)
+        {
+            char       *path = rs_xasprintf("%s/%s", dirs[i], e->d_name);
+            struct stat st;
+
+            if (strncmp(e->d_name, "restate-gpg.", 12) == 0 && lstat(path, &st) == 0 &&
+                st.st_uid == geteuid())
+            {
+                n++;
+            }
+            free(path);
+        }
+        if (d)
+        {
+            (void)closedir(d);
+        }
+    }
+    return n;
+}
+
+/* The secret key in `sec` given with --decrypt-with: used, said, and gone
+ * after, and gone too when a signal ends restate while it is there. */
+static void secret_key_cases(const char *sec, const char *pub)
+{
+    struct rs_buf err;
+    size_t        before = secret_homes();
+    pid_t         pid;
+    int           st = 0;
+
+    TEST_CASE("pgp: a secret key given as a file, in a home of its own");
+    rs_buf_init(&err);
+    CHECK_STR(rs_pgp_key_place(), "this user's GnuPG home");
+    CHECK(rs_pgp_use_secret_key(&sec, 1, &err));
+    CHECK_STR(rs_pgp_key_place(), "the key files --decrypt-with gives");
+    CHECK_INT(secret_homes(), before + 1);
+    rs_pgp_forget_secret_key();
+    rs_pgp_forget_secret_key();
+    CHECK_STR(rs_pgp_key_place(), "this user's GnuPG home");
+    CHECK_INT(secret_homes(), before);
+
+    TEST_CASE("pgp: a file with no secret key in it, or none at all");
+    CHECK(!rs_pgp_use_secret_key(&pub, 1, &err));
+    CHECK_CONTAINS(err.data, "no secret key in it");
+    rs_buf_reset(&err);
+    {
+        const char *both[] = { sec, "/nonexistent/key.sec" };
+
+        CHECK(!rs_pgp_use_secret_key(both, 2, &err));
+        CHECK_CONTAINS(err.data, "gpg --with-colons failed");
+    }
+    CHECK_INT(secret_homes(), before);
+    {
+        static const char *const missing[] = { "/nonexistent/gpg" };
+
+        rs_buf_reset(&err);
+        rs_program_set_paths(RS_PROG_GPG, missing, 1);
+        CHECK(!rs_pgp_use_secret_key(&sec, 1, &err));
+        CHECK_CONTAINS(err.data, "decrypting needs gpg");
+        rs_program_set_paths(RS_PROG_GPG, NULL, 0);
+    }
+    rs_buf_free(&err);
+
+    TEST_CASE("pgp: a signal that ends restate takes the secret key's home with it");
+    pid = fork();
+    if (pid == 0)
+    {
+        struct rs_buf why;
+
+        rs_buf_init(&why);
+        if (rs_pgp_use_secret_key(&sec, 1, &why))
+        {
+            (void)raise(SIGTERM);
+        }
+        _exit(3);
+    }
+    CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
+    CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM);
+    CHECK_INT(secret_homes(), before);
 }
 
 static void detect_cases(void)
@@ -88,6 +184,7 @@ void test_pgp(void)
     char                  *empty = rs_xasprintf("%s/empty", dir);
     char                  *pub = rs_xasprintf("%s/pub.gpg", dir);
     char                  *img = rs_xasprintf("%s/img.tgz.gpg", dir);
+    char                  *sec = rs_xasprintf("%s/sec.gpg", dir);
     char                  *tree = rs_xasprintf("%s/tree", dir);
     char                  *old_home = getenv("GNUPGHOME") ? rs_xstrdup(getenv("GNUPGHOME")) : NULL;
     const char            *keys[2];
@@ -203,8 +300,9 @@ void test_pgp(void)
 
         /* Restored: the files part decrypted on its own, and only it. */
         {
-            char *into = rs_xasprintf("%s/restored", dir);
-            char *key = rs_xasprintf("%s/restored/secret.key", dir);
+            char       *into = rs_xasprintf("%s/restored", dir);
+            char       *key = rs_xasprintf("%s/restored/secret.key", dir);
+            const char *keyf[1];
 
             (void)mkdir(into, 0755);
             o.command = CMD_RESTORE;
@@ -223,6 +321,30 @@ void test_pgp(void)
             (void)setenv("GNUPGHOME", home, 1);
             free(out);
             free(errs);
+
+            /* Or with the secret key given as a file, no GnuPG home holding it. */
+            cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --export-secret-keys > '%s' "
+                               "2>/dev/null", home, sec);
+            CHECK(system(cmd) == 0);
+            free(cmd);
+            (void)setenv("GNUPGHOME", empty, 1);
+            keyf[0] = sec;
+            o.decrypt_with = keyf;
+            o.ndecrypt_with = 1;
+            CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_OK);
+            CHECK(access(key, F_OK) == 0);
+            CHECK_STR(rs_pgp_key_place(), "this user's GnuPG home");
+            free(out);
+            free(errs);
+            keyf[0] = pub;
+            CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_TROUBLE);
+            CHECK_CONTAINS(errs, "--decrypt-with: ");
+            free(out);
+            free(errs);
+            o.decrypt_with = NULL;
+            o.ndecrypt_with = 0;
+            secret_key_cases(sec, pub);
+            (void)setenv("GNUPGHOME", home, 1);
             o.root = tree;
             free(key);
             free(into);
@@ -270,6 +392,7 @@ done:
     free(empty);
     free(pub);
     free(img);
+    free(sec);
     free(tree);
     free(dir);
 }

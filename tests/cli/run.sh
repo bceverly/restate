@@ -1079,6 +1079,33 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "and reads back with the key" -- \
     with_pw env XDG_CACHE_HOME="$WORK/pcache4" GNUPGHOME="$WORK/pgnupg" \
     "$BIN" check -q --passphrase-fd 3 poff-enc
+  # decrypt_with a key that has a passphrase, and passphrase_file: a key of
+  # its own, new each run.
+  mkdir -m 700 dgnupg pjobs ppout2
+  dk() { gpg --homedir "$WORK/dgnupg" --batch --quiet --pinentry-mode loopback --passphrase pw "$@"; }
+  dk --quick-gen-key 'decrypt pass <dpass@example.invalid>' default default never 2> /dev/null
+  dk --export-secret-keys dpass@example.invalid > dpass.key 2> /dev/null
+  dk --export dpass@example.invalid > dpass.pub 2> /dev/null
+  chmod 600 dpass.key pw.txt
+  expect 0 "an encrypted repository for decrypt_with" -- \
+    env XDG_CACHE_HOME="$WORK/pcache5" GNUPGHOME="$WORK/pnokey" \
+    "$BIN" capture -q -r rtree --os=linux --encrypt-to dpass.pub -o drepo --create
+  printf 'command = restore\nrepository = %s\nrestore_root = %s\nallow_unverified = true\ndecrypt_with = %s\npassphrase_file = %s\n' \
+    "$WORK/drepo" "$WORK/ppout2" "$WORK/dpass.key" "$WORK/pw.txt" > pjobs/restore.conf
+  chmod 644 pjobs/restore.conf
+  expect 0 "run a restore job whose key has a passphrase, passphrase_file" -- \
+    env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" "$BIN" run -q "$WORK/pjobs/restore.conf"
+  check "and its files are back" cmp rtree/etc/app/key ppout2/etc/app/key
+  expect 2 "passphrase_file and --passphrase-fd both" -- \
+    with_pw env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" \
+    "$BIN" run -q --passphrase-fd 3 "$WORK/pjobs/restore.conf"
+  contains "$ERR" "give it one way" "is refused"
+  printf 'wrong\n' > wrong.txt && chmod 600 wrong.txt
+  sed "s|pw.txt|wrong.txt|" pjobs/restore.conf > pjobs/wrong.conf && chmod 644 pjobs/wrong.conf
+  expect 2 "the wrong passphrase in passphrase_file" -- \
+    env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" "$BIN" run -q "$WORK/pjobs/wrong.conf"
+  contains "$ERR" "or its passphrase was not given" "says why"
+  gpgconf --homedir "$WORK/dgnupg" --kill gpg-agent 2> /dev/null || true
   expect 0 "prune --whole-packs an encrypted repository, with no key at all" -- \
     env XDG_CACHE_HOME="$WORK/pcache3" GNUPGHOME="$WORK/pnokey" \
     "$BIN" prune --whole-packs --keep-last 1 prepo-enc
@@ -1124,6 +1151,71 @@ if usable gpg && usable gpgv && usable gpgconf; then
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" \
     "$BIN" restore --allow-unverified --root erout erepo
   check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+
+  # The secret key given as a file, for one run, in a GnuPG home of restate's
+  # own: from the command line, and from a job.
+  gk --export-secret-keys enc@example.invalid > enc.sec 2> /dev/null && chmod 600 enc.sec
+  # Called through check.
+  # shellcheck disable=SC2317,SC2329
+  homes() { find /tmp /dev/shm -maxdepth 1 -name 'restate-gpg.*' -user "$(id -u)" 2> /dev/null | wc -l; }
+  homes_before="$(homes)"
+  rm -rf erout && mkdir -p erout
+  expect 0 "restore --decrypt-with the secret key's file" -- \
+    env XDG_CACHE_HOME="$WORK/dcache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" restore -q --allow-unverified --decrypt-with enc.sec --root erout erepo
+  check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+  check "and the home the key was in is gone" test "$(homes)" = "$homes_before"
+  expect 2 "restore --decrypt-with a key it is not encrypted to" -- \
+    env XDG_CACHE_HOME="$WORK/dcache2" GNUPGHOME="$WORK/nokey" \
+    "$BIN" restore -q --allow-unverified --decrypt-with signer.sec --root erout erepo
+  contains "$ERR" "not in the key files --decrypt-with gives" "says the key given is not the one"
+  expect 2 "restore --decrypt-with a public key" -- \
+    env XDG_CACHE_HOME="$WORK/dcache2" GNUPGHOME="$WORK/nokey" \
+    "$BIN" restore -q --allow-unverified --decrypt-with enc.pub --root erout erepo
+  contains "$ERR" "no secret key in it" "is refused, saying why"
+  rm -rf erout && mkdir -p erout
+  expect 0 "restore --decrypt-with two keys, one of them the one" -- \
+    env XDG_CACHE_HOME="$WORK/dcache6" GNUPGHOME="$WORK/nokey" \
+    "$BIN" restore -q --allow-unverified --decrypt-with signer.sec --decrypt-with enc.sec \
+    --root erout erepo
+  check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+  expect 0 "check --decrypt-with" -- \
+    env XDG_CACHE_HOME="$WORK/dcache3" GNUPGHOME="$WORK/nokey" \
+    "$BIN" check -q --decrypt-with enc.sec erepo
+  mkdir -m 700 ejobs
+  rm -rf erout && mkdir -p erout
+  printf 'command = restore\nrepository = %s\nrestore_root = %s\nallow_unverified = true\ndecrypt_with = %s\nresult = %s\n' \
+    "$WORK/erepo" "$WORK/erout" "$WORK/enc.sec" "$WORK/ejob.json" > ejobs/restore.conf
+  chmod 644 ejobs/restore.conf
+  expect 0 "run a restore job with decrypt_with" -- \
+    env XDG_CACHE_HOME="$WORK/dcache4" GNUPGHOME="$WORK/nokey" "$BIN" run -q "$WORK/ejobs/restore.conf"
+  check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+  contains "$(cat ejob.json)" '"status": "ok"' "and its result says so"
+  chmod 640 enc.sec
+  expect 2 "run it with the key file readable by its group" -- \
+    env XDG_CACHE_HOME="$WORK/dcache4" GNUPGHOME="$WORK/nokey" "$BIN" run -q "$WORK/ejobs/restore.conf"
+  contains "$(cat ejob.json)" "readable and writable by no one else" "the result says why it was not run"
+  chmod 600 enc.sec
+  ln -s enc.sec enc.link
+  sed "s|enc.sec|enc.link|" ejobs/restore.conf > ejobs/link.conf && chmod 644 ejobs/link.conf
+  expect 2 "run a job whose decrypt_with is a symlink" -- \
+    env XDG_CACHE_HOME="$WORK/dcache4" GNUPGHOME="$WORK/nokey" "$BIN" run -q "$WORK/ejobs/link.conf"
+  printf 'decrypt_with = %s\n' "$WORK/signer.sec" >> ejobs/restore.conf
+  chmod 600 signer.sec
+  rm -rf erout && mkdir -p erout
+  expect 0 "run a restore job with decrypt_with twice" -- \
+    env XDG_CACHE_HOME="$WORK/dcache7" GNUPGHOME="$WORK/nokey" "$BIN" run -q "$WORK/ejobs/restore.conf"
+  check "its files back" cmp rtree/etc/app/key erout/etc/app/key
+  printf 'command = du\nrepository = %s\ndecrypt_with = %s\n' "$WORK/erepo" "$WORK/enc.sec" > ejobs/du.conf
+  chmod 644 ejobs/du.conf
+  expect 0 "decrypt_with in a du job" -- \
+    env XDG_CACHE_HOME="$WORK/dcache5" GNUPGHOME="$WORK/nokey" "$BIN" run -q "$WORK/ejobs/du.conf"
+  printf 'command = estimate\nroot = %s\ndecrypt_with = %s\n' "$WORK/rtree" "$WORK/enc.sec" > ejobs/est.conf
+  chmod 644 ejobs/est.conf
+  expect 2 "decrypt_with in an estimate job" -- "$BIN" run -q "$WORK/ejobs/est.conf"
+  contains "$ERR" "decrypt_with means nothing to a estimate job" "is refused"
+  expect 2 "run --decrypt-with" -- "$BIN" run --decrypt-with enc.sec "$WORK/ejobs/restore.conf"
+  check "and the homes are gone" test "$(homes)" = "$homes_before"
   expect 0 "snapshots, with the secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" "$BIN" snapshots erepo
   contains "$OUT" "files," "lists them with their summaries"
@@ -1413,6 +1505,8 @@ contains "$OUT" '"job_keys": [' "the keys a job takes"
 contains "$OUT" '"job_commands": [' "the commands a job can be"
 contains "$OUT" '"job_command_keys": {' "the keys each takes"
 contains "$OUT" '"status.capture_rules"' "and that status says how it classified"
+check "a restore job takes decrypt_with and passphrase_file" \
+  eval "printf '%s' \"\$OUT\" | grep '\"restore\": \[' | grep '\"decrypt_with\", \"passphrase_file\"' > /dev/null"
 contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
 

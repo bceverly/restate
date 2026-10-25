@@ -386,6 +386,12 @@ Options:
                           capture, sign, export: sign the image or snapshot
                           with the OpenPGP secret key in KEYFILE (gpg
                           --export-secret-keys)
+      --decrypt-with=KEYFILE
+                          decrypt with the OpenPGP secret key in KEYFILE (gpg
+                          --export-secret-keys), imported into a GnuPG home
+                          made for the run and removed after, rather than with
+                          this user's own; repeatable, for snapshots encrypted
+                          to different keys (see ENCRYPTION)
       --trusted-key=KEYFILE
                           restore, verify, diff, status, list, export: accept
                           an image or snapshot only if it is signed by the
@@ -541,9 +547,10 @@ Options:
       --tmpdir=DIR        capture, export: stage the image being written in DIR
                           rather than beside it, so an image written to a
                           network share is not staged there (see STORAGE)
-      --passphrase-fd=N   read the passphrase of the secret key --sign-with
-                          gives, or that decrypts, from file descriptor N
-                          rather than asking for it (see ENCRYPTION)
+      --passphrase-fd=N   read the passphrase of the secret key --sign-with or
+                          --decrypt-with gives, or that decrypts, from file
+                          descriptor N rather than asking for it (see
+                          ENCRYPTION)
   -q, --quiet             no warnings and no summary; errors are still reported
   -v, --verbose           report every path the rules skip, and why
   -h, --help              print this help and exit
@@ -1272,6 +1279,17 @@ nothing needs at all, and says how many it left. Encryption is not
 authentication -- anyone with the public key can write a snapshot that
 decrypts -- so sign snapshots, and restore with `--trusted-key`.
 
+The secret key need not live in a GnuPG home on the machine at all.
+`--decrypt-with KEYFILE` takes it as a file (`gpg --export-secret-keys`),
+imported for the one run into a GnuPG home of restate's own -- in memory
+where the system has a place for it, `/run` for root and `/dev/shm` for
+anyone else on Linux, else `/tmp` -- and removed, gpg-agent there stopped,
+when the run ends or a signal ends it:
+
+```console
+$ sudo restate restore --decrypt-with /run/keys/web01.sec /mnt/nas/web01
+```
+
 The one thing an encrypted chunk still shows is its size, and with the
 boundaries any repository uses, chunk sizes would say which known files a
 repository holds. So an encrypted repository cuts its chunks where a key of
@@ -1428,6 +1446,15 @@ job reads the newest snapshot unless `snapshot` names one, and a `list` job
 lists the directory `path` says (`/` if it says none). A `status` job takes
 `rules`, `all` and `one_file_system` as a capture does, though it seldom
 needs them: it classifies by the capture's own rules unless given others.
+
+Any job but `estimate` and `protect` can read what is encrypted, and takes
+`decrypt_with`, the secret key as `--decrypt-with` takes it -- repeatable,
+for a repository whose older snapshots are encrypted to a key since replaced
+-- and `passphrase_file`, a file whose first line is the passphrase. Both
+have to be regular files, root's (or the user's) and readable and writable by
+no one else, in a directory only their owner can change. A program that keeps
+the key elsewhere writes it there -- under `/run`, root's alone -- for the one
+run, and removes it after; the job never needs a GnuPG home of its own.
 
 A job refused -- a key restate does not know or the command has no use for,
 a value of the wrong kind -- still writes its `result`, if it names one, as

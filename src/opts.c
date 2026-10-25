@@ -170,6 +170,9 @@ void rs_options_free(struct rs_options *o)
     free(o->trusted);
     o->trusted = NULL;
     o->ntrusted = 0;
+    free(o->decrypt_with);
+    o->decrypt_with = NULL;
+    o->ndecrypt_with = 0;
     free(o->debs);
     o->debs = NULL;
     o->ndebs = 0;
@@ -295,6 +298,11 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_SIGN_WITH:
             o->sign_with = optarg;
+            break;
+        case OPT_DECRYPT_WITH:
+            o->decrypt_with = rs_xreallocarray(o->decrypt_with, o->ndecrypt_with + 1,
+                                               sizeof(*o->decrypt_with));
+            o->decrypt_with[o->ndecrypt_with++] = optarg;
             break;
         case OPT_TRUSTED_KEY:
             o->trusted = rs_xreallocarray(o->trusted, o->ntrusted + 1, sizeof(*o->trusted));

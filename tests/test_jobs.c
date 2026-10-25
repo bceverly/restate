@@ -279,6 +279,12 @@ static void bad_jobs(void)
     refused("command = list\nrepository = /r\nroot = /\n", "root means nothing to a list job");
     refused("command = status\nrepository = /r\npath = /etc\n",
             "path means nothing to a status job");
+    refused("command = protect\nrepository = /r\ndecrypt_with = /k\n",
+            "decrypt_with means nothing to a protect job");
+    refused("command = estimate\npassphrase_file = /p\n",
+            "passphrase_file means nothing to a estimate job");
+    refused("command = check\nrepository = /r\ndecrypt_with = k.sec\n",
+            "decrypt_with: not an absolute path");
     refused("command = status\n", "a status job needs repository, or snapshot as REPO::NAME");
     refused("command = capture\n", "a capture job needs repository");
     refused("command = restore\n", "a restore job needs repository, or snapshot as REPO::NAME");
@@ -341,6 +347,21 @@ static int load_quiet(const void *arg)
         given.root = a[1];
     }
     status = load(a[0], &given, &job);
+    rs_job_free(&job);
+    return status;
+}
+
+struct loaded {
+    const char        *path;
+    struct rs_options *given;
+};
+
+static int load_given(const void *arg)
+{
+    const struct loaded *l = arg;
+    struct rs_job        job;
+    int                  status = load(l->path, l->given, &job);
+
     rs_job_free(&job);
     return status;
 }
@@ -484,6 +505,71 @@ static void loading(void)
     free(out);
     free(errs);
     (void)chmod(jobs, 0755);
+
+    TEST_CASE("jobs: decrypt_with and passphrase_file only if no one else can read them");
+    {
+        char *keys = rs_xasprintf("%s/keys", dir);
+        char *sec = rs_xasprintf("%s/keys/host.sec", dir);
+        char *pw = rs_xasprintf("%s/keys/pw", dir);
+        char *text = rs_xasprintf("command = restore\nrepository = /r\ndecrypt_with = %s\n"
+                                  "passphrase_file = %s\n", sec, pw);
+        char *jpath = rs_xasprintf("%s/secret.conf", jobs);
+
+        (void)mkdir(keys, 0700);
+        rs_test_write(keys, "host.sec", "key\n", 0600);
+        rs_test_write(keys, "pw", "pw\n", 0600);
+        rs_test_write(jobs, "secret.conf", text, 0644);
+        a[0] = jpath;
+        memset(&given, 0, sizeof(given));
+        CHECK_INT(load(jpath, &given, &job), RESTATE_EXIT_OK);
+        CHECK_INT(job.opts.ndecrypt_with, 1);
+        CHECK_STR(job.opts.decrypt_with[0], sec);
+        CHECK_STR(job.opts.passphrase_file, pw);
+        rs_job_free(&job);
+        given.passphrase_given = true;
+        CHECK_INT(rs_test_capture(load_given, &(struct loaded){ jpath, &given }, &out, &errs),
+                  RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(errs, "give it one way");
+        free(out);
+        free(errs);
+        (void)chmod(pw, 0640);
+        CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(errs, "passphrase_file");
+        CHECK_CONTAINS(errs, "readable and writable by no one else");
+        free(out);
+        free(errs);
+        (void)chmod(pw, 0600);
+        (void)chmod(sec, 0604);
+        CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(errs, "decrypt_with");
+        free(out);
+        free(errs);
+        (void)chmod(sec, 0600);
+        (void)chmod(keys, 0777);
+        CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(errs, "in a directory only its owner can change");
+        free(out);
+        free(errs);
+        (void)chmod(keys, 0700);
+        (void)unlink(sec);
+        CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+        CHECK_CONTAINS(errs, "decrypt_with");
+        free(out);
+        free(errs);
+        if (symlink(pw, sec) == 0)
+        {
+            CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+            CHECK_CONTAINS(errs, "has to be a regular file");
+            free(out);
+            free(errs);
+        }
+        a[0] = path;
+        free(jpath);
+        free(text);
+        free(pw);
+        free(sec);
+        free(keys);
+    }
 
     TEST_CASE("jobs: a symlink, a job that is not there, and one that is not a job");
     if (symlink(path, link) == 0)

@@ -1815,6 +1815,20 @@ Signing
 .RB ( \-\-sign\-with )
 takes the secret key as a file, imported into a home of its own that is
 removed after.
+.BI \-\-decrypt\-with " KEYFILE"
+does the same for decrypting: the secret key in
+.I KEYFILE
+.RB ( "gpg \-\-export\-secret\-keys" ,
+armored or not; repeatable, and gpg tries each) is imported into a GnuPG home made for the run \- in
+memory where the system has a place for it, on Linux
+.I /run
+for root and
+.I /dev/shm
+for anyone else, else under
+.I /tmp
+\- and every gpg decrypting runs there rather than in the invoking user's
+home. When the run ends, or a signal ends it, gpg\-agent there is stopped
+and the home is removed, the key with it.
 .PP
 A secret key with a passphrase asks for it, as gpg asks.
 .BI \-\-passphrase\-fd " N"
@@ -1823,9 +1837,12 @@ reads it from file descriptor
 instead \- once, to its end or its first line \- and gives it to every gpg
 the run starts, each through a pipe of its own: for a run with no one at a
 terminal. A program that keeps the key elsewhere can give it for one run
-and no longer: imported into a GnuPG home made for the run, with
-.B GNUPGHOME
-naming it, and the passphrase on a pipe.
+and no longer with
+.BR \-\-decrypt\-with ,
+or in a job with
+.B decrypt_with
+and
+.BR passphrase_file .
 .SH JOBS
 .B restate run
 .I JOBFILE
@@ -1901,6 +1918,22 @@ capture.
 .TP
 .BR encrypt_to " (repeatable)"
 capture and prune: key files.
+.TP
+.BR decrypt_with " (repeatable), " passphrase_file
+every command but estimate and protect: the secret keys to decrypt with,
+as
+.B \-\-decrypt\-with
+takes them \- more than one where snapshots are encrypted to different
+keys, after a key is changed \- and the file whose first line is the
+passphrase. Each has to be a
+regular file, not a symlink, root's (or whoever runs the job's) and
+readable and writable by no one else, in a directory only its owner can
+change; a job given
+.B passphrase_file
+refuses
+.B \-\-passphrase\-fd
+too. A program holding the key elsewhere writes it there for the one run,
+and removes it after.
 .TP
 .BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " whole_packs
 prune;

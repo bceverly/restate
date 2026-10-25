@@ -242,9 +242,13 @@ static void passphrase_args(char **argv, size_t *a, int fd)
     argv[(*a)++] = rs_xasprintf("%d", fd);
 }
 
+/* The GnuPG home rs_pgp_use_secret_key made, which every gpg decrypting
+ * runs in; NULL for the invoking user's own. */
+static char *secret_home;
+
 bool rs_pgp_decrypt(int in_fd, struct rs_pgp *pg, struct rs_buf *err)
 {
-    char  *argv[10];
+    char  *argv[14];
     size_t a = 0;
     size_t i;
     int    pfd = passphrase_pipe();
@@ -254,6 +258,12 @@ bool rs_pgp_decrypt(int in_fd, struct rs_pgp *pg, struct rs_buf *err)
     memset(pg, 0, sizeof(*pg));
     pg->fd = -1;
     argv[a++] = rs_xstrdup("gpg");
+    if (secret_home)
+    {
+        argv[a++] = rs_xstrdup("--homedir");
+        argv[a++] = rs_xstrdup(secret_home);
+        argv[a++] = rs_xstrdup("--no-options");
+    }
     argv[a++] = rs_xstrdup("--quiet");
     argv[a++] = rs_xstrdup("--batch");
     if (pfd >= 0)
@@ -679,9 +689,11 @@ bool rs_pgp_keyring(const char *path, const char *dest, struct rs_buf *err)
     return ok;
 }
 
-/* Runs gpg in `home` with the arguments after the common ones; false, with
- * what gpg said, unless it exits 0. */
-static bool gpg_in(const char *home, const char *const *args, size_t n, struct rs_buf *err)
+/* Runs gpg in `home` with the arguments after the common ones, what it writes
+ * added to `got` if that is not NULL; false, with what gpg said, unless it
+ * exits 0. */
+static bool gpg_in(const char *home, const char *const *args, size_t n, struct rs_buf *got,
+                   struct rs_buf *err)
 {
     char        **argv = rs_xcalloc(12 + n, sizeof(*argv));
     struct rs_buf out;
@@ -726,6 +738,10 @@ static bool gpg_in(const char *home, const char *const *args, size_t n, struct r
                     errtext.data ? errtext.data : "");
         ok = false;
     }
+    if (ok && got && out.data)
+    {
+        rs_buf_add(got, out.data, out.len);
+    }
     rs_buf_free(&out);
     rs_buf_free(&errtext);
     for (i = 0; i < a; i++)
@@ -734,6 +750,38 @@ static bool gpg_in(const char *home, const char *const *args, size_t n, struct r
     }
     free(argv);
     return ok;
+}
+
+/* A throwaway home removed, the agent gpg started for it going with it, and
+ * the directory for its sockets that gpg makes under /run/user, if it made
+ * one: nothing else removes that, and one is left for every home. */
+static void end_home(char *home)
+{
+    if (rs_program_path(RS_PROG_GPGCONF))
+    {
+        char          a0[] = "gpgconf";
+        char          a1[] = "--homedir";
+        char          kill_[] = "--kill";
+        char          agent[] = "gpg-agent";
+        char          sockets[] = "--remove-socketdir";
+        char         *argv[6];
+        int           code;
+        struct rs_buf ignored;
+
+        argv[0] = a0;
+        argv[1] = a1;
+        argv[2] = home;
+        argv[3] = kill_;
+        argv[4] = agent;
+        argv[5] = NULL;
+        rs_buf_init(&ignored);
+        (void)rs_run(RS_PROG_GPGCONF, argv, NULL, NULL, &code, &ignored);
+        argv[3] = sockets;
+        argv[4] = NULL;
+        (void)rs_run(RS_PROG_GPGCONF, argv, NULL, NULL, &code, &ignored);
+        rs_buf_free(&ignored);
+    }
+    rs_pgp_home_remove(home);
 }
 
 bool rs_pgp_sign(const char *keyfile, const char *data, struct rs_buf *sig,
@@ -758,8 +806,8 @@ bool rs_pgp_sign(const char *keyfile, const char *data, struct rs_buf *sig,
         const char *sign[] = { "--detach-sign", "--output", sigfile, data };
         const char *export[] = { "--output", pubfile, "--export" };
 
-        ok = gpg_in(home, import, 2, err) && gpg_in(home, sign, 4, err) &&
-             gpg_in(home, export, 3, err);
+        ok = gpg_in(home, import, 2, NULL, err) && gpg_in(home, sign, 4, NULL, err) &&
+             gpg_in(home, export, 3, NULL, err);
     }
     rs_buf_init(&status);
     rs_buf_init(&why);
@@ -788,29 +836,315 @@ bool rs_pgp_sign(const char *keyfile, const char *data, struct rs_buf *sig,
     }
     rs_buf_free(&status);
     rs_buf_free(&why);
-    /* The agent gpg started for the throwaway home goes with it. */
-    if (rs_program_path(RS_PROG_GPGCONF))
-    {
-        char          a0[] = "gpgconf";
-        char          a1[] = "--homedir";
-        char          a3[] = "--kill";
-        char          a4[] = "gpg-agent";
-        char         *argv[6];
-        int           code;
-        struct rs_buf ignored;
-
-        argv[0] = a0;
-        argv[1] = a1;
-        argv[2] = home;
-        argv[3] = a3;
-        argv[4] = a4;
-        argv[5] = NULL;
-        rs_buf_init(&ignored);
-        (void)rs_run(RS_PROG_GPGCONF, argv, NULL, NULL, &code, &ignored);
-        rs_buf_free(&ignored);
-    }
     free(sigfile);
     free(pubfile);
-    rs_pgp_home_remove(home);
+    end_home(home);
     return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Decrypting with a key file                                                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A home for a secret key: in memory where the system has a file system there
+ * for it -- /run for root, /dev/shm for anyone, on Linux -- so the key is
+ * never on a disk, else under /tmp. 0700, as mkdtemp makes it.
+ */
+static char *memory_home(struct rs_buf *err)
+{
+    static const char *const dirs[] = {
+#ifdef __linux__
+        "/run",
+        "/dev/shm",
+#endif
+        "/tmp",
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+    {
+        struct stat st;
+        char       *home;
+
+        if ((strcmp(dirs[i], "/run") == 0 && geteuid() != 0) || lstat(dirs[i], &st) != 0 ||
+            !S_ISDIR(st.st_mode))
+        {
+            continue;
+        }
+        home = rs_xasprintf("%s/restate-gpg.XXXXXX", dirs[i]);
+        if (mkdtemp(home))
+        {
+            return home;
+        }
+        free(home);
+    }
+    rs_buf_addf(err, "a GnuPG home under /tmp: %s", strerror(errno));
+    return NULL;
+}
+
+/* Whether gpg's --with-colons listing has a secret key in it. */
+static bool lists_secret_key(const struct rs_buf *list)
+{
+    const char *p = list->data;
+
+    while (p && *p)
+    {
+        if (strncmp(p, "sec:", 4) == 0 || strncmp(p, "ssb:", 4) == 0)
+        {
+            return true;
+        }
+        p = strchr(p, '\n');
+        p = p ? p + 1 : NULL;
+    }
+    return false;
+}
+
+/*
+ * What is in the secret home, deepest first, and the sockets gpg-agent may
+ * make there, for a signal that ends restate to remove: unlink and rmdir are
+ * safe in a handler, and walking the directory is not.
+ */
+static char  **doomed;
+static size_t  ndoomed;
+
+static const int        stop_sigs[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT };
+static struct sigaction stop_saved[sizeof(stop_sigs) / sizeof(stop_sigs[0])];
+
+static void doom(const char *path)
+{
+    doomed = rs_xreallocarray(doomed, ndoomed + 1, sizeof(*doomed));
+    doomed[ndoomed++] = rs_xstrdup(path);
+}
+
+/* Every file under `dir`, each directory after what is in it, then `dir`,
+ * into doomed. */
+static void doom_tree(const char *dir) /* NOLINT(misc-no-recursion) */
+{
+    DIR           *d = opendir(dir);
+    struct dirent *e;
+
+    while (d && (e = readdir(d)) != NULL)
+    {
+        char       *path;
+        struct stat st;
+
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+        {
+            continue;
+        }
+        path = rs_xasprintf("%s/%s", dir, e->d_name);
+        if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode))
+        {
+            doom_tree(path);
+        } else
+        {
+            doom(path);
+        }
+        free(path);
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    doom(dir);
+}
+
+/* Removes what doomed names, and ends restate the way the signal says. */
+static void stopped(int sig)
+{
+    size_t i;
+
+    for (i = 0; i < ndoomed; i++)
+    {
+        if (unlink(doomed[i]) != 0)
+        {
+            (void)rmdir(doomed[i]);
+        }
+    }
+    for (i = 0; i < sizeof(stop_sigs) / sizeof(stop_sigs[0]); i++)
+    {
+        if (stop_sigs[i] == sig)
+        {
+            (void)sigaction(sig, &stop_saved[i], NULL);
+        }
+    }
+    (void)raise(sig);
+}
+
+/* While the secret home is there, a signal that ends restate removes it. */
+static void guard_home(const char *home)
+{
+    static const char *const sockets[] = { "S.gpg-agent",     "S.gpg-agent.extra",
+                                           "S.gpg-agent.ssh", "S.gpg-agent.browser",
+                                           "S.scdaemon",      "S.keyboxd" };
+    struct sigaction         act;
+    size_t                   i;
+
+    for (i = 0; i < sizeof(sockets) / sizeof(sockets[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/%s", home, sockets[i]);
+
+        doom(path);
+        free(path);
+    }
+    doom_tree(home);
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = stopped;
+    (void)sigemptyset(&act.sa_mask);
+    for (i = 0; i < sizeof(stop_sigs) / sizeof(stop_sigs[0]); i++)
+    {
+        (void)sigaction(stop_sigs[i], &act, &stop_saved[i]);
+    }
+}
+
+static void unguard_home(void)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(stop_sigs) / sizeof(stop_sigs[0]); i++)
+    {
+        (void)sigaction(stop_sigs[i], &stop_saved[i], NULL);
+    }
+    for (i = 0; i < ndoomed; i++)
+    {
+        free(doomed[i]);
+    }
+    free(doomed);
+    doomed = NULL;
+    ndoomed = 0;
+}
+
+/* Imports the secret key in `keyfile` into `home`: refused unless gpg, told
+ * to show what is in it and import nothing, lists a secret key. */
+static bool import_secret(const char *home, const char *keyfile, struct rs_buf *err)
+{
+    const char   *show[] = { "--with-colons", "--import-options", "show-only", "--import",
+                             keyfile };
+    const char   *import[] = { "--import", keyfile };
+    struct rs_buf list;
+    bool          ok;
+
+    rs_buf_init(&list);
+    ok = gpg_in(home, show, 5, &list, err);
+    if (ok && !lists_secret_key(&list))
+    {
+        rs_buf_addf(err, "%s: no secret key in it (gpg --export-secret-keys writes one)",
+                    keyfile);
+        ok = false;
+    }
+    rs_buf_free(&list);
+    return ok && gpg_in(home, import, 2, NULL, err);
+}
+
+/*
+ * Each secret key in `home` used once, on a few bytes encrypted to it there,
+ * however that ends. gpg-agent keeps an imported key as it came until it is
+ * first used, and gpg-agent 2.4 with libgcrypt 1.12 then refuses it once --
+ * "Bad secret key", or "Bad passphrase" for the right one -- and takes it
+ * every time after: so the once is here, not on the first thing the run
+ * decrypts.
+ */
+static void first_use(const char *home)
+{
+    const char   *list[] = { "--with-colons", "--list-secret-keys" };
+    char         *plain = rs_xasprintf("%s/first-use", home);
+    char         *sealed = rs_xasprintf("%s/first-use.gpg", home);
+    char          fpr[41];
+    const char   *seal[] = { "--yes", "--trust-model", "always", "--output", sealed,
+                             "--recipient", fpr, "--encrypt", plain };
+    const char   *open_[] = { "--yes", "--output", "/dev/null", "--decrypt", sealed };
+    struct rs_buf keys;
+    struct rs_buf ignored;
+    const char   *p;
+    bool          primary = false;
+
+    rs_buf_init(&keys);
+    rs_buf_init(&ignored);
+    p = gpg_in(home, list, 2, &keys, &ignored) && write_new(plain, "x", 1, &ignored) ? keys.data
+                                                                                     : NULL;
+    while (p && *p)
+    {
+        const char *eol = strchr(p, '\n');
+
+        /* Each primary key's fingerprint: field 10 of the "fpr" line after its
+         * "sec" line. */
+        if (strncmp(p, "sec:", 4) == 0)
+        {
+            primary = true;
+        } else if (primary && strncmp(p, "fpr:", 4) == 0)
+        {
+            const char *f = p;
+            int         colons = 0;
+
+            while (*f && *f != '\n' && colons < 9)
+            {
+                colons += *f++ == ':';
+            }
+            primary = false;
+            if (colons == 9 && fingerprint(f, 40) && f[40] == ':')
+            {
+                memcpy(fpr, f, 40);
+                fpr[40] = '\0';
+                if (gpg_in(home, seal, 9, NULL, &ignored))
+                {
+                    (void)gpg_in(home, open_, 5, NULL, &ignored);
+                }
+                (void)unlink(sealed);
+            }
+        }
+        p = eol ? eol + 1 : NULL;
+    }
+    (void)unlink(plain);
+    rs_buf_free(&keys);
+    rs_buf_free(&ignored);
+    free(plain);
+    free(sealed);
+}
+
+bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf *err)
+{
+    char  *home;
+    size_t i;
+    bool   ok = true;
+
+    rs_pgp_forget_secret_key();
+    if (!rs_program_path(RS_PROG_GPG))
+    {
+        rs_buf_addstr(err, "decrypting needs gpg, and it is not installed (or not owned by root)");
+        return false;
+    }
+    home = memory_home(err);
+    if (!home)
+    {
+        return false;
+    }
+    for (i = 0; ok && i < n; i++)
+    {
+        ok = import_secret(home, keyfiles[i], err);
+    }
+    if (!ok)
+    {
+        end_home(home);
+        return false;
+    }
+    first_use(home);
+    secret_home = home;
+    guard_home(home);
+    return true;
+}
+
+const char *rs_pgp_key_place(void)
+{
+    return secret_home ? "the key files --decrypt-with gives" : "this user's GnuPG home";
+}
+
+void rs_pgp_forget_secret_key(void)
+{
+    if (secret_home)
+    {
+        end_home(secret_home);
+        secret_home = NULL;
+        unguard_home();
+    }
 }

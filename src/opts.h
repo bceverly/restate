@@ -64,7 +64,8 @@ enum {
     OPT_WHOLE_PACKS,
     OPT_PROGRESS_FILE,
     OPT_TMPDIR,
-    OPT_PASSPHRASE_FD
+    OPT_PASSPHRASE_FD,
+    OPT_DECRYPT_WITH
 };
 
 enum rs_command {
@@ -92,6 +93,8 @@ struct rs_options {
     const char    **recipients;   /* --encrypt-to: public key files */
     size_t          nrecipients;
     const char     *sign_with;    /* --sign-with: a secret key file */
+    const char    **decrypt_with; /* --decrypt-with: secret key files */
+    size_t          ndecrypt_with;
     const char    **trusted;      /* --trusted-key: public key files */
     size_t          ntrusted;
     bool            allow_unverified;
@@ -141,6 +144,7 @@ struct rs_options {
     const char     *tmpdir;         /* --tmpdir DIR */
     int             passphrase_fd;  /* --passphrase-fd N, where passphrase_given */
     bool            passphrase_given;
+    const char     *passphrase_file; /* a job's passphrase_file; no option sets it */
     bool            one_fs;
     bool            no_hash;
     bool            quiet;

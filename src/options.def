@@ -45,6 +45,10 @@ RS_OPT(OPT_ENCRYPT_TO, "encrypt-to", required_argument, "KEYFILE",
 RS_OPT(OPT_SIGN_WITH, "sign-with", required_argument, "KEYFILE",
        "capture, sign, export: sign the image or snapshot with the OpenPGP secret key in "
        "KEYFILE (gpg --export-secret-keys)")
+RS_OPT(OPT_DECRYPT_WITH, "decrypt-with", required_argument, "KEYFILE",
+       "decrypt with the OpenPGP secret key in KEYFILE (gpg --export-secret-keys), imported "
+       "into a GnuPG home made for the run and removed after, rather than with this user's "
+       "own; repeatable, for snapshots encrypted to different keys (see ENCRYPTION)")
 RS_OPT(OPT_TRUSTED_KEY, "trusted-key", required_argument, "KEYFILE",
        "restore, verify, diff, status, list, export: accept an image or snapshot only if it is "
        "signed by the OpenPGP public key in KEYFILE (gpg --export); autoinstall: have the "
@@ -190,7 +194,8 @@ RS_OPT(OPT_TMPDIR, "tmpdir",          required_argument, "DIR",
        "capture, export: stage the image being written in DIR rather than beside it, so "
        "an image written to a network share is not staged there (see STORAGE)")
 RS_OPT(OPT_PASSPHRASE_FD, "passphrase-fd", required_argument, "N",
-       "read the passphrase of the secret key --sign-with gives, or that decrypts, from file "
+       "read the passphrase of the secret key --sign-with or --decrypt-with gives, or that "
+       "decrypts, from file "
        "descriptor N rather than asking for it (see ENCRYPTION)")
 RS_OPT('q', "quiet",            no_argument,       NULL,
        "no warnings and no summary; errors are still reported")

@@ -658,8 +658,8 @@ static bool zin_close(struct zin *z, bool abandon, struct rs_buf *err)
     }
     if (!ok && z->sealed && !abandon)
     {
-        rs_buf_addstr(err, "; it could not be decrypted: the secret key for it is not in "
-                      "this user's GnuPG home, or its passphrase was not given");
+        rs_buf_addf(err, "; it could not be decrypted: the secret key for it is not in %s, or "
+                    "its passphrase was not given", rs_pgp_key_place());
     }
     memset(z, 0, sizeof(*z));
     z->fd = -1;
@@ -2479,9 +2479,9 @@ bool rs_repo_load_index(struct rs_repo *r, const char *name, struct rs_index *ix
         /* Say why decrypting failed, where that is why. */
         if (rs_pgp_detect((const unsigned char *)gz.data, gz.len))
         {
-            rs_buf_addstr(err, "; it is encrypted, and could not be decrypted: the secret key "
-                          "for it is not in this user's GnuPG home, or its passphrase was not "
-                          "given");
+            rs_buf_addf(err, "; it is encrypted, and could not be decrypted: the secret key "
+                        "for it is not in %s, or its passphrase was not given",
+                        rs_pgp_key_place());
         }
         ok = false;
     }
@@ -7362,9 +7362,9 @@ bool rs_repo_check(struct rs_repo *r, const struct rs_repo_check_opts *opts,
             if (sealed && i == 0)
             {
                 rs_buf_addf(err, "%s: its packs' indexes could not be decrypted, so it cannot be "
-                            "checked: the secret key is not in this user's GnuPG home, or its "
-                            "passphrase was not given (check --metadata-only needs no key)",
-                            r->dir);
+                            "checked: the secret key is not in %s, or its passphrase was not "
+                            "given (check --metadata-only needs no key)",
+                            r->dir, rs_pgp_key_place());
                 rs_buf_free(&why);
                 rs_buf_free(&text);
                 free(path);
