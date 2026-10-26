@@ -68,8 +68,20 @@ bool rs_test_have_gpg(void)
 char *rs_test_tmpdir(void)
 {
     const char *base = getenv("TMPDIR");
-    char       *path = rs_xasprintf("%s/restate-test.XXXXXX",
-                                    base && *base ? base : "/tmp");
+    size_t      n;
+    char       *path;
+
+    /* macOS's $TMPDIR ends in a slash, and a path with "//" in it is not one a job takes. */
+    if (base == NULL || *base == '\0')
+    {
+        base = "/tmp";
+    }
+    n = strlen(base);
+    while (n > 1 && base[n - 1] == '/')
+    {
+        n--;
+    }
+    path = rs_xasprintf("%.*s/restate-test.XXXXXX", (int)n, base);
 
     if (!mkdtemp(path))
     {

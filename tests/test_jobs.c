@@ -523,7 +523,7 @@ static void loading(void)
         memset(&given, 0, sizeof(given));
         CHECK_INT(load(jpath, &given, &job), RESTATE_EXIT_OK);
         CHECK_INT(job.opts.ndecrypt_with, 1);
-        CHECK_STR(job.opts.decrypt_with[0], sec);
+        CHECK_STR(job.opts.ndecrypt_with == 1 ? job.opts.decrypt_with[0] : "", sec);
         CHECK_STR(job.opts.passphrase_file, pw);
         rs_job_free(&job);
         given.passphrase_given = true;
