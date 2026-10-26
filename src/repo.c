@@ -32,6 +32,7 @@
 #define RS_NFS4_ACLS 1
 #endif
 
+#include "fsflags.h"
 #include "glob.h"
 #include "gzip.h"
 #include "image.h"
@@ -316,20 +317,28 @@ static void to_hex(const unsigned char d[32], char hex[RS_SHA256_HEX_SIZE])
  * beside it and renamed over it. */
 static bool replace_file(const char *path, const void *data, size_t len, struct rs_buf *err)
 {
-    const char *slash = strrchr(path, '/');
-    char       *tmp = slash ? rs_xasprintf("%.*s/.%s.%ld.tmp", (int)(slash - path), path, slash + 1,
-                                           (long)getpid())
-                            : rs_xasprintf(".%s.%ld.tmp", path, (long)getpid());
-    bool        ok;
+    const char              *slash = strrchr(path, '/');
+    char                    *tmp = slash ? rs_xasprintf("%.*s/.%s.%ld.tmp", (int)(slash - path),
+                                                        path, slash + 1, (long)getpid())
+                                         : rs_xasprintf(".%s.%ld.tmp", path, (long)getpid());
+    char                    *dir = slash ? rs_xstrndup(path, (size_t)(slash - path))
+                                         : rs_xstrdup(".");
+    bool                     ok;
+    struct rs_fsflags_thawed thawed;
 
+    /* Where protect made it and its directory immutable, root replaces it
+     * all the same: a snapshot's list of packs, a pack's .sum. */
+    (void)rs_fsflags_thaw(dir, &thawed);
     (void)unlink(tmp);
     ok = write_new(tmp, data, len, err);
-    if (ok && rename(tmp, path) != 0)
+    if (ok && rs_fsflags_rename(tmp, path) != 0)
     {
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
         (void)unlink(tmp);
         ok = false;
     }
+    rs_fsflags_refreeze(&thawed);
+    free(dir);
     free(tmp);
     return ok;
 }
@@ -1094,7 +1103,7 @@ static bool parse_marker(const char *text, struct rs_repo *r, bool *newer)
 
 #ifdef RS_NFS4_ACLS
 /* A directory a group adds to, where its filesystem has NFSv4 ACLs (see
- * PROTECT_SHARED). Its owner removes anything from it, as from a sticky one,
+ * protect_as). Its owner removes anything from it, as from a sticky one,
  * and its group nothing; what one of them makes -- a file, or a directory --
  * its maker may rename and remove, until protect makes it root's and its
  * chmod drops what it was given. */
@@ -1179,6 +1188,15 @@ static bool acl_made_ready(int fd)
 }
 #endif
 
+/* Whether `fd` is append-only: on Linux, a directory made ready. */
+static bool append_only(int fd)
+{
+    unsigned flags;
+
+    return rs_fsflags_supported() && rs_fsflags_get(fd, &flags) == 0 &&
+           (flags & RS_FSFLAGS_APPEND) != 0;
+}
+
 bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
 {
     static const char *const subdirs[] = { "packs", "snapshots" };
@@ -1225,10 +1243,10 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
             (void)closedir(d);
         }
         /* Its owner's alone, as a new one is made -- unless it is sticky,
-         * or has an ACL: made ready by root for a group to add to
-         * (rs_repo_protect). */
+         * append-only or has an ACL: made ready by root for a group to add
+         * to (rs_repo_protect). */
         if (!has && fd >= 0 && fstat(fd, &st) == 0 && !(st.st_mode & S_ISVTX) &&
-            !acl_made_ready(fd))
+            !append_only(fd) && !acl_made_ready(fd))
         {
             (void)fchmod(fd, 0700);
         }
@@ -1715,12 +1733,14 @@ static bool upgrade(struct rs_repo *r, struct rs_buf *err)
 
     random_id(r->id);
     text = marker_text(r->id, false);
-    (void)unlink(tmp);
+    (void)rs_fsflags_unlink(tmp);
     ok = write_new(tmp, text, strlen(text), err);
-    if (ok && rename(tmp, final) != 0)
+    /* Its directory append-only where protect made it so: root's prune
+     * replaces the marker all the same; a machine's capture cannot. */
+    if (ok && rs_fsflags_rename(tmp, final) != 0)
     {
         rs_buf_addf(err, "%s: %s", final, strerror(errno));
-        (void)unlink(tmp);
+        (void)rs_fsflags_unlink(tmp);
         ok = false;
     }
     if (ok)
@@ -2537,7 +2557,16 @@ bool rs_repo_add_signature(struct rs_repo *r, const char *name, const void *sig,
         free(path);
         return false;
     }
-    ok = write_new(path, sig, len, err);
+    {
+        /* Into a snapshot protect made immutable, as root. */
+        char                    *dir = rs_xasprintf("%s/snapshots/%s", r->dir, name);
+        struct rs_fsflags_thawed thawed;
+
+        (void)rs_fsflags_thaw(dir, &thawed);
+        ok = write_new(path, sig, len, err);
+        rs_fsflags_refreeze(&thawed);
+        free(dir);
+    }
     free(path);
     return ok;
 }
@@ -3336,7 +3365,11 @@ static void chunk_key(struct rs_repo *r)
         cache_put(r, "keys", "chunks", hex, 64);
         if (!there)
         {
-            char *tmp = rs_xasprintf("%s/.%s.%ld.tmp", r->dir, RS_REPO_CHUNK_KEY, (long)getpid());
+            /* Written in packs/ and linked from there: a machine adds to
+             * the repository's own directory, and where protect made it
+             * append-only, removes nothing from it, its own included. */
+            char *tmp = rs_xasprintf("%s/packs/.%s.%ld.tmp", r->dir, RS_REPO_CHUNK_KEY,
+                                     (long)getpid());
 
             rs_buf_reset(&err);
             if (!write_out(tmp, hex, 64, false, r->recips, seal_n(r), &err) ||
@@ -3754,10 +3787,10 @@ static bool remove_snapshot_dir(const char *dir)
     {
         char *path = rs_xasprintf("%s/%s", dir, files[i]);
 
-        (void)unlink(path);
+        (void)rs_fsflags_unlink(path);
         free(path);
     }
-    return rmdir(dir) == 0;
+    return rs_fsflags_rmdir(dir) == 0;
 }
 
 static void writer_free(struct rs_repo_writer *w)
@@ -5073,10 +5106,10 @@ static uint64_t remove_pack(const struct rs_repo *r, const char *name)
     char    *seek = rs_xasprintf("%s/packs/%s.seek", r->dir, name);
     uint64_t freed = disk_size(idx) + disk_size(content) + disk_size(sum) + disk_size(seek);
 
-    (void)unlink(idx);
-    (void)unlink(content);
-    (void)unlink(sum);
-    (void)unlink(seek);
+    (void)rs_fsflags_unlink(idx);
+    (void)rs_fsflags_unlink(content);
+    (void)rs_fsflags_unlink(sum);
+    (void)rs_fsflags_unlink(seek);
     free(idx);
     free(content);
     free(sum);
@@ -5226,7 +5259,7 @@ static void clear_leftovers(const struct rs_repo *r)
 
             if (lstat(idx, &st) != 0)
             {
-                (void)unlink(path);
+                (void)rs_fsflags_unlink(path);
             }
             free(idx);
         } else if ((len > 4 && strcmp(de->d_name + len - 4, ".sum") == 0) ||
@@ -5239,7 +5272,7 @@ static void clear_leftovers(const struct rs_repo *r)
             /* A .sum or .seek is a pack's only while its .idx is there. */
             if (lstat(idx, &st) != 0)
             {
-                (void)unlink(path);
+                (void)rs_fsflags_unlink(path);
             }
             free(idx);
         }
@@ -5367,7 +5400,7 @@ static void refresh_pack_lists(struct rs_repo *r, char *const *names, size_t n)
         }
         if (!ok)
         {
-            (void)unlink(path);
+            (void)rs_fsflags_unlink(path);
         }
         rs_index_free(&ix);
         rs_buf_free(&err);
@@ -5686,30 +5719,97 @@ static void protect_failed(struct rs_repo_protected *out, const char *dir, const
 }
 
 /*
- * The mode of a directory the machines add to: sticky, so that each removes
- * only what is its own. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD),
- * it is 0770 and an ACL says the same instead: FreeBSD's NFS server makes a
- * file in a sticky directory, then answers EACCES, so no capture could write.
+ * What protect makes of each thing it protects.
+ *
+ * A directory the machines add to is, on Linux, 0770: the repository's own
+ * append-only too, so that nothing in it is removed or renamed, and what is
+ * finished in packs/ and snapshots/ immutable (fsflags.h), since a Linux NFS
+ * client cannot use a sticky directory a share squashes it into. Where the
+ * filesystem has NFSv4 ACLs (ZFS on FreeBSD), it is 0770 and an ACL says that
+ * each removes only what is its own, for the same clients. Anywhere else, it
+ * is sticky.
  */
-#define PROTECT_SHARED ((mode_t)01770)
+enum protect_as {
+    AS_FINISHED, /* a finished file: 0440 */
+    AS_SNAPSHOT, /* a finished snapshot's directory: 0550 */
+    AS_SHARED,   /* packs/ and snapshots/ */
+    AS_TOP       /* the repository's own directory */
+};
+
+/* The flags `as` has on Linux. */
+static unsigned protect_flags(enum protect_as as)
+{
+    if (!rs_fsflags_supported())
+    {
+        return 0;
+    }
+    return as == AS_TOP ? RS_FSFLAGS_APPEND : as == AS_SHARED ? 0 : RS_FSFLAGS_IMMUTABLE;
+}
+
+/* Why `fd`'s flags could not be set to protect's, as protect_failed says it. */
+static const char *flags_failed(int err)
+{
+    if (rs_fsflags_none(err))
+    {
+        return "its filesystem has no immutable or append-only flags (chattr +i and +a), "
+               "which protect sets on Linux";
+    }
+    return err == EPERM ? "only root can make it immutable or append-only (chattr +i and +a)"
+                        : strerror(err);
+}
+
+/* Gives `fd`, which `st` describes, `owner`, `group` and `mode`, then the
+ * flags `want`: NULL, or why it could not. Its flags, `have`, are cleared
+ * first, since nothing immutable or append-only changes owner or mode, and
+ * put back if it could not be given away. */
+static const char *protect_set(int fd, const struct stat *st, uid_t owner, gid_t group,
+                               mode_t mode, unsigned have, unsigned want)
+{
+    bool owner_ok = st->st_uid == owner && st->st_gid == group;
+    bool mode_ok = (st->st_mode & 07777) == mode;
+
+    if ((!owner_ok || !mode_ok) && have != 0 && rs_fsflags_set(fd, 0) != 0)
+    {
+        return flags_failed(errno);
+    }
+    if ((!owner_ok && fchown(fd, owner, group) != 0) || (!mode_ok && fchmod(fd, mode) != 0))
+    {
+        const char *why = strerror(errno);
+
+        if (have != 0)
+        {
+            (void)rs_fsflags_set(fd, have);
+        }
+        return why;
+    }
+    if (rs_fsflags_supported() && rs_fsflags_set(fd, want) != 0)
+    {
+        return flags_failed(errno);
+    }
+    return NULL;
+}
 
 /*
  * Makes `name` in the directory `dfd` (`dir`, for messages) `owner`'s and
- * `group`'s, with `mode`, where it is not so already: 1 if it was changed, 0
- * if it was so, -1 if it could not be, saying why. Only a regular file or a
- * directory, never through a symlink, and a file only with one name: the
- * machines that write here could plant a link to anything for root to give
- * away. One that is not there (a prune took it meanwhile) is left out, as 2.
- * PROTECT_SHARED is a directory the machines add to.
+ * `group`'s, with the mode and flags `as` has, where it is not so already: 1
+ * if it was changed, 0 if it was so, -1 if it could not be, saying why. Only a
+ * regular file or a directory, never through a symlink, and a file only with
+ * one name: the machines that write here could plant a link to anything for
+ * root to give away. One that is not there (a prune took it meanwhile) is
+ * left out, as 2.
  */
 static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, uid_t owner,
-                       gid_t group, mode_t mode, struct rs_repo_protected *out)
+                       gid_t group, enum protect_as as, struct rs_repo_protected *out)
 {
     struct stat before;
     struct stat st;
     int         fd;
     int         changed;
     bool        acl;
+    const char *why;
+    mode_t      mode = as == AS_FINISHED ? 0440 : as == AS_SNAPSHOT ? 0550 : 01770;
+    unsigned    want = protect_flags(as);
+    unsigned    have = 0;
 
     if (fstatat(dfd, name, &before, AT_SYMLINK_NOFOLLOW) != 0)
     {
@@ -5737,19 +5837,28 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
         }
         return -1;
     }
-    acl = mode == PROTECT_SHARED && nfs4_acls(fd);
-    mode = acl ? 0770 : mode;
-    changed = st.st_uid != owner || st.st_gid != group || (st.st_mode & 07777) != mode;
+    acl = mode == 01770 && !rs_fsflags_supported() && nfs4_acls(fd);
+    mode = mode == 01770 && (acl || rs_fsflags_supported()) ? 0770 : mode;
+    if (rs_fsflags_supported() && rs_fsflags_get(fd, &have) != 0)
+    {
+        if (want != 0 || !rs_fsflags_none(errno))
+        {
+            protect_failed(out, dir, name, flags_failed(errno));
+            (void)close(fd);
+            return -1;
+        }
+        have = 0;
+    }
+    changed = st.st_uid != owner || st.st_gid != group || (st.st_mode & 07777) != mode ||
+              have != want;
     /* One already protected is left as it is, whatever names it has: a
      * machine may link to it, and not give it away. */
-    if (changed && !is_dir && st.st_nlink != 1)
+    why = !changed                            ? NULL
+          : !is_dir && st.st_nlink != 1 ? "it has other names (hard links), and is left as it is"
+                                        : protect_set(fd, &st, owner, group, mode, have, want);
+    if (why)
     {
-        protect_failed(out, dir, name, "it has other names (hard links), and is left as it is");
-        changed = -1;
-    } else if (((st.st_uid != owner || st.st_gid != group) && fchown(fd, owner, group) != 0) ||
-               ((st.st_mode & 07777) != mode && fchmod(fd, mode) != 0))
-    {
-        protect_failed(out, dir, name, strerror(errno));
+        protect_failed(out, dir, name, why);
         changed = -1;
     }
 #ifdef RS_NFS4_ACLS
@@ -5773,7 +5882,7 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
 static void protect_file(int dfd, const char *dir, const char *name, uid_t owner, gid_t group,
                          struct rs_repo_protected *out, bool *any)
 {
-    int did = protect_one(dfd, dir, name, false, owner, group, 0440, out);
+    int did = protect_one(dfd, dir, name, false, owner, group, AS_FINISHED, out);
 
     if (did == 1)
     {
@@ -5907,7 +6016,7 @@ static void protect_snapshots(int sfd, const char *dir, uid_t owner, gid_t group
         {
             (void)closedir(files);
         }
-        did = protect_one(sfd, dir, de->d_name, true, owner, group, 0550, out);
+        did = protect_one(sfd, dir, de->d_name, true, owner, group, AS_SNAPSHOT, out);
         if (did == 1 || (did == 0 && any))
         {
             out->snapshots++;
@@ -5942,6 +6051,21 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
         rs_buf_addf(err, "%s: %s", dir, strerror(errno));
         return false;
     }
+    /* On Linux, where it cannot be made append-only, nothing is changed: its
+     * directories without their sticky bit and nothing made immutable would
+     * leave what is finished for any machine to remove. */
+    if (rs_fsflags_supported())
+    {
+        unsigned flags;
+
+        if (rs_fsflags_get(top, &flags) != 0 ||
+            rs_fsflags_set(top, flags | RS_FSFLAGS_APPEND) != 0)
+        {
+            rs_buf_addf(err, "%s: %s; nothing was changed", dir, flags_failed(errno));
+            (void)close(top);
+            return false;
+        }
+    }
     /* An encrypted repository's chunk key, made once; never the marker, the
      * lock or readers, which the machines that write here open as their own. */
     protect_file(top, dir, RS_REPO_CHUNK_KEY, owner, group, out, &any);
@@ -5964,13 +6088,13 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
         }
         /* Anyone in the group adds to it, and removes only what is their
          * own -- what they have not finished. */
-        did = protect_one(top, dir, subs[i], true, owner, group, PROTECT_SHARED, out);
+        did = protect_one(top, dir, subs[i], true, owner, group, AS_SHARED, out);
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;
         free(path);
     }
     {
-        int did = protect_one(top, dir, ".", true, owner, group, PROTECT_SHARED, out);
+        int did = protect_one(top, dir, ".", true, owner, group, AS_TOP, out);
 
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;

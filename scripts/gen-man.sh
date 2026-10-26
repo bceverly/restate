@@ -1676,13 +1676,28 @@ files 0440, each snapshot's directory 0550. The repository and its
 .I packs
 and
 .I snapshots
-become root's and the group's, 1770: sticky, so the machines in the group
-make files there, and remove only their own \- what they have not
-finished. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD) they are
-0770 instead, with an ACL that says the same: FreeBSD's NFS server refuses
-a file made in a sticky directory, after making it, so no capture could
-write. A machine that has been taken over can then add snapshots, and
-read them, but not change, rename or remove one that is there. The marker,
+become root's and the group's. On Linux they are 0770, the repository
+append-only and every finished file and snapshot immutable
+.RB ( "chattr +a" " and " +i ):
+the machines in the group make files there, and rename and remove what is
+not finished in
+.I packs
+and
+.IR snapshots ,
+but nothing at the top, and nothing finished \- root included, until root
+clears the flag, which prune and repack do for what they remove. Only root
+sets them, so protect run as anyone else there, or on a filesystem without
+them, changes nothing and says so. Where the filesystem has NFSv4 ACLs (ZFS
+on FreeBSD) they are 0770, with an ACL that says each machine removes only
+its own; anywhere else they are 1770, sticky, which says the same. Not
+sticky where it can be helped: a Linux NFS client with
+.B fs.protected_regular=2
+(Ubuntu's and systemd's default) refuses a file it has just made in a
+sticky directory that is neither its user's nor the directory owner's \- as
+every file is, in a share that maps every machine to one user \- after
+making it, so no capture could write. A machine that has been taken over
+can then add snapshots, and read them, but not change, rename or remove one
+that is there. The marker,
 .I lock
 and
 .IR readers ,
@@ -1696,11 +1711,16 @@ machine could plant to have root give away a file elsewhere. The group is
 the repository directory's, or
 .BR \-\-group ;
 root's own is refused. Prune, repack and check, run as root on the storage,
-go on as before, and what they write is the group's to read. A snapshot
+go on as before, and what they write is the group's to read.
+.B "features \-\-json"
+says
+.B """protect_flags"": true"
+where protect sets Linux's flags. A snapshot
 already protected cannot be signed afterwards: sign it as it is captured.
 .B capture \-\-create
 works into an empty directory made ready for it, root's and the group's,
-1770 \- or 0770 with that ACL \- and leaves it so. Over NFS, map every machine to one user and the
+0770 and append-only on Linux, 0770 with that ACL, or 1770 \- and leaves it
+so. Over NFS, map every machine to one user and the
 group by name \- on FreeBSD,
 .B \-mapall=restate:restate
 in

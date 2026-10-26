@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "fsflags.h"
 #include "image.h"
 #include "pgp.h"
 #include "progress.h"
@@ -2937,10 +2938,15 @@ static bool group_removes_nothing(const char *path)
 }
 #endif
 
-/* What protect makes a directory the machines add to, in `dir`: sticky, or
- * 0770 with an ACL where the filesystem has NFSv4 ACLs. */
+/* What protect makes a directory the machines add to, in `dir`: 0770 on
+ * Linux, where flags protect what is in it, sticky elsewhere, or 0770 with an
+ * ACL where the filesystem has NFSv4 ACLs. */
 static unsigned shared_mode(const char *dir)
 {
+    if (rs_fsflags_supported())
+    {
+        return 0770;
+    }
 #ifdef ACL_TESTS
     if (nfs4_acls_here(dir))
     {
@@ -2951,8 +2957,47 @@ static unsigned shared_mode(const char *dir)
     return 01770;
 }
 
-static void test_protected(const char *dir)
+/* The immutable and append-only flags of `name` in `dir`, as RS_FSFLAGS_*. */
+static unsigned flags_of(const char *dir, const char *name)
 {
+    char    *path = rs_xasprintf("%s/%s", dir, name);
+    int      fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    unsigned flags = 0;
+
+    if (fd >= 0)
+    {
+        (void)rs_fsflags_get(fd, &flags);
+        (void)close(fd);
+    }
+    free(path);
+    return flags;
+}
+
+/* What protect does where it cannot set the flags: nothing, and says so. */
+static void protect_refused(const char *dir, enum rs_fsflags_mode as, const char *says)
+{
+    char                    *repo = rs_xasprintf("%s/refused-%d", dir, (int)as);
+    struct rs_buf            err;
+    struct rs_repo_protected p;
+
+    rs_buf_init(&err);
+    CHECK(rs_repo_init(repo, false, &err));
+    rs_fsflags_pretend(as);
+    CHECK(!rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", says);
+    CHECK_CONTAINS(err.data ? err.data : "", "nothing was changed");
+    CHECK_INT(mode_of(repo, "packs"), 0700);
+    rs_fsflags_pretend(RS_FSFLAGS_PRETEND);
+    rs_buf_free(&err);
+    free(repo);
+}
+
+/* Protect, as this system has it (`as` RS_FSFLAGS_REAL), or with the flags
+ * Linux's protect sets, pretended: setting them is root's alone there. */
+static void test_protected(const char *top, enum rs_fsflags_mode as)
+{
+    char                    *dir = rs_xasprintf("%s/protect-%d", top, (int)as);
+    bool                     flags;
     char                    *repo = rs_xasprintf("%s/prot", dir);
     char                    *tree = rs_xasprintf("%s/tree7", dir);
     char                    *packs = rs_xasprintf("%s/prot/packs", dir);
@@ -2974,6 +3019,9 @@ static void test_protected(const char *dir)
     int                      i;
 
     rs_buf_init(&err);
+    CHECK(mkdir(dir, 0755) == 0);
+    rs_fsflags_pretend(as);
+    flags = rs_fsflags_supported();
     CHECK(mkdir(tree, 0755) == 0);
     for (i = 0; i < 6; i++)
     {
@@ -3019,6 +3067,18 @@ static void test_protected(const char *dir)
     path = rs_xasprintf("%s/%s", snaps, first);
     CHECK_INT(mode_of(path, "index.json.gz"), 0440);
     CHECK_INT(mode_of(path, "packs"), 0440);
+    if (flags)
+    {
+        /* Nothing at the top removed or renamed, packs/ moved aside
+         * included; nothing finished changed at all. */
+        CHECK_INT(flags_of(repo, "."), RS_FSFLAGS_APPEND);
+        CHECK_INT(flags_of(repo, "packs"), 0);
+        CHECK_INT(flags_of(repo, "snapshots"), 0);
+        CHECK_INT(flags_of(snaps, first), RS_FSFLAGS_IMMUTABLE);
+        CHECK_INT(flags_of(path, "index.json.gz"), RS_FSFLAGS_IMMUTABLE);
+        CHECK_INT(flags_of(repo, "lock"), 0);
+        CHECK_INT(flags_of(repo, RS_REPO_MARKER), 0);
+    }
     free(path);
     {
         DIR                 *d = opendir(packs);
@@ -3033,7 +3093,10 @@ static void test_protected(const char *dir)
             if (len > 4 && strcmp(de->d_name + len - 4, ".idx") == 0 && de->d_name[0] != '.')
             {
                 idx++;
-                ro += mode_of(packs, de->d_name) == 0440 ? 1 : 0;
+                ro += mode_of(packs, de->d_name) == 0440 &&
+                              (!flags || flags_of(packs, de->d_name) == RS_FSFLAGS_IMMUTABLE)
+                          ? 1
+                          : 0;
             }
         }
         if (d)
@@ -3148,6 +3211,11 @@ static void test_protected(const char *dir)
         CHECK(p.nfailed > 0);
         CHECK(failed_with(&p, strerror(EPERM)));
         rs_repo_protected_free(&p);
+        /* And what it could not give away keeps its flags. */
+        CHECK(!flags || flags_of(repo, ".") == RS_FSFLAGS_APPEND);
+        path = rs_xasprintf("%s/%s", snaps, first);
+        CHECK(!flags || flags_of(path, "index.json.gz") == RS_FSFLAGS_IMMUTABLE);
+        free(path);
     }
     CHECK(!rs_repo_protect(tree, geteuid(), getegid(), &p, &err));
     CHECK_CONTAINS(err.data ? err.data : "", "not a restate repository");
@@ -3181,9 +3249,85 @@ static void test_protected(const char *dir)
     CHECK(rs_repo_init(path, false, &err));
     CHECK_INT(mode_of(path, "."), 0700);
     free(path);
+    if (flags)
+    {
+        int fd;
+
+        path = rs_xasprintf("%s/ready-append", dir);
+        CHECK(mkdir(path, 0770) == 0 && chmod(path, 0770) == 0);
+        fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_fsflags_set(fd, RS_FSFLAGS_APPEND) == 0);
+        CHECK(rs_repo_init(path, false, &err));
+        CHECK_INT(mode_of(path, "."), 0770);
+        CHECK(fd >= 0 && rs_fsflags_set(fd, 0) == 0);
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        free(path);
+    }
+
+    TEST_CASE("repo: protected, root signs, prunes, repacks and checks it all the same");
+    {
+        struct rs_repo_keep   keep;
+        struct rs_repo_pruned pr;
+
+        /* What only root may write to, as anyone else: its flags, which
+         * root is held to too, are what this is about. */
+        if (geteuid() != 0)
+        {
+            cmd = rs_xasprintf("chmod -R u+w '%s'", repo);
+            CHECK(system(cmd) == 0);
+            free(cmd);
+        }
+        r = rs_repo_open(repo, RS_REPO_PRUNE, &busy, &err);
+        CHECK(r != NULL);
+        CHECK(r && third && rs_repo_add_signature(r, third, "sig\n", 4, &err));
+        CHECK_STR(err.data ? err.data : "", "");
+        memset(&keep, 0, sizeof(keep));
+        keep.last = 1;
+        CHECK(r && rs_repo_prune(r, &keep, false, &pr, &err));
+        CHECK_STR(err.data ? err.data : "", "");
+        CHECK_INT(pr.ndropped, 2);
+        CHECK(pr.packs_removed + pr.packs_rewritten > 0);
+        rs_repo_pruned_free(&pr);
+        names = r ? rs_repo_snapshots(r, &n) : NULL;
+        CHECK_INT(names ? n : 0, 1);
+        if (names)
+        {
+            rs_repo_free_names(names, n);
+        }
+        CHECK(r && rs_repo_repack(r, false, &pr, &err));
+        CHECK_STR(err.data ? err.data : "", "");
+        rs_repo_pruned_free(&pr);
+        if (r)
+        {
+            rs_repo_close(r);
+        }
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        rs_index_init(&ix);
+        CHECK(r && rs_repo_load_index(r, third ? third : "", &ix, &err));
+        rs_index_free(&ix);
+        if (r)
+        {
+            rs_repo_close(r);
+        }
+        /* The snapshot left, signed, is immutable again. */
+        CHECK(!flags || flags_of(snaps, third ? third : "") == RS_FSFLAGS_IMMUTABLE);
+        CHECK(!flags || flags_of(repo, ".") == RS_FSFLAGS_APPEND);
+    }
+    if (as != RS_FSFLAGS_REAL)
+    {
+        TEST_CASE("repo: protect changes nothing where it cannot set the flags");
+        protect_refused(dir, RS_FSFLAGS_PRETEND_REFUSED, "only root can");
+        protect_refused(dir, RS_FSFLAGS_PRETEND_NONE, "has no immutable or append-only flags");
+    }
 
     /* Writable again, to be cleared away. */
-    cmd = rs_xasprintf("chmod -R u+w '%s'", repo);
+    rs_fsflags_pretend(RS_FSFLAGS_REAL);
+    cmd = flags && as == RS_FSFLAGS_REAL
+              ? rs_xasprintf("chattr -R -i -a '%s' && chmod -R u+w '%s'", repo, repo)
+              : rs_xasprintf("chmod -R u+w '%s'", repo);
     CHECK(system(cmd) == 0);
     free(cmd);
     free(first);
@@ -3193,6 +3337,7 @@ static void test_protected(const char *dir)
     free(snaps);
     free(repo);
     free(tree);
+    free(dir);
     rs_buf_free(&err);
 }
 
@@ -3207,7 +3352,12 @@ void test_repo(void)
     test_seek(dir);
     test_unadoptable();
     test_adopted(dir);
-    test_protected(dir);
+    /* Where they are Linux's flags, only root can set them. */
+    if (!rs_fsflags_supported() || geteuid() == 0)
+    {
+        test_protected(dir, RS_FSFLAGS_REAL);
+    }
+    test_protected(dir, RS_FSFLAGS_PRETEND);
     test_checked(dir);
     test_formats();
     test_storage(dir);

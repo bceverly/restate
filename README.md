@@ -301,11 +301,11 @@ Commands:
                           them needs is dropped on the way
   protect REPO            run as root on the storage a repository is on, after
                           each capture: make every finished pack and snapshot
-                          root's and read-only, and the repository's
-                          directories sticky (or, with NFSv4 ACLs, given an ACL
-                          that says the same), so the machines that capture
-                          into it can add snapshots but change or remove none
-                          that are there
+                          root's and read-only -- on Linux, immutable too, and
+                          the repository append-only; elsewhere its directories
+                          sticky, or with NFSv4 ACLs given an ACL that says the
+                          same -- so the machines that capture into it can add
+                          snapshots but change or remove none that are there
   check REPO              check a repository: read every pack through, each
                           chunk against the digest its index gives, and check
                           that every snapshot's index and kit can be read and
@@ -1356,13 +1356,23 @@ restate du /srv/restate/web01
   after each capture, makes every finished pack and snapshot root's and the
   repository's group's, and read-only (files 0440, each snapshot's directory
   0550), and the repository, `packs/` and `snapshots/` root's and the
-  group's, 1770: sticky, so the machines in the group make files there and
-  remove only their own unfinished ones. Where the filesystem has NFSv4 ACLs
-  (ZFS on FreeBSD) they are 0770 instead, with an ACL that says the same:
-  FreeBSD's NFS server refuses a file made in a sticky directory, after making
-  it, so no capture could write. A machine that has been taken over
-  can then add snapshots and read them, but not change, rename or remove one
-  that is there. The marker, `lock` and `readers`, which a capture and a
+  group's. On Linux they are 0770, with the repository append-only and every
+  finished file and snapshot immutable (`chattr +a` and `+i`): the machines
+  in the group make files there, and rename and remove what is not finished
+  in `packs/` and `snapshots/`, but nothing at the top and nothing
+  finished -- root included, until root clears the flag, which prune and
+  repack do for what they remove. Only root sets them, so protect run as
+  anyone else there, or on a filesystem without them, changes nothing and
+  says so. Where the filesystem has NFSv4 ACLs (ZFS on FreeBSD) they are
+  0770, with an ACL that says each machine removes only its own; anywhere
+  else they are 1770, sticky, which says the same. Not sticky where it can be
+  helped: a Linux NFS client with `fs.protected_regular=2` (Ubuntu's and
+  systemd's default) refuses a file it has just made in a sticky directory
+  that is neither its user's nor the directory owner's -- as every file is,
+  in a share that maps every machine to one user -- after making it, so no
+  capture could write. A machine that has been taken over can then add
+  snapshots and read them, but not change, rename or remove one that is
+  there. The marker, `lock` and `readers`, which a capture and a
   restore open as their own, are left as they are, and so is anything being
   written. Only what is not so already is changed, so it is quick after every
   capture; it takes no lock, follows no symlink, and refuses a file with a
@@ -1371,12 +1381,15 @@ restate du /srv/restate/web01
   is refused. Prune, repack and check, run as root on the NAS, go on as
   before. A snapshot cannot be signed once it is protected, so sign it as it
   is captured. `capture --create` works into an empty directory made ready
-  for it -- root's and the group's, 1770, or 0770 with that ACL -- and leaves
-  it so.
+  for it -- root's and the group's, 0770 and append-only on Linux, 0770 with
+  that ACL, or 1770 -- and leaves it so. `features --json` says
+  `"protect_flags": true` where protect sets Linux's flags.
 
   ```bash
   # On the NAS, once: a directory for the machine to make its repository in.
-  # On ZFS (FreeBSD), 0770 and the ACL protect gives it; elsewhere, 1770.
+  # On ZFS (FreeBSD), 0770 and the ACL protect gives it; on Linux, 0770 and
+  # chattr +a /tank/restate/web01 in place of the setfacl lines; elsewhere,
+  # 1770.
   install -d -o root -g restate -m 0770 /tank/restate/web01
   setfacl -a 0 group@:D::deny /tank/restate/web01
   setfacl -a 0 owner@:d:f:allow /tank/restate/web01

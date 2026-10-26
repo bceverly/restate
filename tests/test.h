@@ -88,6 +88,7 @@ void test_blake2b(void);
 void test_sha1(void);
 void test_pkgdb(void);
 void test_xattr(void);
+void test_fsflags(void);
 void test_live(void);
 void test_sources(void);
 void test_repo(void);

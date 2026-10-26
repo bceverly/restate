@@ -319,7 +319,7 @@ bool rs_repo_repack(struct rs_repo *r, bool dry_run, struct rs_repo_pruned *out,
 struct rs_repo_protected {
     size_t files;        /* finished files made the owner's, 0440 */
     size_t snapshots;    /* snapshots with anything made so, each 0550 */
-    size_t dirs;         /* the repository, packs and snapshots made 1770 */
+    size_t dirs;         /* the repository, packs and snapshots made shared */
     size_t unchanged;    /* files and directories that were so already */
     char **failed;       /* "PATH: why", for each that could not be made so */
     size_t nfailed;
@@ -328,20 +328,23 @@ struct rs_repo_protected {
 /*
  * Makes what is finished in the repository at `dir` -- each pack whose .idx
  * is there, each snapshot under its own name, the chunk key -- `owner`'s and
- * `group`'s and read-only: files 0440, a snapshot's directory 0550. The
- * repository, packs/ and snapshots/ become `owner`'s and `group`'s, 1770 --
- * sticky -- so that the group adds to them, and removes only what is its own:
- * what it has not finished. The marker, the lock and readers, which a capture
- * or a restore opens as its own, are left as they are, and so is anything
- * being written. Run as root on the storage, with `owner` 0, it leaves the
- * machines a share maps into `group` able to add snapshots, and to read
- * them, and unable to change or remove any that are there.
+ * `group`'s and read-only: files 0440, a snapshot's directory 0550, and on
+ * Linux immutable. The repository, packs/ and snapshots/ become `owner`'s
+ * and `group`'s, so that the group adds to them, and removes only what is
+ * its own: what it has not finished. On Linux they are 0770, the repository
+ * append-only; with NFSv4 ACLs, 0770 and an ACL; otherwise 1770, sticky. The
+ * marker, the lock and readers, which a capture or a restore opens as its
+ * own, are left as they are, and so is anything being written. Run as root
+ * on the storage, with `owner` 0, it leaves the machines a share maps into
+ * `group` able to add snapshots, and to read them, and unable to change or
+ * remove any that are there.
  *
  * Only what is not so already is changed. Never through a symlink, and never
  * a file with a second name: what the machines could plant there, root
  * would otherwise give away. False, saying why, only if `dir` is not a
- * repository that can be opened; each thing that could not be protected is
- * in out->failed.
+ * repository that can be opened, or on Linux cannot be made append-only (not
+ * as root, or on a filesystem without the flag), with nothing changed; each
+ * thing that could not be protected is in out->failed.
  */
 bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_protected *out,
                      struct rs_buf *err);

@@ -23,6 +23,7 @@
 #include "buildsheet.h"
 #include "clones.h"
 #include "diff.h"
+#include "fsflags.h"
 #include "fstab.h"
 #include "hooks.h"
 #include "identity.h"
@@ -3049,6 +3050,9 @@ int rs_cmd_features(const struct rs_options *o)
     {
         rs_jval_set_string(rs_jarr_add(list), hooks[i]);
     }
+    /* Whether protect makes what is finished immutable and the repository
+     * append-only (chattr +i and +a) in place of a sticky bit: Linux's. */
+    rs_jobj_bool(&doc, "protect_flags", rs_fsflags_supported());
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)

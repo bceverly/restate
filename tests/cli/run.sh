@@ -1509,6 +1509,11 @@ check "a restore job takes decrypt_with and passphrase_file" \
   eval "printf '%s' \"\$OUT\" | grep '\"restore\": \[' | grep '\"decrypt_with\", \"passphrase_file\"' > /dev/null"
 contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
+if [ "$(uname -s)" = Linux ]; then
+  contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
+else
+  contains "$OUT" '"protect_flags": false' "and that protect sets no flags here"
+fi
 
 expect 0 "estimate" -- "$BIN" estimate -N -r ptree
 contains "$OUT" "/srv/data" "says where the bytes are"
@@ -1630,13 +1635,24 @@ check "puts back what it should" test -f rkout/etc/one
 expect 2 "repack what is not a repository" -- "$BIN" repack ptree
 
 # protect: what is finished made read-only, the directories sticky -- or, where
-# the filesystem has NFSv4 ACLs, 0770 with an ACL that says the same. For this
-# user's group -- or nobody's, as root, whose own group protect refuses.
+# the filesystem has NFSv4 ACLs, 0770 with an ACL that says the same, or on
+# Linux 0770, with what is finished immutable and the repository append-only.
+# For this user's group -- or nobody's, as root, whose own group protect
+# refuses.
 pgroup="--group=$(id -gn)"
 if [ "$(id -u)" = 0 ]; then
   pgroup="--group=$(id -gn nobody)"
 fi
 cp -R prepo pprot
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 0 ]; then
+  # Only root sets Linux's flags; without them, nothing is changed.
+  expect 2 "protect, not as root, on Linux" -- \
+    "$BIN" protect "$pgroup" --result pr.json pprot
+  contains "$ERR" "only root can make it immutable or append-only" "says why"
+  contains "$ERR" "nothing was changed" "and that it changed nothing"
+  check "packs/ is as it was" test "$(file_mode pprot/packs)" = 700
+  contains "$(cat pr.json)" '"status": "failed"' "and its result says so"
+else
 expect 0 "protect" -- "$BIN" protect "$pgroup" --syslog --result pr.json pprot
 contains "$ERR" "restate: protected " "says what it did"
 contains "$(cat pr.json)" '"files_protected": ' "and its result too"
@@ -1644,7 +1660,12 @@ contains "$(cat pr.json)" '"not_protected": 0' "with nothing it could not"
 check "a pack is read-only" test "$(file_mode "$(find pprot/packs -name '*.idx' | head -n 1)")" = 440
 check "and so is a snapshot" \
   test "$(file_mode "$(find pprot/snapshots -mindepth 1 -maxdepth 1 | head -n 1)")" = 550
-if getfacl -q pprot/packs 2> /dev/null | grep -q '^ *group@:----D---------:-------:deny$'; then
+if [ "$(uname -s)" = Linux ]; then
+  check "packs/ is its group's to add to" test "$(file_mode pprot/packs)" = 770
+  check "the repository is append-only" sh -c 'lsattr -d pprot | cut -d" " -f1 | grep -q a'
+  pidx="$(find pprot/packs -name '*.idx' | head -n 1)"
+  check "and a pack immutable" sh -c "lsattr '$pidx' | cut -d' ' -f1 | grep -q i"
+elif getfacl -q pprot/packs 2> /dev/null | grep -q '^ *group@:----D---------:-------:deny$'; then
   check "packs/ is its group's to add to, and to remove nothing from" \
     test "$(file_mode pprot/packs)" = 770
 else
@@ -1667,6 +1688,10 @@ expect 2 "protect for a group that is not there" -- \
   "$BIN" protect --group restate-no-such-group pprot
 contains "$ERR" "no such group" "says so"
 expect 2 "protect what is not a repository" -- "$BIN" protect "$pgroup" ptree
+fi
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ]; then
+  chattr -R -i -a pprot
+fi
 chmod -R u+w pprot
 
 # As a share is used: a machine mapped to one user, in the repository's
@@ -1683,13 +1708,14 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && command -v runuser > /dev/
   echo one > "$shared/tree/etc/one"
   chmod -R a+rX "$shared/tree"
   chown root:restate-cli "$shared/repo"
-  chmod 1770 "$shared/repo"
+  chmod 0770 "$shared/repo"
+  chattr +a "$shared/repo"
   # Called through expect and check.
   # shellcheck disable=SC2317,SC2329
   machine() { runuser -u restate-cli -- "$@"; }
   expect 0 "a machine's capture --create --append-only into a directory made ready" -- \
     machine "$BIN" capture -N -r "$shared/tree" -q -o "$shared/repo" --create --append-only
-  check "which stays sticky" test "$(file_mode "$shared/repo")" = 1770
+  check "which stays its group's" test "$(file_mode "$shared/repo")" = 770
   expect 0 "protect it, as root" -- "$BIN" protect --result "$shared/p.json" "$shared/repo"
   contains "$(cat "$shared/p.json")" '"group": "restate-cli"' "for the repository's group"
   spack="$(find "$shared/repo/packs" -name '*.tar.gz' | head -n 1)"
@@ -1703,6 +1729,8 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && command -v runuser > /dev/
   check "nor change its mode" refused chmod 0644 "$spack"
   check "nor remove a snapshot" refused rm -rf "$ssnap"
   check "nor packs/" refused rm -rf "$shared/repo/packs"
+  check "nor move packs/ aside" refused mv "$shared/repo/packs" "$shared/repo/packs.x"
+  check "and root on the machine is held to it too" sh -c "! rm -f '$spack' 2> /dev/null"
   check "and the pack is there" test -s "$spack"
   check "and the snapshot" test -f "$ssnap/index.json.gz"
   echo two > "$shared/tree/etc/two"
@@ -1716,6 +1744,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && command -v runuser > /dev/
   expect 0 "and the machine still reads what root wrote" -- \
     machine "$BIN" check -q --read-all "$shared/repo"
   expect 0 "protect it again, as root" -- "$BIN" protect -q "$shared/repo"
+  chattr -R -i -a "$shared/repo"
   rm -rf "$shared"
   userdel restate-cli 2> /dev/null
   getent group restate-cli > /dev/null && groupdel restate-cli

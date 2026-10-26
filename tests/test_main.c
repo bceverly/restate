@@ -248,6 +248,7 @@ int main(void)
     test_sha1();
     test_pkgdb();
     test_xattr();
+    test_fsflags();
     test_live();
     test_sources();
     test_repo();
