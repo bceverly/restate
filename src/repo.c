@@ -5754,8 +5754,15 @@ static const char *flags_failed(int err)
         return "its filesystem has no immutable or append-only flags (chattr +i and +a), "
                "which protect sets on Linux";
     }
-    return err == EPERM ? "only root can make it immutable or append-only (chattr +i and +a)"
-                        : strerror(err);
+    if (err == EPERM)
+    {
+        return geteuid() == 0 ? "root here may not make it immutable or append-only (chattr +i "
+                                "and +a need CAP_LINUX_IMMUTABLE, which a container's root "
+                                "often lacks)"
+                              : "only root can make it immutable or append-only (chattr +i "
+                                "and +a)";
+    }
+    return strerror(err);
 }
 
 /* Gives `fd`, which `st` describes, `owner`, `group` and `mode`, then the

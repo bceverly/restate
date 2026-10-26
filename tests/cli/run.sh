@@ -1137,7 +1137,13 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "capture into it again, with no secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
     "$BIN" capture -r rtree --os=linux --encrypt-to enc.pub -o erepo --result ecap.json
-  contains "$(cat ecap.json)" "\"cache\": {\"path\": \"$WORK/cache/restate/repositories/" \
+  # Root's is fixed, whatever XDG_CACHE_HOME says.
+  ecache="$WORK/cache"
+  if [ "$(id -u)" = 0 ]; then
+    ecache=/var/cache
+    [ "$(uname -s)" = Darwin ] && ecache=/Library/Caches
+  fi
+  contains "$(cat ecap.json)" "\"cache\": {\"path\": \"$ecache/restate/repositories/" \
     "the result names this machine's cache of it"
   check "and how much it holds" \
     sh -c '! grep -q "\"cache\": {[^}]*\"bytes\": 0}" ecap.json && grep -q "\"bytes\": " ecap.json'
@@ -1644,11 +1650,21 @@ if [ "$(id -u)" = 0 ]; then
   pgroup="--group=$(id -gn nobody)"
 fi
 cp -R prepo pprot
-if [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 0 ]; then
-  # Only root sets Linux's flags; without them, nothing is changed.
-  expect 2 "protect, not as root, on Linux" -- \
+# Whether Linux's flags can be set here: only by root, and not by a
+# container's root without CAP_LINUX_IMMUTABLE, nor on a filesystem without.
+pflags=no
+if [ "$(uname -s)" = Linux ] && mkdir pprobe; then
+  if chattr +a pprobe 2> /dev/null; then
+    pflags=yes
+    chattr -a pprobe
+  fi
+  rmdir pprobe
+fi
+if [ "$(uname -s)" = Linux ] && [ "$pflags" = no ]; then
+  # Without them, nothing is changed.
+  expect 2 "protect, where the flags cannot be set, on Linux" -- \
     "$BIN" protect "$pgroup" --result pr.json pprot
-  contains "$ERR" "only root can make it immutable or append-only" "says why"
+  contains "$ERR" "immutable or append-only" "says why"
   contains "$ERR" "nothing was changed" "and that it changed nothing"
   check "packs/ is as it was" test "$(file_mode pprot/packs)" = 700
   contains "$(cat pr.json)" '"status": "failed"' "and its result says so"
@@ -1689,7 +1705,7 @@ expect 2 "protect for a group that is not there" -- \
 contains "$ERR" "no such group" "says so"
 expect 2 "protect what is not a repository" -- "$BIN" protect "$pgroup" ptree
 fi
-if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ]; then
+if [ "$pflags" = yes ]; then
   chattr -R -i -a pprot
 fi
 chmod -R u+w pprot
@@ -1697,7 +1713,7 @@ chmod -R u+w pprot
 # As a share is used: a machine mapped to one user, in the repository's
 # group, captures into it; root protects it on the storage. Linux's, as root,
 # where users can be made for it and are not there already.
-if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && command -v runuser > /dev/null 2>&1 &&
+if [ "$pflags" = yes ] && command -v runuser > /dev/null 2>&1 &&
    command -v useradd > /dev/null 2>&1 && ! getent passwd restate-cli > /dev/null &&
    ! getent group restate-cli > /dev/null; then
   groupadd restate-cli

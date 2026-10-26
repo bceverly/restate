@@ -2984,6 +2984,10 @@ static void protect_refused(const char *dir, enum rs_fsflags_mode as, const char
     CHECK(rs_repo_init(repo, false, &err));
     rs_fsflags_pretend(as);
     CHECK(!rs_repo_protect(repo, geteuid(), getegid(), &p, &err));
+    if (geteuid() == 0 && as == RS_FSFLAGS_PRETEND_REFUSED)
+    {
+        says = "CAP_LINUX_IMMUTABLE";
+    }
     CHECK_CONTAINS(err.data ? err.data : "", says);
     CHECK_CONTAINS(err.data ? err.data : "", "nothing was changed");
     CHECK_INT(mode_of(repo, "packs"), 0700);
@@ -3019,7 +3023,9 @@ static void test_protected(const char *top, enum rs_fsflags_mode as)
     int                      i;
 
     rs_buf_init(&err);
-    CHECK(mkdir(dir, 0755) == 0);
+    /* Not the group's to read: root makes what it makes in a directory its
+     * group reads readable by that group too (adopt), and these check modes. */
+    CHECK(mkdir(dir, 0700) == 0);
     rs_fsflags_pretend(as);
     flags = rs_fsflags_supported();
     CHECK(mkdir(tree, 0755) == 0);
@@ -3341,6 +3347,32 @@ static void test_protected(const char *top, enum rs_fsflags_mode as)
     rs_buf_free(&err);
 }
 
+/* Whether the flags can be set here, in `dir`: where they are Linux's, only
+ * by root, and not by a container's root without CAP_LINUX_IMMUTABLE, nor on
+ * a filesystem without them. */
+static bool flags_settable(const char *dir)
+{
+    char *probe = rs_xasprintf("%s/flags-probe", dir);
+    bool  ok = false;
+
+    if (mkdir(probe, 0700) == 0)
+    {
+        int fd = open(probe, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ok = fd >= 0 && rs_fsflags_set(fd, RS_FSFLAGS_APPEND) == 0;
+        if (ok)
+        {
+            (void)rs_fsflags_set(fd, 0);
+        }
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        (void)rmdir(probe);
+    }
+    free(probe);
+    return ok;
+}
+
 void test_repo(void)
 {
     char *dir = rs_test_tmpdir();
@@ -3352,10 +3384,12 @@ void test_repo(void)
     test_seek(dir);
     test_unadoptable();
     test_adopted(dir);
-    /* Where they are Linux's flags, only root can set them. */
-    if (!rs_fsflags_supported() || geteuid() == 0)
+    if (!rs_fsflags_supported() || flags_settable(dir))
     {
         test_protected(dir, RS_FSFLAGS_REAL);
+    } else
+    {
+        (void)printf("  (protect tests with the real flags skipped: they cannot be set here)\n");
     }
     test_protected(dir, RS_FSFLAGS_PRETEND);
     test_checked(dir);
