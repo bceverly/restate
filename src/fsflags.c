@@ -156,22 +156,68 @@ int rs_fsflags_set(int fd, unsigned flags)
 #endif
 }
 
+/* The directory `path` is in. */
+static char *dir_of(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+
+    if (!slash)
+    {
+        return rs_xstrdup(".");
+    }
+    return slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path));
+}
+
+static bool plain(const struct stat *st)
+{
+    return S_ISREG(st->st_mode) || S_ISDIR(st->st_mode);
+}
+
 /* `path`, a regular file or a directory, opened never through a symlink and
  * never as anything else -- not a device, which an open alone can act on: -1
- * if it is not one of those. */
+ * if it is not one of those. Its type is asked of what is there before it is
+ * opened for reading, and then of what was opened, by descriptor both times:
+ * never of a name that could be swapped between the two. */
 static int open_plain(const char *path)
 {
-    struct stat before;
+    struct stat was;
     struct stat st;
-    int         fd;
+    const char *slash = strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    char       *dir = dir_of(path);
+    int         dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int         fd = -1;
 
-    if (lstat(path, &before) != 0 || !(S_ISREG(before.st_mode) || S_ISDIR(before.st_mode)))
+    free(dir);
+    if (dfd < 0)
     {
         return -1;
     }
-    fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    if (fd >= 0 && (fstat(fd, &st) != 0 || st.st_dev != before.st_dev ||
-                    st.st_ino != before.st_ino))
+#if defined(O_PATH) && defined(__linux__)
+    {
+        int pfd = openat(dfd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+
+        if (pfd >= 0 && fstat(pfd, &was) == 0 && plain(&was))
+        {
+            char *again = rs_xasprintf("/proc/self/fd/%d", pfd);
+
+            fd = open(again, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            free(again);
+        }
+        if (pfd >= 0)
+        {
+            (void)close(pfd);
+        }
+    }
+#else
+    if (fstatat(dfd, name, &was, AT_SYMLINK_NOFOLLOW) == 0 && plain(&was))
+    {
+        fd = openat(dfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    }
+#endif
+    (void)close(dfd);
+    if (fd >= 0 && (fstat(fd, &st) != 0 || !plain(&st) || st.st_dev != was.st_dev ||
+                    st.st_ino != was.st_ino))
     {
         (void)close(fd);
         fd = -1;
@@ -210,18 +256,6 @@ void rs_fsflags_refreeze(struct rs_fsflags_thawed *t)
     }
     t->fd = -1;
     t->flags = 0;
-}
-
-/* The directory `path` is in. */
-static char *dir_of(const char *path)
-{
-    const char *slash = strrchr(path, '/');
-
-    if (!slash)
-    {
-        return rs_xstrdup(".");
-    }
-    return slash == path ? rs_xstrdup("/") : rs_xstrndup(path, (size_t)(slash - path));
 }
 
 /* Whether the tests' flags forbid changing the name `path`: its own, or its

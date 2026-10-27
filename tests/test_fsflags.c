@@ -112,6 +112,7 @@ static void pretended_flags(const char *dir)
     char                    *file = rs_xasprintf("%s/file", dir);
     char                    *sym = rs_xasprintf("%s/sym", dir);
     char                    *nowhere = rs_xasprintf("%s/no-such-dir/file", dir);
+    char                    *fifo = rs_xasprintf("%s/fifo", dir);
     struct rs_fsflags_thawed t;
 
     TEST_CASE("fsflags: removing and renaming what is immutable, and in an append-only directory");
@@ -157,8 +158,11 @@ static void pretended_flags(const char *dir)
     CHECK(!rs_fsflags_thaw(sym, &t));
     CHECK_INT(flags_at(file), RS_FSFLAGS_APPEND | RS_FSFLAGS_IMMUTABLE);
     CHECK(!rs_fsflags_thaw(nowhere, &t));
+    /* Nor anything but a file or a directory, which an open could act on. */
+    CHECK(mkfifo(fifo, 0600) == 0);
+    CHECK(!rs_fsflags_thaw(fifo, &t));
     CHECK(flag(file, 0));
-    CHECK(unlink(sym) == 0 && unlink(file) == 0);
+    CHECK(unlink(sym) == 0 && unlink(file) == 0 && unlink(fifo) == 0);
 
     TEST_CASE("fsflags: where setting them is refused, and where there are none");
     rs_test_write(dir, "file", "x\n", 0600);
@@ -181,6 +185,7 @@ static void pretended_flags(const char *dir)
     free(file);
     free(sym);
     free(nowhere);
+    free(fifo);
 }
 
 void test_fsflags(void)
