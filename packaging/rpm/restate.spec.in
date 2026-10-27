@@ -75,7 +75,8 @@ make build VERSION=%{version}
 make test-unit VERSION=%{version}
 
 # The hooks go where the program looks for them, libexec/restate/hooks beside
-# the sbin it runs from: /usr/libexec on every one of these.
+# the sbin it runs from: /usr/libexec on every one of these, though on Leap
+# and SLE 15, whose libexec is /usr/lib, no package has it, so this one does.
 %install
 make install-tree DESTDIR=%{buildroot} prefix=%{_prefix} sbindir=%{_sbindir} \
      mandir=%{_mandir} VERSION=%{version}
@@ -91,6 +92,9 @@ install -m 0644 systemd/restate-job@.timer %{buildroot}%{_unitdir}/restate-job@.
 %doc README.md
 %{_sbindir}/restate
 %{_mandir}/man8/restate.8*
+%if 0%{?suse_version} && 0%{?suse_version} < 1600
+%dir %{_prefix}/libexec
+%endif
 %{_prefix}/libexec/restate/
 %dir %{_sysconfdir}/restate
 %dir %{_sysconfdir}/restate/jobs.d

@@ -990,9 +990,19 @@ jobs:
           SRPM="$(find srpm -name 'restate-*.src.rpm' | head -1)"
           ok=0
           for attempt in 1 2 3 4 5; do
-            if copr-cli build --nowait "$PROJECT" "$SRPM" | tee build.log; then
+            # Not through tee: a pipeline's status is tee's, and a refused
+            # build would pass for one taken.
+            rc=0
+            copr-cli build --nowait "$PROJECT" "$SRPM" > build.log 2>&1 || rc=$?
+            cat build.log
+            if [ "$rc" -eq 0 ]; then
               ok=1
               break
+            fi
+            # Credentials COPR refuses are refused again: no point waiting.
+            if grep -q 'Login invalid' build.log; then
+              echo "::error::COPR refused the credentials: renew the token at https://copr.fedorainfracloud.org/api/ and set COPR_LOGIN, COPR_USERNAME and COPR_API_TOKEN from it"
+              exit 1
             fi
             sleep $((attempt * 20))
           done
