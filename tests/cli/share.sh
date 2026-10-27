@@ -32,7 +32,10 @@ case "$BIN" in
   *) BIN="$PWD/$BIN" ;;
 esac
 [ -x "$BIN" ] || { echo "share.sh: $BIN is not executable" >&2; exit 2; }
-[ -d "$DIR" ] && [ -w "$DIR" ] || { echo "share.sh: $DIR is not a directory to write in" >&2; exit 2; }
+if [ ! -d "$DIR" ] || [ ! -w "$DIR" ]; then
+  echo "share.sh: $DIR is not a directory to write in" >&2
+  exit 2
+fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/restate-share.XXXXXX")" || exit 2
 WORK="$(printf '%s' "$WORK" | tr -s /)"
 REPO="$(mktemp -d "$DIR/restate-share.XXXXXX")" || exit 2
@@ -134,7 +137,17 @@ else
 fi
 
 # --- Encrypted, whose chunking key is kept beside the packs -----------------
-if command -v gpg > /dev/null 2>&1; then
+# A gpg restate will run: root's, and no one else's to write (Homebrew's, on
+# macOS, is not), as run.sh's usable says.
+gpg_usable() {
+  for d in /usr/bin /usr/local/bin /bin; do
+    if [ -n "$(find -L "$d/gpg" -prune -type f -user 0 ! -perm -020 ! -perm -002 2> /dev/null)" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+if gpg_usable; then
   mkdir -m 700 gnupg nokey
   gk() { GNUPGHOME="$WORK/gnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
   gk --quick-gen-key 'restate share <share@example.invalid>' default default never 2> /dev/null
@@ -154,7 +167,7 @@ if command -v gpg > /dev/null 2>&1; then
   check "and its files are back" cmp tree/home/pat/big eback/home/pat/big
   gpgconf --homedir "$WORK/gnupg" --kill gpg-agent 2> /dev/null || true
 else
-  echo "  (encrypted repository: skipped, as it needs gpg)"
+  echo "  (encrypted repository: skipped, as it needs a gpg root owns)"
 fi
 
 # --- Every name restate wrote -------------------------------------------------

@@ -226,12 +226,12 @@ jobs:
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: EL 9
-            image: docker.io/almalinux/almalinux:9
+            image: docker.io/library/almalinux:9
             setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: EL 10
-            image: docker.io/almalinux/almalinux:10
+            image: docker.io/library/almalinux:10
             setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh

@@ -395,9 +395,9 @@ jobs:
           - distro: fedora
             image: registry.fedoraproject.org/fedora:latest
           - distro: el9
-            image: docker.io/almalinux/almalinux:9
+            image: docker.io/library/almalinux:9
           - distro: el10
-            image: docker.io/almalinux/almalinux:10
+            image: docker.io/library/almalinux:10
           - distro: leap16
             image: registry.opensuse.org/opensuse/leap:16.0
           - distro: tumbleweed

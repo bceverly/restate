@@ -51,8 +51,9 @@ fi
 sed "s|@VERSION@|$VERSION|g" "$REPO_ROOT/packaging/alpine/APKBUILD.in" > "$WORK/build/APKBUILD"
 
 if [ -n "${ABUILD_PRIVKEY:-}" ]; then
-  [ -f "$ABUILD_PRIVKEY" ] && [ -f "$ABUILD_PRIVKEY.pub" ] ||
+  if [ ! -f "$ABUILD_PRIVKEY" ] || [ ! -f "$ABUILD_PRIVKEY.pub" ]; then
     die "ABUILD_PRIVKEY: $ABUILD_PRIVKEY and $ABUILD_PRIVKEY.pub are not both there"
+  fi
   PACKAGER_PRIVKEY="$ABUILD_PRIVKEY"
 else
   # A key for this build alone, its public half where apk looks, so the
