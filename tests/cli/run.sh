@@ -950,20 +950,25 @@ if usable gpg && usable gpgv && usable gpgconf; then
   gk --export other@example.invalid > other.pub 2> /dev/null
   # Whether this gpg can decrypt with a secret key exported elsewhere once it
   # has imported it, as --decrypt-with has it do: GnuPG 2.5 with libgcrypt
-  # 1.12 cannot, with a cv25519 key, and restate says so.
-  mkdir -m 700 rgnupg rgnupg2
+  # 1.12 cannot, with a cv25519 key, nor libgcrypt 1.12.0 reliably (GnuPG
+  # T8094) -- which depends even on the path of the GnuPG home, so restate is
+  # asked, which says before it starts when it cannot.
+  mkdir -m 700 rgnupg rgnupg-none
+  mkdir -p rprobe/etc rprobe-out
+  echo probe > rprobe/etc/probe
   rk() { GNUPGHOME="$WORK/rgnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
   rk --quick-gen-key 'reimport <reimport@example.invalid>' default default never 2> /dev/null
   rk --export-secret-keys reimport@example.invalid > reimport.sec 2> /dev/null
-  echo x | rk --trust-model always -r reimport@example.invalid -e > reimport.msg 2> /dev/null
-  reimports=no
-  if GNUPGHOME="$WORK/rgnupg2" gpg --batch --quiet --import reimport.sec 2> /dev/null &&
-    { GNUPGHOME="$WORK/rgnupg2" gpg --batch -d reimport.msg > /dev/null 2>&1 ||
-      GNUPGHOME="$WORK/rgnupg2" gpg --batch -d reimport.msg > /dev/null 2>&1; }; then
-    reimports=yes
-  fi
+  rk --export reimport@example.invalid > reimport.pub 2> /dev/null
   gpgconf --homedir "$WORK/rgnupg" --kill gpg-agent 2> /dev/null || true
-  gpgconf --homedir "$WORK/rgnupg2" --kill gpg-agent 2> /dev/null || true
+  "$BIN" capture -N -q -r rprobe -o reimport.tar --encrypt-to reimport.pub 2> /dev/null
+  reimports=yes
+  if ! GNUPGHOME="$WORK/rgnupg-none" "$BIN" restore -q --allow-unverified \
+         --decrypt-with reimport.sec --root rprobe-out reimport.tar > /dev/null 2> reimport.err; then
+    reimports=no
+    contains "$(cat reimport.err)" "once it is imported" \
+      "a secret key this gpg cannot use once imported is refused, saying so"
+  fi
 
   expect 0 "capture --sign-with" -- "$BIN" capture -r rtree --os=linux --sign-with signer.sec -o simg.tar
   contains "$ERR" "signed by restate test <signer@example.invalid>" "capture says who signed it"
@@ -1171,9 +1176,77 @@ if usable gpg && usable gpgv && usable gpgconf; then
   fi
   contains "$(cat ecap.json)" "\"cache\": {\"path\": \"$ecache/restate/repositories/" \
     "the result names this machine's cache of it"
+
   check "and how much it holds" \
     sh -c '! grep -q "\"cache\": {[^}]*\"bytes\": 0}" ecap.json && grep -q "\"bytes\": " ecap.json'
   contains "$ERR" "unchanged since the last snapshot were not read" "reads only what changed"
+
+  # Which keys its files are encrypted to, read with no key at all: the
+  # subkey that encrypts, from the session key at the head of each file. A
+  # copy, captured into --append-only with a second key, gains a copy of the
+  # chunking key sealed to that one, and a keyless prune keeps only the
+  # newest copy: then the first key is needed by what was encrypted to it
+  # alone.
+  encid="$(gk --with-colons --list-keys enc@example.invalid | awk -F: '$1 == "sub" { print $5; exit }')"
+  expect 0 "du an encrypted repository, with no key" -- \
+    env GNUPGHOME="$WORK/nokey" "$BIN" du --json erepo
+  contains "$OUT" "\"$encid\": {" "names the key its files are encrypted to"
+  contains "$OUT" '"chunk_key": true' "and that the chunking key is"
+  contains "$OUT" '"unreadable_files": 0' "with every encrypted file read"
+  expect 0 "and says so in words" -- env GNUPGHOME="$WORK/nokey" "$BIN" du erepo
+  contains "$OUT" "encrypted to $encid: " "a line for the key"
+  gk --quick-gen-key 'restate enc2 <enc2@example.invalid>' default default never 2> /dev/null
+  gk --export enc2@example.invalid > enc2.pub 2> /dev/null
+  enc2id="$(gk --with-colons --list-keys enc2@example.invalid | awk -F: '$1 == "sub" { print $5; exit }')"
+  cp -R erepo erepo-rot
+  # Called through check.
+  # shellcheck disable=SC2317,SC2329
+  copies() { find erepo-rot -maxdepth 1 -name 'chunk-key*' | wc -l | tr -d ' '; }
+  echo rotated > rtree/etc/rotated
+  expect 0 "capture --append-only into a copy with a newer key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" capture -q --append-only -r rtree --os=linux --encrypt-to enc2.pub -o erepo-rot
+  check "which adds a copy of the chunking key, changing none" test "$(copies)" = 2
+  check "the first as it was" test -s erepo-rot/chunk-key
+  expect 0 "du it" -- env GNUPGHOME="$WORK/nokey" "$BIN" du erepo-rot
+  contains "$OUT" "encrypted to $enc2id: 1 packs" "the newer key has what was captured with it"
+  contains "$(printf '%s\n' "$OUT" | grep "encrypted to $enc2id")" "the chunking key" \
+    "and the chunking key, in its newest copy"
+  lacks "$(printf '%s\n' "$OUT" | grep "encrypted to $encid")" "chunking key" \
+    "which the older key no longer has"
+  expect 0 "capture again with the same key" -- \
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+    "$BIN" capture -q --append-only -r rtree --os=linux --encrypt-to enc2.pub -o erepo-rot
+  check "adds no copy: the newest is sealed to it" test "$(copies)" = 2
+  expect 0 "prune --whole-packs, with no key" -- \
+    env GNUPGHOME="$WORK/nokey" "$BIN" prune -q --whole-packs --keep-last 10 erepo-rot
+  check "keeps only the newest copy" test "$(copies)" = 1
+  check "which is not the first" test ! -e erepo-rot/chunk-key
+  expect 0 "du it again" -- env GNUPGHOME="$WORK/nokey" "$BIN" du erepo-rot
+  contains "$(printf '%s\n' "$OUT" | grep "encrypted to $enc2id")" "the chunking key" \
+    "the newer key has the chunking key still"
+  rm -f rtree/etc/rotated
+  echo again > rtree/etc/again
+  expect 0 "a machine with no cache reads the newest copy" -- \
+    env XDG_CACHE_HOME="$WORK/rcache2" GNUPGHOME="$WORK/gnupg" \
+    "$BIN" capture -q --append-only -r rtree --os=linux --encrypt-to enc2.pub -o erepo-rot
+  lacks "$ERR" "a new one is used" "and uses it, rather than making one"
+  check "and adds no copy" test "$(copies)" = 1
+  rm -f rtree/etc/again
+  # Keys changed back and forth faster than a second apart: a copy each time,
+  # none lost to another made in the same second.
+  for k in enc enc2 enc; do
+    env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
+      "$BIN" capture -q --append-only -r rtree --os=linux --encrypt-to "$k.pub" -o erepo-rot
+  done
+  check "a copy for each change of keys, however quick" test "$(copies)" = 4
+  expect 0 "du it once more" -- env GNUPGHOME="$WORK/nokey" "$BIN" du erepo-rot
+  contains "$(printf '%s\n' "$OUT" | grep "encrypted to $encid")" "the chunking key" \
+    "the newest copy, sealed to the key given last"
+  mkdir -p erot
+  expect 0 "and the older key's snapshots restore with both keys" -- \
+    env XDG_CACHE_HOME="$WORK/rcache" GNUPGHOME="$WORK/gnupg" \
+    "$BIN" restore -q --allow-unverified --root erot "erepo-rot::$("$BIN" snapshots erepo-rot 2> /dev/null | awk 'NR == 1 { print $1 }')"
   mkdir -p erout
   expect 2 "restore it without the secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/nokey" \
@@ -1551,6 +1624,8 @@ check "a restore job takes decrypt_with and passphrase_file" \
   eval "printf '%s' \"\$OUT\" | grep '\"restore\": \[' | grep '\"decrypt_with\", \"passphrase_file\"' > /dev/null"
 contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
+contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
+contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
 else

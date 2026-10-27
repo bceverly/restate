@@ -65,24 +65,29 @@ static size_t secret_homes(void)
 
 /* Whether this gpg can decrypt with a secret key exported from `home` once it
  * is imported somewhere else, as --decrypt-with does: GnuPG 2.5 with
- * libgcrypt 1.12 cannot, with a cv25519 key. Asked of gpg alone, in `dir`. */
+ * libgcrypt 1.12 cannot, with a cv25519 key, and libgcrypt 1.12.0 cannot
+ * reliably (GnuPG T8094) -- as a service runs it, and depending on the very
+ * path of the GnuPG home. So asked of restate itself, which imports into a
+ * home of its own and says, before it starts, when it cannot. */
 static bool gpg_reimports;
 
 static bool reimports(const char *home, const char *dir)
 {
-    char *cmd = rs_xasprintf(
-        "d=$(mktemp -d '%s/reimport.XXXXXX') || exit 1; mkdir -m 700 \"$d/h\" && "
-        "GNUPGHOME='%s' gpg --batch --export-secret-keys > \"$d/k\" 2>/dev/null && "
-        "echo x | GNUPGHOME='%s' gpg --batch --trust-model always -r test@example.invalid -e "
-        "> \"$d/m\" 2>/dev/null && "
-        "GNUPGHOME=\"$d/h\" gpg --batch --quiet --import \"$d/k\" 2>/dev/null && "
-        "{ GNUPGHOME=\"$d/h\" gpg --batch -d \"$d/m\" > /dev/null 2>&1 || "
-        "GNUPGHOME=\"$d/h\" gpg --batch -d \"$d/m\" > /dev/null 2>&1; }; r=$?; "
-        "gpgconf --homedir \"$d/h\" --kill gpg-agent 2>/dev/null; rm -rf \"$d\"; exit $r",
-        dir, home, home);
-    bool ok = system(cmd) == 0;
+    char         *probe = rs_xasprintf("%s/probe.sec", dir);
+    char         *cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --export-secret-keys > '%s' "
+                                     "2>/dev/null", home, probe);
+    const char   *keys[1];
+    struct rs_buf err;
+    bool          ok;
 
+    rs_buf_init(&err);
+    keys[0] = probe;
+    ok = system(cmd) == 0 && rs_pgp_use_secret_key(keys, 1, &err);
+    rs_pgp_forget_secret_key();
+    rs_buf_free(&err);
+    (void)unlink(probe);
     free(cmd);
+    free(probe);
     return ok;
 }
 
@@ -178,6 +183,65 @@ static void detect_cases(void)
     CHECK(!rs_pgp_detect((const unsigned char *)"{\"format\"", 9));
 }
 
+/* The key ids at the head of an encrypted message, from packets made by hand. */
+static void recipient_cases(void)
+{
+    /* New format: a v3 PKESK to 0102030405060708, then the same again, then a
+     * SKESK, then one to 1112131415161718 -- and then the message. */
+    static const unsigned char v3[] = {
+        0xc1, 0x0a, 0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x12,
+        0xc1, 0x0a, 0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x12,
+        0xc3, 0x02, 0x04, 0x09,
+        0x84, 0x0a, 0x03, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x01,
+        0xd2, 0x01, 0x01
+    };
+    /* v6 PKESKs (RFC 9580): to a v4 key, whose id is its fingerprint's last 8
+     * bytes; to a v6 key, its first 8; and to no one in particular. */
+    static const unsigned char v6[] = {
+        0xc1, 0x18, 0x06, 0x15, 0x04,
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0x19,
+        0xc1, 0x24, 0x06, 0x21, 0x06,
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
+        0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb,
+        0xdc, 0xdd, 0xde, 0xdf, 0x19,
+        0xc1, 0x03, 0x06, 0x00, 0x19
+    };
+    /* Old-format two- and four-byte lengths, and a two-byte new-format one. */
+    static const unsigned char lengths[] = {
+        0x85, 0x00, 0x0a, 0x03, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x01,
+        0x86, 0x00, 0x00, 0x00, 0x0a, 0x03, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+        0x01
+    };
+    static const unsigned char partial[] = { 0xc1, 0xe0, 0x03, 0x01 };
+    static const unsigned char indeterminate[] = { 0x87, 0x03, 0x01 };
+    static const unsigned char signature[] = { 0x89, 0x01, 0x33 };
+    char                       ids[4][17];
+
+    TEST_CASE("pgp: the keys a message is encrypted to, read in the clear");
+    CHECK_INT(rs_pgp_recipients(v3, sizeof(v3), ids, 4), 2);
+    CHECK_STR(ids[0], "0102030405060708");
+    CHECK_STR(ids[1], "1112131415161718");
+    CHECK_INT(rs_pgp_recipients(v6, sizeof(v6), ids, 4), 3);
+    CHECK_STR(ids[0], "B0B1B2B3B4B5B6B7");
+    CHECK_STR(ids[1], "C0C1C2C3C4C5C6C7");
+    CHECK_STR(ids[2], "0000000000000000");
+    CHECK_INT(rs_pgp_recipients(lengths, sizeof(lengths), ids, 4), 2);
+    CHECK_STR(ids[0], "2122232425262728");
+    CHECK_STR(ids[1], "3132333435363738");
+
+    TEST_CASE("pgp: no more keys than there is room for, or than the bytes hold");
+    CHECK_INT(rs_pgp_recipients(v3, sizeof(v3), ids, 1), 1);
+    CHECK_INT(rs_pgp_recipients(v3, 11, ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients(v3, 12, ids, 4), 1);
+    CHECK_INT(rs_pgp_recipients(lengths, 2, ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients(partial, sizeof(partial), ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients(indeterminate, sizeof(indeterminate), ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients(signature, sizeof(signature), ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients((const unsigned char *)"plain", 5, ids, 4), 0);
+    CHECK_INT(rs_pgp_recipients(v6 + 25, 5, ids, 4), 0);
+}
+
 static void failure_cases(const char *dir)
 {
     static const char *const missing[] = { "/nonexistent/gpg" };
@@ -228,6 +292,7 @@ void test_pgp(void)
     char                  *cmd;
 
     detect_cases();
+    recipient_cases();
     failure_cases(dir);
 
     if (!rs_program_path(RS_PROG_GPG) || !rs_test_have_gpg())

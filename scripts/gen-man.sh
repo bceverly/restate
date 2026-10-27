@@ -1550,7 +1550,39 @@ So an encrypted repository cuts its chunks where a key of its own says,
 made by the first capture, kept in the repository encrypted to its keys and
 in the capturing machine's cache, where a capture reads it without the secret
 key. A machine with neither makes a key of its own, and stores its large
-files whole once more.
+files whole once more. A capture that finds the newest copy sealed to keys
+other than the ones it is given \- even with
+.B \-\-append\-only
+\- adds a copy sealed to its own,
+.IR chunk\-key. TIME\-N,
+beside the others and in place of none, and every prune, keyless and
+.B \-\-whole\-packs
+included, removes all but the newest: so a key no longer given is not
+needed for it once a prune has run.
+.PP
+.B Changing keys.
+To move a repository to a new key, give the new key's public key alone to
+.B \-\-encrypt\-to
+from then on: what is captured is encrypted to it, and the old snapshots stay
+encrypted to the old key, so restoring one needs the old secret key (give
+each with
+.BR \-\-decrypt\-with ).
+A
+.B prune
+that rewrites a pack needs the secret key the pack was encrypted to, and
+writes what it keeps encrypted to the keys it is given; the files of the
+snapshots it keeps stay as they are.
+.B du
+says which keys the repository's files are still encrypted to: a key it no
+longer names can be retired.
+.PP
+A key given with
+.B \-\-decrypt\-with
+is imported into a GnuPG home of restate's own. libgcrypt 1.12.0 cannot use
+an imported cv25519 key \- the default kind \- reliably (GnuPG T8094, fixed in
+1.12.1), nor can GnuPG 2.5 with libgcrypt 1.12: restate tries each key once
+before it starts, and says so if it cannot. An RSA encryption key has
+neither problem.
 .PP
 One capture, prune or repack runs on a repository at a time, and one
 .B capture \-\-quiesce
@@ -1815,7 +1847,11 @@ key is needed. A copy kept elsewhere is one a fire does not reach.
 .I REPO
 says what a repository holds and, from the pack lists, what each snapshot
 needs of it, what it added when it was taken, and what dropping it alone
-would free, reading no pack.
+would free, reading no pack. Of an encrypted repository it says too which
+keys its files are encrypted to \- each encryption subkey's id, read from
+the session keys at the head of each file, which say so in the clear \- and
+for each, the packs and snapshots encrypted to it and whether the chunking
+key is: a key nothing names any more is one nothing in the repository needs.
 .PP
 .B Interrupted runs.
 A capture cut off \- the share gone, the machine off \- leaves only files

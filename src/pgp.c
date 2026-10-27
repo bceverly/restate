@@ -38,6 +38,128 @@ bool rs_pgp_detect(const unsigned char *head, size_t len)
     return tag == 1 || tag == 3;
 }
 
+/* One packet's tag and body at `p`, `left` bytes from the end: the length of
+ * its header, or 0 if it is not whole there or its length is one only a
+ * stream knows (indeterminate, or partial). RFC 9580, 4.2. */
+static size_t packet_at(const unsigned char *p, size_t left, unsigned *tag, size_t *body)
+{
+    size_t h;
+
+    if (left < 2 || !(p[0] & 0x80))
+    {
+        return 0;
+    }
+    if (p[0] & 0x40)
+    {
+        *tag = p[0] & 0x3f;
+        if (p[1] < 192)
+        {
+            *body = p[1];
+            h = 2;
+        } else if (p[1] < 224)
+        {
+            if (left < 3)
+            {
+                return 0;
+            }
+            *body = ((size_t)(p[1] - 192) << 8) + p[2] + 192;
+            h = 3;
+        } else if (p[1] == 255 && left >= 6)
+        {
+            *body = ((size_t)p[2] << 24) | ((size_t)p[3] << 16) | ((size_t)p[4] << 8) | p[5];
+            h = 6;
+        } else
+        {
+            return 0;
+        }
+    } else
+    {
+        static const size_t sizes[] = { 1, 2, 4 };
+        size_t              n;
+        size_t              i;
+
+        *tag = (p[0] >> 2) & 0x0f;
+        if ((p[0] & 3) == 3)
+        {
+            return 0;
+        }
+        n = sizes[p[0] & 3];
+        if (left < 1 + n)
+        {
+            return 0;
+        }
+        *body = 0;
+        for (i = 0; i < n; i++)
+        {
+            *body = (*body << 8) | p[1 + i];
+        }
+        h = 1 + n;
+    }
+    return *body <= left - h ? h : 0;
+}
+
+size_t rs_pgp_recipients(const unsigned char *data, size_t len, char ids[][17], size_t max)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t            at = 0;
+    size_t            n = 0;
+
+    while (n < max && at < len)
+    {
+        unsigned             tag = 0;
+        size_t               body = 0;
+        size_t               h = packet_at(data + at, len - at, &tag, &body);
+        const unsigned char *b = data + at + h;
+        const unsigned char *id = NULL;
+        static const unsigned char none[8] = { 0 };
+
+        /* Session keys, public (1) or symmetric (3), come first; what
+         * follows them is the message, which says nothing of keys. */
+        if (h == 0 || (tag != 1 && tag != 3))
+        {
+            break;
+        }
+        if (tag == 1 && body >= 10 && b[0] == 3)
+        {
+            id = b + 1;
+        } else if (tag == 1 && body >= 2 && b[0] == 6)
+        {
+            /* A key version and its fingerprint, or nothing for a recipient
+             * left anonymous: a v4 key's id is its fingerprint's last 8
+             * bytes, a v6 key's its first 8. */
+            if (b[1] == 0)
+            {
+                id = none;
+            } else if (b[1] == 21 && b[2] == 4 && body >= 23)
+            {
+                id = b + 3 + 12;
+            } else if (b[1] == 33 && b[2] == 6 && body >= 35)
+            {
+                id = b + 3;
+            }
+        }
+        if (id)
+        {
+            bool   seen = false;
+            size_t i;
+
+            for (i = 0; i < 8; i++)
+            {
+                ids[n][2 * i] = hex[id[i] >> 4];
+                ids[n][2 * i + 1] = hex[id[i] & 15];
+            }
+            ids[n][16] = '\0';
+            for (i = 0; i < n && !seen; i++)
+            {
+                seen = strcmp(ids[i], ids[n]) == 0;
+            }
+            n += seen ? 0 : 1;
+        }
+        at += h + body;
+    }
+    return n;
+}
+
 static void cloexec(int fd)
 {
     int flags = fcntl(fd, F_GETFD);
@@ -1043,10 +1165,12 @@ static bool import_secret(const char *home, const char *keyfile, struct rs_buf *
  * first used, and gpg-agent 2.4 with libgcrypt 1.12 then refuses it once --
  * "Bad secret key", or "Bad passphrase" for the right one -- and takes it
  * every time after: so the once is here, not on the first thing the run
- * decrypts. False if gpg says a second time that it has no secret key for
- * what was just encrypted to one it holds, as GnuPG 2.5 with libgcrypt 1.12
- * says of a cv25519 key it has imported, every time: nothing encrypted to it
- * could be read.
+ * decrypts. False if gpg refuses a second time what was just encrypted to a
+ * key it holds, for want of the key or calling it bad, as it refuses an
+ * imported cv25519 key every time with GnuPG 2.5 and libgcrypt 1.12, and
+ * with libgcrypt 1.12.0, which cannot validate one (GnuPG T8094) -- there
+ * as a service runs it, and not always as a shell does: nothing encrypted to
+ * it could be read.
  */
 static bool first_use(const char *home)
 {
@@ -1097,7 +1221,8 @@ static bool first_use(const char *home)
                 {
                     rs_buf_reset(&ignored);
                     if (!gpg_in(home, open_, 5, NULL, &ignored) && ignored.data &&
-                        strstr(ignored.data, "No secret key"))
+                        (strstr(ignored.data, "No secret key") ||
+                         strstr(ignored.data, "Bad secret key")))
                     {
                         usable = false;
                     }
@@ -1144,8 +1269,10 @@ bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf 
     if (!first_use(home))
     {
         rs_buf_addstr(err, "this gpg cannot decrypt with the secret key --decrypt-with gives once "
-                           "it is imported, as GnuPG 2.5 with libgcrypt 1.12 cannot with a cv25519 "
-                           "key; run it with GNUPGHOME set to the GnuPG home that has the key");
+                           "it is imported, as libgcrypt 1.12.0 cannot with a cv25519 key (GnuPG "
+                           "T8094, fixed in 1.12.1), nor GnuPG 2.5 with libgcrypt 1.12; run it "
+                           "with GNUPGHOME set to the GnuPG home that has the key, or encrypt to "
+                           "an RSA key");
         end_home(home);
         return false;
     }

@@ -229,7 +229,8 @@ static void fuzz_live(const char *text, size_t len)
     }
 }
 
-/* Armor, gpgv's verdict and a Valid-Until, each read from the same text. */
+/* Armor, gpgv's verdict, a Valid-Until and the keys a message is encrypted
+ * to, each read from the same text. */
 static void fuzz_openpgp(const char *text, size_t len)
 {
     char                *s = rs_xstrndup(text, len);
@@ -237,6 +238,30 @@ static void fuzz_openpgp(const char *text, size_t len)
     struct rs_buf        why;
     struct rs_pgp_signer signer;
     int64_t              when;
+    char                 ids[4][17];
+    size_t               n = rs_pgp_recipients((const unsigned char *)text, len, ids, 4);
+    size_t               i;
+    size_t               k;
+
+    /* No more than there is room for, each 16 upper-case hex digits, once. */
+    if (n > 4)
+    {
+        abort();
+    }
+    for (i = 0; i < n; i++)
+    {
+        if (strlen(ids[i]) != 16 || strspn(ids[i], "0123456789ABCDEF") != 16)
+        {
+            abort();
+        }
+        for (k = 0; k < i; k++)
+        {
+            if (strcmp(ids[i], ids[k]) == 0)
+            {
+                abort();
+            }
+        }
+    }
 
     rs_buf_init(&out);
     if (rs_pgp_dearmor(text, len, &out) && out.len > len)

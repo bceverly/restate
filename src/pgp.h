@@ -43,6 +43,14 @@ struct rs_pgp {
  * message, binary or ASCII-armored. */
 bool rs_pgp_detect(const unsigned char *head, size_t len);
 
+/* The ids of the keys a binary OpenPGP message is encrypted to, from the
+ * session key packets at its head -- which say so in the clear, so no key is
+ * needed to read them -- as 16 upper-case hex digits, each once, at most
+ * `max` of them; all zeros for a recipient the message leaves anonymous. 0
+ * for what is not such a message, or holds no more of it than `len` bytes
+ * reach. */
+size_t rs_pgp_recipients(const unsigned char *data, size_t len, char ids[][17], size_t max);
+
 /* Starts gpg encrypting to the public keys in `recipients` (files), writing
  * the ciphertext to `out_fd`. */
 bool rs_pgp_encrypt(const char *const *recipients, size_t n, int out_fd, struct rs_pgp *pg,

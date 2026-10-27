@@ -933,6 +933,7 @@ struct list {
 struct rs_repo {
     char              *dir;
     int                lock_fd;
+    enum rs_repo_lock  mode;       /* as it was opened */
     int                readers_fd;
     int                version;    /* of its format: 1 or 2 */
     bool               encrypted;
@@ -1773,6 +1774,7 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
     *busy = false;
     free(marker);
     r->dir = rs_xstrdup(dir);
+    r->mode = lock;
     r->lock_fd = -1;
     r->readers_fd = -1;
     if (ok && !parse_marker(text.data, r, &newer))
@@ -3318,27 +3320,32 @@ static bool random_key(unsigned char key[32])
 }
 
 /* `tmp` put in place as `path` unless something is there already, which is
- * kept: true either way, false with errno if neither. With link(2), which
+ * kept: 1 if it was put there, 0 if something was there, -1 with errno if
+ * neither (publish_once: true for either of the first two). With link(2), which
  * never replaces; where the filesystem has no hard links (exFAT, FAT, many
  * SMB shares), by taking the name with O_EXCL, which only one machine can,
  * and renaming over what it took. Until the rename, the name is an empty
  * file, which a reader takes for a key it cannot read. */
-static bool publish_once(const char *tmp, const char *path)
+static int place_new(const char *tmp, const char *path)
 {
     int fd;
 
-    if (link(tmp, path) == 0 || errno == EEXIST)
+    if (link(tmp, path) == 0)
     {
-        return true;
+        return 1;
+    }
+    if (errno == EEXIST)
+    {
+        return 0;
     }
     if (errno != EPERM && errno != EOPNOTSUPP && errno != ENOSYS && errno != EMLINK)
     {
-        return false;
+        return -1;
     }
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0)
     {
-        return errno == EEXIST;
+        return errno == EEXIST ? 0 : -1;
     }
     (void)close(fd);
     if (rename(tmp, path) != 0)
@@ -3347,9 +3354,182 @@ static bool publish_once(const char *tmp, const char *path)
 
         (void)unlink(path);
         errno = saved;
-        return false;
+        return -1;
+    }
+    return 1;
+}
+
+static bool publish_once(const char *tmp, const char *path)
+{
+    return place_new(tmp, path) >= 0;
+}
+
+/* What a file is encrypted to, from the session keys at its head: how many
+ * key ids are in `ids`, and whether it is encrypted at all in `sealed`. */
+#define KEYS_HEAD 16384   /* room for a session key to each of many RSA keys */
+#define KEYS_MAX  32
+
+static size_t sealed_to(const char *path, char ids[][17], bool *sealed)
+{
+    unsigned char *head = rs_xmalloc(KEYS_HEAD);
+    int            fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    ssize_t        got = -1;
+    size_t         n = 0;
+
+    *sealed = false;
+    if (fd >= 0)
+    {
+        got = pread(fd, head, KEYS_HEAD, 0);
+        (void)close(fd);
+    }
+    if (got > 0 && rs_pgp_detect(head, (size_t)got))
+    {
+        *sealed = true;
+        n = rs_pgp_recipients(head, (size_t)got, ids, KEYS_MAX);
+    }
+    free(head);
+    return n;
+}
+
+/* Whether files `a` and `b` are encrypted to the same keys, as sets. */
+static bool same_keys(const char *a, const char *b)
+{
+    char   ia[KEYS_MAX][17];
+    char   ib[KEYS_MAX][17];
+    bool   sa;
+    bool   sb;
+    size_t na = sealed_to(a, ia, &sa);
+    size_t nb = sealed_to(b, ib, &sb);
+    size_t i;
+    size_t k;
+
+    if (na != nb || na == 0)
+    {
+        return na == nb && sa == sb;
+    }
+    for (i = 0; i < na; i++)
+    {
+        bool found = false;
+
+        for (k = 0; k < nb && !found; k++)
+        {
+            found = strcmp(ia[i], ib[k]) == 0;
+        }
+        if (!found)
+        {
+            return false;
+        }
     }
     return true;
+}
+
+/* The copies of the chunking key in the repository, oldest first: chunk-key,
+ * as the first capture made it, then each chunk-key.TIME a capture added when
+ * the keys it was given were not the ones the newest copy is sealed to. Every
+ * copy holds the same key. */
+static char **chunk_key_copies(const char *dir, size_t *n)
+{
+    DIR                 *d = opendir(dir);
+    const struct dirent *de;
+    char               **names = NULL;
+    size_t               len = strlen(RS_REPO_CHUNK_KEY);
+    bool                 first = false;
+
+    *n = 0;
+    while (d && (de = readdir(d)) != NULL)
+    {
+        if (strcmp(de->d_name, RS_REPO_CHUNK_KEY) == 0)
+        {
+            first = true;
+        } else if (strncmp(de->d_name, RS_REPO_CHUNK_KEY, len) == 0 && de->d_name[len] == '.' &&
+                   rs_repo_name_valid(de->d_name + len + 1))
+        {
+            names = rs_xreallocarray(names, *n + 1, sizeof(*names));
+            names[(*n)++] = rs_xstrdup(de->d_name);
+        }
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    if (*n > 1)
+    {
+        qsort(names, *n, sizeof(*names), by_name);
+    }
+    if (first)
+    {
+        names = rs_xreallocarray(names, *n + 1, sizeof(*names));
+        memmove(names + 1, names, *n * sizeof(*names));
+        names[0] = rs_xstrdup(RS_REPO_CHUNK_KEY);
+        (*n)++;
+    }
+    return names;
+}
+
+/*
+ * The chunking key, `hex`, sealed to this run's keys in a copy of its own
+ * where the newest copy, `newest`, is sealed to others -- so a key retired
+ * from --encrypt-to is needed for it no longer. Added beside the others,
+ * never in place of one, so an --append-only capture can; a prune removes
+ * the older copies.
+ */
+static void add_sealed_copy(struct rs_repo *r, const char *newest, const char *hex)
+{
+    char         *tmp = rs_xasprintf("%s/packs/.%s.%ld.new", r->dir, RS_REPO_CHUNK_KEY,
+                                     (long)getpid());
+    struct rs_buf err;
+    char          when[32];
+    time_t        now = time(NULL);
+    struct tm     tm;
+
+    rs_buf_init(&err);
+    (void)unlink(tmp);
+    if (write_out(tmp, hex, 64, false, r->recips, seal_n(r), &err) && !same_keys(tmp, newest) &&
+        gmtime_r(&now, &tm) && strftime(when, sizeof(when), "%Y%m%dT%H%M%SZ", &tm) > 0)
+    {
+        int placed = 0;
+        int seq;
+
+        /* Numbered within the second, so that two in one sort in the order
+         * they were added. */
+        for (seq = 0; placed == 0 && seq < 1000; seq++)
+        {
+            char *path = rs_xasprintf("%s/%s.%s-%03d", r->dir, RS_REPO_CHUNK_KEY, when, seq);
+
+            placed = place_new(tmp, path);
+            free(path);
+        }
+    }
+    (void)unlink(tmp);
+    free(tmp);
+    rs_buf_free(&err);
+}
+
+/* All but the newest copy of the chunking key removed, once the newest is
+ * one whose keys can be read: they hold the same key, sealed to keys that
+ * may since have been retired. Needs no key. */
+static void drop_old_chunk_keys(const struct rs_repo *r)
+{
+    char   ids[KEYS_MAX][17];
+    size_t n;
+    char **names = chunk_key_copies(r->dir, &n);
+    char  *newest = n > 0 ? rs_xasprintf("%s/%s", r->dir, names[n - 1]) : NULL;
+    bool   sealed = false;
+
+    if (newest && n > 1 && sealed_to(newest, ids, &sealed) > 0)
+    {
+        size_t i;
+
+        for (i = 0; i + 1 < n; i++)
+        {
+            char *path = rs_xasprintf("%s/%s", r->dir, names[i]);
+
+            (void)rs_fsflags_unlink(path);
+            free(path);
+        }
+    }
+    free(newest);
+    rs_repo_free_names(names, n);
 }
 
 /*
@@ -3370,9 +3550,11 @@ static void chunk_key(struct rs_repo *r)
     char          hex[RS_SHA256_HEX_SIZE];
     struct rs_buf b;
     struct rs_buf err;
-    struct stat   st;
     bool          have = false;
-    bool          there = lstat(path, &st) == 0;
+    size_t        ncopies;
+    char        **copies = chunk_key_copies(r->dir, &ncopies);
+    bool          there = ncopies > 0;
+    size_t        i;
 
     rs_buf_init(&err);
     if (cache_get(r, "keys", "chunks", 128, &b))
@@ -3380,19 +3562,31 @@ static void chunk_key(struct rs_repo *r)
         have = b.len >= 64 && unhex(b.data, key);
         rs_buf_free(&b);
     }
-    if (!have && there)
+    /* Newest first: the one sealed to the keys most likely to be here. */
+    for (i = ncopies; !have && i > 0; i--)
     {
-        bool sealed;
+        char *copy = rs_xasprintf("%s/%s", r->dir, copies[i - 1]);
+        bool  sealed;
 
-        have = read_sealed(path, 4096, true, &b, &sealed, &err) && b.len >= 64 &&
+        have = read_sealed(copy, 4096, true, &b, &sealed, &err) && b.len >= 64 &&
                unhex(b.data, key);
         rs_buf_free(&b);
+        free(copy);
         if (have)
         {
             to_hex(key, hex);
             cache_put(r, "keys", "chunks", hex, 64);
         }
     }
+    if (have && there && r->nrecips > 0)
+    {
+        char *newest = rs_xasprintf("%s/%s", r->dir, copies[ncopies - 1]);
+
+        to_hex(key, hex);
+        add_sealed_copy(r, newest, hex);
+        free(newest);
+    }
+    rs_repo_free_names(copies, ncopies);
     if (!have)
     {
         if (!random_key(key))
@@ -5655,6 +5849,7 @@ static bool sweep(struct rs_repo *r, char *const *left, size_t nleft, bool repac
         char *packs = rs_xasprintf("%s/packs", r->dir);
 
         clear_leftovers(r);
+        drop_old_chunk_keys(r);
         list_packs(r);
         unload(r);
         /* A rewrite moved content the lists name, so they are written again
@@ -6115,9 +6310,19 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
             return false;
         }
     }
-    /* An encrypted repository's chunk key, made once; never the marker, the
-     * lock or readers, which the machines that write here open as their own. */
-    protect_file(top, dir, RS_REPO_CHUNK_KEY, owner, group, out, &any);
+    /* An encrypted repository's chunk key, each copy of it; never the marker,
+     * the lock or readers, which the machines that write here open as their
+     * own. */
+    {
+        size_t ncopies;
+        char **copies = chunk_key_copies(dir, &ncopies);
+
+        for (i = 0; i < ncopies; i++)
+        {
+            protect_file(top, dir, copies[i], owner, group, out, &any);
+        }
+        rs_repo_free_names(copies, ncopies);
+    }
     for (i = 0; i < sizeof(subs) / sizeof(subs[0]); i++)
     {
         char *path = rs_xasprintf("%s/%s", dir, subs[i]);
@@ -6230,6 +6435,7 @@ bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, boo
             }
         }
         clear_leftovers(r);
+        drop_old_chunk_keys(r);
         list_packs(r);
         unload(r);
         tidy_cache(r);
@@ -6255,6 +6461,148 @@ bool rs_repo_prune_whole(struct rs_repo *r, const struct rs_repo_keep *keep, boo
 /* ------------------------------------------------------------------------- */
 /* Usage                                                                     */
 /* ------------------------------------------------------------------------- */
+
+/* The entry for key `id` in `out`, made if it is not there. */
+static struct rs_repo_key_use *key_use(struct rs_repo_keys *out, const char *id)
+{
+    struct rs_repo_key_use *k;
+    size_t                  i;
+
+    for (i = 0; i < out->nkeys; i++)
+    {
+        if (strcmp(out->keys[i].id, id) == 0)
+        {
+            return &out->keys[i];
+        }
+    }
+    out->keys = rs_xreallocarray(out->keys, out->nkeys + 1, sizeof(*out->keys));
+    k = &out->keys[out->nkeys++];
+    memset(k, 0, sizeof(*k));
+    memcpy(k->id, id, sizeof(k->id));
+    return k;
+}
+
+/* The files of one pack or one snapshot, read for the keys they are encrypted
+ * to: per key in `out`, whether any of them is, entered there if it was not. */
+static bool *sealed_files(struct rs_repo_keys *out, char *const *paths, size_t npaths)
+{
+    char   ids[KEYS_MAX][17];
+    size_t at[5 * KEYS_MAX];
+    size_t nat = 0;
+    bool  *hit;
+    size_t i;
+    size_t k;
+
+    for (i = 0; i < npaths; i++)
+    {
+        bool   sealed;
+        size_t n = sealed_to(paths[i], ids, &sealed);
+
+        out->unreadable += sealed && n == 0 ? 1 : 0;
+        out->files += n > 0 ? 1 : 0;
+        for (k = 0; k < n && nat < sizeof(at) / sizeof(at[0]); k++)
+        {
+            at[nat++] = (size_t)(key_use(out, ids[k]) - out->keys);
+        }
+    }
+    hit = rs_xcalloc(out->nkeys + 1, sizeof(*hit));
+    for (i = 0; i < nat; i++)
+    {
+        hit[at[i]] = true;
+    }
+    return hit;
+}
+
+void rs_repo_keys(struct rs_repo *r, struct rs_repo_keys *out)
+{
+    static const char *const pack_ext[] = { "tar.gz", "idx", "sum", "seek" };
+    static const char *const snap_files[] = { "index.json.gz", "index.sig", "kit", "info",
+                                              "packs" };
+    char                     *paths[5];
+    bool                     *hit;
+    char                    **names;
+    size_t                    n;
+    size_t                    i;
+    size_t                    k;
+
+    memset(out, 0, sizeof(*out));
+    list_packs(r);
+    names = rs_repo_snapshots(r, &n);
+    for (i = 0; i < r->npacks; i++)
+    {
+        for (k = 0; k < 4; k++)
+        {
+            paths[k] = rs_xasprintf("%s/packs/%s.%s", r->dir, r->packs[i], pack_ext[k]);
+        }
+        hit = sealed_files(out, paths, 4);
+        for (k = 0; k < out->nkeys; k++)
+        {
+            if (hit[k])
+            {
+                out->keys[k].packs++;
+                out->keys[k].bytes += pack_disk(r, r->packs[i]);
+            }
+        }
+        free(hit);
+        for (k = 0; k < 4; k++)
+        {
+            free(paths[k]);
+        }
+    }
+    for (i = 0; i < n; i++)
+    {
+        for (k = 0; k < 5; k++)
+        {
+            paths[k] = snapshot_file(r, names[i], snap_files[k]);
+        }
+        hit = sealed_files(out, paths, 5);
+        for (k = 0; k < out->nkeys; k++)
+        {
+            struct rs_repo_key_use *u = &out->keys[k];
+
+            if (hit[k])
+            {
+                u->snapshots = rs_xreallocarray(u->snapshots, u->nsnapshots + 1,
+                                                sizeof(*u->snapshots));
+                u->snapshots[u->nsnapshots++] = rs_xstrdup(names[i]);
+            }
+        }
+        free(hit);
+        for (k = 0; k < 5; k++)
+        {
+            free(paths[k]);
+        }
+    }
+    /* The newest copy of the chunking key: the older ones a prune removes. */
+    {
+        size_t ncopies;
+        char **copies = chunk_key_copies(r->dir, &ncopies);
+
+        paths[0] = rs_xasprintf("%s/%s", r->dir, ncopies > 0 ? copies[ncopies - 1]
+                                                             : RS_REPO_CHUNK_KEY);
+        rs_repo_free_names(copies, ncopies);
+    }
+    hit = sealed_files(out, paths, 1);
+    for (k = 0; k < out->nkeys; k++)
+    {
+        out->keys[k].chunk_key = hit[k];
+    }
+    free(hit);
+    free(paths[0]);
+    rs_repo_free_names(names, n);
+}
+
+void rs_repo_keys_free(struct rs_repo_keys *k)
+{
+    size_t i;
+
+    for (i = 0; i < k->nkeys; i++)
+    {
+        rs_repo_free_names(k->keys[i].snapshots, k->keys[i].nsnapshots);
+    }
+    free(k->keys);
+    memset(k, 0, sizeof(*k));
+}
 
 void rs_repo_du(struct rs_repo *r, struct rs_repo_usage *out)
 {
@@ -6636,18 +6984,26 @@ bool rs_repo_copy(struct rs_repo *r, const char *name, const char *dest_dir,
                     r->dir, r->encrypted ? "encrypted" : "not");
         ok = false;
     }
-    /* Its chunking key goes with it, as it is: encrypted to the same keys. */
+    /* Its chunking key goes with it, as it is -- every copy, each encrypted
+     * to the keys it is -- where the copy has none of its own. */
     if (ok && r->encrypted)
     {
-        char *from = rs_xasprintf("%s/%s", r->dir, RS_REPO_CHUNK_KEY);
-        char *to = rs_xasprintf("%s/%s", dest->dir, RS_REPO_CHUNK_KEY);
+        size_t ncopies;
+        size_t nthere;
+        char **copies = chunk_key_copies(r->dir, &ncopies);
+        char **there = chunk_key_copies(dest->dir, &nthere);
 
-        if (lstat(from, &st) == 0 && lstat(to, &st) != 0)
+        for (i = 0; ok && nthere == 0 && i < ncopies; i++)
         {
+            char *from = rs_xasprintf("%s/%s", r->dir, copies[i]);
+            char *to = rs_xasprintf("%s/%s", dest->dir, copies[i]);
+
             ok = copy_file(from, to, &out->bytes, err);
+            free(from);
+            free(to);
         }
-        free(from);
-        free(to);
+        rs_repo_free_names(copies, ncopies);
+        rs_repo_free_names(there, nthere);
     }
     if (ok)
     {

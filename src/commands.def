@@ -60,8 +60,9 @@ RS_CMD(CMD_COPY,     "copy",     "SNAPSHOT DEST", 2, 2,
        "DEST -- made if it is not there -- exactly as they are: an encrypted repository's "
        "copy is encrypted, and nothing is decrypted")
 RS_CMD(CMD_DU,       "du",       "REPO",       1,  1,
-       "say how much a repository holds, and what each snapshot needs of it, adds to it and "
-       "would free if it were dropped, without reading any pack or needing any key")
+       "say how much a repository holds, what each snapshot needs of it, adds to it and "
+       "would free if it were dropped, and which keys an encrypted one's files are "
+       "encrypted to, without reading any pack or needing any key")
 RS_CMD(CMD_EXPORT,   "export",   "SNAPSHOT",   1,  1,
        "write a snapshot as an image (-o FILE.tar) to take elsewhere, encrypted and "
        "signed if asked")

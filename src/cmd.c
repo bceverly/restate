@@ -2724,10 +2724,49 @@ int rs_cmd_copy(const struct rs_options *o)
     return status;
 }
 
+/* The keys du's repository is encrypted to, and what of it each is needed
+ * for: in `doc` and, a line a key, in `text`. */
+static void du_keys(struct rs_jval *doc, struct rs_buf *text, const struct rs_repo_keys *keys)
+{
+    struct rs_jval *obj = rs_jobj_add(doc, "keys");
+    size_t          i;
+    size_t          k;
+
+    rs_jval_set_object(obj);
+    rs_jobj_u64(doc, "encrypted_files", keys->files);
+    rs_jobj_u64(doc, "unreadable_files", keys->unreadable);
+    for (i = 0; i < keys->nkeys; i++)
+    {
+        const struct rs_repo_key_use *u = &keys->keys[i];
+        struct rs_jval               *j = rs_jobj_add(obj, u->id);
+        struct rs_jval               *snaps;
+        char                          size[32];
+
+        rs_jval_set_object(j);
+        rs_jobj_u64(j, "packs", u->packs);
+        rs_jobj_u64(j, "bytes", u->bytes);
+        snaps = rs_jobj_add(j, "snapshots");
+        rs_jval_set_array(snaps);
+        for (k = 0; k < u->nsnapshots; k++)
+        {
+            rs_jval_set_string(rs_jarr_add(snaps), u->snapshots[k]);
+        }
+        rs_jobj_bool(j, "chunk_key", u->chunk_key);
+        rs_human_size(u->bytes, size, sizeof(size));
+        rs_buf_addf(text, "encrypted to %s: %zu packs %s, %zu snapshots%s\n", u->id, u->packs,
+                    size, u->nsnapshots, u->chunk_key ? ", the chunking key" : "");
+    }
+    if (keys->unreadable > 0)
+    {
+        rs_buf_addf(text, "%zu encrypted files whose keys could not be read\n", keys->unreadable);
+    }
+}
+
 OUTPUT_HELD_BEGIN
 int rs_cmd_du(const struct rs_options *o)
 {
     struct rs_repo_usage u;
+    struct rs_repo_keys  keys;
     struct rs_repo      *r;
     struct rs_jval       doc;
     struct rs_jval      *list;
@@ -2748,6 +2787,7 @@ int rs_cmd_du(const struct rs_options *o)
     }
     rs_buf_free(&err);
     rs_repo_du(r, &u);
+    rs_repo_keys(r, &keys);
     rs_repo_close(r);
     memset(&doc, 0, sizeof(doc));
     rs_jval_set_object(&doc);
@@ -2793,6 +2833,8 @@ int rs_cmd_du(const struct rs_options *o)
         rs_human_size(u.pack_bytes, packs, sizeof(packs));
         rs_buf_addf(&text, "total %s, of which %zu packs %s\n", total, u.packs, packs);
     }
+    du_keys(&doc, &text, &keys);
+    rs_repo_keys_free(&keys);
     rs_jval_copy(rs_jobj_add(rs_result(), "du"), &doc);
     if (o->json)
     {
@@ -3053,6 +3095,8 @@ int rs_cmd_features(const struct rs_options *o)
     /* Whether protect makes what is finished immutable and the repository
      * append-only (chattr +i and +a) in place of a sticky bit: Linux's. */
     rs_jobj_bool(&doc, "protect_flags", rs_fsflags_supported());
+    rs_jobj_bool(&doc, "du_keys", true);
+    rs_jobj_bool(&doc, "chunk_key_reseal", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)

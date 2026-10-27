@@ -15,6 +15,8 @@
  *                                "encrypted" for one that is
  *   chunk-key                    an encrypted repository's: the key its chunk
  *                                boundaries follow, encrypted to its keys
+ *   chunk-key.TIME-N             the same key, sealed to newer keys by a capture
+ *                                given them; a prune keeps only the newest copy
  *   lock                         held by a capture, or a prune, while it runs
  *   readers                      held shared by whatever reads a snapshot's
  *                                content, and by a prune alone
@@ -376,6 +378,31 @@ struct rs_repo_usage {
  * is read, so no key is needed. */
 void rs_repo_du(struct rs_repo *r, struct rs_repo_usage *out);
 void rs_repo_usage_free(struct rs_repo_usage *u);
+
+/* A key the repository's files are encrypted to, and which files. */
+struct rs_repo_key_use {
+    char     id[17];        /* its key id: 16 upper-case hex digits, all zeros for
+                             * a recipient a file leaves anonymous */
+    size_t   packs;         /* the packs with a file encrypted to it */
+    uint64_t bytes;         /* those packs, on disk */
+    char   **snapshots;     /* the snapshots with a file of their own encrypted to it */
+    size_t   nsnapshots;
+    bool     chunk_key;     /* the chunking key is encrypted to it */
+};
+
+struct rs_repo_keys {
+    struct rs_repo_key_use *keys;     /* in the order they are first met */
+    size_t                  nkeys;
+    size_t                  files;    /* files encrypted to a key named here */
+    size_t                  unreadable; /* encrypted files whose keys could not be read */
+};
+
+/* The keys the repository's packs, snapshots and chunking key are encrypted
+ * to, read from the session keys at the head of each file, which say so in
+ * the clear: no key is needed. A key no file is encrypted to any more is one
+ * nothing in the repository needs to be read. */
+void rs_repo_keys(struct rs_repo *r, struct rs_repo_keys *out);
+void rs_repo_keys_free(struct rs_repo_keys *k);
 
 struct rs_repo_copied {
     char    *name;            /* the snapshot */

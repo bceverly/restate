@@ -316,9 +316,10 @@ Commands:
                           there -- exactly as they are: an encrypted
                           repository's copy is encrypted, and nothing is
                           decrypted
-  du REPO                 say how much a repository holds, and what each
-                          snapshot needs of it, adds to it and would free if it
-                          were dropped, without reading any pack or needing any
+  du REPO                 say how much a repository holds, what each snapshot
+                          needs of it, adds to it and would free if it were
+                          dropped, and which keys an encrypted one's files are
+                          encrypted to, without reading any pack or needing any
                           key
   export SNAPSHOT         write a snapshot as an image (-o FILE.tar) to take
                           elsewhere, encrypted and signed if asked
@@ -1296,7 +1297,38 @@ repository holds. So an encrypted repository cuts its chunks where a key of
 its own says: made at the first capture, kept in the repository encrypted to
 its keys, and in the machine's cache, where a capture reads it without the
 secret key. A machine with neither makes a key of its own, and stores its
-large files whole once more.
+large files whole once more. A capture -- `--append-only` too -- that finds
+the newest copy sealed to keys other than the ones it is given adds a copy
+sealed to its own, `chunk-key.TIME-N`, beside the others; every prune, keyless
+and `--whole-packs` included, removes all but the newest, so a retired key
+is not needed for it once a prune has run.
+
+**Changing keys.** Give the new public key alone to `--encrypt-to` from then
+on: new snapshots are encrypted to it, and the old ones stay encrypted to the
+old key, so restoring one takes the old secret key too (`--decrypt-with`, once
+for each key). `du` says, with no key at all, which keys the repository's
+files are still encrypted to -- read from the session keys at the head of each
+file, which name them in the clear -- and a key it no longer names can be
+retired:
+
+```console
+$ restate du /srv/restate/web01
+...
+encrypted to 3F2A9C0D81B4E7A6: 412 packs 13 GiB, 30 snapshots
+encrypted to C81D05E9F3A2B740: 37 packs 1.1 GiB, 6 snapshots, the chunking key
+```
+
+A prune that rewrites a pack needs the secret key that pack was encrypted to,
+and writes what it keeps encrypted to the keys it is given; `--whole-packs`
+needs no key, and removes only packs nothing needs.
+
+A key given with `--decrypt-with` is imported into a GnuPG home of restate's
+own, and libgcrypt 1.12.0 (Ubuntu 26.04's) cannot use an imported cv25519
+key -- the default kind -- reliably ([GnuPG T8094](https://dev.gnupg.org/T8094),
+fixed in 1.12.1), nor can GnuPG 2.5 with libgcrypt 1.12. restate tries each key
+once before it starts and says so if it cannot. An RSA encryption key has
+neither problem: `gpg --quick-gen-key NAME rsa3072 cert`, then `gpg
+--quick-add-key FINGERPRINT rsa3072 encr`.
 
 On disk a repository is plain files: `packs/` holds the chunks, in gzip'd tar
 files of about 32 MiB each beside an index of what is in them, a `.sum`
