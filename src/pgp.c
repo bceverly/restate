@@ -104,6 +104,10 @@ size_t rs_pgp_recipients(const unsigned char *data, size_t len, char ids[][17], 
     size_t            at = 0;
     size_t            n = 0;
 
+    if (!data)
+    {
+        return 0;
+    }
     while (n < max && at < len)
     {
         unsigned             tag = 0;

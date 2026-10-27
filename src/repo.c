@@ -1374,6 +1374,17 @@ const char *rs_repo_dir(const struct rs_repo *r)
  * macOS has F_OFD_SETLK too, and there the two locks on one open file
  * conflict with each other, so every capture would find itself busy.
  */
+#if defined(F_OFD_SETLK) && defined(__linux__)
+/* Whether `fd` is a file on an SMB share, as Linux's cifs client mounts one. */
+static bool on_smb(int fd)
+{
+    struct statfs st;
+
+    return fstatfs(fd, &st) == 0 && ((unsigned long)st.f_type == 0xFF534D42UL      /* CIFS */
+                                     || (unsigned long)st.f_type == 0xFE534D42UL); /* SMB2 */
+}
+#endif
+
 static int lock_whole(int fd, bool shared)
 {
 #if defined(F_OFD_SETLK) && defined(__linux__)
@@ -1396,6 +1407,13 @@ static int lock_whole(int fd, bool shared)
         {
             return -1;
         }
+    } else if (on_smb(fd))
+    {
+        /* The kernel's SMB client takes flock(2) as a byte-range lock on the
+         * server too, the same as the OFD lock, and the second one on a file
+         * refuses the first with EACCES: the one lock, then, which every
+         * other client of the share sees. */
+        return 0;
     }
 #endif
     return flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB);

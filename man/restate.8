@@ -1811,7 +1811,9 @@ record locks at all \- a FUSE one, as sshfs's and rclone's are \- is locked
 with
 .BR flock (2)
 alone, which the kernel keeps on the machine that takes it, so it too must
-not have two machines writing at once.
+not have two machines writing at once. An SMB share Linux mounts is locked
+with the open file description lock alone, which its client takes on the
+server, where every other client sees it.
 A FreeBSD server shows its own programs the locks NFS clients take only with
 .BR vfs.nfsd.enable_locallocks=1 ,
 and a Linux client is told of a lock held on such a server as an I/O error

@@ -1372,7 +1372,9 @@ restate du /srv/restate/web01
   the connection may be failing if nothing on the server holds it. A
   filesystem with no record locks at all -- a FUSE one, as sshfs's and
   rclone's are -- gets `flock(2)` alone, which only the machine taking it
-  sees: one writer at a time there.
+  sees: one writer at a time there. An SMB share Linux mounts gets the open
+  file description lock alone, which its client takes on the server as a
+  lock every other client sees.
 - **Any filesystem will do.** Every name restate writes is letters, digits,
   `.`, `-` and `_`, short, never differing from another only in case and
   never a name Windows reserves, and every file is a plain file with one
