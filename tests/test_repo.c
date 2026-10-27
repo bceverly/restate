@@ -1121,6 +1121,21 @@ static int quiet_system(const char *cmd)
     return rc;
 }
 
+/* What is in `dirs`, to stderr: what a failure on a machine nobody can log
+ * into had to work with. */
+static void show(const char *dirs)
+{
+    char *cmd = rs_xasprintf("ls -la %s >&2", dirs);
+
+    (void)fprintf(stderr, "    what was there:\n");
+    (void)fflush(stderr);
+    if (system(cmd) != 0)
+    {
+        (void)fprintf(stderr, "    (and ls said something was not)\n");
+    }
+    free(cmd);
+}
+
 /* Whether the first bytes of every file `pattern` matches are an OpenPGP
  * message's; and that there is at least one. */
 static bool all_sealed(const char *pattern)
@@ -1649,6 +1664,13 @@ static void test_encrypted(const char *dir)
     free(pattern);
     pattern = rs_xasprintf("'%s'/*/packs/*.idx", cache);
     CHECK(count(pattern) >= 2);
+    if (count(pattern) < 2)
+    {
+        char *dirs = rs_xasprintf("'%s'/packs '%s'/* '%s'/*/packs", repo, cache, cache);
+
+        show(dirs);
+        free(dirs);
+    }
     free(pattern);
     /* The chunking key: in the repository, encrypted, and here in the clear. */
     pattern = rs_xasprintf("'%s'/" RS_REPO_CHUNK_KEY, repo);
@@ -1752,6 +1774,13 @@ static void test_encrypted(const char *dir)
     CHECK(rs_repo_prune(r, &keep, false, &pr, &err));
     CHECK_STR(err.data ? err.data : "", "");
     CHECK(pr.packs_left > 0 || pr.packs_removed > 0);
+    if (pr.packs_left == 0 && pr.packs_removed == 0)
+    {
+        char *dirs = rs_xasprintf("'%s'/packs '%s'/snapshots/* '%s'/*/packs", repo, repo, cache);
+
+        show(dirs);
+        free(dirs);
+    }
     rs_repo_pruned_free(&pr);
     rs_repo_set_recipients(r, recips, 1);
     CHECK(rs_repo_prune(r, &keep, false, &pr, &err));
