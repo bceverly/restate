@@ -1386,8 +1386,15 @@ static int lock_whole(int fd, bool shared)
         if (errno == EAGAIN || errno == EACCES)
         {
             errno = EWOULDBLOCK;
+            return -1;
         }
-        return -1;
+        /* A filesystem with no record locks at all -- a FUSE one, as sshfs
+         * and rclone's are -- has flock(2), which the kernel keeps itself:
+         * that alone, then, as on the BSDs. */
+        if (errno != ENOLCK && errno != EOPNOTSUPP && errno != EINVAL)
+        {
+            return -1;
+        }
     }
 #endif
     return flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB);
@@ -3310,6 +3317,41 @@ static bool random_key(unsigned char key[32])
     return got == 32;
 }
 
+/* `tmp` put in place as `path` unless something is there already, which is
+ * kept: true either way, false with errno if neither. With link(2), which
+ * never replaces; where the filesystem has no hard links (exFAT, FAT, many
+ * SMB shares), by taking the name with O_EXCL, which only one machine can,
+ * and renaming over what it took. Until the rename, the name is an empty
+ * file, which a reader takes for a key it cannot read. */
+static bool publish_once(const char *tmp, const char *path)
+{
+    int fd;
+
+    if (link(tmp, path) == 0 || errno == EEXIST)
+    {
+        return true;
+    }
+    if (errno != EPERM && errno != EOPNOTSUPP && errno != ENOSYS && errno != EMLINK)
+    {
+        return false;
+    }
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0)
+    {
+        return errno == EEXIST;
+    }
+    (void)close(fd);
+    if (rename(tmp, path) != 0)
+    {
+        int saved = errno;
+
+        (void)unlink(path);
+        errno = saved;
+        return false;
+    }
+    return true;
+}
+
 /*
  * The key an encrypted repository's chunk boundaries follow. Chunk sizes are
  * what is left to see of an encrypted chunk, and with boundaries anyone can
@@ -3373,7 +3415,7 @@ static void chunk_key(struct rs_repo *r)
 
             rs_buf_reset(&err);
             if (!write_out(tmp, hex, 64, false, r->recips, seal_n(r), &err) ||
-                (link(tmp, path) != 0 && errno != EEXIST))
+                !publish_once(tmp, path))
             {
                 rs_warn("%s: its chunking key could not be kept there (%s); this machine "
                         "keeps it", r->dir, err.len ? err.data : strerror(errno));

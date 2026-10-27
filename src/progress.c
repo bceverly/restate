@@ -243,7 +243,8 @@ void rs_progress_format(const struct rs_progress_state *s, uint64_t now_ns, size
         uint64_t pct = s->bytes >= s->total ? 100 : s->bytes * 100 / s->total;
         uint64_t left = (rate > 0 && s->total > s->bytes) ? (s->total - s->bytes) / rate : 0;
         char     total[32];
-        char     rest[160];
+        /* Four 32-byte fields and the words between them: 164 at most. */
+        char     rest[192];
         size_t   used;
         size_t   bar;
         size_t   fill;

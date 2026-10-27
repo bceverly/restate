@@ -1043,9 +1043,12 @@ static bool import_secret(const char *home, const char *keyfile, struct rs_buf *
  * first used, and gpg-agent 2.4 with libgcrypt 1.12 then refuses it once --
  * "Bad secret key", or "Bad passphrase" for the right one -- and takes it
  * every time after: so the once is here, not on the first thing the run
- * decrypts.
+ * decrypts. False if gpg says a second time that it has no secret key for
+ * what was just encrypted to one it holds, as GnuPG 2.5 with libgcrypt 1.12
+ * says of a cv25519 key it has imported, every time: nothing encrypted to it
+ * could be read.
  */
-static void first_use(const char *home)
+static bool first_use(const char *home)
 {
     const char   *list[] = { "--with-colons", "--list-secret-keys" };
     char         *plain = rs_xasprintf("%s/first-use", home);
@@ -1058,6 +1061,7 @@ static void first_use(const char *home)
     struct rs_buf ignored;
     const char   *p;
     bool          primary = false;
+    bool          usable = true;
 
     rs_buf_init(&keys);
     rs_buf_init(&ignored);
@@ -1086,9 +1090,17 @@ static void first_use(const char *home)
             {
                 memcpy(fpr, f, 40);
                 fpr[40] = '\0';
-                if (gpg_in(home, seal, 9, NULL, &ignored))
+                /* Refused again for want of the key, that is: not for a
+                 * passphrase, which the decrypting says for itself. */
+                if (gpg_in(home, seal, 9, NULL, &ignored) &&
+                    !gpg_in(home, open_, 5, NULL, &ignored))
                 {
-                    (void)gpg_in(home, open_, 5, NULL, &ignored);
+                    rs_buf_reset(&ignored);
+                    if (!gpg_in(home, open_, 5, NULL, &ignored) && ignored.data &&
+                        strstr(ignored.data, "No secret key"))
+                    {
+                        usable = false;
+                    }
                 }
                 (void)unlink(sealed);
             }
@@ -1100,6 +1112,7 @@ static void first_use(const char *home)
     rs_buf_free(&ignored);
     free(plain);
     free(sealed);
+    return usable;
 }
 
 bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf *err)
@@ -1128,7 +1141,14 @@ bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf 
         end_home(home);
         return false;
     }
-    first_use(home);
+    if (!first_use(home))
+    {
+        rs_buf_addstr(err, "this gpg cannot decrypt with the secret key --decrypt-with gives once "
+                           "it is imported, as GnuPG 2.5 with libgcrypt 1.12 cannot with a cv25519 "
+                           "key; run it with GNUPGHOME set to the GnuPG home that has the key");
+        end_home(home);
+        return false;
+    }
     secret_home = home;
     guard_home(home);
     return true;

@@ -154,9 +154,20 @@ static char *real_tmpdir(void)
     return real;
 }
 
+/* Where true and false are, both of them usable as hooks: /usr/bin, or /bin
+ * where there is no /usr/bin/true, as on Alpine. */
+static const char *bin_of_true(void)
+{
+    return rs_hook_usable("/usr/bin/true") && rs_hook_usable("/usr/bin/false") ? "/usr/bin"
+                                                                               : "/bin";
+}
+
 void test_live(void)
 {
     char           *dir = real_tmpdir();
+    const char     *bin = bin_of_true();
+    char           *bin_true = rs_xasprintf("%s/true", bin);
+    char           *bin_false = rs_xasprintf("%s/false", bin);
     char           *proc = rs_xasprintf("%s/proc", dir);
     struct rs_live *l = NULL;
     size_t          n = 0;
@@ -594,14 +605,14 @@ void test_live(void)
     TEST_CASE("hooks: found only where root alone could have put them");
     {
         static const char *const none[] = { "/nonexistent" };
-        static const char *const usr[] = { "/nonexistent", "/usr/bin" };
+        const char *const        usr[] = { "/nonexistent", bin };
         char                    *hook;
 
         rs_hooks_set_dirs(none, 1);
         CHECK(rs_hook_find("true") == NULL);
         rs_hooks_set_dirs(usr, 2);
         hook = rs_hook_find("true");
-        CHECK_STR(hook ? hook : "", "/usr/bin/true");
+        CHECK_STR(hook ? hook : "", bin_true);
         free(hook);
         CHECK(rs_hook_find("../bin/true") == NULL);
         CHECK(rs_hook_find(".hidden") == NULL);
@@ -802,9 +813,9 @@ void test_live(void)
         mkdirs(dir, "proc3");
         /* Twice, once calling itself sshd: one, named for its file. */
         process(proc3, 20, 1, 0, "true", ARGS("true"));
-        link_to(proc3, "20/exe", "/usr/bin/true");
+        link_to(proc3, "20/exe", bin_true);
         process(proc3, 21, 1, 0, "sshd", ARGS("sshd"));
-        link_to(proc3, "21/exe", "/usr/bin/true");
+        link_to(proc3, "21/exe", bin_true);
         /* A copy of its own, by the same name; a kind's own process; and one
          * whose file is not to be had. */
         process(proc3, 22, 1, 1000, "true", ARGS("true"));
@@ -838,14 +849,14 @@ void test_live(void)
 
     TEST_CASE("hooks: a program's, in the site's directory and only there");
     {
-        static const char *const site[] = { "/usr/bin" };
-        static const char *const both[] = { "/usr/bin", "/usr/bin" };
+        const char *const        site[] = { bin };
+        const char *const        both[] = { bin, bin };
         static const char *const none[] = { "/nonexistent" };
         char                    *hook;
 
         rs_hooks_set_dirs(site, 1);
         hook = rs_hook_for_program("true");
-        CHECK_STR(hook ? hook : "", "/usr/bin/true");
+        CHECK_STR(hook ? hook : "", bin_true);
         free(hook);
         /* A kind's name is that kind, whatever program shares it. */
         CHECK(!rs_live_kind("true") && rs_live_kind("docker"));
@@ -880,8 +891,8 @@ void test_live(void)
         one.paths = paths;
         one.npaths = 2;
         rs_buf_init(&err);
-        CHECK(rs_hook_run("/usr/bin/true", "pause", &one, "/var/lib/restate/dumps/x", true, &err));
-        CHECK(!rs_hook_run("/usr/bin/false", "resume", &one, NULL, false, &err));
+        CHECK(rs_hook_run(bin_true, "pause", &one, "/var/lib/restate/dumps/x", true, &err));
+        CHECK(!rs_hook_run(bin_false, "resume", &one, NULL, false, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "resume 18-main exited 1");
         rs_buf_reset(&err);
         /* Anyone's file is not run, however executable. */
@@ -958,6 +969,8 @@ void test_live(void)
     }
 
     free(proc);
+    free(bin_true);
+    free(bin_false);
     rs_test_rmtree(dir);
     free(dir);
 }

@@ -124,6 +124,7 @@ exec_prefix ?= $(prefix)
 sbindir     ?= $(exec_prefix)/sbin
 datarootdir ?= $(prefix)/share
 mandir      ?= $(datarootdir)/man
+sysconfdir  ?= /etc
 DESTDIR     ?=
 INSTALL     ?= install
 
@@ -209,6 +210,12 @@ $(BIN_DIR)/unittests: $(LIB_SRC) $(TEST_SRC) $(wildcard src/*.h tests/*.h) $(OBJ
 .PHONY: test-cli
 test-cli: build ## Run the end-to-end tests against the built binary
 	@tests/cli/run.sh ./$(BIN_DIR)/$(PROG)
+
+# The repository on other storage: a share, a USB disk, anything mounted.
+.PHONY: test-share
+test-share: build ## Use a repository on SHARE=DIR (exFAT, SMB, NFS...) and read it back bit for bit
+	@test -n "$(SHARE)" || { echo "make test-share SHARE=DIR" >&2; exit 2; }
+	@tests/cli/share.sh ./$(BIN_DIR)/$(PROG) "$(SHARE)"
 
 .PHONY: test-memory
 test-memory: ## Run everything again under ASan, UBSan, LSan and valgrind
@@ -312,7 +319,7 @@ deb-sbuild: build ## Build in a clean chroot with no network, as a Launchpad bui
 install-tree: build ## Install into DESTDIR, for the package build
 	@$(INSTALL) -d $(DESTDIR)$(sbindir) $(DESTDIR)$(mandir)/man8 \
 	              $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks
-	@$(INSTALL) -d -m 0755 $(DESTDIR)/etc/$(PROG)/jobs.d
+	@$(INSTALL) -d -m 0755 $(DESTDIR)$(sysconfdir)/$(PROG)/jobs.d
 	@$(INSTALL) -m 0755 $(BIN_DIR)/$(PROG) $(DESTDIR)$(sbindir)/$(PROG)
 	@$(INSTALL) -m 0644 $(MAN_PAGE) $(DESTDIR)$(mandir)/man8/$(PROG).8
 	@$(INSTALL) -m 0755 hooks/* $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks/
@@ -331,6 +338,17 @@ bsd-pkg: build ## Build this BSD's binary package into dist/
 	         mandir=$(BSD_MANDIR) > /dev/null
 	@scripts/build-bsd-pkg.sh $(BSD_STAGE) dist
 	@rm -rf $(BSD_STAGE)
+
+# An RPM for the Fedora, EL or openSUSE this runs on, and an Alpine package
+# for the Alpine release it runs on, each from a tarball of this tree
+# (scripts/build-rpm.sh, scripts/build-apk.sh), into dist/.
+.PHONY: rpm
+rpm: ## Build this distribution's RPM into dist/ (Fedora, RHEL and its rebuilds, openSUSE)
+	@scripts/build-rpm.sh
+
+.PHONY: apk
+apk: ## Build this Alpine release's package into dist/ (as root, in a throwaway container)
+	@scripts/build-apk.sh
 
 .PHONY: deb-clean
 deb-clean: ## Remove what the package builds left behind

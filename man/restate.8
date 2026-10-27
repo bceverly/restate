@@ -1774,7 +1774,12 @@ only as the second kind. So a capture from the machine and a prune or check
 on the file server exclude each other as two on one machine do. NFS version
 3 locks only through its lock daemon; an NFSv3 share mounted
 .B nolock
-does not lock at all, and must not have two writers.
+does not lock at all, and must not have two writers. A filesystem with no
+record locks at all \- a FUSE one, as sshfs's and rclone's are \- is locked
+with
+.BR flock (2)
+alone, which the kernel keeps on the machine that takes it, so it too must
+not have two machines writing at once.
 A FreeBSD server shows its own programs the locks NFS clients take only with
 .BR vfs.nfsd.enable_locallocks=1 ,
 and a Linux client is told of a lock held on such a server as an I/O error
@@ -1793,6 +1798,21 @@ makes the owner and group of the directory it makes it in, and that group's
 read where the directory gives its group read, so the machines a share maps
 to the repository's owner, or into its group, can still read what root
 wrote.
+.PP
+.B Any filesystem.
+A repository asks nothing of its filesystem that exFAT, FAT or an SMB share
+that ignores case cannot give: every name in it is letters, digits,
+.BR . ,
+.B \-
+and
+.BR _ ,
+short, none differing from another in its directory only in case and none a
+name Windows reserves, and every file in it is a plain file with one name.
+The paths captured, their case, owners, modes, times, symlinks and hard links
+are data inside the indexes, so a repository on such storage reads back bit
+for bit. Where the filesystem has no hard links, the chunking key of an
+encrypted repository is put in place by taking its name first and renaming
+over it, which only one machine can.
 .PP
 .B Only adding.
 A capture only ever adds files: each pack, its

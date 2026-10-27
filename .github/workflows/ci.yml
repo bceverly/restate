@@ -197,6 +197,144 @@ jobs:
         run: make test-unit test-cli
 
   # ==========================================================================
+  # The other Linux distributions there are packages for: musl and busybox on
+  # Alpine, and Fedora, EL and openSUSE, each in a container of its own as
+  # root. Built and tested from source, then the package built from this tree
+  # as the release builds it, and installed, used and removed in a fresh
+  # container -- so a change that breaks a package fails here, not after a
+  # tag.
+  distros:
+    name: Tests (${{ matrix.name }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Busybox's find, awk and tar: what the tests have to get by with.
+          - name: Alpine
+            image: alpine:latest
+            setup: apk add -q build-base bash gzip gnupg
+            package: sh scripts/build-apk.sh "" dist
+            verify: verify-apk.sh
+          - name: Fedora
+            image: registry.fedoraproject.org/fedora:latest
+            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            package: bash scripts/build-rpm.sh --deps "" dist
+            verify: verify-rpm.sh
+          - name: EL 9
+            image: docker.io/almalinux/almalinux:9
+            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            package: bash scripts/build-rpm.sh --deps "" dist
+            verify: verify-rpm.sh
+          - name: EL 10
+            image: docker.io/almalinux/almalinux:10
+            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            package: bash scripts/build-rpm.sh --deps "" dist
+            verify: verify-rpm.sh
+          - name: openSUSE Leap 16
+            image: registry.opensuse.org/opensuse/leap:16.0
+            setup: zypper --non-interactive -q install -y gcc make diffutils findutils gawk gzip tar gpg2
+            package: bash scripts/build-rpm.sh --deps "" dist
+            verify: verify-rpm.sh
+          - name: openSUSE Tumbleweed
+            image: registry.opensuse.org/opensuse/tumbleweed:latest
+            setup: zypper --non-interactive -q install -y gcc make diffutils findutils gawk gzip tar gpg2
+            package: bash scripts/build-rpm.sh --deps "" dist
+            verify: verify-rpm.sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and test it, then build its package
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ matrix.setup }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e SETUP -e PACKAGE "$IMAGE" sh -c '
+            set -e
+            $SETUP
+            . /etc/os-release && echo "$PRETTY_NAME"
+            make build WERROR=-Werror
+            make test-unit test-cli
+            make clean
+            eval "$PACKAGE"'
+
+      - name: Install the package in a fresh container, use it and remove it
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERIFY: ${{ matrix.verify }}
+        run: |
+          docker run --rm -v "$PWD/dist:/packages:ro" -v "$PWD/scripts:/s:ro" "$IMAGE" \
+            sh "/s/$VERIFY" /packages
+
+  # ==========================================================================
+  # A repository on storage that is not a Unix filesystem: exFAT and FAT,
+  # which have no case, owners, modes or links, and an SMB share that ignores
+  # case, each mounted by this runner's kernel. The roadmap's promise that the
+  # format assumes nothing of where it is kept, held to (tests/cli/share.sh;
+  # make test-cli runs it on the local filesystem, and macOS's is
+  # case-insensitive).
+  share:
+    name: Repository on exFAT, FAT and SMB
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runner's kernel may keep exfat, vfat and cifs in its extra
+      # modules, which are not installed until asked for.
+      - name: Install the filesystems' tools and Samba
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential exfatprogs dosfstools samba cifs-utils gnupg
+          for m in exfat vfat cifs; do
+            sudo modprobe "$m" 2> /dev/null ||
+              { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe "$m"; }
+          done
+
+      - name: make build
+        run: make build WERROR=-Werror
+
+      - name: exFAT
+        run: |
+          truncate -s 1G "$RUNNER_TEMP/exfat.img"
+          mkfs.exfat "$RUNNER_TEMP/exfat.img"
+          sudo mkdir -p /mnt/exfat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)" "$RUNNER_TEMP/exfat.img" /mnt/exfat
+          make test-share SHARE=/mnt/exfat
+
+      - name: FAT
+        run: |
+          truncate -s 1G "$RUNNER_TEMP/fat.img"
+          mkfs.vfat -F 32 "$RUNNER_TEMP/fat.img"
+          sudo mkdir -p /mnt/fat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)" "$RUNNER_TEMP/fat.img" /mnt/fat
+          make test-share SHARE=/mnt/fat
+
+      # A share as a NAS has one: case ignored (and kept), every file the
+      # same owner and mode whatever was asked, over SMB 3.
+      - name: SMB
+        run: |
+          sudo mkdir -p /srv/restate-smb
+          sudo chown "$(id -u):$(id -g)" /srv/restate-smb
+          printf '[restate]\n  path = /srv/restate-smb\n  read only = no\n  case sensitive = no\n  preserve case = yes\n  force user = %s\n' \
+            "$(id -un)" | sudo tee -a /etc/samba/smb.conf > /dev/null
+          printf 'restate-ci\nrestate-ci\n' | sudo smbpasswd -s -a "$(id -un)"
+          sudo systemctl restart smbd
+          sudo mkdir -p /mnt/smb
+          sudo mount -t cifs //127.0.0.1/restate /mnt/smb -o \
+            "username=$(id -un),password=restate-ci,uid=$(id -u),gid=$(id -g),file_mode=0644,dir_mode=0755,vers=3.1.1"
+          make test-share SHARE=/mnt/smb
+
+  # ==========================================================================
   # macOS, on a native runner: Apple's linker, Apple's libc, BSD userland.
   macos:
     name: Tests (macOS)

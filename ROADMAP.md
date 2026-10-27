@@ -435,16 +435,22 @@ restate is Linux first, and Ubuntu first of all. The rest of it is the same
 program on each system, with what is particular to each kept in its own
 place:
 
-- [ ] **A repository format free of any system's assumptions**, so one
+- [x] **A repository format free of any system's assumptions**, so one
       repository can hold captures of Linux, the BSDs, macOS and Windows, on
-      any storage, a NAS share among them. Packs and snapshots are already
-      plain files with names restate chooses (digests, sequence numbers and
-      UTC times, in letters, digits, `.`, `-` and `_`); paths, their bytes
-      and case, owners, modes, times and every other kind of metadata stay
-      data inside the index, never left to the filesystem the repository is
-      on. To be held to by a test: a repository on a case-insensitive
-      filesystem with short names and no Unix permissions (exFAT, SMB) reads
-      back bit for bit
+      any storage, a NAS share among them. Packs and snapshots are plain
+      files with names restate chooses (digests, sequence numbers and UTC
+      times, in letters, digits, `.`, `-` and `_`); paths, their bytes and
+      case, owners, modes, times and every other kind of metadata stay data
+      inside the index, never left to the filesystem the repository is on.
+      Held to by `tests/cli/share.sh`: a repository captured into, pruned,
+      repacked and restored from reads back bit for bit, and every name in
+      it is short, portable, unique without case and none Windows reserves,
+      with nothing but plain files with one name -- run by `make test-cli`
+      on the local filesystem (case-insensitive on macOS), and by CI on
+      exFAT, FAT and an SMB share that ignores case. Where a filesystem has
+      no record locks (FUSE) restate takes `flock` alone, and where it has
+      no hard links the chunking key goes in place without one. **Every
+      change to what a repository holds keeps to this**
 - [ ] **Each system's `--quiesce`**: a capture read from a snapshot of the
       filesystem rather than from services paused one by one -- Volume
       Shadow Copy on Windows, APFS local snapshots on macOS, ZFS and UFS
@@ -457,10 +463,17 @@ place:
       (`chflags`: `schg`, `uchg`, `nodump` and the rest), recorded and set
       again last, since an immutable flag set early would refuse the rest of
       the restore. NFSv4 and macOS ACLs are above, under putting it back
-- [ ] **Windows**: paths compared without case, as NTFS does, so two paths
-      captured elsewhere that differ only in case are said to collide rather
-      than one overwriting the other; long paths, past `MAX_PATH`, through
-      the `\\?\` prefix; and a Windows build of restate itself
+- [ ] **Windows** (on hold): paths compared without case, as NTFS does, so
+      two paths captured elsewhere that differ only in case are said to
+      collide rather than one overwriting the other; long paths, past
+      `MAX_PATH`, through the `\\?\` prefix; and a Windows build of restate
+      itself. More a second program than a port: what makes a Windows
+      machine different from a fresh install is in the component store, the
+      MSI and AppX databases, winget and the registry rather than in package
+      managers' file lists; it is rebuilt with unattend.xml and winget rather
+      than an autoinstall file; and it has no POSIX owners, modes or
+      fork/exec. It shares the repository format (kept free of Unix's
+      assumptions for it, above), the tar and gzip code and the index
 
 ## Then — other processor architectures
 
@@ -502,8 +515,17 @@ name an architecture:
       NetBSD on each release, built in that release's VM with its own package
       tool from the release's tarball, installed, checked and removed there
       first; `make bsd-pkg` by hand
-- [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, Homebrew formula
-- [ ] Debian and RPM packages for other Linux distributions
+- [x] RPMs for Fedora, RHEL 9 and 10 and their rebuilds, and openSUSE: one
+      spec, built for each release and architecture in a bare container,
+      installed and removed in a fresh one, and attached to the release;
+      Fedora COPR and the openSUSE Build Service build it for every release
+      they have; `make rpm` by hand
+- [x] Alpine packages for every supported release, built with abuild,
+      installed and removed there first; `make apk` by hand
+- [x] A Homebrew formula in the `bceverly/homebrew-tap` tap, installed from
+      source, tested and audited on macOS before each release's goes there
+- [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, and Homebrew's own core tap
+- [ ] Debian itself, as against Ubuntu's PPA, and Arch (the AUR)
 
 ## Later
 

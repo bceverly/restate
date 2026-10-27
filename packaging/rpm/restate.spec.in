@@ -1,0 +1,102 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate's RPM, one spec for Fedora, RHEL and its rebuilds (EL 9 and 10),
+# and openSUSE. scripts/build-rpm.sh writes restate.spec from this, with the
+# version from VERSION, so the number lives in one place; the release workflow
+# builds and installs it on each before a release, and sends the same spec to
+# Fedora COPR and the openSUSE Build Service, which build it for every
+# architecture they have.
+#
+# Very little here, as in debian/rules: one program, its manual and its hooks,
+# from C that links only libc, built by the project's own Makefile.
+
+Name:           restate
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Record what makes a machine different from a fresh install
+License:        BSD-2-Clause
+URL:            https://github.com/bceverly/restate
+Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
+
+BuildRequires:  bash
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  systemd-rpm-macros
+# What the unit tests run besides restate, which a build root as bare as
+# OBS's and COPR's does not have unless asked.
+BuildRequires:  diffutils
+BuildRequires:  findutils
+BuildRequires:  gawk
+BuildRequires:  gzip
+BuildRequires:  tar
+
+# gpgv checks an image's signature, and restore refuses an image whose
+# signature it cannot check; restate runs gzip for every image. Named by
+# path, since the package that has them is gnupg2 on Fedora and EL and gpg2
+# on openSUSE.
+Requires:       /usr/bin/gpgv
+Requires:       gzip
+# gpg encrypts and signs (--encrypt-to, --sign-with); curl fetches installers
+# and the package baseline; pigz compresses on every core. restate says
+# plainly which is missing when it needs one.
+Recommends:     /usr/bin/gpg
+Recommends:     curl
+Recommends:     pigz
+
+%description
+restate records what makes a machine different from a fresh install of its
+operating system, and puts that difference back after a reinstall: onto the
+same machine, a new one, or a virtual machine.
+
+Every file is classified: what the system regenerates, what is safe to lose,
+what the installed packages provide unmodified, and the state that makes the
+machine itself. Only that state is kept; the packages are recorded instead,
+each at its version, with the repositories it came from, along with the disk
+layout and the machine's hardware.
+
+Captures can go into a repository that stores each file once, encrypted if
+wanted, with snapshots pruned on a schedule. One C program that links only
+libc.
+
+%prep
+%autosetup
+
+# The Makefile appends its own flags to the distribution's, which
+# set_build_flags exports: both apply, as in debian/rules.
+%build
+%{?set_build_flags}
+make build VERSION=%{version}
+
+# The unit tests: self-contained, and a few seconds. Not the end-to-end
+# tests, which build their fixtures with whatever tar, gzip and gpg the
+# builder happens to have.
+%check
+make test-unit VERSION=%{version}
+
+# The hooks go where the program looks for them, libexec/restate/hooks beside
+# the sbin it runs from: /usr/libexec on every one of these.
+%install
+make install-tree DESTDIR=%{buildroot} prefix=%{_prefix} sbindir=%{_sbindir} \
+     mandir=%{_mandir} VERSION=%{version}
+install -d %{buildroot}%{_unitdir}
+sed 's|@SBINDIR@|%{_sbindir}|' systemd/restate-job@.service.in \
+    > %{buildroot}%{_unitdir}/restate-job@.service
+install -m 0644 systemd/restate-job@.timer %{buildroot}%{_unitdir}/restate-job@.timer
+
+# A template unit is never enabled or started by the package: there is no job
+# until someone writes one.
+%files
+%license LICENSE
+%doc README.md
+%{_sbindir}/restate
+%{_mandir}/man8/restate.8*
+%{_prefix}/libexec/restate/
+%dir %{_sysconfdir}/restate
+%dir %{_sysconfdir}/restate/jobs.d
+%{_unitdir}/restate-job@.service
+%{_unitdir}/restate-job@.timer
+
+%changelog
+* @DATE@ Bryan C. Everly <bryan@theeverlys.com> - @VERSION@-1
+- restate @VERSION@: see https://github.com/bceverly/restate/releases/tag/v@VERSION@

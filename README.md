@@ -1337,7 +1337,18 @@ restate du /srv/restate/web01
   the locks NFS clients take only with `vfs.nfsd.enable_locallocks=1`, and a
   Linux client is told of a lock held on such a server as an I/O error:
   restate asks again twice, a second apart, and then exits 5 (busy), saying
-  the connection may be failing if nothing on the server holds it.
+  the connection may be failing if nothing on the server holds it. A
+  filesystem with no record locks at all -- a FUSE one, as sshfs's and
+  rclone's are -- gets `flock(2)` alone, which only the machine taking it
+  sees: one writer at a time there.
+- **Any filesystem will do.** Every name restate writes is letters, digits,
+  `.`, `-` and `_`, short, never differing from another only in case and
+  never a name Windows reserves, and every file is a plain file with one
+  name; what was captured -- its paths and their case, owners, modes, times,
+  symlinks and hard links -- is data inside the indexes. So a repository on
+  exFAT, FAT, a USB disk or an SMB share that ignores case reads back bit for
+  bit. CI holds it to that on exFAT, FAT and SMB, and `make test-share
+  SHARE=DIR` does on whatever DIR is on.
 - **Nothing needs to be root's.** A share that maps every user to one of its
   own (`all_squash`) works, as long as that user can write it. Run as root on
   the storage itself -- a prune, a repack or a check there -- restate gives
@@ -1817,11 +1828,63 @@ own packages are signed by OpenBSD's means, which these are not -- hence
 them instead. `pkg delete restate` (FreeBSD) or `pkg_delete restate` removes
 it. `make bsd-pkg` builds the same package on the system it runs on.
 
-A package for macOS comes later; see the [roadmap](ROADMAP.md). Everywhere
-else, and for what is not released yet,
-restate is built from source and installed into `/usr/local`, which is the
-place for software the administrator installs by hand and is never touched by
-the package manager.
+On Fedora, RHEL 9 and 10 and their rebuilds (AlmaLinux, Rocky), from
+[COPR](https://copr.fedorainfracloud.org/coprs/bceverly/restate/), which
+builds each release for every Fedora and EPEL release and architecture it
+has; on openSUSE Tumbleweed, Leap and SLE, from the
+[openSUSE Build Service](https://software.opensuse.org/download/package?package=restate&project=home%3Abceverly):
+
+```bash
+sudo dnf copr enable bceverly/restate && sudo dnf install restate   # Fedora, EL
+```
+
+Or from the RPM attached to each release for Fedora, EL 9, EL 10, Leap 16 and
+Tumbleweed, x86_64 and aarch64, each built in a bare container of that
+distribution from the release's tarball, then installed, used and removed in
+a fresh one before the release is published:
+
+```bash
+sudo dnf install ./restate-VERSION-1.el10.x86_64.rpm                       # Fedora, EL
+sudo zypper install --allow-unsigned-rpm ./restate-VERSION-1.opensuseleap16.0.x86_64.rpm
+```
+
+Each puts `restate` in `/usr/sbin` (`/usr/bin` on Fedora 42 and later, where
+they are one), its manual in section 8 and its hooks in
+`/usr/libexec/restate/hooks`, and brings `gpgv`; `curl`, `gpg` and `pigz` come
+as recommendations, and the `restate-job@` systemd units come with it, enabled
+for no job until one is written. `make rpm` builds the same package on the
+system it runs on.
+
+On Alpine 3.21 to 3.24, from the two packages attached to each release for
+each, x86_64 and aarch64 -- the program, and its manual as Alpine splits it
+off -- built with `abuild` on that release and installed, used and removed
+there first:
+
+```bash
+apk add --allow-untrusted restate-VERSION-r0-alpine3.24-x86_64.apk \
+    restate-doc-VERSION-r0-alpine3.24-x86_64.apk
+```
+
+They are signed by no key Alpine knows -- hence `--allow-untrusted`, as with
+OpenBSD's `-D unsigned` -- and the release's checksums and attestation vouch
+for them instead. `make apk` builds the same packages, as root in a
+throwaway Alpine container.
+
+On macOS, with Homebrew, from the formula each release puts in the
+[bceverly/homebrew-tap](https://github.com/bceverly/homebrew-tap) tap, after
+installing it from source, testing it and removing it on macOS:
+
+```bash
+brew install bceverly/tap/restate
+```
+
+restate runs as root, and runs only programs and hooks root owns: Homebrew's
+are yours, so the formula's hooks are not run, and an image's signature is
+checked only with a `gpgv` that is root's. `brew info restate` says so too.
+
+Everywhere else, and for what is not released yet, restate is built from
+source and installed into `/usr/local`, which is the place for software the
+administrator installs by hand and is never touched by the package manager.
 
 ### Installing on Ubuntu 26.04 from source
 
@@ -1908,6 +1971,7 @@ reports itself as `-dev`, so a bug report says which it was.
 make test            # all of the below
 make test-unit       # the C unit tests
 make test-cli        # end-to-end: the built binary, run as a user runs it
+make test-share SHARE=/mnt/usb   # a repository on that storage, read back bit for bit
 make test-memory     # ASan + UBSan + LSan, then valgrind, over both suites and a malformed-input corpus
 make coverage        # line coverage, and the README badge; fails below 80%
 make fuzz            # libFuzzer (or the built-in mutator) over every parser; FUZZ_SECONDS=30
@@ -1956,6 +2020,8 @@ Run `make` with no arguments for the full list.
 | `make deb` / `make deb-source` | the binary `.deb`, or the signed source package Launchpad builds from |
 | `make deb-sbuild` | build the package in a clean chroot with no network, as a Launchpad builder does |
 | `make bsd-pkg` | this BSD's binary package, into `dist/`: FreeBSD's `.pkg`, OpenBSD's or NetBSD's `.tgz` |
+| `make rpm` | this distribution's RPM and source RPM, into `dist/`: Fedora, RHEL and its rebuilds, openSUSE |
+| `make apk` | this Alpine release's packages, into `dist/`, as root in a throwaway container |
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
 | `make install-dev` | the development tools and the git hooks |
 | `make man` | regenerate the manpage and the README's Usage block |

@@ -1,0 +1,40 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate's Alpine package. scripts/build-apk.sh writes APKBUILD from this,
+# with the version from VERSION and the release's tarball beside it, and
+# builds it with abuild; the release workflow builds it on each supported
+# Alpine release and installs, checks and removes it there first.
+#
+# Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+pkgname=restate
+pkgver=@VERSION@
+pkgrel=0
+pkgdesc="Record what makes a machine different from a fresh install"
+url="https://github.com/bceverly/restate"
+arch="all"
+license="BSD-2-Clause"
+# gpgv checks an image's signature, and restore refuses an image whose
+# signature it cannot check; restate runs gzip for every image. gnupg, curl
+# and pigz it uses when they are there, and says which is missing when it
+# needs one: apk has no recommendations to name them in.
+depends="gpgv gzip"
+makedepends="bash"
+subpackages="$pkgname-doc"
+source="$pkgname-$pkgver.tar.gz"
+
+# The Makefile appends its own flags to abuild's CFLAGS, which it exports.
+build() {
+	make build VERSION="$pkgver"
+}
+
+# The unit tests: self-contained, and a few seconds.
+check() {
+	make test-unit VERSION="$pkgver"
+}
+
+# The hooks go where the program looks for them: libexec/restate/hooks beside
+# the sbin it runs from.
+package() {
+	make install-tree DESTDIR="$pkgdir" prefix=/usr VERSION="$pkgver"
+}

@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -201,11 +202,14 @@ void test_scan(void)
     {
         char *out = NULL;
         char *errs = NULL;
+        /* In the C library's words: musl's are not glibc's. */
+        char *eio = rs_xasprintf("/usr/tool: %s", strerror(EIO));
 
         CHECK_INT(rs_test_capture(scan_pretending, &o, &out, &errs), 1);
         CHECK_CONTAINS(errs, "/etc/hosts: written to while it was being copied; kept as it was");
         CHECK_CONTAINS(errs, "/etc/empty: cut short while it was being copied");
-        CHECK_CONTAINS(errs, "/usr/tool: Input/output error");
+        CHECK_CONTAINS(errs, eio);
+        free(eio);
         free(out);
         free(errs);
     }

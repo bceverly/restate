@@ -429,10 +429,28 @@ static void copied(const char *dir)
     TEST_CASE("identity: new host keys made by ssh-keygen -A");
     {
         static const char *const yes[] = { "/bin/true", "/usr/bin/true" };
+        bool                     fakes = false;
 
         put(root, "etc/ssh/ssh_host_ed25519_key", "KEY\n");
         rs_program_set_paths(RS_PROG_SSH_KEYGEN, yes, 2);
+        /* true stands in for ssh-keygen only where, called by that name, it
+         * is still true: busybox's (Alpine's) is a program that does what
+         * its name says. */
         if (rs_program_path(RS_PROG_SSH_KEYGEN))
+        {
+            char          a0[] = "ssh-keygen";
+            char         *argv[] = { a0, NULL };
+            struct rs_buf said;
+            struct rs_buf why;
+            int           code = -1;
+
+            rs_buf_init(&said);
+            rs_buf_init(&why);
+            fakes = rs_run(RS_PROG_SSH_KEYGEN, argv, &said, &said, &code, &why) && code == 0;
+            rs_buf_free(&said);
+            rs_buf_free(&why);
+        }
+        if (fakes)
         {
             (void)rs_test_capture(run_renew, &r, &out, &errs);
             CHECK(r.ok);

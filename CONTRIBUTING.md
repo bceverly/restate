@@ -63,6 +63,17 @@ installs them first whenever they differ.
   and `make man` regenerates the manpage and the README's Usage block from it.
   Commit both.
 - Anything that parses input is reachable from `tests/fuzz/fuzz_restate.c`.
+- A repository assumes nothing of the filesystem it is on: anything restate
+  writes into one has a name of letters, digits, `.`, `-` and `_`, short,
+  unique in its directory without case and none Windows reserves, and is a
+  plain file with one name or a directory; whatever was captured -- paths,
+  case, owners, modes, times, links -- goes in the indexes, never onto the
+  repository's filesystem. `tests/cli/share.sh` checks it (`make test-cli`
+  runs it, and CI on exFAT, FAT and SMB); `make test-share SHARE=DIR` runs it
+  on any other storage.
+- A change to the packaging builds and installs where it is built for: the
+  RPM, Alpine and Homebrew packages are built and installed by CI and by
+  the release workflow, and `make rpm` and `make apk` build them by hand.
 
 ## House style
 

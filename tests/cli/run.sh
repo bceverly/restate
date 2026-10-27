@@ -22,6 +22,7 @@ case "$BIN" in
   *) BIN="$PWD/$BIN" ;;
 esac
 [ -x "$BIN" ] || { echo "run.sh: $BIN is not executable" >&2; exit 2; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/restate-cli.XXXXXX")" || exit 2
 # macOS's TMPDIR ends in a slash, so that is ".../T//restate-cli.x" -- which a
@@ -871,7 +872,10 @@ contains "$ERR" "the repository is damaged" "and that it is damaged"
 expect 3 "check --read-all a damaged repository" -- "$BIN" check --read-all crepo
 contains "$ERR" "not as their indexes say" "the full read finds it too"
 
-# A member the index does not list.
+# A member the index does not list -- appended with tar -r, which busybox's
+# tar (Alpine's) has not.
+echo a > tarprobe.a
+if tar -cf tarprobe.tar tarprobe.a 2> /dev/null && tar -rf tarprobe.tar tarprobe.a 2> /dev/null; then
 mkdir -p extra/restate/files/etc && echo evil > extra/restate/files/etc/evil
 ( cd tamper && gzip -dc ../tamper/restate/files.tar.gz > /dev/null; tar -xf ../rimg.tar &&
   gzip -dc restate/files.tar.gz > clean.tar && tar -rf clean.tar -C ../extra restate/files/etc/evil &&
@@ -883,6 +887,10 @@ expect 3 "restore an image with a member the index does not list" -- \
 contains "$ERR" "/etc/evil: in the image, but not as the index records it; refused" \
   "a member the index does not list is refused"
 check "and not written" test ! -e rextra/etc/evil
+else
+  echo "  (a member the index does not list: skipped, as this tar cannot append)"
+fi
+rm -f tarprobe.a tarprobe.tar
 
 # Extended attributes: set with whatever this system sets them with, where
 # its filesystem keeps them at all; captured, restored and verified.
@@ -940,6 +948,22 @@ if usable gpg && usable gpgv && usable gpgconf; then
   gk --export signer@example.invalid > signer.pub 2> /dev/null
   gk --export --armor signer@example.invalid > signer.asc 2> /dev/null
   gk --export other@example.invalid > other.pub 2> /dev/null
+  # Whether this gpg can decrypt with a secret key exported elsewhere once it
+  # has imported it, as --decrypt-with has it do: GnuPG 2.5 with libgcrypt
+  # 1.12 cannot, with a cv25519 key, and restate says so.
+  mkdir -m 700 rgnupg rgnupg2
+  rk() { GNUPGHOME="$WORK/rgnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
+  rk --quick-gen-key 'reimport <reimport@example.invalid>' default default never 2> /dev/null
+  rk --export-secret-keys reimport@example.invalid > reimport.sec 2> /dev/null
+  echo x | rk --trust-model always -r reimport@example.invalid -e > reimport.msg 2> /dev/null
+  reimports=no
+  if GNUPGHOME="$WORK/rgnupg2" gpg --batch --quiet --import reimport.sec 2> /dev/null &&
+    { GNUPGHOME="$WORK/rgnupg2" gpg --batch -d reimport.msg > /dev/null 2>&1 ||
+      GNUPGHOME="$WORK/rgnupg2" gpg --batch -d reimport.msg > /dev/null 2>&1; }; then
+    reimports=yes
+  fi
+  gpgconf --homedir "$WORK/rgnupg" --kill gpg-agent 2> /dev/null || true
+  gpgconf --homedir "$WORK/rgnupg2" --kill gpg-agent 2> /dev/null || true
 
   expect 0 "capture --sign-with" -- "$BIN" capture -r rtree --os=linux --sign-with signer.sec -o simg.tar
   contains "$ERR" "signed by restate test <signer@example.invalid>" "capture says who signed it"
@@ -1081,6 +1105,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
     "$BIN" check -q --passphrase-fd 3 poff-enc
   # decrypt_with a key that has a passphrase, and passphrase_file: a key of
   # its own, new each run.
+  if [ "$reimports" = yes ]; then
   mkdir -m 700 dgnupg pjobs ppout2
   dk() { gpg --homedir "$WORK/dgnupg" --batch --quiet --pinentry-mode loopback --passphrase pw "$@"; }
   dk --quick-gen-key 'decrypt pass <dpass@example.invalid>' default default never 2> /dev/null
@@ -1106,6 +1131,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
     env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" "$BIN" run -q "$WORK/pjobs/wrong.conf"
   contains "$ERR" "or its passphrase was not given" "says why"
   gpgconf --homedir "$WORK/dgnupg" --kill gpg-agent 2> /dev/null || true
+  fi
   expect 0 "prune --whole-packs an encrypted repository, with no key at all" -- \
     env XDG_CACHE_HOME="$WORK/pcache3" GNUPGHOME="$WORK/pnokey" \
     "$BIN" prune --whole-packs --keep-last 1 prepo-enc
@@ -1158,6 +1184,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
     "$BIN" restore --allow-unverified --root erout erepo
   check "its files back" cmp rtree/etc/app/key erout/etc/app/key
 
+  if [ "$reimports" = yes ]; then
   # The secret key given as a file, for one run, in a GnuPG home of restate's
   # own: from the command line, and from a job.
   gk --export-secret-keys enc@example.invalid > enc.sec 2> /dev/null && chmod 600 enc.sec
@@ -1222,6 +1249,15 @@ if usable gpg && usable gpgv && usable gpgconf; then
   contains "$ERR" "decrypt_with means nothing to a estimate job" "is refused"
   expect 2 "run --decrypt-with" -- "$BIN" run --decrypt-with enc.sec "$WORK/ejobs/restore.conf"
   check "and the homes are gone" test "$(homes)" = "$homes_before"
+  else
+    gk --export-secret-keys enc@example.invalid > enc.sec 2> /dev/null && chmod 600 enc.sec
+    rm -rf erout && mkdir -p erout
+    expect 2 "restore --decrypt-with a key this gpg cannot use once imported" -- \
+      env XDG_CACHE_HOME="$WORK/dcache" GNUPGHOME="$WORK/nokey" \
+      "$BIN" restore -q --allow-unverified --decrypt-with enc.sec --root erout erepo
+    contains "$ERR" "once it is imported" "says so, and what to do instead"
+    echo "  (secret key file tests skipped: this gpg cannot use one it imports)"
+  fi
   expect 0 "snapshots, with the secret key" -- \
     env XDG_CACHE_HOME="$WORK/cache" GNUPGHOME="$WORK/gnupg" "$BIN" snapshots erepo
   contains "$OUT" "files," "lists them with their summaries"
@@ -1654,7 +1690,8 @@ cp -R prepo pprot
 # container's root without CAP_LINUX_IMMUTABLE, nor on a filesystem without.
 pflags=no
 if [ "$(uname -s)" = Linux ] && mkdir pprobe; then
-  if chattr +a pprobe 2> /dev/null; then
+  # Read back: busybox's chattr (Alpine's) says nothing of a refusal.
+  if chattr +a pprobe 2> /dev/null && lsattr -d pprobe 2> /dev/null | cut -d' ' -f1 | grep -q a; then
     pflags=yes
     chattr -a pprobe
   fi
@@ -1924,6 +1961,17 @@ printf 'keep /x\n' > bad.rules
 expect 2 "a bad rules file" -- "$BIN" -R bad.rules classify /x
 contains "$ERR" "bad.rules:1: unknown class" "a bad rules file says where"
 expect 2 "a missing rules file" -- "$BIN" -R nonexistent.rules classify /x
+
+# A repository on this filesystem, read back bit for bit, and every name in it
+# one any filesystem keeps (tests/cli/share.sh; CI runs it on exFAT, FAT and
+# SMB too).
+mkdir -p share
+if bash "$HERE/share.sh" "$BIN" "$WORK/share" > share.log 2>&1; then
+  ok
+else
+  fail "a repository holds to its format here"
+  grep -v '^$' share.log | sed 's/^/        /' | tail -12
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n'

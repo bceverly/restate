@@ -12,8 +12,26 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
-#include <linux/fs.h>
 #include <sys/ioctl.h>
+
+/* Linux's, from <linux/fs.h>: fixed by its ABI, and given here so that
+ * building needs no kernel headers (Alpine's are a package of their own). */
+#ifndef FS_IOC_GETFLAGS
+#define FS_IOC_GETFLAGS _IOR('f', 1, long)
+#define FS_IOC_SETFLAGS _IOW('f', 2, long)
+#endif
+#ifndef FS_IMMUTABLE_FL
+#define FS_IMMUTABLE_FL 0x00000010
+#define FS_APPEND_FL    0x00000020
+#endif
+
+/* ioctl's request is an unsigned long in glibc and an int in musl, which
+ * the two requests above do not fit without a cast. */
+#ifdef __GLIBC__
+#define FSFLAGS_REQ(r) (r)
+#else
+#define FSFLAGS_REQ(r) ((int)(r))
+#endif
 #endif
 
 #include "util.h"
@@ -98,7 +116,7 @@ int rs_fsflags_get(int fd, unsigned *flags)
     {
         int attr = 0;
 
-        if (ioctl(fd, FS_IOC_GETFLAGS, &attr) != 0)
+        if (ioctl(fd, FSFLAGS_REQ(FS_IOC_GETFLAGS), &attr) != 0)
         {
             return -1;
         }
@@ -141,14 +159,14 @@ int rs_fsflags_set(int fd, unsigned flags)
     {
         int attr = 0;
 
-        if (ioctl(fd, FS_IOC_GETFLAGS, &attr) != 0)
+        if (ioctl(fd, FSFLAGS_REQ(FS_IOC_GETFLAGS), &attr) != 0)
         {
             return -1;
         }
         attr &= ~(FS_IMMUTABLE_FL | FS_APPEND_FL);
         attr |= ((flags & RS_FSFLAGS_IMMUTABLE) ? FS_IMMUTABLE_FL : 0) |
                 ((flags & RS_FSFLAGS_APPEND) ? FS_APPEND_FL : 0);
-        return ioctl(fd, FS_IOC_SETFLAGS, &attr);
+        return ioctl(fd, FSFLAGS_REQ(FS_IOC_SETFLAGS), &attr);
     }
 #else
     errno = EOPNOTSUPP;

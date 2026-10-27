@@ -63,6 +63,29 @@ static size_t secret_homes(void)
     return n;
 }
 
+/* Whether this gpg can decrypt with a secret key exported from `home` once it
+ * is imported somewhere else, as --decrypt-with does: GnuPG 2.5 with
+ * libgcrypt 1.12 cannot, with a cv25519 key. Asked of gpg alone, in `dir`. */
+static bool gpg_reimports;
+
+static bool reimports(const char *home, const char *dir)
+{
+    char *cmd = rs_xasprintf(
+        "d=$(mktemp -d '%s/reimport.XXXXXX') || exit 1; mkdir -m 700 \"$d/h\" && "
+        "GNUPGHOME='%s' gpg --batch --export-secret-keys > \"$d/k\" 2>/dev/null && "
+        "echo x | GNUPGHOME='%s' gpg --batch --trust-model always -r test@example.invalid -e "
+        "> \"$d/m\" 2>/dev/null && "
+        "GNUPGHOME=\"$d/h\" gpg --batch --quiet --import \"$d/k\" 2>/dev/null && "
+        "{ GNUPGHOME=\"$d/h\" gpg --batch -d \"$d/m\" > /dev/null 2>&1 || "
+        "GNUPGHOME=\"$d/h\" gpg --batch -d \"$d/m\" > /dev/null 2>&1; }; r=$?; "
+        "gpgconf --homedir \"$d/h\" --kill gpg-agent 2>/dev/null; rm -rf \"$d\"; exit $r",
+        dir, home, home);
+    bool ok = system(cmd) == 0;
+
+    free(cmd);
+    return ok;
+}
+
 /* The secret key in `sec` given with --decrypt-with: used, said, and gone
  * after, and gone too when a signal ends restate while it is there. */
 static void secret_key_cases(const char *sec, const char *pub)
@@ -72,8 +95,18 @@ static void secret_key_cases(const char *sec, const char *pub)
     pid_t         pid;
     int           st = 0;
 
-    TEST_CASE("pgp: a secret key given as a file, in a home of its own");
     rs_buf_init(&err);
+    if (!gpg_reimports)
+    {
+        TEST_CASE("pgp: a secret key this gpg cannot use once imported, refused, saying so");
+        CHECK(!rs_pgp_use_secret_key(&sec, 1, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "once it is imported");
+        CHECK_INT(secret_homes(), before);
+        rs_buf_free(&err);
+        (void)printf("  (secret key file tests skipped: this gpg cannot use one it imports)\n");
+        return;
+    }
+    TEST_CASE("pgp: a secret key given as a file, in a home of its own");
     CHECK_STR(rs_pgp_key_place(), "this user's GnuPG home");
     CHECK(rs_pgp_use_secret_key(&sec, 1, &err));
     CHECK_STR(rs_pgp_key_place(), "the key files --decrypt-with gives");
@@ -215,6 +248,7 @@ void test_pgp(void)
     cmd = rs_xasprintf("GNUPGHOME='%s' gpg --batch --export > '%s' 2>/dev/null", home, pub);
     CHECK(system(cmd) == 0);
     free(cmd);
+    gpg_reimports = reimports(home, dir);
     (void)setenv("GNUPGHOME", home, 1);
 
     TEST_CASE("pgp: an encrypted image, written and read back");
@@ -331,8 +365,15 @@ void test_pgp(void)
             keyf[0] = sec;
             o.decrypt_with = keyf;
             o.ndecrypt_with = 1;
-            CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_OK);
-            CHECK(access(key, F_OK) == 0);
+            if (gpg_reimports)
+            {
+                CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_OK);
+                CHECK(access(key, F_OK) == 0);
+            } else
+            {
+                CHECK_INT(rs_test_capture(run, &o, &out, &errs), RESTATE_EXIT_TROUBLE);
+                CHECK_CONTAINS(errs, "once it is imported");
+            }
             CHECK_STR(rs_pgp_key_place(), "this user's GnuPG home");
             free(out);
             free(errs);

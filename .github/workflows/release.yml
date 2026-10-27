@@ -14,6 +14,12 @@
 #            and NetBSD (openbsd-8 for OpenBSD 8.0), each built from the
 #            tarball in that release's VM with its own package tool, then
 #            installed, checked and removed (scripts/verify-bsd-pkg.sh)
+#   rpm      an RPM for Fedora, EL 9 and 10, openSUSE Leap 16 and Tumbleweed,
+#            x86_64 and aarch64, each built from the tarball in a bare
+#            container of that distribution, then installed, used and removed
+#            in a fresh one (scripts/build-rpm.sh, scripts/verify-rpm.sh)
+#   alpine   Alpine's package for 3.21 to 3.24, x86_64 and aarch64, the same
+#            way (scripts/build-apk.sh, scripts/verify-apk.sh)
 #   sign     SHA-256 checksums of all of them, and one signed build-provenance
 #            attestation (SLSA) that says which workflow made each from which
 #            commit
@@ -26,10 +32,18 @@
 #            and removed (scripts/verify-deb.sh)
 #   ppa      the source packages uploaded to the Launchpad PPA, which builds
 #            and publishes them for every architecture it has
+#   copr     the source RPM sent to Fedora COPR, which builds it for every
+#            chroot the project has
+#   obs      the tarball and spec committed to the openSUSE Build Service,
+#            which builds them for every repository the project has
+#   homebrew the formula for this release, installed from source, tested and
+#            audited on macOS, then pushed to the Homebrew tap
 #
-# `ppa` needs `deb-verify`, so a package that builds but does not install
-# never reaches the PPA: an upload there cannot be withdrawn, only superseded
-# by a higher version. The BSD ports and Homebrew come later; see ROADMAP.md.
+# `ppa` needs `deb-verify`, and `copr` and `obs` need `rpm`, so a package that
+# builds but does not install never reaches a repository: an upload there
+# cannot be withdrawn, only superseded by a higher version. `homebrew` needs
+# `publish`, since the formula downloads the release's tarball. The BSD ports
+# come later; see ROADMAP.md.
 #
 # ---------------------------------------------------------------------------
 # What the PPA needs configured in the repository
@@ -49,6 +63,26 @@
 #
 # The upload job runs in the `launchpad` environment, which can be given a
 # required reviewer to hold each upload for a person's approval.
+#
+# ---------------------------------------------------------------------------
+# What COPR, OBS and Homebrew need configured
+# ---------------------------------------------------------------------------
+# Secrets:
+#   COPR_LOGIN, COPR_USERNAME, COPR_API_TOKEN
+#                       from https://copr.fedorainfracloud.org/api/ (they
+#                       expire: COPR says when)
+#   OBS_USERNAME, OBS_PASSWORD
+#                       the openSUSE Build Service account
+#   HOMEBREW_TAP_DEPLOY_KEY
+#                       the private half of an SSH deploy key with write
+#                       access on the tap's repository
+#
+# Variables -- optional, defaults shown:
+#   COPR_PROJECT        bceverly/restate: made on COPR, with the chroots it is
+#                       to build for (Fedora, EPEL 9 and 10, openSUSE...)
+#   OBS_PROJECT         home:OBS_USERNAME: holding a package named restate,
+#                       with the repositories it is to build for
+#   HOMEBREW_TAP        bceverly/homebrew-tap
 
 name: Release
 
@@ -338,10 +372,161 @@ jobs:
           if-no-files-found: error
 
   # ==========================================================================
+  # An RPM for each distribution it is built for -- Fedora, RHEL's rebuilds
+  # (EL 9 and 10, AlmaLinux standing in for RHEL) and openSUSE -- on each
+  # architecture, built from the tarball in a bare container of that
+  # distribution with only what the spec asks for (scripts/build-rpm.sh
+  # --deps), then installed with dnf or zypper in a fresh one, used and
+  # removed (scripts/verify-rpm.sh). COPR and the openSUSE Build Service
+  # build their own from the same spec, below, once these have installed.
+  rpm:
+    name: Build the ${{ matrix.distro }} RPM (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        distro: [fedora, el9, el10, leap16, tumbleweed]
+        arch: [x86_64, aarch64]
+        include:
+          - distro: fedora
+            image: registry.fedoraproject.org/fedora:latest
+          - distro: el9
+            image: docker.io/almalinux/almalinux:9
+          - distro: el10
+            image: docker.io/almalinux/almalinux:10
+          - distro: leap16
+            image: registry.opensuse.org/opensuse/leap:16.0
+          - distro: tumbleweed
+            image: registry.opensuse.org/opensuse/tumbleweed:latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: Unpack the tarball
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          tar -xzf "source/restate-$V.tar.gz"
+
+      - name: Build it in a bare container
+        env:
+          V: ${{ needs.build.outputs.version }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -eu
+          mkdir -p packages
+          docker run --rm -v "$PWD:/w" -w "/w/restate-$V" "$IMAGE" \
+            bash scripts/build-rpm.sh --deps "/w/source/restate-$V.tar.gz" /w/packages
+          ls -l packages
+
+      - name: Install it in a fresh one, use it and remove it
+        env:
+          IMAGE: ${{ matrix.image }}
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          docker run --rm -v "$PWD/packages:/packages:ro" -v "$PWD/restate-$V/scripts:/s:ro" \
+            "$IMAGE" sh /s/verify-rpm.sh /packages
+
+      # The source package once, for COPR; the binary packages each.
+      - name: Keep the packages
+        run: |
+          set -eu
+          mkdir -p keep
+          cp packages/restate-*.rpm keep/
+          if [ "${{ matrix.distro }}/${{ matrix.arch }}" != fedora/x86_64 ]; then
+            rm -f keep/*.src.rpm
+          else
+            mkdir -p srpm && mv keep/*.src.rpm srpm/
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-rpm-${{ matrix.distro }}-${{ matrix.arch }}
+          path: keep/
+          retention-days: 30
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.distro == 'fedora' && matrix.arch == 'x86_64'
+        with:
+          name: srpm
+          path: srpm/
+          retention-days: 30
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Alpine's package for each supported release and architecture, built with
+  # abuild from the tarball in that release's container (scripts/build-apk.sh)
+  # and installed with apk in a fresh one, used and removed
+  # (scripts/verify-apk.sh). Signed with a key made for the build, as the BSD
+  # packages are by none: the release's checksums and attestation vouch for
+  # them, and apk add --allow-untrusted installs them.
+  alpine:
+    name: Build the Alpine ${{ matrix.version }} package (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      # Every release Alpine supports: each is supported for two years.
+      matrix:
+        version: ["3.21", "3.22", "3.23", "3.24"]
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: Unpack the tarball
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          tar -xzf "source/restate-$V.tar.gz"
+
+      - name: Build it
+        env:
+          V: ${{ needs.build.outputs.version }}
+          ALPINE: ${{ matrix.version }}
+        run: |
+          set -eu
+          mkdir -p packages
+          docker run --rm -v "$PWD:/w" -w "/w/restate-$V" "alpine:$ALPINE" \
+            sh -c "apk add -q alpine-sdk && sh scripts/build-apk.sh /w/source/restate-$V.tar.gz /w/packages"
+          ls -l packages
+
+      - name: Install it in a fresh container, use it and remove it
+        env:
+          V: ${{ needs.build.outputs.version }}
+          ALPINE: ${{ matrix.version }}
+        run: |
+          set -eu
+          docker run --rm -v "$PWD/packages:/packages:ro" -v "$PWD/restate-$V/scripts:/s:ro" \
+            "alpine:$ALPINE" sh /s/verify-apk.sh /packages
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-alpine-${{ matrix.version }}-${{ matrix.arch }}
+          path: packages/
+          retention-days: 30
+          if-no-files-found: error
+
+  # ==========================================================================
   # Everything the release holds, checksummed and attested together.
   sign:
     name: Checksum and attest the release files
-    needs: [build, bsd, openbsd-8]
+    needs: [build, bsd, openbsd-8, rpm, alpine]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -418,8 +603,11 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
           V: ${{ needs.build.outputs.version }}
+          COPR: ${{ vars.COPR_PROJECT || 'bceverly/restate' }}
+          OBS: ${{ vars.OBS_PROJECT || 'home:bceverly' }}
         run: |
           set -eu
+          OBS_URL="$(printf '%s' "$OBS" | sed 's/:/%3A/g')"
           # The release before this one: the newest version tag older than
           # this tag, in version order.
           PREV=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' |
@@ -448,6 +636,13 @@ jobs:
               *-netbsd-*) printf '    pkg_add %s\n' "$f" ;;
             esac
           done)"
+          RPMS="$(cd dist && for f in restate-"$V"-*.rpm; do
+            [ -e "$f" ] || continue
+            case "$f" in
+              *.el* | *.fc*) printf '    sudo dnf install ./%s\n' "$f" ;;
+              *) printf '    sudo zypper install --allow-unsigned-rpm ./%s\n' "$f" ;;
+            esac
+          done)"
           cat >> notes.md <<NOTES
 
           Install on Ubuntu 22.04, 24.04 or 26.04 from the PPA, once Launchpad
@@ -464,6 +659,28 @@ jobs:
 
           (OpenBSD's packages are signed by OpenBSD's own means, which these are
           not: the checksums and the attestation below vouch for them instead.)
+
+          Install on Fedora, RHEL 9 or 10 and their rebuilds, from COPR, or on
+          openSUSE, from the openSUSE Build Service, once each has built it:
+
+              sudo dnf copr enable $COPR && sudo dnf install restate
+              # openSUSE: https://software.opensuse.org/download/package?package=restate&project=$OBS_URL
+
+          or from the package here for your distribution and architecture --
+          each built, installed and tested on it:
+
+          $RPMS
+
+          Install on Alpine 3.21 to 3.24 from the packages here, the program
+          and its manual, signed by no key Alpine knows (the checksums and the
+          attestation vouch for them):
+
+              apk add --allow-untrusted restate-$V-r0-alpineREL-ARCH.apk \
+                  restate-doc-$V-r0-alpineREL-ARCH.apk
+
+          Install on macOS with Homebrew:
+
+              brew install bceverly/tap/restate
 
           Build and install from source (Ubuntu 26.04 and any Linux, the BSDs
           with gmake, macOS):
@@ -718,3 +935,245 @@ jobs:
           fi
           echo "Accepted, not yet published: Launchpad builds them now. Follow it at"
           echo "  https://launchpad.net/~$OWNER/+archive/ubuntu/$NAME/+packages"
+
+  # ==========================================================================
+  # Fedora COPR: the source package, which COPR builds for every chroot the
+  # project has (Fedora, EPEL 9 and 10, openSUSE, each architecture). Only
+  # once the RPMs have installed: a build there is published as it finishes.
+  # The project and its chroots are set up on COPR, not here -- see the top.
+  copr:
+    name: Send it to Fedora COPR
+    needs: [build, rpm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: srpm
+          path: srpm
+
+      - name: Install copr-cli
+        run: |
+          set -eu
+          # rich is a dependency copr-cli does not declare.
+          pip3 install --user --quiet copr-cli rich
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # printf, not a heredoc through sed: a token can hold a '/'.
+      - name: Configure the credentials
+        env:
+          COPR_LOGIN: ${{ secrets.COPR_LOGIN }}
+          COPR_USERNAME: ${{ secrets.COPR_USERNAME }}
+          COPR_API_TOKEN: ${{ secrets.COPR_API_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${COPR_LOGIN:-}" ] || [ -z "${COPR_USERNAME:-}" ] || [ -z "${COPR_API_TOKEN:-}" ]; then
+            echo "::error::COPR_LOGIN, COPR_USERNAME and COPR_API_TOKEN must all be set: see the top of this workflow"
+            exit 1
+          fi
+          mkdir -p ~/.config
+          umask 077
+          printf '[copr-cli]\nlogin = %s\nusername = %s\ntoken = %s\ncopr_url = https://copr.fedorainfracloud.org\n' \
+            "$COPR_LOGIN" "$COPR_USERNAME" "$COPR_API_TOKEN" > ~/.config/copr
+          copr-cli whoami
+
+      # --nowait, then followed: the emulated architectures' builds outlast a
+      # step that waits on them. A build that fails fails this job; one still
+      # going at the end is left to finish, and said.
+      - name: Build it there
+        env:
+          PROJECT: ${{ vars.COPR_PROJECT || 'bceverly/restate' }}
+        run: |
+          set -eu
+          SRPM="$(find srpm -name 'restate-*.src.rpm' | head -1)"
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if copr-cli build --nowait "$PROJECT" "$SRPM" | tee build.log; then
+              ok=1
+              break
+            fi
+            sleep $((attempt * 20))
+          done
+          [ "$ok" -eq 1 ] || { echo "::error::COPR did not take the build"; exit 1; }
+          ID="$(sed -n 's/^Created builds: *//p' build.log | awk '{ print $1 }')"
+          [ -n "$ID" ] || { echo "::error::no build id in what copr-cli said"; exit 1; }
+          echo "https://copr.fedorainfracloud.org/coprs/build/$ID"
+          for _ in $(seq 1 80); do
+            STATE="$(copr-cli status "$ID" 2> /dev/null || echo unknown)"
+            echo "  $STATE"
+            case "$STATE" in
+              succeeded) exit 0 ;;
+              failed | canceled) echo "::error::COPR build $ID $STATE"; exit 1 ;;
+            esac
+            sleep 60
+          done
+          echo "::warning::COPR build $ID is still going; it publishes when it is done"
+
+  # ==========================================================================
+  # The openSUSE Build Service: the tarball and the spec committed to the
+  # package there, which OBS builds for every repository the project has
+  # (Tumbleweed, Leap, SLE, and any other it is given), then followed to the
+  # end -- a commit OBS takes and then fails to build is a failure here, not
+  # a green job and a package that stays at the last version.
+  obs:
+    name: Send it to the openSUSE Build Service
+    needs: [build, rpm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: Install osc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends osc
+
+      - name: Configure the credentials
+        env:
+          OBS_USERNAME: ${{ secrets.OBS_USERNAME }}
+          OBS_PASSWORD: ${{ secrets.OBS_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "${OBS_USERNAME:-}" ] || [ -z "${OBS_PASSWORD:-}" ]; then
+            echo "::error::OBS_USERNAME and OBS_PASSWORD must both be set: see the top of this workflow"
+            exit 1
+          fi
+          mkdir -p ~/.config/osc
+          umask 077
+          printf '[general]\napiurl = https://api.opensuse.org\n\n[https://api.opensuse.org]\nuser = %s\npass = %s\n' \
+            "$OBS_USERNAME" "$OBS_PASSWORD" > ~/.config/osc/oscrc
+
+      - name: Commit the release to the package
+        env:
+          V: ${{ needs.build.outputs.version }}
+          OBS_USERNAME: ${{ secrets.OBS_USERNAME }}
+          PROJECT: ${{ vars.OBS_PROJECT }}
+        run: |
+          set -eu
+          PROJECT="${PROJECT:-home:$OBS_USERNAME}"
+          echo "OBS_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          tar -xzf "source/restate-$V.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            rm -rf "$PROJECT"
+            osc checkout "$PROJECT/restate" && break
+            [ "$attempt" -lt 5 ] || { echo "::error::osc checkout failed"; exit 1; }
+            sleep $((attempt * 20))
+          done
+          cd "$PROJECT/restate"
+          for f in restate-*.tar.gz restate.spec; do
+            if [ -e "$f" ]; then
+              osc rm "$f"
+            fi
+          done
+          cp "$GITHUB_WORKSPACE/source/restate-$V.tar.gz" .
+          sed -e "s|@VERSION@|$V|g" -e "s|@DATE@|$(LC_ALL=C date -u '+%a %b %d %Y')|g" \
+            "$GITHUB_WORKSPACE/restate-$V/packaging/rpm/restate.spec.in" > restate.spec
+          osc add "restate-$V.tar.gz" restate.spec
+          for attempt in 1 2 3 4 5; do
+            osc commit -m "restate $V" && break
+            [ "$attempt" -lt 5 ] || { echo "::error::osc commit failed"; exit 1; }
+            sleep $((attempt * 20))
+          done
+
+      - name: Wait for it to build
+        run: |
+          set -eu
+          sleep 120
+          for _ in $(seq 1 60); do
+            RESULTS="$(osc results "$OBS_PROJECT" restate 2> /dev/null || true)"
+            printf '%s\n' "$RESULTS"
+            if printf '%s\n' "$RESULTS" | grep -Eq '(failed|broken|unresolvable)'; then
+              printf '%s\n' "$RESULTS" | awk '$NF ~ /failed|broken/ { print $1, $2 }' |
+                while read -r repo arch; do
+                  osc remotebuildlog "$OBS_PROJECT" restate "$repo" "$arch" | tail -60 || true
+                done
+              echo "::error::OBS could not build it: see above"
+              exit 1
+            fi
+            if [ -n "$RESULTS" ] && ! printf '%s\n' "$RESULTS" |
+                grep -Eq '(scheduled|building|dispatching|blocked|finished|signing|unknown)'; then
+              echo "Built everywhere."
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "::warning::OBS is still building; it publishes each repository when it is done"
+
+  # ==========================================================================
+  # Homebrew: the formula, written for this release's tarball once the
+  # release that holds it is published, then installed from source, tested,
+  # audited and removed on macOS before it goes to the tap.
+  homebrew:
+    name: Publish the Homebrew formula
+    needs: [build, publish]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: source
+
+      - name: Write the formula
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          tar -xzf "source/restate-$V.tar.gz"
+          SHA="$(shasum -a 256 "source/restate-$V.tar.gz" | awk '{ print $1 }')"
+          sed -e "s|@VERSION@|$V|g" -e "s|@SHA256@|$SHA|g" \
+            "restate-$V/packaging/homebrew/restate.rb.in" > restate.rb
+          cat restate.rb
+
+      # From a tap of its own on this runner, as brew installs formulae only
+      # from taps; the URL is the published release's, so this is what
+      # someone installing it will download.
+      - name: Install it from source, test it, audit it and remove it
+        run: |
+          set -eu
+          brew tap-new --no-git restate/check
+          cp restate.rb "$(brew --repository restate/check)/Formula/restate.rb"
+          brew install --build-from-source restate/check/restate
+          brew test restate/check/restate
+          brew audit --strict restate/check/restate
+          brew uninstall restate/check/restate
+          brew untap restate/check
+
+      - name: Push it to the tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP: ${{ vars.HOMEBREW_TAP || 'bceverly/homebrew-tap' }}
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          if [ -z "${DEPLOY_KEY:-}" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is not set: see the top of this workflow"
+            exit 1
+          fi
+          KEYFILE="$(mktemp)"
+          trap 'rm -f "$KEYFILE"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+          export GIT_SSH_COMMAND="ssh -i $KEYFILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone "git@github.com:$TAP.git" tap
+          mkdir -p tap/Formula
+          cp restate.rb tap/Formula/restate.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/restate.rb
+          if git diff --cached --quiet; then
+            echo "The tap has restate $V already."
+            exit 0
+          fi
+          git commit -m "restate $V"
+          git push origin HEAD
