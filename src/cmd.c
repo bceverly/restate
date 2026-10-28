@@ -2157,10 +2157,11 @@ int rs_cmd_prune(const struct rs_options *o)
     keep.daily = o->keep_daily;
     keep.weekly = o->keep_weekly;
     keep.monthly = o->keep_monthly;
-    if (keep.last + keep.daily + keep.weekly + keep.monthly == 0)
+    keep.yearly = o->keep_yearly;
+    if (keep.last + keep.daily + keep.weekly + keep.monthly + keep.yearly == 0)
     {
-        rs_error("prune: say what to keep, with --keep-last, --keep-daily, --keep-weekly or "
-                 "--keep-monthly");
+        rs_error("prune: say what to keep, with --keep-last, --keep-daily, --keep-weekly, "
+                 "--keep-monthly or --keep-yearly");
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
         return RESTATE_EXIT_TROUBLE;
     }
@@ -3097,6 +3098,7 @@ int rs_cmd_features(const struct rs_options *o)
     rs_jobj_bool(&doc, "protect_flags", rs_fsflags_supported());
     rs_jobj_bool(&doc, "du_keys", true);
     rs_jobj_bool(&doc, "chunk_key_reseal", true);
+    rs_jobj_bool(&doc, "keep_yearly", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)

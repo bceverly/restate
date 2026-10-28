@@ -424,6 +424,17 @@ static void test_pure(void)
         rs_repo_choose(names, 7, &k, kept);
         CHECK(kept[5] && !kept[4] && kept[3] && kept[2] && !kept[1] && !kept[0]);
         memset(&k, 0, sizeof(k));
+        k.yearly = 1;
+        rs_repo_choose(names, 7, &k, kept);
+        CHECK(kept[5] && !kept[4] && !kept[3] && !kept[2] && !kept[1] && !kept[0] && kept[6]);
+        /* 2026's newest, and 2025's: 12-29 is in 2026's ISO week, not its year. */
+        k.yearly = 2;
+        rs_repo_choose(names, 7, &k, kept);
+        CHECK(kept[5] && !kept[4] && !kept[3] && kept[2] && !kept[1] && !kept[0]);
+        k.yearly = 5;
+        rs_repo_choose(names, 7, &k, kept);
+        CHECK(kept[5] && kept[2] && !kept[1] && !kept[0]);
+        memset(&k, 0, sizeof(k));
         k.last = 2;
         rs_repo_choose(names, 7, &k, kept);
         CHECK(kept[5] && kept[4] && !kept[3]);

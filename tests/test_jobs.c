@@ -94,7 +94,8 @@ static void other_jobs(void)
               "their argument");
     rs_job_init(&job);
     CHECK(parse(&job, "command = prune\nrepository = /r\nkeep_last = 3\nkeep_daily = 7\n"
-                      "keep_weekly = 4\nkeep_monthly = 12\nwhole_packs = true\ndry_run = no\n"
+                      "keep_weekly = 4\nkeep_monthly = 12\nkeep_yearly = 3\n"
+                      "whole_packs = true\ndry_run = no\n"
                       "record = /var/lib/r.record\nencrypt_to = /k.asc\n",
                 &why));
     free(why);
@@ -102,7 +103,8 @@ static void other_jobs(void)
     CHECK_INT(job.opts.nargs, 1);
     CHECK_STR(job.opts.args[0], "/r");
     CHECK(job.opts.keep_last == 3 && job.opts.keep_daily == 7 && job.opts.keep_weekly == 4 &&
-          job.opts.keep_monthly == 12 && job.opts.whole_packs && !job.opts.dry_run);
+          job.opts.keep_monthly == 12 &&
+          job.opts.keep_yearly == 3 && job.opts.whole_packs && !job.opts.dry_run);
     CHECK_STR(job.opts.record, "/var/lib/r.record");
     CHECK(parse(&job, "command = check\nrepository = /r\nread_all = true\n"
                       "trusted_key = /k.asc\n", &why));

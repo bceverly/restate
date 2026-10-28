@@ -292,8 +292,8 @@ Commands:
                           REPO::NAME names one wherever an image can be named,
                           and REPO alone its newest
   prune REPO              drop the snapshots --keep-last, --keep-daily,
-                          --keep-weekly and --keep-monthly do not keep, and the
-                          content nothing left refers to
+                          --keep-weekly, --keep-monthly and --keep-yearly do
+                          not keep, and the content nothing left refers to
   repack REPO             write again each pack an older restate wrote, which
                           can be read only from its start, so that a restore of
                           a few files reads only the parts of each pack that
@@ -538,6 +538,8 @@ Options:
                           weeks that have one
       --keep-monthly=N    prune: keep the newest snapshot of each of the last N
                           months that have one
+      --keep-yearly=N     prune: keep the newest snapshot of each of the last N
+                          years that have one
   -P, --progress[=json]   show progress on standard error: paths and bytes so
                           far while walking, a percentage and time left while
                           writing an image or downloading; with =json, as one
@@ -1180,13 +1182,13 @@ l 0777 root     root               34 2026-10-11T09:12:40.122362530Z  sites-enab
 
 **`prune`** drops the snapshots it is not told to keep -- the newest
 `--keep-last N`, and the newest of each of the last `--keep-daily N` days,
-`--keep-weekly N` ISO weeks and `--keep-monthly N` months that have one --
-then the chunks no snapshot left needs, rewriting a pack that is a quarter or
-more dead. `--dry-run` says which it would drop. A prune that SIGTERM, SIGINT,
-SIGHUP or SIGQUIT asks to stop does so between one snapshot or pack and the
-next, within a second or so: it updates its `--record` with what it removed,
-ends with status 3 (incomplete) and the signal in its result's `errors`, and
-then lets the signal end it. The next prune finishes the job.
+`--keep-weekly N` ISO weeks, `--keep-monthly N` months and `--keep-yearly N`
+years that have one -- then the chunks no snapshot left needs, rewriting a
+pack that is a quarter or more dead. `--dry-run` says which it would drop. A
+prune that SIGTERM, SIGINT, SIGHUP or SIGQUIT asks to stop does so between one
+snapshot or pack and the next, within a second or so: it updates its
+`--record` with what it removed, ends with status 3 (incomplete) and the
+signal in its result's `errors`, and then lets the signal end it. The next prune finishes the job.
 
 **`repack`** makes an older repository fast to restore a few files from. A
 pack is one gzip file, and gzip reads only forward, so a pack written as one

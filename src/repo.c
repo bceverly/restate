@@ -5293,9 +5293,9 @@ static int64_t iso_week(unsigned y, unsigned m, unsigned d)
 
 void rs_repo_choose(char *const *names, size_t n, const struct rs_repo_keep *keep, bool *kept)
 {
-    const unsigned limit[3] = { keep->daily, keep->weekly, keep->monthly };
-    unsigned       count[3] = { 0, 0, 0 };
-    int64_t        last[3] = { -1, -1, -1 };
+    const unsigned limit[4] = { keep->daily, keep->weekly, keep->monthly, keep->yearly };
+    unsigned       count[4] = { 0, 0, 0, 0 };
+    int64_t        last[4] = { -1, -1, -1, -1 };
     unsigned       newest = 0;
     size_t         i = n;
 
@@ -5305,7 +5305,7 @@ void rs_repo_choose(char *const *names, size_t n, const struct rs_repo_keep *kee
         unsigned y;
         unsigned m;
         unsigned d;
-        int64_t  period[3];
+        int64_t  period[4];
         size_t   k;
 
         kept[i] = false;
@@ -5322,7 +5322,8 @@ void rs_repo_choose(char *const *names, size_t n, const struct rs_repo_keep *kee
         period[0] = (int64_t)y * 10000 + (int64_t)m * 100 + d;
         period[1] = iso_week(y, m, d);
         period[2] = (int64_t)y * 100 + m;
-        for (k = 0; k < 3; k++)
+        period[3] = (int64_t)y;
+        for (k = 0; k < 4; k++)
         {
             if (period[k] != last[k])
             {

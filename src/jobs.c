@@ -88,6 +88,7 @@ enum key_id {
     KEY_KEEP_DAILY,
     KEY_KEEP_WEEKLY,
     KEY_KEEP_MONTHLY,
+    KEY_KEEP_YEARLY,
     KEY_WHOLE_PACKS,
     KEY_READ_ALL,
     KEY_METADATA_ONLY,
@@ -138,6 +139,7 @@ static const struct key {
     [KEY_KEEP_DAILY] = { "keep_daily", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_WEEKLY] = { "keep_weekly", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_MONTHLY] = { "keep_monthly", K_COUNT, false, J_PRUNE },
+    [KEY_KEEP_YEARLY] = { "keep_yearly", K_COUNT, false, J_PRUNE },
     [KEY_WHOLE_PACKS] = { "whole_packs", K_BOOL, false, J_PRUNE },
     [KEY_READ_ALL] = { "read_all", K_BOOL, false, J_CHECK },
     [KEY_METADATA_ONLY] = { "metadata_only", K_BOOL, false, J_CHECK },
@@ -496,6 +498,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_KEEP_MONTHLY:
         o->keep_monthly = u;
+        break;
+    case KEY_KEEP_YEARLY:
+        o->keep_yearly = u;
         break;
     case KEY_WHOLE_PACKS:
         o->whole_packs = b;
@@ -867,7 +872,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->sign_with || o->ndecrypt_with || o->ntrusted || o->allow_unverified ||
                 o->all || o->rules_only ||
                 o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
-                o->keep_daily || o->keep_weekly || o->keep_monthly || o->exact_versions ||
+                o->keep_daily || o->keep_weekly || o->keep_monthly || o->keep_yearly ||
+                o->exact_versions ||
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||
                 o->plan_only ||
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||

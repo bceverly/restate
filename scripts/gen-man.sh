@@ -1483,9 +1483,11 @@ and the newest of each of the last
 .BR "\-\-keep\-daily " N
 days,
 .BR "\-\-keep\-weekly " N
-ISO weeks and
+ISO weeks,
 .BR "\-\-keep\-monthly " N
-months that have one \- then the chunks no snapshot left needs, rewriting a
+months and
+.BR "\-\-keep\-yearly " N
+years that have one \- then the chunks no snapshot left needs, rewriting a
 pack that is a quarter or more dead. A prune that SIGTERM, SIGINT, SIGHUP or
 SIGQUIT asks to stop does so between one snapshot or pack and the next,
 within a second or so: it updates its
@@ -2013,7 +2015,7 @@ refuses
 too. A program holding the key elsewhere writes it there for the one run,
 and removes it after.
 .TP
-.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " whole_packs
+.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " keep_yearly ", " whole_packs
 prune;
 .B dry_run
 for prune, repack and restore;

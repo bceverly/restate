@@ -79,7 +79,7 @@ make an empty repository at DIR: captures into it (\-o DIR) are kept as snapshot
 list the snapshots in a repository, oldest first; REPO::NAME names one wherever an image can be named, and REPO alone its newest
 .TP
 \fBprune\fR \fIREPO\fR
-drop the snapshots \-\-keep\-last, \-\-keep\-daily, \-\-keep\-weekly and \-\-keep\-monthly do not keep, and the content nothing left refers to
+drop the snapshots \-\-keep\-last, \-\-keep\-daily, \-\-keep\-weekly, \-\-keep\-monthly and \-\-keep\-yearly do not keep, and the content nothing left refers to
 .TP
 \fBrepack\fR \fIREPO\fR
 write again each pack an older restate wrote, which can be read only from its start, so that a restore of a few files reads only the parts of each pack that hold them; every snapshot is kept, and what none of them needs is dropped on the way
@@ -288,6 +288,9 @@ prune: keep the newest snapshot of each of the last N weeks that have one
 .TP
 \-\-keep\-monthly=N
 prune: keep the newest snapshot of each of the last N months that have one
+.TP
+\-\-keep\-yearly=N
+prune: keep the newest snapshot of each of the last N years that have one
 .TP
 \fB\-P\fR, \fB\-\-progress\fR[=\fBjson\fR]
 show progress on standard error: paths and bytes so far while walking, a percentage and time left while writing an image or downloading; with =json, as one JSON object a line (see PROGRESS)
@@ -1629,9 +1632,11 @@ and the newest of each of the last
 .BR "\-\-keep\-daily " N
 days,
 .BR "\-\-keep\-weekly " N
-ISO weeks and
+ISO weeks,
 .BR "\-\-keep\-monthly " N
-months that have one \- then the chunks no snapshot left needs, rewriting a
+months and
+.BR "\-\-keep\-yearly " N
+years that have one \- then the chunks no snapshot left needs, rewriting a
 pack that is a quarter or more dead. A prune that SIGTERM, SIGINT, SIGHUP or
 SIGQUIT asks to stop does so between one snapshot or pack and the next,
 within a second or so: it updates its
@@ -2159,7 +2164,7 @@ refuses
 too. A program holding the key elsewhere writes it there for the one run,
 and removes it after.
 .TP
-.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " whole_packs
+.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " keep_yearly ", " whole_packs
 prune;
 .B dry_run
 for prune, repack and restore;

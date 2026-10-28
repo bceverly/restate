@@ -184,6 +184,8 @@ RS_OPT(OPT_KEEP_WEEKLY, "keep-weekly", required_argument, "N",
        "prune: keep the newest snapshot of each of the last N weeks that have one")
 RS_OPT(OPT_KEEP_MONTHLY, "keep-monthly", required_argument, "N",
        "prune: keep the newest snapshot of each of the last N months that have one")
+RS_OPT(OPT_KEEP_YEARLY, "keep-yearly", required_argument, "N",
+       "prune: keep the newest snapshot of each of the last N years that have one")
 RS_OPT('P', "progress",         optional_argument, "json",
        "show progress on standard error: paths and bytes so far while walking, "
        "a percentage and time left while writing an image or downloading; with =json, "

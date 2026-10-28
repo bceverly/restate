@@ -258,13 +258,14 @@ bool    rs_repo_stream_close(struct rs_repo_stream *s, struct rs_buf *err);
 /* ------------------------------------------------------------------------- */
 
 /* How many to keep, counting back from the newest: the newest `last`, and
- * the newest of each of the most recent `daily` days, `weekly` ISO weeks and
- * `monthly` months that have one. */
+ * the newest of each of the most recent `daily` days, `weekly` ISO weeks,
+ * `monthly` months and `yearly` years that have one. */
 struct rs_repo_keep {
     unsigned last;
     unsigned daily;
     unsigned weekly;
     unsigned monthly;
+    unsigned yearly;
 };
 
 /* Which of the snapshots `names` (oldest first, as rs_repo_snapshots gives

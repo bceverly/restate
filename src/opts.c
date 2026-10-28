@@ -366,11 +366,13 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_KEEP_DAILY:
         case OPT_KEEP_WEEKLY:
         case OPT_KEEP_MONTHLY:
+        case OPT_KEEP_YEARLY:
         {
-            unsigned *to = c == OPT_KEEP_LAST    ? &o->keep_last
-                           : c == OPT_KEEP_DAILY ? &o->keep_daily
-                           : c == OPT_KEEP_WEEKLY ? &o->keep_weekly
-                                                  : &o->keep_monthly;
+            unsigned *to = c == OPT_KEEP_LAST      ? &o->keep_last
+                           : c == OPT_KEEP_DAILY   ? &o->keep_daily
+                           : c == OPT_KEEP_WEEKLY  ? &o->keep_weekly
+                           : c == OPT_KEEP_MONTHLY ? &o->keep_monthly
+                                                   : &o->keep_yearly;
 
             if (!count_arg(optarg, to))
             {

@@ -39,8 +39,8 @@ RS_CMD(CMD_SNAPSHOTS, "snapshots", "REPO",     1,  1,
        "list the snapshots in a repository, oldest first; REPO::NAME names one wherever "
        "an image can be named, and REPO alone its newest")
 RS_CMD(CMD_PRUNE,    "prune",    "REPO",       1,  1,
-       "drop the snapshots --keep-last, --keep-daily, --keep-weekly and --keep-monthly do "
-       "not keep, and the content nothing left refers to")
+       "drop the snapshots --keep-last, --keep-daily, --keep-weekly, --keep-monthly and "
+       "--keep-yearly do not keep, and the content nothing left refers to")
 RS_CMD(CMD_REPACK,   "repack",   "REPO",       1,  1,
        "write again each pack an older restate wrote, which can be read only from its start, "
        "so that a restore of a few files reads only the parts of each pack that hold them; "

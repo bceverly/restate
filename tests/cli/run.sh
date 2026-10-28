@@ -838,6 +838,9 @@ expect 2 "prune, keeping nothing named" -- "$BIN" prune repo
 expect 0 "prune --dry-run" -- "$BIN" prune --dry-run --keep-last 1 repo
 contains "$OUT" "would drop 20260101T000000Z" "says what it would drop"
 expect 2 "--keep-last is a number" -- "$BIN" prune --keep-last=x repo
+expect 0 "prune --dry-run --keep-yearly" -- "$BIN" prune --dry-run --keep-yearly 1 repo
+contains "$OUT" "would drop 20260101T000000Z" "keeps one snapshot of the year, its newest"
+expect 2 "--keep-yearly is a number" -- "$BIN" prune --keep-yearly=-1 repo
 if command -v flock > /dev/null 2>&1; then
   flock repo/lock sleep 3 &
   locker=$!
@@ -1626,6 +1629,7 @@ contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"programs": {' "and the programs it can use"
 contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
+contains "$OUT" '"keep_yearly": true' "and that prune keeps yearly snapshots"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
 else
