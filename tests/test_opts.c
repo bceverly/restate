@@ -103,6 +103,10 @@ void test_opts(void)
     CHECK_CONTAINS(err.data, "--firmware: \"efi\" is not uefi or bios");
     CHECK(parse_args(&o, &err, ARGS("buildsheet", "--target", "vm", "--firmware", "bios")));
     CHECK_STR(o.firmware, "bios");
+    CHECK(parse_args(&o, &err, ARGS("installer", "--arch", "arm64")));
+    CHECK_STR(o.arch, "arm64");
+    CHECK(!parse_args(&o, &err, ARGS("installer", "--arch", "vax")));
+    CHECK_CONTAINS(err.data, "--arch: \"vax\" is not a processor restate knows");
     CHECK(parse_args(&o, &err, ARGS("restore", "--packages", "img.tar")));
     CHECK(o.packages);
     CHECK(parse_args(&o, &err, ARGS("restore", "--as", "web-1.lab", "img.tar")));

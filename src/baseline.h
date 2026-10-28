@@ -41,6 +41,11 @@ struct rs_baseline_opts {
     const char *cache;      /* NULL: rs_baseline_default_cache() */
     const char *snapshot;   /* the capture's snapshot ID ("20261011T030000Z"), or NULL */
     bool        quiet;
+    /* Debian's name for the processor to fetch for, or NULL for the
+     * machine's own: each package of the machine's own fetched as its build
+     * for this one, from Ubuntu's ports archive where that is where they are
+     * (rs_baseline_uri_for). */
+    const char *arch;
 };
 
 struct rs_baseline_stats {
@@ -50,8 +55,15 @@ struct rs_baseline_stats {
     size_t   snapshot;   /* of those, from an archive's snapshot */
     size_t   missing;    /* no repository restate could check had them */
     size_t   local;      /* installed from a .deb: only the image can keep those */
+    size_t   foreign;    /* with an arch: of a third processor, multiarch's, left out */
     uint64_t bytes;      /* downloaded */
 };
+
+/* `uri`, an archive's root, as one for packages of Debian's `arch`: Ubuntu
+ * keeps amd64 and i386 at archive.ubuntu.com and security.ubuntu.com, and
+ * every other processor at ports.ubuntu.com. Anything else as it is. The
+ * caller frees it. */
+char *rs_baseline_uri_for(const char *uri, const char *arch);
 
 /* Where `restate baseline fetch` keeps packages unless told otherwise. */
 const char *rs_baseline_default_cache(void);

@@ -392,8 +392,11 @@ machine rather than N copies of one:
       address or disk serial to match on); its early-command finds which copy
       the machine is, so N machines boot one installer and each comes up as
       itself
-- [ ] A PostgreSQL cluster's system identifier, which only `initdb` sets:
-      say so for a copy that replicates, since restate cannot change it
+- [x] A PostgreSQL cluster's system identifier, which only `initdb` sets:
+      `restore --as` says, for each cluster the image keeps (its
+      `global/pg_control`), that to replication it is the original's, and an
+      autoinstall file of copies says the same -- a copy that is to
+      replicate is made a standby with `pg_basebackup`, not restored
 
 ## Done — 2.0: run by other programs, stored on other machines
 
@@ -477,33 +480,40 @@ place:
 
 ## Then — other processor architectures
 
-restate is built and tested on amd64. It is portable C that links only libc,
-so it should build anywhere; the work is in proving it and in the parts that
-name an architecture:
+restate is portable C that links only libc, built and tested on amd64 and
+aarch64 natively and on the others under QEMU:
 
-- [ ] **arm64** (aarch64), **ppc64le**, **riscv64** and **s390x**
+- [x] **arm64** (aarch64), **ppc64le**, **riscv64** and **s390x**
       (big-endian): built and the unit and end-to-end tests run on each in
-      CI, natively where a runner exists and under QEMU otherwise, so
-      s390x, the one big-endian among them, proves that every on-disk format
-      (the index, packs, pax headers, digests, signatures) is read and
-      written byte for byte the same as on a little-endian machine, and that
-      a repository or image captured on one is restored on another
-- [ ] **Each architecture's names**: Debian's (`arm64`, `ppc64el`,
-      `riscv64`, `s390x`), RPM's (`aarch64`, `ppc64le`, `riscv64`, `s390x`)
-      and the BSDs' (`aarch64`, `powerpc64le`, `riscv64`) mapped to one
-      another, in the package baseline, the build sheet, the fetched
-      packages and the repositories' `binary-ARCH` paths
-- [ ] **The installer and the boot underneath**: the Ubuntu server ISO for
-      each architecture that has one (the installer's architecture map
-      knows all four already, but only amd64 is exercised); the bootloader
-      each uses (GRUB EFI on arm64 and riscv64, PReP and GRUB on ppc64le,
-      zipl on s390x) recorded in the layout and put back, and the disks
-      s390x sees (DASD and zFCP) recognized rather than skipped
-- [ ] **A capture moved across architectures**: restoring an arm64 machine's
-      state onto amd64 or the reverse, with the packages reinstalled for the
-      new architecture rather than copied, and the files that are
-      architecture-specific -- binaries no package owns, under `/usr/local`
-      or `/opt` -- named in the build sheet as needing a rebuild
+      CI, natively for aarch64 and in an Ubuntu container under QEMU for the
+      rest; then `tests/cli/cross.sh` has each read what the amd64 build
+      wrote -- an image, a repository both capture into, prune and check, an
+      encrypted one -- and the other way round, so s390x proves every
+      on-disk format the same bytes whichever byte order wrote it. (QEMU's
+      s390x `fstat` drops nanoseconds, where `lstat` and `statx` keep them;
+      the tests allow for it there and nowhere else)
+- [x] **Each architecture's names**: the kernel's, Debian's (`arm64`,
+      `ppc64el`), RPM's and each BSD's, and an ELF header's machine number,
+      mapped to one another in one table (`src/arch.c`); a machine
+      description records restate's own spelling (`arch`) beside the
+      kernel's, and `baseline fetch --arch` fetches each package's build for
+      another processor, through the `binary-ARCH` lists of Ubuntu's ports
+      archive where that is where they are
+- [x] **The installer and the boot underneath**: `installer --arch`; the
+      boot each processor uses -- GRUB from the ESP on arm64 and riscv64, a
+      PReP partition for POWER's Open Firmware, petitboot's none, zipl on
+      s390x -- recorded (the firmware mode, GRUB's platforms, zipl) and
+      rebuilt, the partition one needs taking the place of another's; the
+      VM QEMU's machine for the processor; and IBM Z's DASD and zFCP disks
+      recorded by their addresses, brought online with `chzdev`, a DASD
+      formatted with `dasdfmt` and partitioned with `fdasd` (curtin's
+      `vtoc`)
+- [x] **A capture moved across architectures**: `buildsheet` and
+      `autoinstall --arch`, with the packages reinstalled as the new
+      processor's builds by name; capture records the processor of every
+      ELF program it keeps, the build sheet names those no package installed
+      as needing a rebuild, and restore leaves a changed program of a
+      package as the new machine's package has it, warning of the rest
 
 ## Packaging
 

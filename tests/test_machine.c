@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "index.h"
 #include "json.h"
 #include "machine.h"
@@ -301,6 +302,23 @@ static bool notes_contain(const struct rs_jval *m, const char *needle)
     return false;
 }
 
+/* The disk named `name` in a description's "disks". */
+static const struct rs_jval *find_named(const struct rs_jval *disks, const char *name)
+{
+    size_t i;
+
+    for (i = 0; i < disks->n; i++)
+    {
+        const char *n = rs_jobject_str(&disks->items[i], "name");
+
+        if (n && strcmp(n, name) == 0)
+        {
+            return &disks->items[i];
+        }
+    }
+    return NULL;
+}
+
 void test_machine(void)
 {
     char                 *dir = rs_test_tmpdir();
@@ -497,6 +515,70 @@ void test_machine(void)
         free(path);
     }
     rs_jval_free(&m);
+
+    TEST_CASE("machine: IBM Z's disks, a DASD and a SCSI disk over zFCP; the architecture");
+    {
+        char *zs = rs_xasprintf("%s/zsys", dir);
+        char *zr = rs_xasprintf("%s/zroot", dir);
+        char *link = rs_xasprintf("%s/sys/block/dasda/device", zs);
+
+        (void)mkdir(zs, 0755);
+        (void)mkdir(zr, 0755);
+        put(zs, "sys/block/dasda/size", "14424480\n");
+        put(zs, "sys/block/dasda/dev", "94:0\n");
+        put(zs, "devices/css0/0.0.0010/0.0.0200/discipline", "ECKD\n");
+        CHECK(symlink("../../../devices/css0/0.0.0010/0.0.0200", link) == 0);
+        put(zs, "sys/block/dasda/dasda1/partition", "1\n");
+        put(zs, "sys/block/dasda/dasda1/start", "192\n");
+        put(zs, "sys/block/dasda/dasda1/size", "14424288\n");
+        put(zs, "sys/block/sdb/size", "20971520\n");
+        put(zs, "sys/block/sdb/dev", "8:16\n");
+        put(zs, "run/udev/data/b8:16", "E:ID_PATH=ccw-0.0.1700-zfcp-0x500507630b0b0000:"
+                                       "0x4010400000000000\nE:ID_PART_TABLE_TYPE=gpt\n");
+        put(zs, "sys/block/sdc/size", "20971520\n");
+        put(zs, "sys/block/sdc/dev", "8:32\n");
+        put(zs, "run/udev/data/b8:32", "E:ID_PATH=ccw-0.0.1700-zfcp-0x5005\n");
+        put(zr, "etc/zipl.conf", "[defaultboot]\n");
+        put(zr, "boot/grub/x86_64-efi/normal.mod", "");
+        put(zr, "boot/grub/i386-pc/normal.mod", "");
+        put(zr, "boot/grub/fonts/unicode.pf2", "");
+        memset(&m, 0, sizeof(m));
+        rs_machine_describe(zs, zr, &m);
+        v = rs_jobject_get(&m, "disks");
+        CHECK_INT(v ? v->n : 0, 3);
+        disk = v ? find_named(v, "dasda") : NULL;
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "table"), "type"), "dasd");
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "dasd"), "bus_id"), "0.0.0200");
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "dasd"), "discipline"), "ECKD");
+        part = rs_jobject_get(disk, "partitions");
+        CHECK_INT(part ? part->n : 0, 1);
+        disk = v ? find_named(v, "sdb") : NULL;
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "zfcp"), "bus_id"), "0.0.1700");
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "zfcp"), "wwpn"), "0x500507630b0b0000");
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "zfcp"), "lun"), "0x4010400000000000");
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "table"), "type"), "gpt");
+        /* An ID_PATH with no LUN in it: the adapter alone. */
+        disk = v ? find_named(v, "sdc") : NULL;
+        CHECK_STR(rs_jobject_str(rs_jobject_get(disk, "zfcp"), "bus_id"), "0.0.1700");
+        CHECK(rs_jobject_get(rs_jobject_get(disk, "zfcp"), "wwpn") == NULL);
+        v = rs_jobject_get(&m, "firmware");
+        {
+            const struct rs_jval *bl = rs_jobject_get(v, "boot_loaders");
+            const struct rs_jval *gp = rs_jobject_get(v, "grub_platforms");
+
+            CHECK(bl && bl->n == 1 && strcmp(bl->items[0].s, "zipl") == 0);
+            CHECK_INT(gp ? gp->n : 0, 2);
+        }
+        /* The kernel's word for the processor, and restate's. */
+        v = rs_jobject_get(&m, "system");
+        CHECK(rs_jobject_str(v, "arch") != NULL);
+        CHECK(rs_arch_find(rs_jobject_str(v, "architecture")) == NULL ||
+              rs_arch_same(rs_jobject_str(v, "architecture"), rs_jobject_str(v, "arch")));
+        rs_jval_free(&m);
+        free(link);
+        free(zr);
+        free(zs);
+    }
 
     TEST_CASE("machine: a system without /sys/block says so");
     {

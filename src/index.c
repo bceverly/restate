@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "arch.h"
 #include "json.h"
 
 void rs_index_init(struct rs_index *ix)
@@ -444,6 +445,10 @@ static void entry_json(struct rs_buf *b, const struct rs_entry *e)
     {
         put_bytes(b, "target", e->target, &first);
     }
+    if (e->arch)
+    {
+        put_str(b, "arch", e->arch, &first);
+    }
     if (e->stored)
     {
         put_bytes(b, "stored", e->stored, &first);
@@ -763,6 +768,13 @@ static bool entry_from_json(const struct rs_jval *obj, struct rs_entry *e, const
     }
     v = rs_jobject_get(obj, "modified");
     e->modified = e->package && v && v->type == RS_JBOOL && v->b;
+    /* One this restate does not know is as good as none: it names nothing a
+     * machine here could be. */
+    v = rs_jobject_get(obj, "arch");
+    if (e->type == 'f' && v && v->type == RS_JSTRING && rs_arch_find(v->s))
+    {
+        e->arch = rs_arch_find(v->s)->name;
+    }
     v = rs_jobject_get(obj, "xattrs");
     if (v && v->type != RS_JNULL && !get_xattrs(e, v))
     {

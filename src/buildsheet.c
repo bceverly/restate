@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "arch.h"
 #include "image.h"
 #include "installer.h"
 #include "packages.h"
@@ -117,6 +118,42 @@ static char *dev_expr(const struct sheet *s, size_t i)
         return rs_xasprintf("\"$DISK%zu\"", v->disk + 1);
     }
     return rs_xstrdup(v->path);
+}
+
+/* How a machine boots, for people. */
+static const char *firmware_text(const char *mode)
+{
+    static const char *const names[][2] = {
+        { "uefi", "UEFI" },
+        { "bios", "BIOS (legacy)" },
+        { "ieee1275", "Open Firmware, GRUB in a PReP partition" },
+        { "opal", "OPAL (petitboot), no boot partition" },
+        { "zipl", "IBM Z IPL, of what zipl writes" },
+    };
+    size_t i;
+
+    for (i = 0; mode && i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        if (strcmp(mode, names[i][0]) == 0)
+        {
+            return names[i][1];
+        }
+    }
+    return mode ? mode : "(unknown)";
+}
+
+/* The processor the machine is rebuilt for, and the one it was, if that was
+ * another (--arch): rs_arch's names. */
+static const char *arch_now(const struct sheet *s)
+{
+    const struct rs_arch *a = rs_arch_of_machine(s->machine);
+
+    return a ? a->name : NULL;
+}
+
+static const char *arch_was(const struct sheet *s)
+{
+    return rs_jobject_str(s->sys, "rebuilt_from");
 }
 
 /* The name of the disk variable's default for this target. */
@@ -249,10 +286,9 @@ static void intro(struct sheet *s)
     }
     {
         bool        uefi = eq(s->l.firmware, "uefi");
-        const char *mode = uefi ? "UEFI" : (s->l.firmware ? "BIOS (legacy)" : "(unknown)");
         const char *sb = uefi ? (s->l.secure_boot ? ", Secure Boot on" : ", Secure Boot off") : "";
 
-        say(s, "  Firmware   %s%s", mode, sb);
+        say(s, "  Firmware   %s%s", firmware_text(s->l.firmware), sb);
     }
     say(s, "  Rebuilt as %s", targets[s->o->target]);
     say(s, "  Made by    restate %s%s%s", s->o->version ? s->o->version : "",
@@ -317,12 +353,18 @@ static void needs(struct sheet *s)
                 size_text(disk->size, buf2, sizeof(buf2)));
         }
     }
-    if (s->l.firmware && strcmp(s->l.firmware, "uefi") == 0)
+    if (eq(s->l.firmware, "uefi"))
     {
         say(s, "%s", "  - Firmware set to boot UEFI, not legacy BIOS.");
-    } else if (s->l.firmware)
+    } else if (eq(s->l.firmware, "bios"))
     {
         say(s, "%s", "  - Firmware set to boot legacy BIOS (CSM), as the original did.");
+    } else if (eq(s->l.firmware, "zipl"))
+    {
+        say(s, "%s", "  - The LPAR or z/VM guest set to IPL from its first disk once installed.");
+    } else if (s->l.firmware)
+    {
+        say(s, "  - Firmware set to boot by %s.", firmware_text(s->l.firmware));
     }
     if (s->have_installer)
     {
@@ -416,6 +458,49 @@ static void layout(struct sheet *s)
     }
 }
 
+/* IBM Z's disks, brought online by their addresses before anything can see
+ * them: the old machine's, which on other hardware may be others. */
+static void online(struct sheet *s)
+{
+    bool   any = false;
+    size_t d;
+
+    if (s->o->target == RS_TARGET_VM)
+    {
+        return;
+    }
+    for (d = 0; d < s->l.ndisks; d++)
+    {
+        const struct rs_disk *disk = &s->l.disks[d];
+
+        if (!disk->dasd_bus && !(disk->zfcp_bus && disk->zfcp_wwpn && disk->zfcp_lun))
+        {
+            continue;
+        }
+        if (!any)
+        {
+            say(s, "%s", "");
+            say(s, "%s", "Bring the disks online first, by the addresses the old machine had them "
+                         "at");
+            say(s, "%s", "(lszdev lists what this one has; on other hardware they differ):");
+            say(s, "%s", "");
+            any = true;
+        }
+        if (disk->dasd_bus)
+        {
+            say(s, "    chzdev -e dasd %s", disk->dasd_bus);
+        } else
+        {
+            say(s, "    chzdev -e zfcp-lun %s:%s:%s", disk->zfcp_bus, disk->zfcp_wwpn,
+                disk->zfcp_lun);
+        }
+    }
+    if (any)
+    {
+        say(s, "%s", "");
+    }
+}
+
 static void shell(struct sheet *s)
 {
     size_t d;
@@ -442,6 +527,7 @@ static void shell(struct sheet *s)
     say(s, "%s", "Then become root, name the disks, and define a helper for partition names:");
     say(s, "%s", "");
     say(s, "%s", "    sudo -i");
+    online(s);
     say(s, "%s", "    lsblk -o NAME,SIZE,MODEL,SERIAL");
     for (d = 0; d < s->l.ndisks; d++)
     {
@@ -468,6 +554,53 @@ static void shell(struct sheet *s)
         say(s, "%s", "other hardware are not knowable in advance, and /dev/CHANGE-ME fails "
                      "safely.");
     }
+}
+
+/*
+ * A DASD: formatted by dasdfmt, in the compatible disk layout, before fdasd
+ * makes its partitions -- one across the disk with -a, or several, given
+ * their sizes, in fdasd's own dialog. Their names are the disk's with the
+ * number after: dasda1.
+ */
+static void dasd_partitions(struct sheet *s, size_t d)
+{
+    size_t   n = 0;
+    unsigned num = 0;
+    size_t   i;
+    char     buf[32];
+
+    for (i = 0; i < s->l.nvols; i++)
+    {
+        n += s->l.vols[i].disk == d && s->l.vols[i].kind == RS_VOL_PART &&
+             rs_layout_fit(&s->l, i, s->o->target) > 0;
+    }
+    say(s, "    dasdfmt -b 4096 -d cdl -y -p \"$DISK%zu\"", d + 1);
+    if (n == 1)
+    {
+        say(s, "    fdasd -a \"$DISK%zu\"", d + 1);
+    } else
+    {
+        say(s, "    fdasd \"$DISK%zu\"   # n for each of these, in order, then w:", d + 1);
+    }
+    for (i = 0; i < s->l.nvols; i++)
+    {
+        const struct rs_vol *v = &s->l.vols[i];
+        uint64_t             fit = rs_layout_fit(&s->l, i, s->o->target);
+
+        if (v->disk != d || v->kind != RS_VOL_PART || fit == 0)
+        {
+            continue;
+        }
+        num++;
+        s->newnum[i] = s->o->target == RS_TARGET_SAME ? v->number : num;
+        if (n > 1)
+        {
+            say(s, "    #   partition %u: %s", s->newnum[i],
+                size_text(s->o->target == RS_TARGET_SAME ? v->size : fit, buf, sizeof(buf)));
+        }
+        s->done[i] = true;
+    }
+    say(s, "%s", "");
 }
 
 static void partition(struct sheet *s)
@@ -507,6 +640,11 @@ static void partition(struct sheet *s)
         }
         if (!any)
         {
+            continue;
+        }
+        if (eq(disk->table, "dasd") && s->o->target != RS_TARGET_VM)
+        {
+            dasd_partitions(s, d);
             continue;
         }
         gpt = strcmp(disk->table, "dos") != 0;
@@ -1004,10 +1142,22 @@ static void install(struct sheet *s)
             is_esp(v) ? "EFI System Partition" : (v->fstype ? v->fstype : ""));
     }
     free(list);
-    if (s->l.firmware && strcmp(s->l.firmware, "bios") == 0)
+    if (eq(s->l.firmware, "bios"))
     {
         say(s, "%s", "");
         say(s, "%s", "Install the boot loader to $DISK1 itself (the whole disk, not a partition).");
+    } else if (eq(s->l.firmware, "ieee1275"))
+    {
+        say(s, "%s", "");
+        say(s, "%s", "The installer puts GRUB in the PReP partition on $DISK1, which Open "
+                     "Firmware");
+        say(s, "%s", "boots from; it has no filesystem and is not mounted.");
+    } else if (eq(s->l.firmware, "zipl"))
+    {
+        say(s, "%s", "");
+        say(s, "%s", "The installer writes the boot record with zipl, from /boot; there is no "
+                     "boot");
+        say(s, "%s", "partition. IPL the machine from $DISK1 afterwards.");
     }
     if (any_luks)
     {
@@ -2032,6 +2182,25 @@ static void restore(struct sheet *s)
     say(s, "%s", "    update-initramfs -u -k all && update-grub && reboot");
 }
 
+/* QEMU's machine for a guest of `arch`, as virt-install's --machine names it. */
+static const char *vm_machine(const char *arch)
+{
+    if (strcmp(arch, "aarch64") == 0 || strcmp(arch, "riscv64") == 0 ||
+        strcmp(arch, "armv7l") == 0)
+    {
+        return "virt";
+    }
+    if (strncmp(arch, "ppc64", 5) == 0)
+    {
+        return "pseries";
+    }
+    if (strcmp(arch, "s390x") == 0)
+    {
+        return "s390-ccw-virtio";
+    }
+    return "q35";
+}
+
 static void vm(struct sheet *s)
 {
     const struct rs_jval *hw = rs_jobject_get(s->machine, "hardware");
@@ -2039,6 +2208,10 @@ static void vm(struct sheet *s)
     const struct rs_jval *cpus = rs_jobject_get(hw, "cpus");
     const char           *host = rs_jobject_str(s->sys, "hostname");
     bool                  uefi = s->l.firmware && strcmp(s->l.firmware, "uefi") == 0;
+    const char           *arch = arch_now(s) ? arch_now(s) : "x86_64";
+    /* Written by a restate of another processor than the guest's, the host is
+     * likely that one's too: QEMU emulates the guest, and passes no CPU. */
+    bool                  emulated = rs_arch_built() && strcmp(rs_arch_built()->name, arch) != 0;
     size_t                d;
 
     uint64_t              orig_mib = mem ? mem->u / MIB : 0;
@@ -2054,12 +2227,17 @@ static void vm(struct sheet *s)
     say(s, "%s", "will hold, and it gets a modest share of a host -- at most 8 GiB and 4 CPUs:");
     say(s, "%s", "");
     say(s, "    virt-install --name %s \\", host ? host : "restored");
+    if (emulated)
+    {
+        say(s, "        --arch %s \\", arch);
+    }
     /* q35: its CD drives are SATA. On the older "pc" machine they are IDE,
      * which current installers' initrds cannot see, and the live system
-     * then cannot find itself. */
-    say(s, "%s", "        --machine q35 \\");
-    say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 " --cpu host-passthrough \\", vm_mib,
-        vm_cpus);
+     * then cannot find itself. The others' are what QEMU calls their
+     * general-purpose machines. */
+    say(s, "        --machine %s \\", vm_machine(arch));
+    say(s, "        --memory %" PRIu64 " --vcpus %" PRIu64 "%s \\", vm_mib, vm_cpus,
+        emulated ? "" : " --cpu host-passthrough");
     for (d = 0; d < s->l.ndisks; d++)
     {
         uint64_t need = 0;
@@ -2084,7 +2262,7 @@ static void vm(struct sheet *s)
     {
         say(s, "%s", "        --boot uefi \\");
     }
-    if (s->have_installer && eq(s->in.flavor, "desktop"))
+    if (s->have_installer && eq(s->in.flavor, "desktop") && !emulated)
     {
         say(s, "%s", "        --graphics spice --video virtio \\");
     } else
@@ -2116,12 +2294,81 @@ static void vm(struct sheet *s)
     }
     say(s, "%s", "The VM's disks appear as /dev/vda, /dev/vdb...; Ubuntu's generic kernel has");
     say(s, "%s", "the virtio drivers, so the initramfs needs nothing added.");
+    if (emulated)
+    {
+        say(s, "On a host of another processor QEMU emulates this %s guest, many times", arch);
+        say(s, "slower than one of its own; on a %s host, add --cpu host-passthrough.", arch);
+    }
     if (s->l.secure_boot)
     {
         say(s, "%s", "For Secure Boot in the guest, use firmware with the Microsoft keys "
                      "enrolled:");
         say(s, "%s", "--boot uefi,firmware.feature0.name=secure-boot,"
                      "firmware.feature0.enabled=yes");
+    }
+}
+
+/*
+ * Rebuilt for another processor (--arch): the packages are each one's build
+ * for it, which apt installs by name. What the image keeps that a package
+ * did not install -- a program built here, a binary copied in -- is the old
+ * processor's, and will not run: named, to be built again or fetched for the
+ * new one. A program a package installed and someone then changed is put
+ * back by restore only on a machine of its own processor.
+ */
+static void other_processor(struct sheet *s)
+{
+    const struct rs_jval *progs = rs_jobject_get(s->machine, "programs");
+    const char           *was = arch_was(s);
+    size_t                own = 0;
+    size_t                pkg = 0;
+    size_t                i;
+
+    if (!was)
+    {
+        return;
+    }
+    heading(s, "Another processor");
+    say(s, "The old machine was %s; this one is %s. Each package the steps above", was,
+        arch_now(s) ? arch_now(s) : "another");
+    say(s, "%s", "reinstall is its build for this processor, which apt chooses by name.");
+    for (i = 0; progs && progs->type == RS_JARRAY && i < progs->n; i++)
+    {
+        const struct rs_jval *p = &progs->items[i];
+
+        if (!rs_arch_same(rs_jobject_str(p, "arch"), was))
+        {
+            continue;
+        }
+        if (rs_jobject_str(p, "package"))
+        {
+            pkg++;
+            continue;
+        }
+        if (own == 0)
+        {
+            say(s, "%s", "");
+            say(s, "These programs no package installed are built for %s and will not run", was);
+            say(s, "%s", "here: build each again from its source, or install its build for this");
+            say(s, "%s", "processor, after the restore puts back the rest:");
+            say(s, "%s", "");
+        }
+        own++;
+        say(s, "    %s", rs_jobject_str(p, "path"));
+    }
+    if (pkg > 0)
+    {
+        say(s, "%s", "");
+        say(s, "%zu program%s a package installed, and then changed, %s left as this", pkg,
+            pkg == 1 ? "" : "s", pkg == 1 ? "is" : "are");
+        say(s, "%s", "processor's package has it: restore puts back no program of another.");
+    }
+    if (own == 0 && pkg == 0)
+    {
+        say(s, "%s", "");
+        say(s, "%s", "The image keeps no program a package did not install, so nothing else "
+                     "needs");
+        say(s, "%s", "building again.");
     }
 }
 
@@ -2234,6 +2481,7 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
     after(&s);
     reinstall(&s);
     restore(&s);
+    other_processor(&s);
     notes(&s);
 
     if (s.have_installer)

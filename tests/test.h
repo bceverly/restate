@@ -116,6 +116,7 @@ void test_baseline(void);
 void test_identity(void);
 void test_clones(void);
 void test_jobs(void);
+void test_arch(void);
 void test_result(void);
 
 #endif /* RESTATE_TEST_H */

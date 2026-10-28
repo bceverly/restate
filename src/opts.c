@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "identity.h"
 #include "rules.h"
 
@@ -326,6 +327,16 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
                 return false;
             }
             o->firmware = optarg;
+            break;
+        case OPT_ARCH:
+            if (!rs_arch_find(optarg))
+            {
+                rs_buf_addf(err, "--arch: \"%s\" is not a processor restate knows "
+                            "(x86_64, aarch64, ppc64le, riscv64, s390x, ppc64, i686, armv7l)",
+                            optarg);
+                return false;
+            }
+            o->arch = optarg;
             break;
         case OPT_PACKAGES:
             o->packages = true;

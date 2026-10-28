@@ -248,6 +248,19 @@ static void fuzz_openpgp(const char *text, size_t len)
     {
         abort();
     }
+    /* A signature's issuer: a key ID, a v4 or a v6 fingerprint, in hex, or
+     * nothing at all. */
+    {
+        char   iss[65];
+        bool   named = rs_pgp_sig_issuer((const unsigned char *)text, len, iss);
+        size_t il = strlen(iss);
+
+        if (named != (il > 0) || (il != 0 && il != 16 && il != 40 && il != 64) ||
+            strspn(iss, "0123456789ABCDEF") != il)
+        {
+            abort();
+        }
+    }
     for (i = 0; i < n; i++)
     {
         if (strlen(ids[i]) != 16 || strspn(ids[i], "0123456789ABCDEF") != 16)

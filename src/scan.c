@@ -924,6 +924,7 @@ static bool reuse(struct walk *w, struct rs_entry *e, const struct rs_entry *was
     }
     memcpy(e->hash, was->hash, sizeof(e->hash));
     e->hash_state = RS_HASH_PRESENT;
+    e->arch = was->arch;
     if (keep)
     {
         if (!w->opts->store(w->opts->store_ctx, e, -1, st, w->err))

@@ -115,6 +115,44 @@ static void pure(void)
     CHECK(!rs_baseline_snapshot_uri("http://archive.ubuntu.com/elsewhere", "20261010T000000Z",
                                     &b));
 
+    TEST_CASE("baseline: Ubuntu's archive for each processor's packages");
+    {
+        static const char *const cases[][3] = {
+            { "http://archive.ubuntu.com/ubuntu", "arm64",
+              "http://ports.ubuntu.com/ubuntu-ports/" },
+            { "https://gb.archive.ubuntu.com/ubuntu/", "s390x",
+              "https://ports.ubuntu.com/ubuntu-ports/" },
+            { "http://security.ubuntu.com/ubuntu", "riscv64",
+              "http://ports.ubuntu.com/ubuntu-ports/" },
+            { "http://ports.ubuntu.com/ubuntu-ports", "amd64",
+              "http://archive.ubuntu.com/ubuntu/" },
+            { "http://us.ports.ubuntu.com/ubuntu-ports/", "i386",
+              "http://archive.ubuntu.com/ubuntu/" },
+            { "http://archive.ubuntu.com/ubuntu", "amd64", "http://archive.ubuntu.com/ubuntu" },
+            { "http://ports.ubuntu.com/ubuntu-ports", "ppc64el",
+              "http://ports.ubuntu.com/ubuntu-ports" },
+            { "http://deb.debian.org/debian", "arm64", "http://deb.debian.org/debian" },
+            { "http://archive.ubuntu.com/elsewhere", "arm64",
+              "http://archive.ubuntu.com/elsewhere" },
+            { "file:///srv/mirror", "arm64", "file:///srv/mirror" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        {
+            char *got = rs_baseline_uri_for(cases[i][0], cases[i][1]);
+
+            CHECK_STR(got, cases[i][2]);
+            free(got);
+        }
+        {
+            char *got = rs_baseline_uri_for("http://archive.ubuntu.com/ubuntu", NULL);
+
+            CHECK_STR(got, "http://archive.ubuntu.com/ubuntu");
+            free(got);
+        }
+    }
+
     TEST_CASE("baseline: a Release file's entry for a list");
     {
         static const char release[] =
@@ -528,6 +566,51 @@ static void fetching(void)
         free(said);
         rs_jval_free(&old);
         free(old_json);
+    }
+
+    TEST_CASE("baseline fetch: for another processor, its builds of the machine's packages");
+    {
+        struct rs_jval          other;
+        struct rs_baseline_opts to = o;
+        char                   *cache2 = rs_xasprintf("%s/cache2", dir);
+        char                   *other_json = rs_xasprintf(
+            "{\"apt\": {\"architectures\": [\"arm64\", \"armhf\"],"
+            " \"sources\": [{\"file\": \"/etc/apt/sources.list.d/t.sources\", \"types\": [\"deb\"],"
+            "  \"uris\": [\"file://%s/repo\"], \"suites\": [\"stable\"],"
+            " \"components\": [\"main\"],"
+            "  \"signed_by\": \"/usr/share/keyrings/a.gpg\"}],"
+            " \"keys\": [{\"path\": \"/usr/share/keyrings/a.gpg\", \"data\": \"%s\"}],"
+            " \"packages\": ["
+            "  {\"name\": \"hello\", \"architecture\": \"arm64\", \"version\": \"1.0\","
+            "   \"origins\": [\"file://%s/repo stable/main\"]},"
+            "  {\"name\": \"tzdata\", \"architecture\": \"all\", \"version\": \"2026a\","
+            "   \"origins\": [\"file://%s/repo stable/main\"]},"
+            "  {\"name\": \"libold\", \"architecture\": \"armhf\", \"version\": \"1\","
+            "   \"origins\": [\"file://%s/repo stable/main\"]}]}}",
+            dir, b64.data ? b64.data : "", dir, dir, dir);
+
+        memset(&other, 0, sizeof(other));
+        rs_buf_reset(&err);
+        rs_json_init(&jp, other_json, strlen(other_json), &err);
+        CHECK(rs_json_value(&jp, &other));
+        to.cache = cache2;
+        to.arch = "amd64";
+        CHECK(rs_baseline_fetch(&other, &to, &st, &err));
+        CHECK_INT(st.wanted, 2);
+        CHECK_INT(st.foreign, 1);
+        CHECK_INT(st.fetched, 2);
+        CHECK_INT(st.missing, 0);
+        rs_buf_init(&text);
+        CHECK(rs_read_beneath(cache2, "/hello_1.0_amd64.deb", 4096, &text));
+        rs_buf_free(&text);
+        /* Its own processor, asked for by name: nothing changes. */
+        to.arch = "arm64";
+        CHECK(rs_baseline_fetch(&other, &to, &st, &err));
+        CHECK_INT(st.foreign, 0);
+        CHECK_INT(st.wanted, 3);
+        rs_jval_free(&other);
+        free(other_json);
+        free(cache2);
     }
 
     TEST_CASE("baseline fetch: an index signed by another key is not used");

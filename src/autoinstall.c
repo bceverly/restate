@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "arch.h"
 #include "image.h"
 #include "packages.h"
 
@@ -118,12 +119,13 @@ static const char *part_flag(const struct rs_vol *v)
     } flags[] = {
         { "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "boot" },
         { "21686148-6449-6e6f-744e-656564454649", "bios_grub" },
+        { "9e1a2d38-c612-4316-aa26-8b49521e5a8b", "prep" },
         { "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "swap" },
         { "e3c9e316-0b5c-4db8-817d-f92df00215ae", "msftres" },
         { "e6d6d379-f507-44c2-a23c-238f2a3df928", "lvm" },
         { "a19d880f-05fc-4d3b-a006-743f0f84911e", "raid" },
         { "0xef", "boot" }, { "0x82", "swap" }, { "0x8e", "lvm" }, { "0xfd", "raid" },
-        { "0x05", "extended" }, { "0x0f", "extended" },
+        { "0x05", "extended" }, { "0x0f", "extended" }, { "0x41", "prep" },
     };
     size_t i;
 
@@ -135,6 +137,49 @@ static const char *part_flag(const struct rs_vol *v)
         }
     }
     return NULL;
+}
+
+/* Rebuilt for another processor (--arch): what the image keeps that no
+ * package installed, and is built for the old one, said for someone to
+ * build again -- the packages are the new processor's builds already. */
+static void other_processor(struct gen *g)
+{
+    const struct rs_jval *progs = rs_jobject_get(g->machine, "programs");
+    const char           *was = rs_jobject_str(g->sys, "rebuilt_from");
+    const struct rs_arch *now = rs_arch_of_machine(g->machine);
+    bool                  any = false;
+    size_t                i;
+
+    if (!was)
+    {
+        return;
+    }
+    rs_buf_addf(g->out, "#\n# Rebuilt for %s; the old machine was %s. Each package is installed\n"
+                        "# as its build for %s.",
+                now ? now->name : "another processor", was, now ? now->name : "this one");
+    for (i = 0; progs && progs->type == RS_JARRAY && i < progs->n; i++)
+    {
+        const struct rs_jval *p = &progs->items[i];
+        const char           *path = rs_jobject_str(p, "path");
+
+        if (!rs_arch_same(rs_jobject_str(p, "arch"), was) || rs_jobject_str(p, "package") ||
+            !path || strchr(path, '\n'))
+        {
+            continue;
+        }
+        if (!any)
+        {
+            rs_buf_addf(g->out, " These programs no package installed are built for\n"
+                                "# %s and will not run here; build them again after the "
+                                "install:\n", was);
+            any = true;
+        }
+        rs_buf_addf(g->out, "#   %s\n", path);
+    }
+    if (!any)
+    {
+        rs_buf_addstr(g->out, "\n");
+    }
 }
 
 static void header(struct gen *g)
@@ -166,6 +211,7 @@ static void header(struct gen *g)
                   "#\n"
                   "# The installer formats the volumes itself, so the restore keeps its\n"
                   "# /etc/fstab and /etc/crypttab rather than the old ones.\n");
+    other_processor(g);
     if (g->o->packages && g->o->image_at)
     {
         rs_buf_addf(g->out,
@@ -349,9 +395,13 @@ static void put_disk(struct gen *g, size_t d)
         }
         free(path);
     }
+    /* A DASD's own volume table is curtin's "vtoc"; a DASD rebuilt as a
+     * virtual machine's disk is a virtio one, and GPT. */
     if (disk->table)
     {
-        kv(g, 8, "ptable", strcmp(disk->table, "dos") == 0 ? "msdos" : "gpt");
+        bool vtoc = strcmp(disk->table, "dasd") == 0 && g->o->target != RS_TARGET_VM;
+
+        kv(g, 8, "ptable", strcmp(disk->table, "dos") == 0 ? "msdos" : vtoc ? "vtoc" : "gpt");
     }
     if (g->keep_table)
     {
@@ -419,7 +469,10 @@ static void put_partitions(struct gen *g, size_t d)
         {
             kv(g, 8, "partition_type", v->ptype);
         }
-        if (is_esp(v) && !eq(g->l.firmware, "bios"))
+        /* GRUB's place: the ESP for UEFI, the PReP partition for Open
+         * Firmware. IBM Z's zipl and POWER's petitboot need neither. */
+        if ((is_esp(v) && (!g->l.firmware || eq(g->l.firmware, "uefi"))) ||
+            (eq(flag, "prep") && eq(g->l.firmware, "ieee1275")))
         {
             rs_buf_addstr(g->out, "        grub_device: true\n");
         }
@@ -1424,6 +1477,33 @@ static void indented(struct rs_buf *out, const char *text, int n)
  * the rest of this file writes it under "autoinstall:", with RS_AUTO_COPY
  * for the copy's name and NETWORK_HERE for its network.
  */
+/* Each PostgreSQL cluster the image keeps is, in every copy, the original's
+ * to replication: its system identifier is the one initdb gave it, and
+ * nothing after changes that. Said, for whoever sets copies to replicate. */
+static void same_clusters(const struct gen *g)
+{
+    const struct rs_jval *pg = rs_jobject_get(g->machine, "postgresql_clusters");
+    size_t                i;
+
+    if (!pg || pg->type != RS_JARRAY || pg->n == 0)
+    {
+        return;
+    }
+    rs_buf_addstr(g->out,
+                  "#\n"
+                  "# Every copy's PostgreSQL cluster has the original's system identifier,\n"
+                  "# which only initdb sets, so to replication each is the same cluster: a copy\n"
+                  "# that is to replicate is made a standby with pg_basebackup from its\n"
+                  "# primary, not restored from the image. The clusters:\n");
+    for (i = 0; i < pg->n; i++)
+    {
+        if (pg->items[i].type == RS_JSTRING && !strchr(pg->items[i].s, '\n'))
+        {
+            rs_buf_addf(g->out, "#   %s\n", pg->items[i].s);
+        }
+    }
+}
+
 static void copies_file(struct gen *g, const struct rs_buf *config)
 {
     const struct rs_clones *c = g->o->clones;
@@ -1458,6 +1538,7 @@ static void copies_file(struct gen *g, const struct rs_buf *config)
         rs_buf_addf(g->out, "#   %-20s %-17s %-20s %s\n", k->name, k->mac ? k->mac : "-",
                     k->serial ? k->serial : "-", k->address ? k->address : "DHCP");
     }
+    same_clusters(g);
     rs_buf_addstr(&script,
                   "# restate: which copy this machine is, and the installer's configuration\n"
                   "# for it, which the installer reads again once this has run.\n"

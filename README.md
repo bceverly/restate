@@ -195,8 +195,9 @@ accounted for: the storage and network drivers in the initramfs, device and
 interface names, a disk sized to the data rather than the old drive, hardware
 tools swapped for guest agents (or the reverse), an encrypted volume that was
 unlocked by the old machine's TPM -- and, with `--firmware`, UEFI where it
-booted by BIOS, or the other way. For a VM, a ready-to-run definition of the
-virtual machine itself.
+booted by BIOS, or the other way; with `--arch`, onto another processor
+altogether, an x86 server rebuilt on ARM. For a VM, a ready-to-run
+definition of the virtual machine itself.
 
 **Stamping out copies.** Build one machine that does the thing — a load
 generator, a lab workstation — and [put it back as many](#copies), each with
@@ -455,6 +456,12 @@ Options:
       --target=KIND       buildsheet, autoinstall: rebuild as a virtual machine
                           (vm) or on other hardware (metal) rather than the
                           same machine
+      --arch=ARCH         installer, baseline fetch, and buildsheet and
+                          autoinstall with --target: rebuild for this processor
+                          (x86_64, aarch64, ppc64le, riscv64, s390x, in any
+                          system's spelling) rather than the image's, its
+                          packages built for it; restore: the root is of this
+                          processor, not this machine's
       --firmware=MODE     buildsheet, autoinstall, with --target: boot the
                           rebuilt machine by UEFI (uefi) or BIOS (bios) rather
                           than as the old one did, with the partition that
@@ -893,10 +900,39 @@ goes the other way, onto other hardware. Both cover what cannot move:
 interface names and MACs, TPM-held LUKS keys, Secure Boot keys, the
 hibernation resume device.
 
+`--arch` rebuilds for another processor -- `x86_64`, `aarch64`, `ppc64le`,
+`riscv64` or `s390x`, in any system's spelling (`amd64`, `arm64`,
+`ppc64el`) -- with `--target vm` or `--target metal`, since a machine of
+another processor is other hardware. The installer is that processor's, and
+each package is reinstalled as its build for it, which apt chooses by name.
+It boots as that processor does: ARM and RISC-V by UEFI, POWER from a PReP
+partition (Open Firmware), IBM Z by its IPL of what zipl writes, with no boot
+partition at all; the partition the new one needs takes the old one's place.
+A virtual machine of another processor is QEMU's machine for it (`virt`,
+`pseries`, `s390-ccw-virtio`). What does not move is the image's programs
+that no package installed -- a tool built from source, a binary copied into
+`/usr/local` or `/opt`: capture records which processor each program it keeps
+is built for, from its ELF header, and the build sheet names the ones to
+build again. `restate installer --arch` names the other processor's
+installer, and `restate baseline fetch --arch` fetches each package's build
+for it, from Ubuntu's ports archive where that is where they are.
+
+Restoring onto a machine of another processor, restore leaves a program a
+package installed, and someone then changed, as this machine's package has it
+-- the image's would not run, and would break what needs it -- and warns of
+the programs it puts back that will not run here. `--arch` on restore says
+what processor the root is, where it is not this machine's.
+
+IBM Z's disks are recorded too: a DASD by its bus address, low-level formatted
+with `dasdfmt` and partitioned with `fdasd` in its own volume table, and a
+SCSI disk reached through an FCP adapter (zFCP) by that adapter, its WWPN and
+its LUN. The build sheet brings each online (`chzdev`) before partitioning it.
+
 ```console
 $ restate buildsheet web01.tar -o web01-rebuild.txt
 $ restate autoinstall --target vm web01.tar -o user-data
 $ restate buildsheet --target metal --firmware uefi old-bios-box.tar -o new-box.txt
+$ restate buildsheet --target vm --arch arm64 web01.tar -o web01-on-arm.txt
 ```
 
 Given `--image-at PATH` -- where the installer will find the image -- the
@@ -1087,8 +1123,12 @@ came from, as well as by the image, so one captured before the class existed
 is read as if it had it; an `identity PATTERN` line in a `--rules` file adds
 a site's own. Two things restate cannot make new: a WireGuard key has to be
 made known to the peers, so a copy has none until it is given one, and a
-PostgreSQL cluster's system identifier is fixed when the cluster is made
-(it matters only to replication).
+PostgreSQL cluster's system identifier is fixed when `initdb` makes the
+cluster. That one matters only to replication, to which every copy's cluster
+is the original's: `restore --as` says so for each cluster the image keeps,
+as an autoinstall file of copies does, and a copy that is to replicate is
+made a standby with `pg_basebackup` from its primary rather than restored
+from the image.
 
 `restate autoinstall --clones FILE` writes **one** autoinstall file for every
 copy `FILE` lists:
@@ -1501,17 +1541,21 @@ report_group = restate-report
 ```
 
 A job can be a `capture`, `prune`, `check`, `copy`, `snapshots`, `restore`,
-`estimate`, `du`, `repack`, `protect`, `status` or `list`; a `status` or `list`
-job reads the newest snapshot unless `snapshot` names one, and a `list` job
+`estimate`, `du`, `repack`, `protect`, `status`, `list` or `sign`; a `status`,
+`list` or `sign` job reads the newest snapshot unless `snapshot` names one.
+A `sign` job signs it with `sign_with` (and `passphrase_file`, if the key has
+a passphrase) -- as a storage host does after a capture, before `protect` --
+and its result says which snapshot (`signed`, `REPO::NAME`) and whose key
+(`signer`). A `list` job
 lists the directory `path` says (`/` if it says none). A `status` job takes
 `rules`, `all` and `one_file_system` as a capture does, though it seldom
 needs them: it classifies by the capture's own rules unless given others.
 
-Any job but `estimate` and `protect` can read what is encrypted, and takes
+Any job but `estimate`, `protect` and `sign` can read what is encrypted, and takes
 `decrypt_with`, the secret key as `--decrypt-with` takes it -- repeatable,
 for a repository whose older snapshots are encrypted to a key since replaced
--- and `passphrase_file`, a file whose first line is the passphrase. Both
-have to be regular files, root's (or the user's) and readable and writable by
+-- and `passphrase_file`, a file whose first line is the passphrase. Both,
+and a job's `sign_with`, have to be regular files, root's (or the user's) and readable and writable by
 no one else, in a directory only their owner can change. A program that keeps
 the key elsewhere writes it there -- under `/run`, root's alone -- for the one
 run, and removes it after; the job never needs a GnuPG home of its own.
@@ -1705,6 +1749,21 @@ archive's last member, `restate/index.sig`: a detached OpenPGP signature over
 the index part exactly as stored -- compressed, and encrypted if the image is
 -- so it covers every kept file's digest, owner, mode and path, and checking
 it decrypts nothing.
+
+A snapshot in a repository is signed the same way: as `capture` makes it, or
+afterwards with `restate sign REPO::NAME` -- or `REPO` alone, its newest --
+on whatever machine holds the key, as a [sign job](#jobs) does on a storage
+host. `restate snapshots` says of each whether it is signed and the key its
+signature names (`issuer`, in `--json` and its result -- what the signature
+claims, unchecked); with `--trusted-key`, it checks each signature against
+those keys and says whether it is good (`trusted`) and whose (`signer`,
+`signer_name`):
+
+```console
+$ restate snapshots --trusted-key backup-signing.pub /srv/restate/web01
+20261011T030000Z  web01  455634 files, 156.2 GiB; 156.2 GiB new; signed by Backups <backup@example.com> (76FC5D5D87ADCE70D3AF872FAECD3F3F70FF0A48)
+20261012T030000Z  web01  455640 files, 156.3 GiB; 412.0 MiB new; not signed
+```
 
 ## Classes and rules
 
@@ -2017,6 +2076,13 @@ The coverage gate is **80%, for the total and for every source file on its
 own** — a well-tested file cannot hide an untested one. Either can be raised
 (`COVERAGE_MIN=90`, `COVERAGE_FILE_MIN=90`); asking for less than 80 is
 refused. The badge above is generated from the measured number, never typed.
+
+Every on-disk format is meant to be the same bytes whichever processor wrote
+it, and CI holds it to that: besides amd64 and native aarch64, it builds and
+runs both suites on s390x (the big-endian one), ppc64le and riscv64 under
+QEMU, then has each processor's build read what the amd64 one wrote -- an
+image, a repository both capture into, prune and check, an encrypted one --
+and the other way round (`tests/cli/cross.sh BINARY OTHER-BINARY`).
 
 The fuzz target reaches every parser restate has — the JSON index, the tar
 reader, rules files, path patterns, timestamps and base64 — and checks

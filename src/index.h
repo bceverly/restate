@@ -97,6 +97,8 @@ struct rs_entry {
     char              *group;
     char              *stored;   /* member name inside the image, or NULL */
     char              *package;  /* the package it came from, or NULL */
+    const char        *arch;     /* the architecture an ELF program is built for, as
+                                  * rs_arch names it; NULL for anything else */
     bool               modified; /* not what that package installed */
     struct rs_xattr   *xattrs;   /* sorted by name; NULL when there are none */
     size_t             nxattrs;

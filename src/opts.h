@@ -47,6 +47,7 @@ enum {
     OPT_FETCH_SOURCES,
     OPT_PACKAGES,
     OPT_FIRMWARE,
+    OPT_ARCH,
     OPT_IMAGE_FSTAB,
     OPT_OFFLINE,
     OPT_AS,
@@ -91,6 +92,7 @@ struct rs_options {
     const char     *mirror;
     const char     *target;       /* "vm" or "metal", or NULL: the same machine */
     const char     *firmware;     /* "uefi" or "bios", or NULL: the machine's own */
+    const char     *arch;         /* --arch: rebuilt for this processor, or NULL */
     const char    **recipients;   /* --encrypt-to: public key files */
     size_t          nrecipients;
     const char     *sign_with;    /* --sign-with: a secret key file */

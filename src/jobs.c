@@ -35,9 +35,10 @@ enum {
     J_PROTECT   = 1u << 9,
     J_STATUS    = 1u << 10,
     J_LIST      = 1u << 11,
-    J_ANY       = 0xfffu,
+    J_SIGN      = 1u << 12,
+    J_ANY       = 0x1fffu,
     /* Every one that can read what is encrypted, and so may need a key. */
-    J_DECRYPTS  = J_ANY & ~(J_ESTIMATE | J_PROTECT)
+    J_DECRYPTS  = J_ANY & ~(J_ESTIMATE | J_PROTECT | J_SIGN)
 };
 
 static const struct {
@@ -51,6 +52,7 @@ static const struct {
     { "estimate", CMD_ESTIMATE, J_ESTIMATE },    { "du", CMD_DU, J_DU },
     { "repack", CMD_REPACK, J_REPACK },          { "protect", CMD_PROTECT, J_PROTECT },
     { "status", CMD_STATUS, J_STATUS },          { "list", CMD_LIST, J_LIST },
+    { "sign", CMD_SIGN, J_SIGN },
 };
 
 enum kind {
@@ -116,7 +118,8 @@ static const struct key {
 } keys[KEY_COUNT] = {
     [KEY_COMMAND] = { "command", K_COMMAND, false, J_ANY },
     [KEY_REPOSITORY] = { "repository", K_PATH, false, J_ANY & ~J_ESTIMATE },
-    [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false, J_RESTORE | J_COPY | J_STATUS | J_LIST },
+    [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false,
+                       J_RESTORE | J_COPY | J_STATUS | J_LIST | J_SIGN },
     [KEY_PATH] = { "path", K_PATH, false, J_LIST },
     [KEY_ROOT] = { "root", K_PATH, false, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_RESTORE_ROOT] = { "restore_root", K_PATH, false, J_RESTORE },
@@ -128,10 +131,11 @@ static const struct key {
     [KEY_QUIESCE] = { "quiesce", K_BOOL, false, J_CAPTURE },
     [KEY_QUIESCE_WITH] = { "quiesce_with", K_NAME, true, J_CAPTURE },
     [KEY_ENCRYPT_TO] = { "encrypt_to", K_PATH, true, J_CAPTURE | J_PRUNE },
-    [KEY_SIGN_WITH] = { "sign_with", K_PATH, false, J_CAPTURE },
+    [KEY_SIGN_WITH] = { "sign_with", K_PATH, false, J_CAPTURE | J_SIGN },
     [KEY_DECRYPT_WITH] = { "decrypt_with", K_PATH, true, J_DECRYPTS },
-    [KEY_PASSPHRASE_FILE] = { "passphrase_file", K_PATH, false, J_DECRYPTS },
-    [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true, J_RESTORE | J_CHECK | J_STATUS | J_LIST },
+    [KEY_PASSPHRASE_FILE] = { "passphrase_file", K_PATH, false, J_DECRYPTS | J_SIGN },
+    [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true,
+                          J_RESTORE | J_CHECK | J_STATUS | J_LIST | J_SNAPSHOTS },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
     [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
@@ -581,6 +585,7 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
     case CMD_RESTORE:
     case CMD_STATUS:
     case CMD_LIST:
+    case CMD_SIGN:
         if (snap && strstr(snap, "::"))
         {
             if (repo)
@@ -618,7 +623,8 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
     {
         rs_buf_addf(err, "%s: a %s job needs repository%s", name, rs_command_name(o->command),
                     o->command == CMD_RESTORE || o->command == CMD_COPY ||
-                            o->command == CMD_STATUS || o->command == CMD_LIST
+                            o->command == CMD_STATUS || o->command == CMD_LIST ||
+                            o->command == CMD_SIGN
                         ? ", or snapshot as REPO::NAME"
                         : "");
         return false;
@@ -868,7 +874,7 @@ static bool owned_safely(const struct stat *st)
 static bool only_reporting(const struct rs_options *o)
 {
     bool said = o->root || o->output || o->nrules_files || o->no_default_rules || o->os ||
-                o->cache || o->mirror || o->target || o->firmware || o->nrecipients ||
+                o->cache || o->mirror || o->target || o->firmware || o->arch || o->nrecipients ||
                 o->sign_with || o->ndecrypt_with || o->ntrusted || o->allow_unverified ||
                 o->all || o->rules_only ||
                 o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
@@ -923,8 +929,8 @@ static char *dir_of(const char *path)
 }
 
 /*
- * Why the file a job's `key` names for a secret -- its decrypt_with or
- * passphrase_file -- is not taken, or NULL if it is: it has to be a regular
+ * Why the file a job's `key` names for a secret -- its decrypt_with,
+ * sign_with or passphrase_file -- is not taken, or NULL if it is: it has to be a regular
  * file, not a symlink, root's or the user's and readable and writable by no
  * one else, in a directory only its owner can change, as the job is.
  */
@@ -1034,6 +1040,10 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     for (i = 0; !why && i < job->opts.ndecrypt_with; i++)
     {
         why = secret_refused(path, "decrypt_with", job->opts.decrypt_with[i]);
+    }
+    if (!why && job->opts.sign_with)
+    {
+        why = secret_refused(path, "sign_with", job->opts.sign_with);
     }
     if (!why && job->opts.passphrase_file)
     {

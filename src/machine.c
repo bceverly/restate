@@ -14,6 +14,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "bsd.h"
 
 /* Text files read here are small; anything larger is not what it claims. */
@@ -1251,6 +1252,13 @@ static void describe_system(const char *sysroot, const char *root, struct rs_jva
     {
         rs_jobj_str(sys, "kernel_name", u.sysname);
         rs_jobj_str(sys, "architecture", u.machine);
+        /* The kernel's word, in the one spelling restate compares by:
+         * "amd64" on a BSD is "x86_64", and NetBSD's "evbarm" is whatever
+         * this restate was built for. */
+        if (rs_arch_here(u.machine))
+        {
+            rs_jobj_str(sys, "arch", rs_arch_here(u.machine)->name);
+        }
         /* OpenBSD, NetBSD and macOS have no os-release: the kernel's name and
          * release are the system's. */
         if (!rs_jobject_str(sys, "id"))
@@ -1391,14 +1399,32 @@ static void describe_hardware(const char *sysroot, struct rs_jval *machine)
 
 static void describe_firmware(const char *sysroot, const char *root, struct rs_jval *machine)
 {
-    struct rs_jval *fw = rs_jobj_add(machine, "firmware");
-    bool            uefi = exists(sysroot, "/sys/firmware/efi");
-    struct rs_jval *loaders;
-    char          **efi;
-    size_t          nefi;
+    struct rs_jval       *fw = rs_jobj_add(machine, "firmware");
+    bool                  uefi = exists(sysroot, "/sys/firmware/efi");
+    const struct rs_arch *arch = rs_arch_of_machine(machine);
+    const char           *mode = "bios";
+    struct rs_jval       *loaders;
+    char                **efi;
+    size_t                nefi;
+    char                **grub;
+    size_t                ngrub;
 
+    /* Without UEFI: a PC's BIOS; IBM Z's IPL, of what zipl wrote; POWER's
+     * Open Firmware, which boots GRUB from a PReP partition -- or, on a
+     * POWER machine with no hypervisor, OPAL's petitboot, which reads the
+     * GRUB configuration itself and needs no boot partition at all. */
+    if (uefi)
+    {
+        mode = "uefi";
+    } else if (arch && strcmp(arch->name, "s390x") == 0)
+    {
+        mode = "zipl";
+    } else if (arch && strncmp(arch->name, "ppc64", 5) == 0)
+    {
+        mode = exists(sysroot, "/sys/firmware/opal") ? "opal" : "ieee1275";
+    }
     rs_jval_set_object(fw);
-    rs_jobj_str(fw, "mode", uefi ? "uefi" : "bios");
+    rs_jobj_str(fw, "mode", mode);
     if (uefi)
     {
         char *path = path_join(sysroot, "/sys/firmware/efi/efivars/"
@@ -1428,6 +1454,35 @@ static void describe_firmware(const char *sysroot, const char *root, struct rs_j
     {
         rs_jval_set_string(rs_jarr_add(loaders), "systemd-boot");
     }
+    if (exists(root, "/etc/zipl.conf"))
+    {
+        rs_jval_set_string(rs_jarr_add(loaders), "zipl");
+    }
+    /* The platforms GRUB is installed for: "x86_64-efi", "i386-pc",
+     * "arm64-efi", "powerpc-ieee1275" -- its modules' directories. */
+    grub = list_dir(root, "/boot/grub", &ngrub);
+    {
+        struct rs_jval *plats = NULL;
+        size_t          i;
+
+        for (i = 0; i < ngrub; i++)
+        {
+            const char *g = grub[i];
+            size_t      n = strlen(g);
+
+            if ((n > 4 && strcmp(g + n - 4, "-efi") == 0) || strcmp(g, "i386-pc") == 0 ||
+                strcmp(g, "powerpc-ieee1275") == 0)
+            {
+                if (!plats)
+                {
+                    plats = rs_jobj_add(fw, "grub_platforms");
+                    rs_jval_set_array(plats);
+                }
+                rs_jval_set_string(rs_jarr_add(plats), g);
+            }
+        }
+    }
+    free_list(grub, ngrub);
     /* What is installed on the EFI system partition: ubuntu, Microsoft, BOOT,
      * and so on -- which says, among other things, that this is dual boot. */
     efi = list_dir(root, "/boot/efi/EFI", &nefi);
@@ -1510,6 +1565,76 @@ static void luks_details(const char *sysroot, struct rs_jval *machine, struct rs
     rs_jval_free(&luks);
 }
 
+/* The last name in the symlink `rel`'s target -- a device's bus address,
+ * "0.0.0200" -- or NULL. */
+static char *link_base(const char *sysroot, const char *rel)
+{
+    char        target[512];
+    char       *path = path_join(sysroot, rel);
+    ssize_t     n = readlink(path, target, sizeof(target) - 1); /* Flawfinder: ignore */
+    const char *slash;
+
+    free(path);
+    if (n <= 0)
+    {
+        return NULL;
+    }
+    target[n] = '\0';
+    slash = strrchr(target, '/');
+    return slash && slash[1] != '\0' ? rs_xstrdup(slash + 1) : NULL;
+}
+
+/*
+ * IBM Z's disks. A DASD ("dasda") is a channel-attached device, named by its
+ * bus address and low-level formatted by dasdfmt before fdasd partitions it
+ * -- in its own volume table, which blkid does not read, so the table is
+ * said to be a DASD's here. A SCSI disk reached through an FCP adapter (zFCP) is
+ * an sd disk like any other, but brought online by its adapter, WWPN and
+ * LUN, which udev's ID_PATH holds: "ccw-0.0.1700-zfcp-0x5005...:0x4010...".
+ */
+static void s390_disk(struct rs_jval *disk, const char *sysroot, const char *base,
+                      const char *name, const char *udev)
+{
+    char *path = udev ? udev_get(udev, "ID_PATH") : NULL;
+
+    if (rs_starts_with(name, "dasd"))
+    {
+        struct rs_jval *d = rs_jobj_add(disk, "dasd");
+        char           *rel = rs_xasprintf("%s/device", base);
+        char           *bus = link_base(sysroot, rel);
+        char           *v;
+
+        free(rel);
+        rs_jval_set_object(d);
+        rs_jobj_str(d, "bus_id", bus);
+        free(bus);
+        rel = rs_xasprintf("%s/device/discipline", base);
+        v = read_line(sysroot, rel);
+        free(rel);
+        rs_jobj_str(d, "discipline", v);
+        free(v);
+    } else if (path && rs_starts_with(path, "ccw-") && strstr(path, "-zfcp-"))
+    {
+        struct rs_jval *z = rs_jobj_add(disk, "zfcp");
+        const char     *at = strstr(path, "-zfcp-");
+        const char     *colon = strchr(at + 6, ':');
+        char           *bus = rs_xstrndup(path + 4, (size_t)(at - path - 4));
+
+        rs_jval_set_object(z);
+        rs_jobj_str(z, "bus_id", bus);
+        free(bus);
+        if (colon)
+        {
+            char *wwpn = rs_xstrndup(at + 6, (size_t)(colon - at - 6));
+
+            rs_jobj_str(z, "wwpn", wwpn);
+            rs_jobj_str(z, "lun", colon + 1);
+            free(wwpn);
+        }
+    }
+    free(path);
+}
+
 static void describe_disks(const char *sysroot, struct rs_jval *machine)
 {
     struct rs_jval *disks = rs_jobj_add(machine, "disks");
@@ -1586,7 +1711,12 @@ static void describe_disks(const char *sysroot, struct rs_jval *machine)
         free(s);
         udev_member(disk, udev, "ID_SERIAL_SHORT", "serial");
         udev_member(disk, udev, "ID_WWN", "wwn");
+        s390_disk(disk, sysroot, base, names[i], udev);
         s = udev ? udev_get(udev, "ID_PART_TABLE_TYPE") : NULL;
+        if (!s && rs_starts_with(names[i], "dasd"))
+        {
+            s = rs_xstrdup("dasd");
+        }
         if (s)
         {
             struct rs_jval *table = rs_jobj_add(disk, "table");

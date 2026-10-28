@@ -204,12 +204,20 @@ SysManage agent, against the repository directory locally.
 
 ### 9. Unattended signing for repository snapshots
 
-`sign` takes an image only, and signing asks for a passphrase.
+A trusted machine (the NAS, or the SysManage server) signs snapshots after
+they are written:
 
-- Allow `restate sign REPO::NAME --sign-with KEY`, so a trusted machine
-  (the NAS, or the SysManage server) signs snapshots after they're written.
-- Optionally accept a passphrase on a file descriptor (`--passphrase-fd N`)
-  for hosts where an agent-held signing key is acceptable.
+- `restate sign REPO::NAME --sign-with KEY`, or `REPO` alone for its newest,
+  with `--passphrase-fd N` for a key with a passphrase.
+- As a job: `command = sign`, with `repository`, `snapshot` (or none, for the
+  newest), `sign_with` and `passphrase_file` -- the key files held to what
+  `decrypt_with` is. Its result has `signed` (`REPO::NAME`) and `signer`.
+  Run it before `protect`. `restate features` lists `sign` in
+  `job_commands`.
+- `snapshots` says of each snapshot whether it is signed and the key the
+  signature names (`issuer`, unchecked); with `trusted_key`, whether it is
+  good (`trusted`) and whose (`signer`, `signer_name`). The features flag is
+  `snapshot_signer`.
 - Restore already refuses unsigned or untrusted input (exit 4). SysManage
   will surface that as a clear "this snapshot is not signed" message rather
   than defaulting to `--allow-unverified`.
@@ -297,6 +305,16 @@ one tenant whether another holds a given file. Give each store an owner
 label, refuse to attach a repository whose owner label differs, and keep
 the keyed chunker per store, so equal content in two tenants' stores
 produces different chunk ids.
+
+### 22. An append-only gateway, so hosts never mount the storage
+
+No restate change planned. SysManage ROADMAP Phase 25.5's append-only HTTPS
+gateway is a project of its own, installed on the storage host; restate
+keeps to local paths and has no network code, and the host side presents
+the repository to it as a local path (FUSE, or a staging directory the agent
+uploads from -- the gateway's design to settle). If that needs something
+small of restate -- a hook, or a guarantee about how it writes packs --
+it becomes an item here then.
 
 ---
 

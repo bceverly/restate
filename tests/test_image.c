@@ -306,6 +306,20 @@ void test_image(void)
             }
             free(big);
         }
+        {
+            /* A program, as its ELF header has it: 64-bit, big-endian, IBM Z. */
+            static const unsigned char head[24] = { 0x7f, 'E', 'L', 'F', 2, 2, 1, 0, 0, 0, 0, 0,
+                                                    0,    0,   0,   0,   0, 2, 0, 22 };
+            char *prog = rs_xasprintf("%s/prog", tree);
+            FILE *fp = fopen(prog, "wb");
+
+            CHECK(fp && fwrite(head, 1, sizeof(head), fp) == sizeof(head));
+            if (fp)
+            {
+                (void)fclose(fp);
+            }
+            free(prog);
+        }
         rs_rules_init(&rules);
         memset(&so, 0, sizeof(so));
         so.root = tree;
@@ -317,7 +331,7 @@ void test_image(void)
         so.store = rs_image_store;
         so.store_ctx = &iw;
         CHECK(rs_scan(&so, &ix, &st, &err));
-        CHECK_INT(st.stored, 4);
+        CHECK_INT(st.stored, 5);
         ix.created = rs_xstrdup("2026-10-03T00:00:00.000000000Z");
         ix.content = rs_xstrdup("state");
         CHECK(rs_image_finish(&iw, &ix, &err));
@@ -327,8 +341,11 @@ void test_image(void)
         rs_index_init(&back);
         CHECK(rs_index_load(&back, img, &err));
         CHECK_INT(back.count, ix.count);
+        e = rs_index_find(&back, "/prog");
+        CHECK_STR(e && e->arch ? e->arch : "", "s390x");
         e = rs_index_find(&back, "/etc/conf");
         CHECK(e && e->hash_state == RS_HASH_PRESENT && e->mode == 0640);
+        CHECK(e && e->arch == NULL);
         CHECK(e && e->stored && strcmp(e->stored, "restate/files/etc/conf") == 0);
         e = rs_index_find(&back, "/big");
         CHECK(e && e->size > 500000 && e->hash_state == RS_HASH_PRESENT);

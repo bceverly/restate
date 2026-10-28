@@ -98,6 +98,136 @@ static size_t packet_at(const unsigned char *p, size_t left, unsigned *tag, size
     return *body <= left - h ? h : 0;
 }
 
+/* `n` bytes of `b` in uppercase hex into `out`. */
+static void hex_of(const unsigned char *b, size_t n, char *out)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t            i;
+
+    for (i = 0; i < n; i++)
+    {
+        out[2 * i] = hex[b[i] >> 4];
+        out[2 * i + 1] = hex[b[i] & 15];
+    }
+    out[2 * n] = '\0';
+}
+
+/*
+ * The issuer in the `len` bytes of subpackets at `p`: a fingerprint (33)
+ * into fpr, a key ID (16) into keyid, each left alone if there is none.
+ * False if the area is not well formed. RFC 9580, 5.2.3.7.
+ */
+static bool issuer_in(const unsigned char *p, size_t len, char *fpr, char *keyid)
+{
+    size_t at = 0;
+
+    while (at < len)
+    {
+        size_t n;
+        size_t h;
+
+        if (p[at] < 192)
+        {
+            n = p[at];
+            h = 1;
+        } else if (p[at] < 255)
+        {
+            if (len - at < 2)
+            {
+                return false;
+            }
+            n = ((size_t)(p[at] - 192) << 8) + p[at + 1] + 192;
+            h = 2;
+        } else
+        {
+            if (len - at < 5)
+            {
+                return false;
+            }
+            n = ((size_t)p[at + 1] << 24) | ((size_t)p[at + 2] << 16) |
+                ((size_t)p[at + 3] << 8) | p[at + 4];
+            h = 5;
+        }
+        if (n == 0 || n > len - at - h)
+        {
+            return false;
+        }
+        {
+            const unsigned char *s = p + at + h;
+            unsigned             type = s[0] & 0x7f;
+
+            if (type == 33 && ((n == 22 && s[1] == 4) || (n == 34 && s[1] == 6)))
+            {
+                hex_of(s + 2, n - 2, fpr);
+            } else if (type == 16 && n == 9)
+            {
+                hex_of(s + 1, 8, keyid);
+            }
+        }
+        at += h + n;
+    }
+    return true;
+}
+
+bool rs_pgp_sig_issuer(const unsigned char *data, size_t len, char *out)
+{
+    unsigned             tag = 0;
+    size_t               body = 0;
+    size_t               h = data ? packet_at(data, len, &tag, &body) : 0;
+    const unsigned char *b = data ? data + h : NULL;
+    char                 fpr[65] = "";
+    char                 keyid[17] = "";
+
+    out[0] = '\0';
+    if (h == 0 || tag != 2 || body < 1)
+    {
+        return false;
+    }
+    if (b[0] == 3 && body >= 15)
+    {
+        /* v3: the key ID at a fixed place. */
+        hex_of(b + 7, 8, out);
+        return true;
+    }
+    if (b[0] == 4 && body >= 6)
+    {
+        size_t hashed = ((size_t)b[4] << 8) | b[5];
+        size_t unhashed;
+
+        if (hashed > body - 6 || body - 6 - hashed < 2)
+        {
+            return false;
+        }
+        unhashed = ((size_t)b[6 + hashed] << 8) | b[7 + hashed];
+        if (unhashed > body - 8 - hashed || !issuer_in(b + 6, hashed, fpr, keyid) ||
+            !issuer_in(b + 8 + hashed, unhashed, fpr, keyid))
+        {
+            return false;
+        }
+    } else if (b[0] == 6 && body >= 8)
+    {
+        size_t hashed = ((size_t)b[4] << 24) | ((size_t)b[5] << 16) | ((size_t)b[6] << 8) | b[7];
+        size_t unhashed;
+
+        if (hashed > body - 8 || body - 8 - hashed < 4)
+        {
+            return false;
+        }
+        unhashed = ((size_t)b[8 + hashed] << 24) | ((size_t)b[9 + hashed] << 16) |
+                   ((size_t)b[10 + hashed] << 8) | b[11 + hashed];
+        if (unhashed > body - 12 - hashed || !issuer_in(b + 8, hashed, fpr, keyid) ||
+            !issuer_in(b + 12 + hashed, unhashed, fpr, keyid))
+        {
+            return false;
+        }
+    } else
+    {
+        return false;
+    }
+    (void)snprintf(out, 65, "%s", fpr[0] ? fpr : keyid);
+    return out[0] != '\0';
+}
+
 size_t rs_pgp_recipients(const unsigned char *data, size_t len, char ids[][17], size_t max)
 {
     static const char hex[] = "0123456789ABCDEF";

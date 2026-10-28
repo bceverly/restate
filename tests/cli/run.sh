@@ -411,6 +411,10 @@ expect 2 "installer for an unsupported system" -- "$BIN" installer openbsd.json
 contains "$ERR" "installers for openbsd are not supported yet" "installer says what is unsupported"
 expect 2 "installer for a missing description" -- "$BIN" installer no-such.json
 expect 2 "installer with two descriptions" -- "$BIN" installer ubuntu.json ubuntu.json
+expect 0 "installer --arch" -- "$BIN" installer --arch s390x ubuntu.json
+contains "$OUT" "installer   Ubuntu 26.04 Server for s390x" "names the other processor's image"
+expect 0 "installer --arch, the kernel's name for it" -- "$BIN" installer --arch x86_64 ubuntu.json
+contains "$OUT" "https://releases.ubuntu.com/26.04/" "amd64 comes from releases"
 # A fetch needs curl and gpgv; without them it fails differently.
 have() { [ -x "/usr/bin/$1" ] || [ -x "/usr/local/bin/$1" ] || [ -x "/bin/$1" ]; }
 if have curl && have gpgv; then
@@ -477,6 +481,38 @@ JSON
 expect 0 "buildsheet --target=vm from an index" -- "$BIN" buildsheet --target=vm captured.json
 contains "$OUT" "vda1 : size=7168MiB" "a VM volume is sized from what the index records"
 contains "$OUT" "--disk size=8," "and so is the VM's disk"
+# --arch: rebuilt for another processor. The index records which processor
+# each program it keeps is for, and the build sheet names those that will
+# not run on the new one.
+sed 's/"version_id": "26.04", "kernel_name"/"version_id": "26.04", "architecture": "x86_64", "kernel_name"/' \
+  captured.json | awk '
+  /^\{"path": "\/srv\/x",/ {
+    print "{\"path\": \"/usr/local/bin/tool\", \"name\": \"tool\", \"type\": \"file\", \"class\": \"state\", \"mode\": \"0755\", \"uid\": 0, \"gid\": 0, \"size\": 9, \"mtime\": \"2026-10-05T00:00:00.000000000Z\", \"arch\": \"x86_64\"},"
+    print "{\"path\": \"/var/lib/postgresql/18/main/global/pg_control\", \"name\": \"pg_control\", \"type\": \"file\", \"class\": \"state\", \"mode\": \"0600\", \"uid\": 0, \"gid\": 0, \"size\": 9, \"mtime\": \"2026-10-05T00:00:00.000000000Z\"},"
+  }
+  { print }' > captured-arch.json
+expect 2 "--arch without --target" -- "$BIN" buildsheet --arch aarch64 captured-arch.json
+contains "$ERR" "--arch needs --target" "is refused: another processor is other hardware"
+expect 2 "--arch of a processor restate does not know" -- \
+  "$BIN" buildsheet --target vm --arch vax captured-arch.json
+expect 0 "buildsheet --arch arm64" -- "$BIN" buildsheet --target vm --arch arm64 captured-arch.json
+contains "$OUT" "Another processor" "says the processor is another"
+contains "$OUT" "The old machine was x86_64; this one is aarch64." "and which"
+contains "$OUT" "    /usr/local/bin/tool" "names the program that will not run there"
+contains "$OUT" "--machine virt" "the VM is an ARM one"
+contains "$OUT" "Firmware   UEFI" "which boots by UEFI"
+expect 2 "--firmware a processor does not boot by" -- \
+  "$BIN" buildsheet --target vm --arch s390x --firmware bios captured-arch.json
+contains "$ERR" "s390x machines boot only by zipl" "says how it boots"
+expect 0 "buildsheet --arch s390x" -- "$BIN" buildsheet --target vm --arch s390x captured-arch.json
+contains "$OUT" "IBM Z IPL, of what zipl writes" "IBM Z boots by zipl"
+expect 0 "autoinstall --arch ppc64el" -- \
+  "$BIN" autoinstall --target vm --arch ppc64el captured-arch.json
+contains "$OUT" '        flag: "prep"' "POWER boots GRUB from a PReP partition"
+contains "$OUT" "# Rebuilt for ppc64le; the old machine was x86_64." "and says what it was"
+expect 0 "buildsheet --arch, the processor it was" -- \
+  "$BIN" buildsheet --target vm --arch amd64 captured-arch.json
+lacks "$OUT" "Another processor" "is no other"
 # --exact-versions: the packages' versions from the archive's snapshot as of
 # the capture, where the archive has moved on.
 sed -e 's/"content": "none",/"content": "none", "created": "2026-10-10T19:14:40.031046870Z",/' \
@@ -607,6 +643,13 @@ echo doc > "rtree/home/u/with space"
 ln -s ../../etc/hosts rtree/home/u/link
 echo shared > rtree/var/lib/x/one
 ln rtree/var/lib/x/one rtree/var/lib/x/two
+# QEMU's s390x user-mode emulation, which CI runs the big-endian tests under,
+# drops the nanoseconds fstat gives (lstat and statx keep them): a file put
+# back with the very time captured would never look it to the restore that
+# checks it through its descriptor. Whole seconds, then, there.
+if [ "$(uname -m)" = s390x ]; then
+  find rtree -type f -exec touch -d @1700000000 {} +
+fi
 expect 0 "capture for restore" -- "$BIN" capture -r rtree --os=linux -q -o rimg.tar
 
 mkdir -p rout
@@ -690,6 +733,8 @@ echo oldbox > itree/etc/hostname
 echo KEY > itree/etc/ssh/ssh_host_ed25519_key
 echo node > itree/var/lib/tailscale/tailscaled.state
 echo doc > itree/home/u/doc
+mkdir -p itree/var/lib/postgresql/18/main/global
+echo control > itree/var/lib/postgresql/18/main/global/pg_control
 expect 0 "capture a machine's identity" -- "$BIN" capture -r itree --os=linux -o iimg.tar
 contains "$ERR" " 4 identity," "capture counts what is identity"
 expect 2 "restore --as a name that is not a host name" -- \
@@ -700,6 +745,8 @@ echo ffffffffffffffffffffffffffffffff > ifresh/etc/machine-id
 expect 0 "restore --as onto a fresh install" -- \
   "$BIN" restore --allow-unverified --as web1 --root ifresh iimg.tar
 contains "$ERR" "as web1: left out the image's identity (4 paths)" "says what it left out"
+contains "$ERR" "the PostgreSQL cluster in /var/lib/postgresql/18/main keeps the image's system identifier" \
+  "says a PostgreSQL cluster is the original's, to replication"
 check "keeps the machine's own machine-id" \
   test "$(cat ifresh/etc/machine-id)" = ffffffffffffffffffffffffffffffff
 check "gives it the new host name" test "$(cat ifresh/etc/hostname)" = web1
@@ -1074,6 +1121,32 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 0 "and it is trusted" -- "$BIN" restore --dry-run --trusted-key signer.pub --root srout srepo
   expect 2 "sign it again" -- "$BIN" sign --sign-with signer.sec srepo
   contains "$ERR" "it is signed already" "is refused"
+  # A sign job, as a storage host runs one after a capture: the newest, by
+  # the name it has when the job starts.
+  expect 0 "capture into it unsigned, for a sign job" -- "$BIN" capture -r rtree --os=linux -q -o srepo
+  mkdir -m 700 sjobs
+  cp signer.sec sjobs/s.sec && chmod 600 sjobs/s.sec
+  printf 'command = sign\nrepository = %s\nsign_with = %s\n' "$WORK/srepo" "$WORK/sjobs/s.sec" \
+    > sjobs/sign.conf
+  chmod 644 sjobs/sign.conf
+  expect 0 "run a sign job" -- "$BIN" run -q --result "$WORK/sjobs/res.json" "$WORK/sjobs/sign.conf"
+  contains "$(cat sjobs/res.json)" "\"signed\": \"$WORK/srepo::" "says which snapshot it signed"
+  contains "$(cat sjobs/res.json)" '"signer": "' "and whose key"
+  expect 0 "snapshots --trusted-key" -- "$BIN" snapshots --json --trusted-key signer.pub srepo
+  contains "$OUT" '"trusted": true, "signer": "' "says each is signed, and by whom"
+  lacks "$OUT" '"signed": false' "every one of them"
+  contains "$OUT" '"signer_name": "restate test <signer@example.invalid>"' "and names the signer"
+  expect 0 "snapshots --trusted-key someone else's" -- \
+    "$BIN" snapshots --trusted-key other.pub srepo
+  contains "$OUT" "by no key trusted here" "says the signature is no trusted key's"
+  expect 0 "snapshots, no key at all" -- "$BIN" snapshots --json srepo
+  contains "$OUT" '"issuer": "' "names the key each signature claims"
+  lacks "$OUT" '"trusted"' "and says nothing of trust"
+  expect 2 "run the sign job again" -- "$BIN" run -q "$WORK/sjobs/sign.conf"
+  contains "$ERR" "it is signed already" "is refused"
+  chmod 640 sjobs/s.sec
+  expect 2 "a sign job whose key others can read" -- "$BIN" run -q "$WORK/sjobs/sign.conf"
+  contains "$ERR" "sign_with" "is not run"
 
   # A key with a passphrase, given on a file descriptor rather than asked for:
   # for signing unattended, and for a restore a program runs.
@@ -1630,6 +1703,10 @@ contains "$OUT" '"programs": {' "and the programs it can use"
 contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
 contains "$OUT" '"keep_yearly": true' "and that prune keeps yearly snapshots"
+contains "$OUT" '"rebuild_arch": true' "and that it rebuilds for another processor"
+contains "$OUT" '"program_arch": true' "and records each program's"
+contains "$OUT" '"snapshot_signer": true' "and that snapshots says who signed each"
+contains "$OUT" '"sign": ["command", "repository", "snapshot", "sign_with"' "and that a job can sign"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
 else

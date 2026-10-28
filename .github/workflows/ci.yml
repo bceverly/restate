@@ -197,6 +197,57 @@ jobs:
         run: make test-unit test-cli
 
   # ==========================================================================
+  # The processors there is no runner for -- s390x, the one big-endian among
+  # them, ppc64le and riscv64 -- under QEMU: an Ubuntu container of each,
+  # built and tested in as on any other machine. Then what it writes, the
+  # runner's own amd64 build reads, and the other way round (cross.sh): every
+  # on-disk format is the same bytes whichever processor wrote it.
+  emulated:
+    name: Tests (${{ matrix.arch }}, emulated)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [s390x, ppc64le, riscv64]
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Ubuntu's own registers each processor with binfmt_misc, fixed, so a
+      # container of it runs with nothing of QEMU's inside.
+      - name: QEMU for the other processors
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-user-static > /dev/null
+
+      - name: Build and test in a ${{ matrix.arch }} container
+        run: |
+          docker run --rm --platform "linux/$ARCH" -v "$PWD:/w" -w /w -e ARCH \
+            docker.io/library/ubuntu:24.04 sh -c '
+            set -e
+            test "$(uname -m)" = "$ARCH"
+            apt-get update -q
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+              gcc make gnupg gzip diffutils ca-certificates > /dev/null
+            make build WERROR=-Werror
+            make test-unit test-cli
+            # Static, for the runner to run beside its own build.
+            mkdir -p "cross-$ARCH"
+            gcc -std=c11 -O2 -static -Iinclude -Isrc $(scripts/features.sh) \
+              -DRESTATE_VERSION="\"$(cat VERSION)-$ARCH\"" -o "cross-$ARCH/restate" src/*.c
+            make clean'
+
+      - name: What one writes, the other reads
+        run: |
+          make build WERROR=-Werror
+          tests/cli/cross.sh bin/restate "cross-$ARCH/restate"
+
+  # ==========================================================================
   # The other Linux distributions there are packages for: musl and busybox on
   # Alpine, and Fedora, EL and openSUSE, each in a container of its own as
   # root. Built and tested from source, then the package built from this tree

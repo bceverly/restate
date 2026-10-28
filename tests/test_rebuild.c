@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "autoinstall.h"
 #include "buildsheet.h"
 #include "clones.h"
@@ -1275,6 +1276,76 @@ static void firmware_cases(void)
     free(s);
     rs_jval_free(&m);
 
+    TEST_CASE("firmware: UEFI on GPT to Open Firmware, the ESP's place GRUB's PReP partition");
+    server(&m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "ieee1275"));
+    v = rs_layout_find(&l, "sda1");
+    CHECK_STR(l.vols[v].ptype, "9e1a2d38-c612-4316-aa26-8b49521e5a8b");
+    CHECK(l.vols[v].mountpoint == NULL && l.vols[v].fstype == NULL);
+    CHECK_INT(l.vols[v].size, (uint64_t)8 * 1024 * 1024);
+    /* And back: the PReP partition's place is the ESP's again. */
+    CHECK(rs_layout_set_firmware(&l, "uefi"));
+    CHECK_STR(l.vols[v].ptype, "c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+    CHECK_STR(l.vols[v].mountpoint, "/boot/efi");
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_VM, "ieee1275");
+    CHECK_CONTAINS(s, "Firmware   Open Firmware, GRUB in a PReP partition");
+    CHECK_CONTAINS(s, "type=9e1a2d38-c612-4316-aa26-8b49521e5a8b");
+    CHECK_CONTAINS(s, "The installer puts GRUB in the PReP partition");
+    CHECK(strstr(s, "/boot/efi") == NULL);
+    free(s);
+    s = autoinst_firmware(&m, RS_TARGET_VM, "ieee1275");
+    CHECK_CONTAINS(s, "        flag: \"prep\"\n");
+    CHECK_CONTAINS(s, "        flag: \"prep\"\n        partition_type: "
+                      "\"9e1a2d38-c612-4316-aa26-8b49521e5a8b\"\n        grub_device: true\n");
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: a BIOS guest on MBR to Open Firmware, a PReP partition added");
+    parse(guest_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "ieee1275"));
+    v = rs_layout_find(&l, "prep");
+    CHECK(v != SIZE_MAX);
+    CHECK_STR(v != SIZE_MAX ? l.vols[v].ptype : "", "0x41");
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_VM, "ieee1275");
+    CHECK_CONTAINS(s, "vda1 : size=8MiB, type=41\n");
+    free(s);
+    s = autoinst_firmware(&m, RS_TARGET_VM, "ieee1275");
+    CHECK_CONTAINS(s, "        flag: \"prep\"\n        grub_device: true\n");
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("firmware: IBM Z's IPL and POWER's petitboot, with no boot partition");
+    server(&m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "zipl"));
+    v = rs_layout_find(&l, "sda1");
+    CHECK(l.vols[v].foreign);
+    CHECK_CONTAINS(l.vols[v].foreign_why, "IBM Z's IPL does not use");
+    /* A BIOS on GPT, with the ESP set aside: GRUB's partition is added. */
+    CHECK(rs_layout_set_firmware(&l, "bios"));
+    CHECK(rs_layout_find(&l, "biosboot") != SIZE_MAX);
+    rs_layout_free(&l);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(rs_layout_set_firmware(&l, "opal"));
+    CHECK_CONTAINS(l.vols[rs_layout_find(&l, "sda1")].foreign_why, "petitboot");
+    rs_layout_free(&l);
+    s = sheet_firmware(&m, RS_TARGET_VM, "zipl");
+    CHECK_CONTAINS(s, "Firmware   IBM Z IPL, of what zipl writes");
+    CHECK_CONTAINS(s, "The installer writes the boot record with zipl");
+    CHECK_CONTAINS(s, "The LPAR or z/VM guest set to IPL");
+    free(s);
+    s = sheet_firmware(&m, RS_TARGET_VM, "opal");
+    CHECK_CONTAINS(s, "Firmware set to boot by OPAL (petitboot), no boot partition.");
+    free(s);
+    s = autoinst_firmware(&m, RS_TARGET_VM, "zipl");
+    CHECK(strstr(s, "grub_device") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
     TEST_CASE("firmware: nothing to boot from");
     parse("{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\"},"
           " \"firmware\": {\"mode\": \"bios\"},"
@@ -1418,6 +1489,13 @@ static void clones_cases(void)
     rs_buf_free(&text);
     rs_buf_init(&err);
     CHECK(rs_clones_parse(&c, list, strlen(list), "lab.csv", &err));
+    {
+        struct rs_jval *pg = rs_jobj_add(&m, "postgresql_clusters");
+
+        rs_jval_set_array(pg);
+        rs_jval_set_string(rs_jarr_add(pg), "/var/lib/postgresql/18/main");
+        rs_jval_set_string(rs_jarr_add(pg), "/srv/bad\nname");
+    }
     memset(&o, 0, sizeof(o));
     o.target = RS_TARGET_VM;
     o.version = "9.9";
@@ -1436,6 +1514,9 @@ static void clones_cases(void)
                       "10.0.0.11/24\n");
     CHECK_CONTAINS(s, "#   web2                 -                 SER-2                DHCP\n");
     CHECK_CONTAINS(s, "# The restore is made with --as");
+    CHECK_CONTAINS(s, "# Every copy's PostgreSQL cluster has the original's system identifier,");
+    CHECK_CONTAINS(s, "#   /var/lib/postgresql/18/main\n");
+    CHECK(strstr(s, "/srv/bad") == NULL);
     CHECK_CONTAINS(s, "\nautoinstall:\n  version: 1\n  early-commands:\n    - |\n");
     /* Nothing of the copies' configuration outside the early-command. */
     CHECK(strstr(s, "\n  storage:") == NULL);
@@ -1511,6 +1592,165 @@ static void clones_cases(void)
     free(dir);
 }
 
+/* An IBM Z guest: a DASD with /boot and /, and a SCSI disk over zFCP. */
+static const char s390x_json[] =
+    "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"architecture\": \"s390x\","
+    "   \"arch\": \"s390x\", \"type\": \"server\", \"hostname\": \"z1\"},"
+    " \"firmware\": {\"mode\": \"zipl\", \"boot_loaders\": [\"zipl\"]},"
+    " \"disks\": [{\"name\": \"dasda\", \"size\": 7385333760, \"logical_block_size\": 4096,"
+    "   \"dasd\": {\"bus_id\": \"0.0.0200\", \"discipline\": \"ECKD\"},"
+    "   \"table\": {\"type\": \"dasd\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"dasda1\", \"number\": 1, \"start\": 98304, \"size\": 1073741824,"
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"b\"}},"
+    "    {\"name\": \"dasda2\", \"number\": 2, \"start\": 1073840128, \"size\": 6000000000,"
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"r\"}}]},"
+    "  {\"name\": \"sda\", \"size\": 10737418240,"
+    "   \"zfcp\": {\"bus_id\": \"0.0.1700\", \"wwpn\": \"0x500507630b0b0000\","
+    "     \"lun\": \"0x4010400000000000\"},"
+    "   \"table\": {\"type\": \"gpt\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 10000000000,"
+    "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"d\"}}]}],"
+    " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"},"
+    "            {\"spec\": \"UUID=b\", \"file\": \"/boot\", \"type\": \"ext4\"},"
+    "            {\"spec\": \"UUID=d\", \"file\": \"/srv\", \"type\": \"ext4\"}]"
+    "}";
+
+static char *sheet_for(const struct rs_jval *m, enum rs_target t)
+{
+    struct rs_sheet_opts o;
+    struct rs_buf        out;
+    struct rs_buf        err;
+
+    memset(&o, 0, sizeof(o));
+    o.target = t;
+    o.version = "9.9";
+    rs_buf_init(&out);
+    rs_buf_init(&err);
+    CHECK(rs_buildsheet(m, &o, &out, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    rs_buf_free(&err);
+    return rs_buf_detach(&out);
+}
+
+static char *autoinst_for(const struct rs_jval *m, enum rs_target t)
+{
+    return autoinst_firmware(m, t, NULL);
+}
+
+static void arch_cases(void)
+{
+    struct rs_jval m;
+    char          *s;
+
+    TEST_CASE("buildsheet: IBM Z's disks, brought online by their addresses and formatted");
+    parse(s390x_json, &m);
+    s = sheet_for(&m, RS_TARGET_SAME);
+    CHECK_CONTAINS(s, "Firmware   IBM Z IPL, of what zipl writes");
+    CHECK_CONTAINS(s, "    chzdev -e dasd 0.0.0200\n");
+    CHECK_CONTAINS(s, "    chzdev -e zfcp-lun 0.0.1700:0x500507630b0b0000:0x4010400000000000\n");
+    CHECK_CONTAINS(s, "    dasdfmt -b 4096 -d cdl -y -p \"$DISK1\"\n");
+    CHECK_CONTAINS(s, "    fdasd \"$DISK1\"   # n for each of these, in order, then w:\n");
+    CHECK_CONTAINS(s, "    #   partition 2: ");
+    CHECK(strstr(s, "sfdisk \"$DISK1\"") == NULL);
+    CHECK_CONTAINS(s, "sfdisk \"$DISK2\"");
+    free(s);
+    s = autoinst_for(&m, RS_TARGET_SAME);
+    CHECK_CONTAINS(s, "ptable: \"vtoc\"");
+    CHECK(strstr(s, "grub_device") == NULL);
+    free(s);
+
+    TEST_CASE("buildsheet: IBM Z rebuilt as a virtual machine, on virtio disks");
+    s = sheet_for(&m, RS_TARGET_VM);
+    CHECK(strstr(s, "chzdev") == NULL && strstr(s, "dasdfmt") == NULL);
+    CHECK_CONTAINS(s, "--machine s390-ccw-virtio");
+    CHECK_CONTAINS(s, "sfdisk \"$DISK1\"");
+    free(s);
+    s = autoinst_for(&m, RS_TARGET_VM);
+    CHECK(strstr(s, "vtoc") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("buildsheet: one partition on a DASD, across it");
+    parse("{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"arch\": \"s390x\"},"
+          " \"firmware\": {\"mode\": \"zipl\"},"
+          " \"disks\": [{\"name\": \"dasda\", \"size\": 7385333760,"
+          "   \"table\": {\"type\": \"dasd\"}, \"partitions\": ["
+          "    {\"name\": \"dasda1\", \"number\": 1, \"start\": 98304, \"size\": 7000000000,"
+          "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"r\"}}]}],"
+          " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"}]}", &m);
+    s = sheet_for(&m, RS_TARGET_METAL);
+    CHECK_CONTAINS(s, "    fdasd -a \"$DISK1\"\n");
+    CHECK(strstr(s, "chzdev") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("buildsheet: rebuilt for another processor, what will not run named");
+    server(&m);
+    {
+        struct rs_jval *sys = (struct rs_jval *)(uintptr_t)rs_jobject_get(&m, "system");
+        struct rs_jval *progs = rs_jobj_add(&m, "programs");
+        struct rs_jval *p;
+
+        rs_jobj_str(sys, "arch", "aarch64");
+        rs_jobj_str(sys, "rebuilt_from", "x86_64");
+        rs_jval_set_array(progs);
+        p = rs_jarr_add(progs);
+        rs_jval_set_object(p);
+        rs_jobj_str(p, "path", "/usr/local/bin/tool");
+        rs_jobj_str(p, "arch", "amd64");
+        p = rs_jarr_add(progs);
+        rs_jval_set_object(p);
+        rs_jobj_str(p, "path", "/usr/bin/patched");
+        rs_jobj_str(p, "arch", "x86_64");
+        rs_jobj_str(p, "package", "coreutils");
+        p = rs_jarr_add(progs);
+        rs_jval_set_object(p);
+        rs_jobj_str(p, "path", "/opt/already-arm");
+        rs_jobj_str(p, "arch", "aarch64");
+    }
+    s = sheet_for(&m, RS_TARGET_VM);
+    CHECK_CONTAINS(s, "Another processor\n");
+    CHECK_CONTAINS(s, "The old machine was x86_64; this one is aarch64.");
+    CHECK_CONTAINS(s, "    /usr/local/bin/tool\n");
+    CHECK(strstr(s, "/opt/already-arm") == NULL && strstr(s, "    /usr/bin/patched") == NULL);
+    CHECK_CONTAINS(s, "1 program a package installed, and then changed, is left as this");
+    CHECK_CONTAINS(s, "--machine virt");
+    if (rs_arch_built() && strcmp(rs_arch_built()->name, "aarch64") == 0)
+    {
+        CHECK_CONTAINS(s, "--cpu host-passthrough");
+    } else
+    {
+        CHECK_CONTAINS(s, "        --arch aarch64 \\\n");
+        CHECK_CONTAINS(s, "QEMU emulates this aarch64 guest");
+    }
+    free(s);
+    s = autoinst_for(&m, RS_TARGET_VM);
+    CHECK_CONTAINS(s, "# Rebuilt for aarch64; the old machine was x86_64.");
+    CHECK_CONTAINS(s, "#   /usr/local/bin/tool\n");
+    CHECK(strstr(s, "/usr/bin/patched") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("buildsheet: rebuilt for another processor, with nothing to build again");
+    server(&m);
+    {
+        struct rs_jval *sys = (struct rs_jval *)(uintptr_t)rs_jobject_get(&m, "system");
+
+        rs_jobj_str(sys, "arch", "riscv64");
+        rs_jobj_str(sys, "rebuilt_from", "x86_64");
+    }
+    s = sheet_for(&m, RS_TARGET_VM);
+    CHECK_CONTAINS(s, "keeps no program a package did not install");
+    free(s);
+    s = autoinst_for(&m, RS_TARGET_VM);
+    CHECK_CONTAINS(s, "# as its build for riscv64.\n");
+    free(s);
+    rs_jval_free(&m);
+}
+
 void test_rebuild(void)
 {
     package_cases();
@@ -1521,4 +1761,5 @@ void test_rebuild(void)
     sheet_cases();
     autoinstall_cases();
     clones_cases();
+    arch_cases();
 }

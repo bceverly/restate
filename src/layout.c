@@ -320,6 +320,10 @@ static void read_disks(const struct rs_jval *machine, struct rs_layout *l)
         }
         disk->rotational = flag(d, "rotational");
         disk->removable = flag(d, "removable");
+        disk->dasd_bus = rs_jobject_str(rs_jobject_get(d, "dasd"), "bus_id");
+        disk->zfcp_bus = rs_jobject_str(rs_jobject_get(d, "zfcp"), "bus_id");
+        disk->zfcp_wwpn = rs_jobject_str(rs_jobject_get(d, "zfcp"), "wwpn");
+        disk->zfcp_lun = rs_jobject_str(rs_jobject_get(d, "zfcp"), "lun");
         if (table && table->type == RS_JOBJECT)
         {
             disk->table = rs_jobject_str(table, "type");
@@ -967,7 +971,9 @@ bool rs_layout_build(const struct rs_jval *machine, struct rs_layout *out)
 
 #define ESP_TYPE  "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 #define BIOS_TYPE "21686148-6449-6e6f-744e-656564454649"
+#define PREP_TYPE "9e1a2d38-c612-4316-aa26-8b49521e5a8b"
 #define ESP_SIZE  ((uint64_t)512 * 1024 * 1024)
+#define PREP_SIZE ((uint64_t)8 * 1024 * 1024)
 
 static bool is_esp(const struct rs_vol *v)
 {
@@ -978,6 +984,18 @@ static bool is_esp(const struct rs_vol *v)
 static bool is_bios_boot(const struct rs_vol *v)
 {
     return v->kind == RS_VOL_PART && rs_ptype_is(v->ptype, BIOS_TYPE);
+}
+
+static bool is_prep(const struct rs_vol *v)
+{
+    return v->kind == RS_VOL_PART &&
+           (rs_ptype_is(v->ptype, PREP_TYPE) || rs_ptype_is(v->ptype, "0x41"));
+}
+
+/* A partition the firmware or boot loader uses, rather than the system. */
+static bool is_boot_part(const struct rs_vol *v)
+{
+    return is_esp(v) || is_bios_boot(v) || is_prep(v);
 }
 
 /* The disk volume `i` is on, through what it is made from -- the first of
@@ -1009,8 +1027,7 @@ static size_t boot_disk(const struct rs_layout *l)
 
     for (i = 0; i < l->nvols; i++)
     {
-        if ((is_esp(&l->vols[i]) || is_bios_boot(&l->vols[i])) && !l->vols[i].foreign &&
-            l->vols[i].disk != SIZE_MAX)
+        if (is_boot_part(&l->vols[i]) && !l->vols[i].foreign && l->vols[i].disk != SIZE_MAX)
         {
             return l->vols[i].disk;
         }
@@ -1069,30 +1086,69 @@ static struct rs_vol *insert_vol(struct rs_layout *l, size_t at)
     return &l->vols[at];
 }
 
-/* What an EFI system partition holds and where it is mounted. */
-static void make_esp(struct rs_vol *v, bool gpt)
+/* A boot partition as `mode` wants one, in place of whatever `v` was: an
+ * EFI system partition for UEFI, GRUB's BIOS boot partition for a BIOS on
+ * GPT, a PReP partition for Open Firmware -- the last two raw, GRUB's own. */
+static void make_boot(struct rs_vol *v, const char *mode, bool gpt)
 {
-    v->ptype = gpt ? ESP_TYPE : "0xef";
+    bool uefi = strcmp(mode, "uefi") == 0;
+
     v->pname = NULL;
     v->puuid = NULL;
     v->pflags = NULL;
-    v->size = ESP_SIZE;
-    v->fstype = "vfat";
-    v->usage = "filesystem";
     v->uuid = NULL;
     v->label = NULL;
     v->version = NULL;
-    v->mountpoint = "/boot/efi";
-    v->options = "umask=0077";
     v->fs_size = 0;
     v->fs_used = 0;
     v->captured_known = false;
+    v->fstype = uefi ? "vfat" : NULL;
+    v->usage = uefi ? "filesystem" : NULL;
+    v->mountpoint = uefi ? "/boot/efi" : NULL;
+    v->options = uefi ? "umask=0077" : NULL;
+    if (uefi)
+    {
+        v->ptype = gpt ? ESP_TYPE : "0xef";
+        v->size = ESP_SIZE;
+    } else if (strcmp(mode, "ieee1275") == 0)
+    {
+        v->ptype = gpt ? PREP_TYPE : "0x41";
+        v->size = PREP_SIZE;
+    } else
+    {
+        v->ptype = BIOS_TYPE;
+        v->size = (uint64_t)1024 * 1024;
+    }
+}
+
+/* Whether `mode` boots from a partition of its own on `gpt` or not: a BIOS
+ * on a DOS table puts GRUB in the gap after the MBR; IBM Z's IPL and POWER's
+ * petitboot need none. */
+static bool wants_boot_part(const char *mode, bool gpt)
+{
+    return strcmp(mode, "uefi") == 0 || strcmp(mode, "ieee1275") == 0 ||
+           (strcmp(mode, "bios") == 0 && gpt);
+}
+
+static const char *boot_part_why(const char *mode)
+{
+    if (strcmp(mode, "zipl") == 0)
+    {
+        return "a boot partition, which IBM Z's IPL does not use";
+    }
+    if (strcmp(mode, "opal") == 0)
+    {
+        return "a boot partition, which OPAL's petitboot does not use";
+    }
+    return "the EFI system partition, which a BIOS boot does not use";
 }
 
 bool rs_layout_set_firmware(struct rs_layout *l, const char *mode)
 {
     size_t d = boot_disk(l);
     bool   gpt;
+    bool   want;
+    size_t first = SIZE_MAX;
     size_t i;
 
     if (!mode || (l->firmware && strcmp(l->firmware, mode) == 0))
@@ -1104,88 +1160,62 @@ bool rs_layout_set_firmware(struct rs_layout *l, const char *mode)
         return false;
     }
     gpt = strcmp(l->disks[d].table, "dos") != 0;
-    if (strcmp(mode, "uefi") == 0)
-    {
-        size_t first = SIZE_MAX;
-
-        for (i = 0; i < l->nvols; i++)
-        {
-            struct rs_vol *v = &l->vols[i];
-
-            if (v->disk != d || v->kind != RS_VOL_PART || v->foreign)
-            {
-                continue;
-            }
-            if (is_esp(v))
-            {
-                l->firmware = "uefi";
-                return true;   /* it has one already */
-            }
-            if (is_bios_boot(v))
-            {
-                /* GRUB's BIOS partition, which UEFI does not use: the ESP
-                 * takes its place, at the front of the disk. */
-                make_esp(v, gpt);
-                l->firmware = "uefi";
-                return true;
-            }
-            first = first == SIZE_MAX ? i : first;
-        }
-        if (first == SIZE_MAX)
-        {
-            return false;
-        }
-        {
-            struct rs_vol *v = insert_vol(l, first);
-            const char    *disk = l->disks[d].name;
-            size_t         n = strlen(disk);
-
-            v->kind = RS_VOL_PART;
-            v->disk = d;
-            v->number = 1;
-            v->name = "esp";
-            v->kname = "esp";
-            /* The first partition: the rest are numbered after it. */
-            v->path = rs_xasprintf("/dev/%s%s1", disk,
-                                   n > 0 && disk[n - 1] >= '0' && disk[n - 1] <= '9' ? "p" : "");
-            make_esp(v, gpt);
-        }
-        l->firmware = "uefi";
-        return true;
-    }
-    /* BIOS: GRUB goes in a BIOS boot partition on GPT, and in the gap after
-     * the MBR on a DOS table; the ESP is not needed either way. */
+    want = wants_boot_part(mode, gpt);
     for (i = 0; i < l->nvols; i++)
     {
         struct rs_vol *v = &l->vols[i];
 
-        if (v->disk != d || !is_esp(v) || v->foreign)
+        if (v->disk != d || v->kind != RS_VOL_PART || v->foreign)
         {
             continue;
         }
-        if (gpt)
+        first = first == SIZE_MAX ? i : first;
+        if (!is_boot_part(v))
         {
-            v->ptype = BIOS_TYPE;
-            v->pname = NULL;
-            v->pflags = NULL;
-            v->size = (uint64_t)1024 * 1024;
-            v->fstype = NULL;
-            v->usage = NULL;
-            v->uuid = NULL;
-            v->label = NULL;
-            v->mountpoint = NULL;
-            v->options = NULL;
-            v->fs_size = 0;
-            v->captured_known = false;
-        } else
+            continue;
+        }
+        if (!want)
         {
             v->foreign = true;
-            v->foreign_why = "the EFI system partition, which a BIOS boot does not use";
+            v->foreign_why = boot_part_why(mode);
+        } else if (!(strcmp(mode, "uefi") == 0 ? is_esp(v)
+                     : strcmp(mode, "ieee1275") == 0 ? is_prep(v)
+                                                      : is_bios_boot(v)))
+        {
+            /* The old one's place, at the front of the disk, is the new
+             * one's. */
+            make_boot(v, mode, gpt);
         }
-        l->firmware = "bios";
+        l->firmware = mode;
         return true;
     }
-    l->firmware = "bios";
+    l->firmware = mode;
+    if (!want)
+    {
+        return true;
+    }
+    if (first == SIZE_MAX)
+    {
+        return false;
+    }
+    {
+        struct rs_vol *v = insert_vol(l, first);
+        const char    *disk = l->disks[d].name;
+        size_t         n = strlen(disk);
+        const char    *name = strcmp(mode, "uefi") == 0 ? "esp" : strcmp(mode, "ieee1275") == 0
+                                                                     ? "prep"
+                                                                     : "biosboot";
+
+        v->kind = RS_VOL_PART;
+        v->disk = d;
+        v->number = 1;
+        v->name = name;
+        v->kname = name;
+        /* The first partition: the rest are numbered after it. */
+        v->path = rs_xasprintf("/dev/%s%s1", disk,
+                               n > 0 && disk[n - 1] >= '0' && disk[n - 1] <= '9' ? "p" : "");
+        make_boot(v, mode, gpt);
+    }
     return true;
 }
 

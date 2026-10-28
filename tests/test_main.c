@@ -259,6 +259,7 @@ int main(void)
     test_identity();
     test_clones();
     test_jobs();
+    test_arch();
     test_result();
     test_cmd();
 

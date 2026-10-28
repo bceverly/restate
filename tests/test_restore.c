@@ -10,6 +10,7 @@
 #include "fstab.h"
 #include "image.h"
 #include "index.h"
+#include "meta.h"
 #include "packages.h"
 #include "restore.h"
 #include "rules.h"
@@ -210,6 +211,55 @@ static void test_fstab(void)
     free(dev);
 }
 
+/*
+ * Whether fstat here says what utimensat set, to the nanosecond. QEMU's
+ * s390x user-mode emulation, which CI runs the big-endian tests under, has
+ * it drop the nanoseconds -- lstat and statx keep them -- so a file put back
+ * with the very time captured never looks it to the restore that checks it
+ * through its descriptor. A real kernel's fstat keeps them.
+ */
+static bool fstat_keeps_ns(const char *dir)
+{
+    char           *path = at(dir, "ns-probe");
+    struct timespec ts[2] = { { 1000, 123456789 }, { 2000, 987654321 } };
+    struct stat     st;
+    struct rs_time  a;
+    struct rs_time  m;
+    struct rs_time  c;
+    int             fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    bool            keeps = true;
+
+    if (fd >= 0 && futimens(fd, ts) == 0 && fstat(fd, &st) == 0)
+    {
+        rs_stat_times(&st, &a, &m, &c);
+        keeps = m.nsec == 987654321;
+    }
+    if (fd >= 0)
+    {
+        (void)close(fd);
+        (void)unlink(path);
+    }
+    free(path);
+    return keeps;
+}
+
+/* The files of `tree` the tests below put back over themselves, to whole
+ * seconds: what is then captured is a time even a lossy fstat reads right. */
+static void whole_seconds(const char *tree)
+{
+    static const char *const files[] = { "etc/hosts", "etc/app/key", "home/u/doc", "var/x/one" };
+    size_t                   i;
+
+    for (i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+    {
+        char           *path = at(tree, files[i]);
+        struct timespec ts[2] = { { 1700000000, 0 }, { 1700000000, 0 } };
+
+        CHECK(utimensat(AT_FDCWD, path, ts, 0) == 0);
+        free(path);
+    }
+}
+
 void test_restore(void)
 {
     char           *dir = rs_test_tmpdir();
@@ -236,6 +286,10 @@ void test_restore(void)
     p = at(tree, "home/u/link");
     CHECK(symlink("../../etc/hosts", p) == 0);
     free(p);
+    if (!fstat_keeps_ns(dir))
+    {
+        whole_seconds(tree);
+    }
     capture(tree, img, &ix);
 
     TEST_CASE("restore: verbose, into an empty root");
@@ -385,6 +439,52 @@ void test_restore(void)
         rs_buf_free(&r.err);
         free(out);
         free(errs);
+        free(root);
+    }
+
+    TEST_CASE("restore: programs of another processor, a package's left as this one's has it");
+    {
+        char            *root = at(dir, "arch");
+        struct rs_entry *key = (struct rs_entry *)(uintptr_t)rs_index_find(&ix, "/etc/app/key");
+        struct rs_entry *doc = (struct rs_entry *)(uintptr_t)rs_index_find(&ix, "/home/u/doc");
+
+        CHECK(mkdir(root, 0755) == 0 && key && doc);
+        if (key && doc)
+        {
+            /* As the index would say of programs captured on IBM Z, one of
+             * them a package's. */
+            key->arch = "s390x";
+            doc->arch = "s390x";
+            doc->package = rs_xstrdup("docs");
+            memset(&r, 0, sizeof(r));
+            r.o.verbose = true;
+            r.o.arch = "x86_64";
+            restore_into(&r, img, &ix, root, &out, &errs);
+            CHECK(r.ok);
+            CHECK_INT(r.st.other_arch, 1);
+            CHECK_INT(r.st.other_arch_left, 1);
+            CHECK_CONTAINS(out, "leave as this processor's package has it /home/u/doc\n");
+            CHECK_CONTAINS(out, "restore /etc/app/key\n");
+            p = at(root, "home/u/doc");
+            CHECK(access(p, F_OK) != 0);
+            free(p);
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+            /* The same processor in another spelling is no other. */
+            memset(&r, 0, sizeof(r));
+            r.o.dry_run = true;
+            r.o.arch = "s390x";
+            restore_into(&r, img, &ix, root, &out, &errs);
+            CHECK_INT(r.st.other_arch + r.st.other_arch_left, 0);
+            rs_buf_free(&r.err);
+            free(out);
+            free(errs);
+            key->arch = NULL;
+            doc->arch = NULL;
+            free(doc->package);
+            doc->package = NULL;
+        }
         free(root);
     }
 

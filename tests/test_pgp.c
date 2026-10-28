@@ -184,6 +184,92 @@ static void detect_cases(void)
 }
 
 /* The key ids at the head of an encrypted message, from packets made by hand. */
+static void issuer_cases(void)
+{
+    /* A v4 signature: version, type, algorithms, the hashed subpackets -- a
+     * creation time, then the issuer fingerprint, v4 -- and the unhashed, a
+     * key ID; then the hash's first bytes and the MPIs, which are not read. */
+    static const unsigned char v4[] = {
+        0xc2, 0x32, 0x04, 0x00, 0x16, 0x0a, 0x00, 0x1d,
+        0x05, 0x02, 0x6a, 0x00, 0x00, 0x00,
+        0x16, 0x21, 0x04, 0x76, 0xfc, 0x5d, 0x5d, 0x87, 0xad, 0xce, 0x70, 0xd3, 0xaf, 0x87,
+        0x2f, 0xae, 0xcd, 0x3f, 0x3f, 0x70, 0xff, 0x0a, 0x48,
+        0x00, 0x0a, 0x09, 0x10, 0xae, 0xcd, 0x3f, 0x3f, 0x70, 0xff, 0x0a, 0x48,
+        0x12, 0x34, 0x01
+    };
+    /* Old-format header, and a key ID alone, in the unhashed area. */
+    static const unsigned char v4_keyid[] = {
+        0x88, 0x13, 0x04, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x0a,
+        0x09, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00
+    };
+    /* Neither area names a key. */
+    static const unsigned char anonymous[] = { 0xc2, 0x08, 0x04, 0x00, 0x01, 0x08,
+                                               0x00, 0x00, 0x00, 0x00 };
+    /* v6: four-byte area lengths, a 32-byte fingerprint, the five-byte
+     * subpacket length form. */
+    static const unsigned char v6[] = {
+        0xc2, 0x34, 0x06, 0x00, 0x1b, 0x0a, 0x00, 0x00, 0x00, 0x27,
+        0xff, 0x00, 0x00, 0x00, 0x22, 0x21, 0x06,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+        0x1d, 0x1e, 0x1f, 0x20,
+        0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    /* v3: the key ID at its fixed place. */
+    static const unsigned char v3[] = {
+        0xc2, 0x13, 0x03, 0x05, 0x00, 0x6a, 0x00, 0x00, 0x00, 0x11, 0x12, 0x13, 0x14,
+        0x15, 0x16, 0x17, 0x18, 0x01, 0x08, 0x00, 0x00
+    };
+    char   out[65];
+    size_t i;
+
+    TEST_CASE("pgp: who a detached signature says made it");
+    CHECK(rs_pgp_sig_issuer(v4, sizeof(v4), out));
+    CHECK_STR(out, "76FC5D5D87ADCE70D3AF872FAECD3F3F70FF0A48");
+    CHECK(rs_pgp_sig_issuer(v4_keyid, sizeof(v4_keyid), out));
+    CHECK_STR(out, "0102030405060708");
+    CHECK(rs_pgp_sig_issuer(v6, sizeof(v6), out));
+    CHECK_STR(out, "0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20");
+    CHECK(rs_pgp_sig_issuer(v3, sizeof(v3), out));
+    CHECK_STR(out, "1112131415161718");
+
+    TEST_CASE("pgp: and what names none, or is not a signature");
+    /* Cut short anywhere: never more than is there. */
+    for (i = 0; i < sizeof(v4); i++)
+    {
+        CHECK(!rs_pgp_sig_issuer(v4, i, out));
+    }
+    for (i = 0; i < sizeof(v6) - 5; i++)
+    {
+        CHECK(!rs_pgp_sig_issuer(v6, i, out));
+    }
+    {
+        unsigned char b[sizeof(v4)];
+
+        /* Not a signature packet; another version; an area longer than the
+         * packet; a subpacket longer than its area; one of no length. */
+        memcpy(b, v4, sizeof(b));
+        b[0] = 0xc1;
+        CHECK(!rs_pgp_sig_issuer(b, sizeof(b), out));
+        memcpy(b, v4, sizeof(b));
+        b[2] = 5;
+        CHECK(!rs_pgp_sig_issuer(b, sizeof(b), out));
+        memcpy(b, v4, sizeof(b));
+        b[7] = 0x40;
+        CHECK(!rs_pgp_sig_issuer(b, sizeof(b), out));
+        memcpy(b, v4, sizeof(b));
+        b[8] = 0x1d;
+        CHECK(!rs_pgp_sig_issuer(b, sizeof(b), out));
+        memcpy(b, v4, sizeof(b));
+        b[8] = 0x00;
+        CHECK(!rs_pgp_sig_issuer(b, sizeof(b), out));
+    }
+    CHECK(!rs_pgp_sig_issuer(anonymous, sizeof(anonymous), out));
+    CHECK_STR(out, "");
+    CHECK(!rs_pgp_sig_issuer(NULL, 0, out));
+    CHECK(!rs_pgp_sig_issuer((const unsigned char *)"\xc2\x00", 2, out));
+}
+
 static void recipient_cases(void)
 {
     /* New format: a v3 PKESK to 0102030405060708, then the same again, then a
@@ -293,6 +379,7 @@ void test_pgp(void)
 
     detect_cases();
     recipient_cases();
+    issuer_cases();
     failure_cases(dir);
 
     if (!rs_program_path(RS_PROG_GPG) || !rs_test_have_gpg())

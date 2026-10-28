@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "gzip.h"
 #include "pgp.h"
 #include "progress.h"
@@ -199,6 +200,14 @@ bool rs_image_copy_file(struct rs_tar_writer *tar, struct rs_entry *e, int fd, u
             /* Read past what the header promised: it grew. */
             e->copy = RS_COPY_GREW;
             break;
+        }
+        /* A program: which processor it is for, from its ELF header, for a
+         * rebuild on a machine of another to name what will not run there. */
+        if (copied == 0)
+        {
+            const struct rs_arch *a = rs_arch_of_elf(chunk, (size_t)n);
+
+            e->arch = a ? a->name : NULL;
         }
         rs_sha256_update(&ctx, chunk, (size_t)n);
         if (copy_tap)

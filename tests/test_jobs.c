@@ -235,6 +235,36 @@ static void other_jobs(void)
     CHECK_INT(job.opts.nargs, 1);
     CHECK_STR(job.opts.args[0], "/r");
     rs_job_free(&job);
+
+    TEST_CASE("jobs: sign, a snapshot named or the newest, with a key and its passphrase");
+    CHECK(parse(&job, "command = sign\nrepository = /r\nsnapshot = 20261020T030000Z\n"
+                      "sign_with = /etc/restate/keys/s.gpg\npassphrase_file = /etc/restate/pw\n",
+                &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_SIGN);
+    CHECK_INT(job.opts.nargs, 1);
+    CHECK_STR(job.opts.args[0], "/r::20261020T030000Z");
+    CHECK_STR(job.opts.sign_with, "/etc/restate/keys/s.gpg");
+    CHECK_STR(job.opts.passphrase_file, "/etc/restate/pw");
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = sign\nrepository = /r\nsign_with = /k\n", &why));
+    free(why);
+    CHECK_STR(job.opts.args[0], "/r");
+    rs_job_free(&job);
+    /* No key to read anything with: a sign decrypts nothing. */
+    CHECK(!parse(&job, "command = sign\nrepository = /r\ndecrypt_with = /k\n", &why));
+    CHECK_CONTAINS(why, "decrypt_with");
+    free(why);
+    rs_job_free(&job);
+    CHECK(!parse(&job, "command = sign\nsign_with = /k\n", &why));
+    CHECK_CONTAINS(why, "a sign job needs repository, or snapshot as REPO::NAME");
+    free(why);
+    rs_job_free(&job);
+    /* snapshots checks signatures against the keys it is given. */
+    CHECK(parse(&job, "command = snapshots\nrepository = /r\ntrusted_key = /k.asc\n", &why));
+    free(why);
+    CHECK_INT(job.opts.ntrusted, 1);
+    rs_job_free(&job);
 }
 
 static void bad_jobs(void)
@@ -547,6 +577,25 @@ static void loading(void)
         free(out);
         free(errs);
         (void)chmod(sec, 0600);
+        {
+            /* A signing key as much as one to decrypt with. */
+            char *sj = rs_xasprintf("command = sign\nrepository = /r\nsign_with = %s\n", sec);
+            char *sjp = rs_xasprintf("%s/signer.conf", jobs);
+
+            rs_test_write(jobs, "signer.conf", sj, 0644);
+            a[0] = sjp;
+            CHECK_INT(load(sjp, &given, &job), RESTATE_EXIT_OK);
+            rs_job_free(&job);
+            (void)chmod(sec, 0640);
+            CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
+            CHECK_CONTAINS(errs, "sign_with");
+            free(out);
+            free(errs);
+            (void)chmod(sec, 0600);
+            a[0] = jpath;
+            free(sjp);
+            free(sj);
+        }
         (void)chmod(keys, 0777);
         CHECK_INT(rs_test_capture(load_quiet, a, &out, &errs), RESTATE_EXIT_TROUBLE);
         CHECK_CONTAINS(errs, "in a directory only its owner can change");

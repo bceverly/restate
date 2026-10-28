@@ -134,6 +134,39 @@ static bool split_uri(const char *uri, char **host, char **path)
     return true;
 }
 
+static bool ends_with(const char *s, const char *suffix);
+
+char *rs_baseline_uri_for(const char *uri, const char *arch)
+{
+    char *host = NULL;
+    char *path = NULL;
+    char *out = NULL;
+    bool  pc = arch && (strcmp(arch, "amd64") == 0 || strcmp(arch, "i386") == 0);
+
+    if (arch && split_uri(uri, &host, &path))
+    {
+        const char *scheme = rs_starts_with(uri, "https://") ? "https://" : "http://";
+        bool        main = strcmp(path, "ubuntu") == 0 &&
+                    (strcmp(host, "archive.ubuntu.com") == 0 ||
+                     ends_with(host, ".archive.ubuntu.com") ||
+                     strcmp(host, "security.ubuntu.com") == 0);
+        bool        ports = strcmp(path, "ubuntu-ports") == 0 &&
+                     (strcmp(host, "ports.ubuntu.com") == 0 ||
+                      ends_with(host, ".ports.ubuntu.com"));
+
+        if (main && !pc)
+        {
+            out = rs_xasprintf("%sports.ubuntu.com/ubuntu-ports/", scheme);
+        } else if (ports && pc)
+        {
+            out = rs_xasprintf("%sarchive.ubuntu.com/ubuntu/", scheme);
+        }
+    }
+    free(host);
+    free(path);
+    return out ? out : rs_xstrdup(uri);
+}
+
 static bool ends_with(const char *s, const char *suffix)
 {
     size_t n = strlen(s);
@@ -676,6 +709,7 @@ struct run {
     char                          *home;       /* gpgv's, and where lists are fetched to */
     char                          *netrc;      /* apt's credentials, for curl, or NULL */
     const char                    *native;
+    const char                    *to;         /* --arch's, Debian's name; or NULL */
     struct want                   *w;
     size_t                         nw;
     struct group                  *g;
@@ -894,18 +928,23 @@ static void plan_label(struct run *r, const struct want *w, const char *label, c
     char                 *uri;
     char                 *suite;
     char                 *comp;
-    const char           *arch = strcmp(w->arch, "all") == 0 && r->native ? r->native : w->arch;
+    const char           *native = r->to ? r->to : r->native;
+    const char           *arch = strcmp(w->arch, "all") == 0 && native ? native : w->arch;
+    char                 *there;
 
     if (!rs_baseline_label(label, &uri, &suite, &comp))
     {
         return;
     }
+    /* Trusted as the machine's source is; fetched from where the
+     * processor's packages are. */
     src = source_for(r->apt, uri, suite);
+    there = rs_baseline_uri_for(uri, r->to);
     rs_buf_init(&snap);
-    if (src && (!id || rs_baseline_snapshot_uri(uri, id, &snap)))
+    if (src && (!id || rs_baseline_snapshot_uri(there, id, &snap)))
     {
-        struct group *g = group_for(r, id ? snap.data : uri, suite, comp[0] == '\0', id != NULL,
-                                    src);
+        struct group *g = group_for(r, id ? snap.data : there, suite, comp[0] == '\0',
+                                    id != NULL, src);
         char         *part = comp[0] ? rs_xasprintf("%s/binary-%s/", comp, arch)
                                      : rs_xstrdup("");
 
@@ -920,6 +959,7 @@ static void plan_label(struct run *r, const struct want *w, const char *label, c
         }
     }
     rs_buf_free(&snap);
+    free(there);
     free(uri);
     free(suite);
     free(comp);
@@ -1371,6 +1411,17 @@ static void wants(struct run *r, const struct rs_jval *pkgs)
             r->st->local++;
             continue;
         }
+        /* For another processor: the machine's own packages as that one's
+         * builds; a third's, multiarch's, have nothing to be there. */
+        if (r->to && strcmp(arch, "all") != 0)
+        {
+            if (!r->native || strcmp(arch, r->native) != 0)
+            {
+                r->st->foreign++;
+                continue;
+            }
+            arch = r->to;
+        }
         r->st->wanted++;
         r->w = rs_xreallocarray(r->w, r->nw + 1, sizeof(*r->w));
         w = &r->w[r->nw++];
@@ -1425,6 +1476,7 @@ bool rs_baseline_fetch(const struct rs_jval *packages, const struct rs_baseline_
     r.st = st;
     r.cache = o->cache ? o->cache : rs_baseline_default_cache();
     r.native = native_arch(r.apt);
+    r.to = o->arch && r.native && strcmp(o->arch, r.native) != 0 ? o->arch : NULL;
     if (!r.apt)
     {
         rs_buf_addstr(err, "the inventory has no apt packages");

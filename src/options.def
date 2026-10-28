@@ -108,6 +108,11 @@ RS_OPT(OPT_MIRROR, "mirror",    required_argument, "URL",
 RS_OPT(OPT_TARGET, "target",    required_argument, "KIND",
        "buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other "
        "hardware (metal) rather than the same machine")
+RS_OPT(OPT_ARCH, "arch",        required_argument, "ARCH",
+       "installer, baseline fetch, and buildsheet and autoinstall with --target: rebuild "
+       "for this processor (x86_64, aarch64, ppc64le, riscv64, s390x, in any system's "
+       "spelling) rather than the image's, its packages built for it; restore: the root "
+       "is of this processor, not this machine's")
 RS_OPT(OPT_FIRMWARE, "firmware", required_argument, "MODE",
        "buildsheet, autoinstall, with --target: boot the rebuilt machine by UEFI (uefi) or "
        "BIOS (bios) rather than as the old one did, with the partition that needs")

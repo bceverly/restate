@@ -223,6 +223,9 @@ installer fetch: download from the directory at URL (https:// or file://) rather
 \fB\-\-target\fR=\fIKIND\fR
 buildsheet, autoinstall: rebuild as a virtual machine (vm) or on other hardware (metal) rather than the same machine
 .TP
+\fB\-\-arch\fR=\fIARCH\fR
+installer, baseline fetch, and buildsheet and autoinstall with \-\-target: rebuild for this processor (x86_64, aarch64, ppc64le, riscv64, s390x, in any system's spelling) rather than the image's, its packages built for it; restore: the root is of this processor, not this machine's
+.TP
 \fB\-\-firmware\fR=\fIMODE\fR
 buildsheet, autoinstall, with \-\-target: boot the rebuilt machine by UEFI (uefi) or BIOS (bios) rather than as the old one did, with the partition that needs
 .TP
@@ -1136,6 +1139,52 @@ in place of GRUB's BIOS boot partition, or added in front of the others on an
 MBR disk; or a BIOS boot partition in place of the EFI system partition,
 which an MBR disk does without. The installer then puts in the boot loader
 for that mode.
+.PP
+.B \-\-arch
+.I ARCH
+rebuilds for another processor \-
+.BR x86_64 ,
+.BR aarch64 ,
+.BR ppc64le ,
+.B riscv64
+or
+.BR s390x ,
+in any system's spelling
+.RB ( amd64 ,
+.BR arm64 ,
+.BR ppc64el )
+\- with either target, since a machine of another processor is other
+hardware. The installer is that processor's, and each package is
+reinstalled as its build for it, which apt chooses by name. It boots as that
+processor does: ARM and RISC\-V by UEFI, POWER from a PReP partition (Open
+Firmware), IBM Z by its IPL of what
+.BR zipl (8)
+writes, with no boot partition; the partition the new one needs takes the
+old one's place. A virtual machine of another processor is QEMU's machine for
+it. Capture records which processor each program it keeps is built for, from
+its ELF header, and the build sheet names the programs no package installed
+that are the old processor's and will not run on the new one, to be built
+again.
+.B "restate installer \-\-arch"
+names the other processor's installer, and
+.B "restate baseline fetch \-\-arch"
+fetches each package's build for it, from Ubuntu's ports archive where that
+is where they are. Restoring onto a machine of another processor, restore
+leaves a program a package installed, and someone then changed, as this
+machine's package has it, and warns of the programs it puts back that will
+not run;
+.B \-\-arch
+on restore says what processor the root is, where it is not this machine's.
+.PP
+IBM Z's disks are recorded too: a DASD by its bus address, low-level
+formatted with
+.BR dasdfmt (8)
+and partitioned with
+.BR fdasd (8)
+in its own volume table, and a SCSI disk reached through an FCP adapter (zFCP)
+by that adapter, its WWPN and its LUN. The build sheet brings each online with
+.BR chzdev (8)
+before partitioning it.
 .SH LIVE SERVICES
 A file copied while something writes to it can come back half old and half
 new: a database's pages from two moments, a virtual machine's disk in the
@@ -1521,8 +1570,15 @@ rules, given with
 .BR \-\-rules ,
 apply at the restore. Two things cannot be made new by restate: a WireGuard
 key has to be made known to the peers, so a copy has none until it is
-given one, and a PostgreSQL cluster's system identifier is fixed when the
-cluster is made, which matters only to replication.
+given one, and a PostgreSQL cluster's system identifier is fixed when
+.BR initdb (1)
+makes the cluster. That matters only to replication, to which every copy's
+cluster is the original's:
+.B restore \-\-as
+says so for each cluster the image keeps, as an autoinstall file of copies
+does, and a copy that is to replicate is made a standby with
+.BR pg_basebackup (1)
+from its primary rather than restored from the image.
 .PP
 .B restate autoinstall \-\-clones
 .I FILE
@@ -2115,15 +2171,16 @@ and the commands each means something to:
 .BR du ,
 .BR repack ,
 .BR protect ,
-.B status
+.BR status ,
+.B list
 or
-.BR list .
+.BR sign .
 .TP
 .B repository
 the repository; every command but estimate.
 .TP
 .B snapshot
-restore, copy, status, list: the snapshot's name, or
+restore, copy, status, list, sign: the snapshot's name, or
 .IR REPO :: NAME
 in place of
 .BR repository ;
@@ -2142,14 +2199,25 @@ classifies by the capture's own rules unless given these.
 .B baseline_content
 capture and estimate.
 .TP
-.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " create ", " sign_with ", " tmpdir
+.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " create ", " tmpdir
 capture.
+.TP
+.B sign_with
+capture and sign: the secret key file to sign with, held to what
+.B decrypt_with
+is held to, below. A sign job signs the snapshot named, or the newest, by
+the name it has when the job starts; its result says which
+.RB ( signed ,
+.IR REPO :: NAME )
+and whose key
+.RB ( signer ).
 .TP
 .BR encrypt_to " (repeatable)"
 capture and prune: key files.
 .TP
 .BR decrypt_with " (repeatable), " passphrase_file
-every command but estimate and protect: the secret keys to decrypt with,
+every command but estimate, protect and sign (passphrase_file for sign
+too, the signing key's): the secret keys to decrypt with,
 as
 .B \-\-decrypt\-with
 takes them \- more than one where snapshots are encrypted to different
@@ -2174,7 +2242,7 @@ for prune, repack and check.
 .BR read_all ", " metadata_only
 check;
 .BR trusted_key " (repeatable)"
-for check, restore, status and list.
+for check, restore, status, list and snapshots.
 .TP
 .BR include ", " exclude " (repeatable), " check_first ", " plan ", " allow_unverified
 restore;
@@ -2557,7 +2625,24 @@ part exactly as stored, compressed and, in an encrypted image, encrypted:
 the index holds every kept file's digest, owner, mode and path, so it
 covers them all, and checking it decrypts nothing. gpg runs in a GnuPG home
 of its own the key is imported into, removed afterwards, and asks for the
-key's passphrase the way it always does. An image is signed once.
+key's passphrase the way it always does. An image is signed once. A
+snapshot is signed the same way, as capture makes it or with
+.BR "restate sign " \fIREPO\fP:: \fINAME\fP
+\- or
+.I REPO
+alone, its newest \- afterwards, as a sign job does.
+.B restate snapshots
+says, of each, whether it is signed and the key its signature names
+.RB ( issuer ,
+in its result and
+.BR \-\-json ,
+unchecked); given
+.BR \-\-trusted\-key ,
+it checks each signature against those keys, and says whether it is good
+.RB ( trusted )
+and whose
+.RB ( signer ,
+.BR signer_name ).
 .PP
 An image is compressed by
 .BR pigz (1)

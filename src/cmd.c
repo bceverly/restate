@@ -14,10 +14,12 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "arch.h"
 #include "autoinstall.h"
 #include "baseline.h"
 #include "buildsheet.h"
@@ -1394,9 +1396,44 @@ static int trust_matches(const struct rs_options *o, const char *path, const str
     return RESTATE_EXIT_OK;
 }
 
+/* A repository named alone as its newest snapshot, REPO::NAME: what is
+ * signed, and said to be, is that one, whatever a capture adds meanwhile.
+ * Anything else as it is. */
+static char *sign_ref(const char *ref)
+{
+    char           *dir;
+    char           *name;
+    char           *found = NULL;
+    struct rs_repo *r;
+    struct rs_buf   err;
+    bool            busy;
+
+    if (!rs_repo_ref(ref, &dir, &name) || name)
+    {
+        free(dir);
+        free(name);
+        return rs_xstrdup(ref);
+    }
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_LOOK, &busy, &err);
+    if (r)
+    {
+        found = rs_repo_resolve(r, NULL, &err);
+        rs_repo_close(r);
+    }
+    rs_buf_free(&err);
+    {
+        char *full = found ? rs_xasprintf("%s" RS_REPO_SEP "%s", dir, found) : rs_xstrdup(ref);
+
+        free(found);
+        free(dir);
+        return full;
+    }
+}
+
 int rs_cmd_sign(const struct rs_options *o)
 {
-    const char          *path = o->args[0];
+    char                *path;
     struct rs_buf        index_part;
     struct rs_buf        sig;
     struct rs_buf        err;
@@ -1414,6 +1451,7 @@ int rs_cmd_sign(const struct rs_options *o)
     {
         return RESTATE_EXIT_TROUBLE;
     }
+    path = sign_ref(o->args[0]);
     rs_buf_init(&index_part);
     rs_buf_init(&sig);
     rs_buf_init(&err);
@@ -1452,6 +1490,7 @@ int rs_cmd_sign(const struct rs_options *o)
     {
         rs_error("%s", err.data);
         rs_buf_free(&err);
+        free(path);
         return RESTATE_EXIT_TROUBLE;
     }
     rs_buf_free(&err);
@@ -1461,6 +1500,7 @@ int rs_cmd_sign(const struct rs_options *o)
     {
         say_signer("signed by", &signer);
     }
+    free(path);
     return RESTATE_EXIT_OK;
 }
 
@@ -1991,6 +2031,76 @@ int rs_cmd_init(const struct rs_options *o)
 }
 
 OUTPUT_HELD_BEGIN
+/* Who a snapshot's signature says made it, and, with --trusted-key, whether
+ * it is good by one of those keys and whose. */
+struct said_signer {
+    char                 issuer[65];   /* "" if unsigned, or naming none */
+    bool                 checked;      /* --trusted-key was given */
+    bool                 trusted;
+    struct rs_pgp_signer signer;       /* when trusted */
+};
+
+static void said_signer(const struct rs_options *o, const struct rs_repo *r, const char *name,
+                        const struct rs_buf *sig, struct said_signer *s)
+{
+    memset(s, 0, sizeof(*s));
+    if (sig->len > 0)
+    {
+        (void)rs_pgp_sig_issuer((const unsigned char *)sig->data, sig->len, s->issuer);
+    }
+    if (o->ntrusted > 0)
+    {
+        char         *ref = rs_xasprintf("%s" RS_REPO_SEP "%s", rs_repo_dir(r), name);
+        char          digest[RS_SHA256_HEX_SIZE];
+        struct rs_buf why;
+
+        rs_buf_init(&why);
+        s->checked = true;
+        s->trusted = sig->len > 0 &&
+                     rs_image_trusted(ref, o->trusted, o->ntrusted, &s->signer, digest, &why);
+        rs_buf_free(&why);
+        free(ref);
+    }
+}
+
+static void signature_text(struct rs_buf *text, bool is_signed, const struct said_signer *s)
+{
+    if (!is_signed)
+    {
+        rs_buf_addstr(text, s->checked ? "; not signed" : "");
+    } else if (s->trusted)
+    {
+        rs_buf_addf(text, "; signed by %s (%s)", s->signer.who[0] ? s->signer.who : "?",
+                    s->signer.fpr);
+    } else if (s->checked)
+    {
+        rs_buf_addf(text, "; signed%s%s, by no key trusted here", s->issuer[0] ? " by " : "",
+                    s->issuer);
+    } else
+    {
+        rs_buf_addf(text, "; signed%s%s", s->issuer[0] ? " by " : "", s->issuer);
+    }
+}
+
+/* "issuer": the key the signature names, unchecked; with --trusted-key,
+ * "trusted", and the "signer" and "signer_name" it was checked to be. */
+static void signature_json(struct rs_jval *j, const struct said_signer *s)
+{
+    if (s->issuer[0])
+    {
+        rs_jobj_str(j, "issuer", s->issuer);
+    }
+    if (s->checked)
+    {
+        rs_jobj_bool(j, "trusted", s->trusted);
+    }
+    if (s->trusted)
+    {
+        rs_jobj_str(j, "signer", s->signer.fpr);
+        rs_jobj_str(j, "signer_name", s->signer.who[0] ? s->signer.who : NULL);
+    }
+}
+
 int rs_cmd_snapshots(const struct rs_options *o)
 {
     struct rs_repo *r;
@@ -2022,6 +2132,7 @@ int rs_cmd_snapshots(const struct rs_options *o)
         struct rs_jval       *j = rs_jarr_add(&list);
         struct rs_buf         sig;
         struct rs_buf         gz;
+        struct said_signer    said;
         uint64_t              files = 0;
         uint64_t              bytes = 0;
         uint64_t              fresh = 0;
@@ -2032,6 +2143,7 @@ int rs_cmd_snapshots(const struct rs_options *o)
         rs_buf_init(&sig);
         rs_buf_init(&gz);
         (void)rs_repo_index_bytes(r, names[i], &gz, &sig, &err);
+        said_signer(o, r, names[i], &sig, &said);
         rs_buf_reset(&err);
         if (rs_repo_info(r, names[i], &info, &err))
         {
@@ -2046,7 +2158,9 @@ int rs_cmd_snapshots(const struct rs_options *o)
             human_size(&text, bytes);
             rs_buf_addstr(&text, "; ");
             human_size(&text, fresh);
-            rs_buf_addf(&text, " new%s\n", sig.len > 0 ? "; signed" : "");
+            rs_buf_addstr(&text, " new");
+            signature_text(&text, sig.len > 0, &said);
+            rs_buf_addc(&text, '\n');
             rs_jobj_str(j, "host", rs_jobject_str(&info, "host"));
             rs_jobj_str(j, "created", rs_jobject_str(&info, "created"));
             rs_jobj_u64(j, "files", files);
@@ -2059,6 +2173,7 @@ int rs_cmd_snapshots(const struct rs_options *o)
             rs_jobj_str(j, "error", err.data);
         }
         rs_jobj_bool(j, "signed", sig.len > 0);
+        signature_json(j, &said);
         rs_buf_free(&sig);
         rs_buf_free(&gz);
     }
@@ -3099,6 +3214,14 @@ int rs_cmd_features(const struct rs_options *o)
     rs_jobj_bool(&doc, "du_keys", true);
     rs_jobj_bool(&doc, "chunk_key_reseal", true);
     rs_jobj_bool(&doc, "keep_yearly", true);
+    /* --arch, and what it rebuilds for: this restate's own processor, and
+     * that an image records the processor of each program it keeps. */
+    rs_jobj_bool(&doc, "rebuild_arch", true);
+    rs_jobj_str(&doc, "arch", rs_arch_built() ? rs_arch_built()->name : NULL);
+    rs_jobj_bool(&doc, "program_arch", true);
+    /* snapshots names each signature's issuer, and with --trusted-key its
+     * checked signer; a job can be a sign. */
+    rs_jobj_bool(&doc, "snapshot_signer", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)
@@ -4011,6 +4134,63 @@ static const char *image_host(const struct rs_index *ix)
 }
 
 /* What restore --as did, after the files. Exit status as restore's. */
+/*
+ * The PostgreSQL clusters the image keeps: each data directory, by the
+ * global/pg_control in it, that a restore would put back. A cluster's
+ * system identifier is in that file, set by initdb and by nothing after:
+ * every copy restored from the image has the original's, and replication
+ * takes two clusters with one identifier for one -- a standby of the other,
+ * or the same primary twice. restate cannot give a copy its own; it says so.
+ */
+static char **pg_clusters(const struct rs_index *ix, size_t *n)
+{
+    static const char tail[] = "/global/pg_control";
+    char            **dirs = NULL;
+    size_t            i;
+
+    *n = 0;
+    for (i = 0; i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+        size_t                 len = e->path ? strlen(e->path) : 0;
+
+        if (e->type == 'f' && (e->cls == RS_CLASS_STATE || e->cls == RS_CLASS_IDENTITY) &&
+            len > sizeof(tail) - 1 && strcmp(e->path + len - (sizeof(tail) - 1), tail) == 0)
+        {
+            dirs = rs_xreallocarray(dirs, *n + 1, sizeof(*dirs));
+            dirs[(*n)++] = rs_xstrndup(e->path, len - (sizeof(tail) - 1));
+        }
+    }
+    return dirs;
+}
+
+/* Says, for a copy made with --as, that each cluster is the original's. */
+static void pg_same_cluster(const struct rs_options *o, const struct rs_index *ix)
+{
+    size_t n;
+    char **dirs = pg_clusters(ix, &n);
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        struct rs_buf b;
+
+        rs_buf_init(&b);
+        rs_escape(&b, dirs[i]);
+        if (!o->quiet)
+        {
+            (void)fprintf(stderr, "restate: as %s: the PostgreSQL cluster in %s keeps the "
+                          "image's system identifier, which only initdb sets: to replication "
+                          "it is the original's cluster. A copy that is to replicate is made a "
+                          "standby with pg_basebackup from its primary, not restored from an "
+                          "image\n", o->as, b.data ? b.data : "");
+        }
+        rs_buf_free(&b);
+        free(dirs[i]);
+    }
+    free(dirs);
+}
+
 static int renew_identity(const struct rs_options *o, const struct rs_index *ix, const bool *leave,
                           const char *root, uint64_t left)
 {
@@ -4055,6 +4235,7 @@ static int renew_identity(const struct rs_options *o, const struct rs_index *ix,
                           "new identity\n", o->as);
         }
     }
+    pg_same_cluster(o, ix);
     return is.failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
@@ -4083,6 +4264,8 @@ static void restore_result(const struct rs_options *o, const struct rs_restore_s
     rs_jobj_u64(res, "failed", st->failed);
     rs_jobj_u64(res, "missing", st->missing);
     rs_jobj_u64(res, "plan_count", st->planned);
+    rs_jobj_u64(res, "other_arch", st->other_arch);
+    rs_jobj_u64(res, "other_arch_left", st->other_arch_left);
     *rs_jobj_add(res, "plan") = *plan;
     memset(plan, 0, sizeof(*plan));
 }
@@ -4240,6 +4423,13 @@ int rs_cmd_restore(const struct rs_options *o)
     rs_jval_set_array(&plan);
     ro.plan = &plan;
     ro.plan_max = RESTORE_PLAN_MAX;
+    {
+        struct utsname        u;
+        const struct rs_arch *a = o->arch ? rs_arch_find(o->arch)
+                                          : rs_arch_here(uname(&u) == 0 ? u.machine : NULL);
+
+        ro.arch = a ? a->name : NULL;
+    }
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     free(excludes);
     restore_result(o, &st, &plan, ro.root);
@@ -4289,6 +4479,23 @@ int rs_cmd_restore(const struct rs_options *o)
         {
             (void)fprintf(stderr, "restate: %" PRIu64 " extended attributes could not be set: "
                           "some need root, and some filesystems have none\n", st.xattrs);
+        }
+        if (st.other_arch_left > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " program%s a package installed %s the "
+                          "image's for another processor: left as this %s machine's package "
+                          "has %s\n", st.other_arch_left, st.other_arch_left == 1 ? "" : "s",
+                          st.other_arch_left == 1 ? "is" : "are", ro.arch,
+                          st.other_arch_left == 1 ? "it" : "them");
+        }
+        if (st.other_arch > 0)
+        {
+            (void)fprintf(stderr, "restate: warning: %" PRIu64 " program%s put back, which no "
+                          "package installed, %s built for another processor and will not run "
+                          "on this %s machine: build %s again (restate buildsheet --arch "
+                          "names %s)\n", st.other_arch, st.other_arch == 1 ? "" : "s",
+                          st.other_arch == 1 ? "is" : "are", ro.arch,
+                          st.other_arch == 1 ? "it" : "them", st.other_arch == 1 ? "it" : "them");
         }
     }
     if (leave)
@@ -4411,6 +4618,156 @@ static void note_captured(const struct rs_index *ix, struct rs_jval *machine)
     free(sums);
 }
 
+/* The programs the image keeps -- ELF files it would put back, not those a
+ * package reinstalls -- into the description's "programs", for a rebuild on
+ * another processor to say which of them will not run there. */
+#define PROGRAMS_MAX 1000
+static void note_programs(const struct rs_index *ix, struct rs_jval *machine)
+{
+    struct rs_jval *list = NULL;
+    size_t          i;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+        struct rs_jval        *p;
+
+        if (e->type != 'f' || !e->arch ||
+            (e->cls != RS_CLASS_STATE && e->cls != RS_CLASS_IDENTITY))
+        {
+            continue;
+        }
+        if (!list)
+        {
+            list = rs_jobj_add(machine, "programs");
+            rs_jval_set_array(list);
+        }
+        if (list->n == PROGRAMS_MAX)
+        {
+            break;
+        }
+        p = rs_jarr_add(list);
+        rs_jval_set_object(p);
+        rs_jobj_str(p, "path", e->path);
+        rs_jobj_str(p, "arch", e->arch);
+        rs_jobj_str(p, "package", e->package);
+    }
+}
+
+/* The PostgreSQL clusters the image keeps, into the description's
+ * "postgresql_clusters": for an autoinstall file of copies to say that each
+ * copy's is the original's (pg_clusters). */
+static void note_clusters(const struct rs_index *ix, struct rs_jval *machine)
+{
+    size_t          n;
+    char          **dirs = pg_clusters(ix, &n);
+    struct rs_jval *list;
+    size_t          i;
+
+    if (n == 0)
+    {
+        return;
+    }
+    list = rs_jobj_add(machine, "postgresql_clusters");
+    rs_jval_set_array(list);
+    for (i = 0; i < n; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), dirs[i]);
+        free(dirs[i]);
+    }
+    free(dirs);
+}
+
+/* Sets `key` in `obj` to `value`, in place of what it was. */
+static void set_str(struct rs_jval *obj, const char *key, const char *value)
+{
+    size_t i;
+
+    for (i = 0; obj->type == RS_JOBJECT && i < obj->n; i++)
+    {
+        if (strcmp(obj->keys[i], key) == 0)
+        {
+            rs_jval_free(&obj->items[i]);
+            rs_jval_set_string(&obj->items[i], value);
+            return;
+        }
+    }
+    rs_jobj_str(obj, key, value);
+}
+
+/* The mutable member `key` of `obj`, or NULL. */
+static struct rs_jval *member(struct rs_jval *obj, const char *key)
+{
+    size_t i;
+
+    for (i = 0; obj->type == RS_JOBJECT && i < obj->n; i++)
+    {
+        if (strcmp(obj->keys[i], key) == 0)
+        {
+            return &obj->items[i];
+        }
+    }
+    return NULL;
+}
+
+/* How a machine of `a` boots, rebuilt as one: ARM and RISC-V by UEFI, as
+ * Ubuntu's installers for them do; POWER from a PReP partition, as a virtual
+ * machine under KVM or PowerVM does; IBM Z by its IPL, of what zipl writes.
+ * NULL for x86, which boots either way: as the old machine did, if that
+ * was one of the two. */
+static const char *arch_firmware(const struct rs_arch *a, const char *was)
+{
+    if (strcmp(a->name, "s390x") == 0)
+    {
+        return "zipl";
+    }
+    if (strncmp(a->name, "ppc64", 5) == 0)
+    {
+        return "ieee1275";
+    }
+    if (strcmp(a->name, "x86_64") == 0 || strcmp(a->name, "i686") == 0)
+    {
+        return was && (strcmp(was, "uefi") == 0 || strcmp(was, "bios") == 0) ? NULL : "uefi";
+    }
+    return "uefi";
+}
+
+/*
+ * --arch: the machine rebuilt for another processor. Its description then
+ * says the new one -- "arch" and "architecture" -- and "rebuilt_from" the
+ * old; and *firmware, unless --firmware chose, how the new one boots. A
+ * --firmware the new one cannot boot by is refused.
+ */
+static bool retarget(const struct rs_options *o, struct rs_jval *machine, const char **firmware)
+{
+    const struct rs_arch *to = o->arch ? rs_arch_find(o->arch) : NULL;
+    const struct rs_arch *from = rs_arch_of_machine(machine);
+    struct rs_jval       *sys = member(machine, "system");
+    const char           *was = rs_jobject_str(rs_jobject_get(machine, "firmware"), "mode");
+    bool                  x86;
+
+    *firmware = o->firmware;
+    if (!to || !sys || to == from)
+    {
+        return true;
+    }
+    x86 = strcmp(to->name, "x86_64") == 0 || strcmp(to->name, "i686") == 0;
+    if (o->firmware && !x86 && strcmp(o->firmware, arch_firmware(to, NULL)) != 0)
+    {
+        rs_error("--firmware %s: %s machines boot only by %s", o->firmware, to->name,
+                 arch_firmware(to, NULL));
+        return false;
+    }
+    if (!o->firmware)
+    {
+        *firmware = arch_firmware(to, was);
+    }
+    rs_jobj_str(sys, "rebuilt_from", from ? from->name : rs_jobject_str(sys, "architecture"));
+    set_str(sys, "arch", to->name);
+    set_str(sys, "architecture", to->name);
+    return true;
+}
+
 /*
  * The machine description in `path`: an image or index with a "machine"
  * section, or what `restate machine -o` writes.
@@ -4430,6 +4787,8 @@ static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jv
         {
             rs_jval_copy(machine, &ix.machine);
             note_captured(&ix, machine);
+            note_programs(&ix, machine);
+            note_clusters(&ix, machine);
             if (packages && ix.packages.type == RS_JOBJECT)
             {
                 rs_jval_copy(packages, &ix.packages);
@@ -4538,6 +4897,15 @@ int rs_cmd_installer(const struct rs_options *o)
     } else
     {
         rs_machine_describe("/", o->root ? o->root : "/", &machine);
+    }
+    {
+        const char *firmware;
+
+        if (!retarget(o, &machine, &firmware))
+        {
+            rs_jval_free(&machine);
+            return RESTATE_EXIT_TROUBLE;
+        }
     }
     rs_buf_init(&err);
     if (!rs_installer_resolve(&machine, &in, &err))
@@ -4707,6 +5075,7 @@ int rs_cmd_baseline(const struct rs_options *o)
     bo.cache = o->cache;
     bo.snapshot = snapshot;
     bo.quiet = o->quiet;
+    bo.arch = o->arch ? rs_arch_find(o->arch)->debian : NULL;
     if (!rs_baseline_fetch(&packages, &bo, &st, &err))
     {
         rs_error("%s", err.data);
@@ -4725,6 +5094,12 @@ int rs_cmd_baseline(const struct rs_options *o)
                 (void)fprintf(stderr, "restate: %zu were installed from .deb files no repository "
                               "has: only an image can keep those (capture "
                               "--keep-local-packages)\n", st.local);
+            }
+            if (st.foreign > 0)
+            {
+                (void)fprintf(stderr, "restate: %zu of a third processor's, as multiarch "
+                              "installed them, left out: they have no place on a %s machine\n",
+                              st.foreign, bo.arch);
             }
         }
         status = st.missing > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
@@ -4901,13 +5276,20 @@ static bool trust_for(const struct rs_options *o, bool knows, bool installer, ch
     return true;
 }
 
-/* --firmware changes the partitions, which only a rebuild elsewhere renumbers. */
+/* --firmware changes the partitions, which only a rebuild elsewhere renumbers;
+ * and a machine of another processor is other hardware. */
 static bool firmware_ok(const struct rs_options *o)
 {
     if (o->firmware && !o->target)
     {
         rs_error("--firmware needs --target vm or --target metal: rebuilt as the same "
                  "machine, it boots as that machine did");
+        return false;
+    }
+    if (o->arch && !o->target)
+    {
+        rs_error("--arch needs --target vm or --target metal: a machine of another "
+                 "processor is other hardware");
         return false;
     }
     return true;
@@ -4921,6 +5303,7 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     struct rs_buf        err;
     struct rs_sheet_opts so;
     struct rs_jval       packages;
+    const char          *firmware = NULL;
     bool                 old_image;
     bool                 knows;
     char                *trust = NULL;
@@ -4934,7 +5317,7 @@ int rs_cmd_buildsheet(const struct rs_options *o)
         return RESTATE_EXIT_TROUBLE;
     }
     if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
-        !trust_for(o, knows, false, &trust, &keyring))
+        !retarget(o, &machine, &firmware) || !trust_for(o, knows, false, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
@@ -4947,7 +5330,7 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     so.trust = trust;
     so.old_image = old_image;
     so.target = target_of(o);
-    so.firmware = o->firmware;
+    so.firmware = firmware;
     so.image = image;
     so.version = RESTATE_VERSION;
     so.packages = packages.type == RS_JOBJECT ? &packages : NULL;
@@ -4979,6 +5362,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     struct rs_buf       err;
     struct rs_auto_opts ao;
     struct rs_jval      packages;
+    const char         *firmware = NULL;
     bool                old_image;
     bool                knows;
     char               *trust = NULL;
@@ -5008,7 +5392,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
         rs_escape(&from, o->clones);
     }
     if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
-        !trust_for(o, knows, true, &trust, &keyring))
+        !retarget(o, &machine, &firmware) || !trust_for(o, knows, true, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
@@ -5024,7 +5408,7 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     ao.trust_keyring = keyring;
     ao.old_image = old_image;
     ao.target = target_of(o);
-    ao.firmware = o->firmware;
+    ao.firmware = firmware;
     ao.image = image;
     ao.version = RESTATE_VERSION;
     ao.packages = packages.type == RS_JOBJECT ? &packages : NULL;

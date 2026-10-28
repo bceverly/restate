@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "accounts.h"
+#include "arch.h"
 #include "glob.h"
 #include "image.h"
 #include "meta.h"
@@ -992,6 +993,16 @@ static bool put_back(struct ctx *c, struct rs_tar_reader *r, const struct rs_ent
     {
         c->st->excluded++;
         return true;
+    }
+    if (want == 'f' && c->o->arch && e->arch && !rs_arch_same(e->arch, c->o->arch))
+    {
+        if (e->package)
+        {
+            c->st->other_arch_left++;
+            said(c, "leave as this processor's package has it", e->path);
+            return true;
+        }
+        c->st->other_arch++;
     }
     c->st->planned++;
     if (c->o->plan && c->o->plan->n < c->o->plan_max)

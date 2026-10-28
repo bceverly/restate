@@ -102,13 +102,13 @@ void test_index(void)
                            ", \"sha256\": \"" HASH_A "\", \"user\": \"root\", \"group\": null, "
                            "\"nlink\": 2, \"device\": 9, \"inode\": 99, "
                            "\"atime\": \"@-1.000000000\", \"btime\": null, "
-                           "\"stored\": \"restate/files/etc/b\"")
-                     ", " ENTRY("\"/\"", "\"directory\"", "\"0755\"", "")
+                           "\"stored\": \"restate/files/etc/b\", \"arch\": \"amd64\"")
+                     ", " ENTRY("\"/\"", "\"directory\"", "\"0755\"", ", \"arch\": \"s390x\"")
                      ", " ENTRY("\"x\"", "\"symlink\"", "\"0777\"",
                                 ", \"path_base64\": \"L2V0Yy9h/w==\", \"target\": \"t\"")
                      ", " ENTRY("\"/dev/null\"", "\"char\"", "\"0666\"", ", \"rdev\": 259")
                      ", " ENTRY("\"/etc/c\"", "\"file\"", "\"0600\"",
-                                ", \"sha256\": null, \"unreadable\": true")
+                                ", \"sha256\": null, \"unreadable\": true, \"arch\": \"vax\"")
                      "]}", &err));
     CHECK_STR(err.data ? err.data : "", "");
     CHECK_INT(ix.count, 5);
@@ -126,6 +126,11 @@ void test_index(void)
     CHECK_INT(ix.entries[3].atime.sec, -1);
     CHECK(!ix.entries[3].btime.set);
     CHECK_STR(ix.entries[3].stored, "restate/files/etc/b");
+    /* A program's processor, in restate's spelling; a name no system has,
+     * and one on anything but a file, as none. */
+    CHECK_STR(ix.entries[3].arch, "x86_64");
+    CHECK(ix.entries[4].arch == NULL);
+    CHECK(ix.entries[0].arch == NULL);
     CHECK_INT(ix.entries[4].hash_state, RS_HASH_UNREADABLE);
     CHECK_INT(ix.entries[1].rdev, 259);
     CHECK(rs_index_find(&ix, "/etc/c") == &ix.entries[4]);
@@ -169,12 +174,14 @@ void test_index(void)
             CHECK_INT(b->hash_state, a->hash_state);
             CHECK_INT(b->rdev, a->rdev);
             CHECK_INT(b->cls, a->cls);
+            CHECK(a->arch ? b->arch && strcmp(a->arch, b->arch) == 0 : b->arch == NULL);
         }
         {
             struct rs_buf json;
 
             CHECK(rs_read_beneath(dir, "/ix.json", 1 << 20, &json));
             CHECK_CONTAINS(json.data, "\"class\": \"state\", \"identity\": true,");
+            CHECK_CONTAINS(json.data, "\"arch\": \"x86_64\"");
             CHECK(strstr(json.data, "\"class\": \"identity\"") == NULL);
             rs_buf_free(&json);
         }

@@ -74,6 +74,11 @@ struct rs_restore_opts {
     struct rs_jval    *plan;       /* an array the paths put back -- or that would
                                     * be -- are added to, up to plan_max; or NULL */
     size_t             plan_max;
+    /* The processor of the machine restored onto, as rs_arch names it, or
+     * NULL for any. A program the image keeps that is built for another, and
+     * that a package installed, is left as this machine's package has it:
+     * the package is this processor's build, and the image's would not run. */
+    const char        *arch;
 };
 
 struct rs_restore_stats {
@@ -91,6 +96,9 @@ struct rs_restore_stats {
     uint64_t missing;     /* the index says stored; the image does not have it */
     uint64_t owners;      /* owners that could not be set (not root) */
     uint64_t xattrs;      /* extended attributes that could not be set */
+    uint64_t other_arch_left; /* programs of another processor, a package's: left */
+    uint64_t other_arch;  /* programs of another processor no package installed: put
+                           * back, though they will not run here */
     uint64_t planned;     /* paths put back, or that would be: all, not only plan_max */
     bool     merged;      /* the accounts were merged, owners mapped by name */
 };

@@ -51,6 +51,15 @@ bool rs_pgp_detect(const unsigned char *head, size_t len);
  * reach. */
 size_t rs_pgp_recipients(const unsigned char *data, size_t len, char ids[][17], size_t max);
 
+/*
+ * The key a detached signature says made it, read from its own packet, in
+ * uppercase hex into `out` (at least 65 bytes): its issuer fingerprint where
+ * it has one (40 digits for a v4 key, 64 for v6), else its 16-digit key ID.
+ * False if `data` does not start with a signature packet that names one.
+ * Only what the signature claims: verifying it is gpgv's (rs_pgp_verify).
+ */
+bool rs_pgp_sig_issuer(const unsigned char *data, size_t len, char *out);
+
 /* Starts gpg encrypting to the public keys in `recipients` (files), writing
  * the ciphertext to `out_fd`. */
 bool rs_pgp_encrypt(const char *const *recipients, size_t n, int out_fd, struct rs_pgp *pg,

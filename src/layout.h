@@ -109,10 +109,16 @@ struct rs_disk {
     const char *serial;
     uint64_t    size;
     uint64_t    sector;      /* the logical block size */
-    const char *table;       /* "gpt", "dos", or NULL for none */
+    const char *table;       /* "gpt", "dos", "dasd", or NULL for none */
     const char *table_uuid;
     bool        rotational;
     bool        removable;
+    /* IBM Z: a DASD's bus address; a zFCP disk's adapter, WWPN and LUN. Each
+     * is brought online by them before it can be used. */
+    const char *dasd_bus;
+    const char *zfcp_bus;
+    const char *zfcp_wwpn;
+    const char *zfcp_lun;
 };
 
 struct rs_pv {
