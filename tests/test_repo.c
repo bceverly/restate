@@ -478,6 +478,84 @@ static bool saying_nfs(int fd)
     return says_nfs;
 }
 
+/* What an older Linux client does on a prepared share (create_new), and a
+ * create that failed partway, finished by the next. */
+static void test_unfinished(const char *dir)
+{
+    char                *refused = rs_xasprintf("%s/refused", dir);
+    char                *half = rs_xasprintf("%s/half", dir);
+    char                *full = rs_xasprintf("%s/half-full", dir);
+    char                *odd = rs_xasprintf("%s/half-odd", dir);
+    char                *tree = rs_xasprintf("%s/refused-tree", dir);
+    char                *name = NULL;
+    struct rs_buf        err;
+    struct rs_repo      *r;
+    struct rs_scan_stats st;
+    bool                 busy;
+
+    rs_buf_init(&err);
+    TEST_CASE("repo: made, where each new file's open is refused once it is made");
+    rs_repo_set_refusing_creates(true);
+    CHECK(rs_repo_init(refused, false, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    CHECK(rs_repo_is(refused));
+    put(tree, "etc/conf", "conf\n", 0644);
+    memset(&st, 0, sizeof(st));
+    r = rs_repo_open(refused, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    CHECK(r && snap(r, tree, "2026-01-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+    free(name);
+    rs_buf_reset(&err);
+    CHECK(!rs_repo_init(refused, false, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "a repository already");
+    rs_repo_set_refusing_creates(false);
+
+    TEST_CASE("repo: a create that failed partway is finished by the next");
+    rs_buf_reset(&err);
+    put(half, "lock", "", 0600);
+    CHECK(mkdir(half, 0755) == 0 || errno == EEXIST);
+    {
+        char *packs = rs_xasprintf("%s/packs", half);
+
+        CHECK(mkdir(packs, 0700) == 0);
+        free(packs);
+    }
+    CHECK(!rs_repo_is(half));
+    CHECK(rs_repo_init(half, false, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    CHECK(rs_repo_is(half));
+
+    TEST_CASE("repo: but not a directory with anything else in it");
+    rs_buf_reset(&err);
+    put(full, "lock", "", 0600);
+    put(full, "packs/a.tar.gz", "x", 0600);
+    CHECK(!rs_repo_init(full, false, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "not an empty directory");
+    rs_buf_reset(&err);
+    put(odd, "readers", "someone\n", 0600);
+    CHECK(!rs_repo_init(odd, false, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "not an empty directory");
+    rs_buf_reset(&err);
+    {
+        char *link = rs_xasprintf("%s/lock", odd);
+        char *gone = rs_xasprintf("%s/readers", odd);
+
+        CHECK(unlink(gone) == 0);
+        CHECK(symlink("/etc/passwd", link) == 0);
+        CHECK(!rs_repo_init(odd, false, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "not an empty directory");
+        free(link);
+        free(gone);
+    }
+    rs_buf_free(&err);
+    free(refused);
+    free(half);
+    free(full);
+    free(odd);
+    free(tree);
+}
+
 static void test_made(const char *dir)
 {
     char           *repo = rs_xasprintf("%s/repo", dir);
@@ -3036,6 +3114,62 @@ static void protect_refused(const char *dir, enum rs_fsflags_mode as, const char
     free(repo);
 }
 
+/* Protect, where the file server has lent out the files a machine has just
+ * written (an NFSv4 delegation): it waits for them, and says which it could
+ * not have. */
+static void test_protect_waits(const char *top)
+{
+    char                    *dir = rs_xasprintf("%s/protect-waits", top);
+    char                    *tree = rs_xasprintf("%s/tree", dir);
+    char                    *soon = rs_xasprintf("%s/soon", dir);
+    char                    *never = rs_xasprintf("%s/never", dir);
+    char                    *name = NULL;
+    struct rs_buf            err;
+    struct rs_scan_stats     st;
+    struct rs_repo          *r;
+    struct rs_repo_protected p;
+    bool                     busy;
+
+    rs_buf_init(&err);
+    rs_fsflags_pretend(RS_FSFLAGS_PRETEND);
+    CHECK(mkdir(dir, 0700) == 0);
+    put(tree, "etc/conf", "conf\n", 0644);
+    CHECK(rs_repo_init(soon, false, &err));
+    CHECK(rs_repo_init(never, false, &err));
+    r = rs_repo_open(soon, RS_REPO_WRITE, &busy, &err);
+    CHECK(r && snap(r, tree, "2026-06-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+    free(name);
+    name = NULL;
+    r = rs_repo_open(never, RS_REPO_WRITE, &busy, &err);
+    CHECK(r && snap(r, tree, "2026-06-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+    free(name);
+
+    TEST_CASE("repo: protect waits for files the server has lent out, and protects them");
+    rs_repo_set_protect_wait(2000, 2);
+    CHECK(rs_repo_protect(soon, geteuid(), getegid(), &p, &err));
+    CHECK_INT(p.nfailed, 0);
+    CHECK_INT(p.waited_for, 2);
+    CHECK(p.files > 2);
+    rs_repo_protected_free(&p);
+
+    TEST_CASE("repo: and says which it waited for in vain");
+    rs_repo_set_protect_wait(300, 1000000);
+    CHECK(rs_repo_protect(never, geteuid(), getegid(), &p, &err));
+    CHECK(p.nfailed > 0);
+    CHECK_INT(p.nfailed, p.waited_for);
+    CHECK_CONTAINS(p.nfailed ? p.failed[0] : "", strerror(EWOULDBLOCK));
+    rs_repo_protected_free(&p);
+    rs_repo_set_protect_wait(-1, 0);
+    rs_fsflags_pretend(RS_FSFLAGS_REAL);
+    rs_buf_free(&err);
+    free(dir);
+    free(tree);
+    free(soon);
+    free(never);
+}
+
 /* Protect, as this system has it (`as` RS_FSFLAGS_REAL), or with the flags
  * Linux's protect sets, pretended: setting them is root's alone there. */
 static void test_protected(const char *top, enum rs_fsflags_mode as)
@@ -3419,6 +3553,7 @@ void test_repo(void)
 
     test_pure();
     test_made(dir);
+    test_unfinished(dir);
     test_written(dir);
     test_chunks(dir);
     test_seek(dir);
@@ -3432,6 +3567,7 @@ void test_repo(void)
         (void)printf("  (protect tests with the real flags skipped: they cannot be set here)\n");
     }
     test_protected(dir, RS_FSFLAGS_PRETEND);
+    test_protect_waits(dir);
     test_checked(dir);
     test_formats();
     test_storage(dir);

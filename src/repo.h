@@ -324,6 +324,7 @@ struct rs_repo_protected {
     size_t snapshots;    /* snapshots with anything made so, each 0550 */
     size_t dirs;         /* the repository, packs and snapshots made shared */
     size_t unchanged;    /* files and directories that were so already */
+    size_t waited_for;   /* files the file server had lent out, waited for */
     char **failed;       /* "PATH: why", for each that could not be made so */
     size_t nfailed;
 };
@@ -558,6 +559,16 @@ void rs_repo_set_segment_size(uint64_t bytes);
  * group of the directory it is made in as it is when run as root, for the
  * unit tests' benefit: they are not root. Nothing in restate itself calls it. */
 void rs_repo_set_adopting(bool always);
+/* With `refuse`, each new file restate makes in a repository is made and then
+ * its open refused, as a Linux client older than 6.x refuses it in a sticky
+ * directory on a share that maps root to another user -- for the unit tests'
+ * benefit, which have no such share. Nothing in restate itself calls it. */
+void rs_repo_set_refusing_creates(bool refuse);
+/* Replaces how long protect waits for files the file server has lent out
+ * (180 seconds), and makes the next `lent` files' opens refused as lent, for
+ * the unit tests' benefit: they have no NFS server. A negative wait restores
+ * the default. Nothing in restate itself calls it. */
+void rs_repo_set_protect_wait(long wait_ms, int lent);
 
 /* Replaces how a lock file is locked, how NFS is told, and the pause between
  * asking again where NFS says EIO, for the unit tests' benefit: they cannot

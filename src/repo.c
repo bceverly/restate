@@ -228,10 +228,59 @@ static void adopt_dir(const char *path)
     }
 }
 
+/* Whether create_new() acts as an older Linux does on a prepared share. */
+static bool refusing_creates;
+
+void rs_repo_set_refusing_creates(bool refuse)
+{
+    refusing_creates = refuse;
+}
+
+/*
+ * A new file `path`, 0600, open for writing; -1 with errno if not. Linux
+ * before 6.x, with fs.protected_regular=2 (Ubuntu's), refuses with EACCES an
+ * O_CREAT open in a sticky directory its group writes, of a file neither the
+ * directory's owner nor the caller owns -- even the file that open has just
+ * made. That is every file root makes on a share that maps it to another user,
+ * in a directory prepared root's for that user's group to add to (as
+ * SysManage prepares one): made, and then refused. So where it is refused, the
+ * name is opened again without O_CREAT, which that check leaves alone, and
+ * kept if it is the empty file just made. With O_EXCL it cannot be a file that
+ * was there before: that is EEXIST.
+ */
+static int create_new(const char *path)
+{
+    int         fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    struct stat st;
+
+    if (fd >= 0 && refusing_creates)
+    {
+        (void)close(fd);
+        fd = -1;
+        errno = EACCES;
+    }
+    if (fd >= 0 || errno != EACCES)
+    {
+        return fd;
+    }
+    fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0 &&
+        (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 0 || st.st_nlink != 1))
+    {
+        (void)close(fd);
+        fd = -1;
+    }
+    if (fd < 0)
+    {
+        errno = EACCES;
+    }
+    return fd;
+}
+
 /* `len` bytes into a new file `path`, 0600, flushed to disk. */
 static bool write_new(const char *path, const void *data, size_t len, struct rs_buf *err)
 {
-    int  fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int  fd = create_new(path);
     bool ok;
 
     if (fd < 0)
@@ -780,7 +829,7 @@ static bool read_plain(const char *path, size_t max, struct rs_buf *out, struct 
 static bool write_out(const char *path, const void *data, size_t len, bool gzip,
                       const char *const *recips, size_t n, struct rs_buf *err)
 {
-    int         fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int         fd = create_new(path);
     struct zout z;
     bool        ok;
 
@@ -1198,6 +1247,57 @@ static bool append_only(int fd)
            (flags & RS_FSFLAGS_APPEND) != 0;
 }
 
+/* Whether `name` in the directory `dfd` is what an unfinished
+ * rs_repo_init() leaves: its empty lock or readers, or its empty packs or
+ * snapshots. */
+static bool init_leftover(int dfd, const char *name)
+{
+    struct stat st;
+    int         fd;
+    DIR        *d;
+    bool        empty = true;
+
+    if (dfd < 0)
+    {
+        return false;
+    }
+    if (strcmp(name, "lock") == 0 || strcmp(name, "readers") == 0)
+    {
+        return fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode) &&
+               st.st_size == 0;
+    }
+    if (strcmp(name, "packs") != 0 && strcmp(name, "snapshots") != 0)
+    {
+        return false;
+    }
+    fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    d = fd >= 0 ? fdopendir(fd) : NULL;
+    if (!d)
+    {
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
+        return false;
+    }
+    for (;;)
+    {
+        const struct dirent *de = readdir(d);
+
+        if (!de)
+        {
+            break;
+        }
+        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
+        {
+            empty = false;
+            break;
+        }
+    }
+    (void)closedir(d);
+    return empty;
+}
+
 bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
 {
     static const char *const subdirs[] = { "packs", "snapshots" };
@@ -1206,6 +1306,11 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
     char                     id[ID_LEN + 1];
     size_t                   i;
     bool                     ok = true;
+    /* What an unfinished create left, which this one finishes -- one that
+     * failed partway, where what it made cannot be removed again, as in a
+     * directory made ready by root for a group to add to, which no machine
+     * can remove from: lock, readers, packs and snapshots, by bit. */
+    unsigned                 left = 0;
 
     /* Made, or else there already: then it has to be an empty directory, and
      * everything about it is learned through the one descriptor on it, so
@@ -1237,7 +1342,20 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
             {
                 break;
             }
-            has = strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0;
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            {
+                continue;
+            }
+            if (init_leftover(dirfd(d), de->d_name))
+            {
+                left |= strcmp(de->d_name, "lock") == 0      ? 1U
+                        : strcmp(de->d_name, "readers") == 0 ? 2U
+                        : strcmp(de->d_name, "packs") == 0   ? 4U
+                                                             : 8U;
+            } else
+            {
+                has = true;
+            }
         }
         if (d)
         {
@@ -1269,7 +1387,7 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
     for (i = 0; ok && i < sizeof(subdirs) / sizeof(subdirs[0]); i++)
     {
         path = rs_xasprintf("%s/%s", dir, subdirs[i]);
-        ok = mkdir(path, 0700) == 0;
+        ok = (left & (4U << i)) != 0 || mkdir(path, 0700) == 0;
         if (!ok)
         {
             rs_buf_addf(err, "%s: %s", path, strerror(errno));
@@ -1280,7 +1398,7 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
     for (i = 0; ok && i < sizeof(empty) / sizeof(empty[0]); i++)
     {
         path = rs_xasprintf("%s/%s", dir, empty[i]);
-        ok = write_new(path, "", 0, err);
+        ok = (left & (1U << i)) != 0 || write_new(path, "", 0, err);
         free(path);
     }
     /* The marker last: until it is there, this is not a repository. */
@@ -2894,7 +3012,7 @@ static bool pack_open(struct rs_repo *r, struct pack_out *pk, struct rs_buf *err
     memset(pk, 0, sizeof(*pk));
     pk->name = pack_name(r);
     pk->tmp = rs_xasprintf("%s/packs/.%s.tar.gz.tmp", r->dir, pk->name);
-    pk->fd = open(pk->tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    pk->fd = create_new(pk->tmp);
     if (pk->fd < 0)
     {
         rs_buf_addf(err, "%s: %s", pk->tmp, strerror(errno));
@@ -3360,7 +3478,7 @@ static int place_new(const char *tmp, const char *path)
     {
         return -1;
     }
-    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    fd = create_new(path);
     if (fd < 0)
     {
         return errno == EEXIST ? 0 : -1;
@@ -5992,6 +6110,34 @@ enum protect_as {
     AS_TOP       /* the repository's own directory */
 };
 
+/*
+ * A file the file server has lent out -- an NFSv4 write delegation, a lease --
+ * cannot be opened without waiting (O_NONBLOCK) until the client gives it back:
+ * EWOULDBLOCK. A Linux NFS client holds one on what it has just written for up
+ * to the server's lease time, 90 seconds by default, so protect run as soon as
+ * a capture finishes finds its last files lent. It goes on with the rest, then
+ * tries those again, waiting longer each time, for up to two lease times.
+ */
+#define PROTECT_WAIT_MS (180L * 1000L)
+#define PROTECT_NAP_MS  250L
+#define PROTECT_NAP_MAX (15L * 1000L)
+#define PROTECT_LENT    1024 /* at most this many waited for; the rest fail */
+
+static bool lent(int err)
+{
+    return err == EWOULDBLOCK || err == EAGAIN;
+}
+
+/* The files protect is waiting for. */
+struct protect_lent {
+    struct lent_file {
+        int   dfd; /* its directory, a descriptor of its own */
+        char *dir;
+        char *name;
+    } *f;
+    size_t n;
+};
+
 /* The flags `as` has on Linux. */
 static unsigned protect_flags(enum protect_as as)
 {
@@ -6061,8 +6207,25 @@ static const char *protect_set(int fd, const struct stat *st, uid_t owner, gid_t
  * root to give away. One that is not there (a prune took it meanwhile) is
  * left out, as 2.
  */
-static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, uid_t owner,
-                       gid_t group, enum protect_as as, struct rs_repo_protected *out)
+/* How long protect waits for files the file server lends out, and the opens
+ * it refuses as lent, for the unit tests (rs_repo_set_protect_wait). */
+static long protect_wait_ms = PROTECT_WAIT_MS;
+static int  protect_lent;
+
+void rs_repo_set_protect_wait(long wait_ms, int lent)
+{
+    protect_wait_ms = wait_ms < 0 ? PROTECT_WAIT_MS : wait_ms;
+    protect_lent = lent;
+}
+
+/*
+ * `name` in `dfd` made what `as` says: 1 if it was changed, 0 if it was so
+ * already, 2 if it is gone, -1 (and in out->failed) if it cannot be -- or,
+ * with `wait`, 3 if it is a file the server has lent out (lent()).
+ */
+static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, bool wait,
+                       uid_t owner, gid_t group, enum protect_as as,
+                       struct rs_repo_protected *out)
 {
     struct stat before;
     struct stat st;
@@ -6090,6 +6253,17 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
     }
     fd = openat(dfd, name,
                 O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (is_dir ? O_DIRECTORY : 0));
+    if (fd >= 0 && !is_dir && protect_lent > 0)
+    {
+        protect_lent--;
+        (void)close(fd);
+        fd = -1;
+        errno = EWOULDBLOCK;
+    }
+    if (fd < 0 && wait && !is_dir && lent(errno))
+    {
+        return 3;
+    }
     if (fd < 0 || fstat(fd, &st) != 0 || st.st_dev != before.st_dev ||
         st.st_ino != before.st_ino)
     {
@@ -6143,10 +6317,28 @@ static int protect_one(int dfd, const char *dir, const char *name, bool is_dir, 
 
 /* Counts what protect_one did with a file. */
 static void protect_file(int dfd, const char *dir, const char *name, uid_t owner, gid_t group,
-                         struct rs_repo_protected *out, bool *any)
+                         struct rs_repo_protected *out, bool *any, struct protect_lent *later)
 {
-    int did = protect_one(dfd, dir, name, false, owner, group, AS_FINISHED, out);
+    int did = protect_one(dfd, dir, name, false, later && later->n < PROTECT_LENT, owner, group,
+                          AS_FINISHED, out);
 
+    if (did == 3 && later)
+    {
+        int               own = fcntl(dfd, F_DUPFD_CLOEXEC, 0);
+        struct lent_file *f;
+
+        if (own < 0)
+        {
+            protect_failed(out, dir, name, strerror(errno));
+            return;
+        }
+        later->f = rs_xreallocarray(later->f, later->n + 1, sizeof(*later->f));
+        f = &later->f[later->n++];
+        f->dfd = own;
+        f->dir = rs_xstrdup(dir);
+        f->name = rs_xstrdup(name);
+        return;
+    }
     if (did == 1)
     {
         out->files++;
@@ -6193,7 +6385,7 @@ static const char *pack_suffix(const char *name)
 
 /* Each finished pack's files in packs/, `pfd`. */
 static void protect_packs(int pfd, const char *dir, uid_t owner, gid_t group,
-                          struct rs_repo_protected *out)
+                          struct rs_repo_protected *out, struct protect_lent *later)
 {
     int                  listing = dup(pfd);
     DIR                 *d = listing >= 0 ? fdopendir(listing) : NULL;
@@ -6219,7 +6411,7 @@ static void protect_packs(int pfd, const char *dir, uid_t owner, gid_t group,
          * refuses what is not a regular file, and says so. */
         if (fstatat(pfd, idx, &st, AT_SYMLINK_NOFOLLOW) == 0)
         {
-            protect_file(pfd, dir, de->d_name, owner, group, out, &any);
+            protect_file(pfd, dir, de->d_name, owner, group, out, &any, later);
         }
         free(idx);
     }
@@ -6231,7 +6423,7 @@ static void protect_packs(int pfd, const char *dir, uid_t owner, gid_t group,
 
 /* Each finished snapshot in snapshots/, `sfd`: its files, then itself. */
 static void protect_snapshots(int sfd, const char *dir, uid_t owner, gid_t group,
-                              struct rs_repo_protected *out)
+                              struct rs_repo_protected *out, struct protect_lent *later)
 {
     int                  listing = dup(sfd);
     DIR                 *d = listing >= 0 ? fdopendir(listing) : NULL;
@@ -6272,14 +6464,14 @@ static void protect_snapshots(int sfd, const char *dir, uid_t owner, gid_t group
         {
             if (fe->d_name[0] != '.')
             {
-                protect_file(fd, path, fe->d_name, owner, group, out, &any);
+                protect_file(fd, path, fe->d_name, owner, group, out, &any, later);
             }
         }
         if (files)
         {
             (void)closedir(files);
         }
-        did = protect_one(sfd, dir, de->d_name, true, owner, group, AS_SNAPSHOT, out);
+        did = protect_one(sfd, dir, de->d_name, true, false, owner, group, AS_SNAPSHOT, out);
         if (did == 1 || (did == 0 && any))
         {
             out->snapshots++;
@@ -6294,6 +6486,68 @@ static void protect_snapshots(int sfd, const char *dir, uid_t owner, gid_t group
     }
 }
 
+/* The files `later` holds, tried again with longer and longer pauses until
+ * each is done or protect_wait_ms has gone by; then once more, saying why
+ * for each still lent. */
+static void protect_waiting(struct protect_lent *later, uid_t owner, gid_t group,
+                            struct rs_repo_protected *out)
+{
+    long   waited = 0;
+    long   nap = PROTECT_NAP_MS;
+    size_t i;
+    size_t left = later->n;
+
+    out->waited_for = later->n;
+    while (left > 0)
+    {
+        bool last = waited >= protect_wait_ms;
+
+        if (!last)
+        {
+            struct timespec ts;
+            long            ms = nap < protect_wait_ms - waited ? nap : protect_wait_ms - waited;
+
+            ts.tv_sec = ms / 1000;
+            ts.tv_nsec = (ms % 1000) * 1000000L;
+            (void)nanosleep(&ts, NULL);
+            waited += ms;
+            nap = nap * 2 < PROTECT_NAP_MAX ? nap * 2 : PROTECT_NAP_MAX;
+        }
+        for (i = 0; i < later->n; i++)
+        {
+            struct lent_file *f = &later->f[i];
+            int               did;
+
+            if (f->dfd < 0)
+            {
+                continue;
+            }
+            /* The last time, one still lent fails, saying why. */
+            did = protect_one(f->dfd, f->dir, f->name, false, !last, owner, group, AS_FINISHED,
+                              out);
+            if (did == 3)
+            {
+                continue;
+            }
+            out->files += did == 1 ? 1 : 0;
+            out->unchanged += did == 0 ? 1 : 0;
+            (void)close(f->dfd);
+            f->dfd = -1;
+            left--;
+        }
+        if (last)
+        {
+            break;
+        }
+    }
+    for (i = 0; i < later->n; i++)
+    {
+        free(later->f[i].dir);
+        free(later->f[i].name);
+    }
+    free(later->f);
+}
+
 bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_protected *out,
                      struct rs_buf *err)
 {
@@ -6301,8 +6555,10 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
     int                      top;
     size_t                   i;
     bool                     any = false;
+    struct protect_lent      later;
 
     memset(out, 0, sizeof(*out));
+    memset(&later, 0, sizeof(later));
     if (!rs_repo_is(dir))
     {
         rs_buf_addf(err, "%s: not a restate repository", dir);
@@ -6338,7 +6594,7 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
 
         for (i = 0; i < ncopies; i++)
         {
-            protect_file(top, dir, copies[i], owner, group, out, &any);
+            protect_file(top, dir, copies[i], owner, group, out, &any, &later);
         }
         rs_repo_free_names(copies, ncopies);
     }
@@ -6352,27 +6608,28 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
         {
             if (i == 0)
             {
-                protect_packs(fd, path, owner, group, out);
+                protect_packs(fd, path, owner, group, out, &later);
             } else
             {
-                protect_snapshots(fd, path, owner, group, out);
+                protect_snapshots(fd, path, owner, group, out, &later);
             }
             (void)close(fd);
         }
         /* Anyone in the group adds to it, and removes only what is their
          * own -- what they have not finished. */
-        did = protect_one(top, dir, subs[i], true, owner, group, AS_SHARED, out);
+        did = protect_one(top, dir, subs[i], true, false, owner, group, AS_SHARED, out);
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;
         free(path);
     }
     {
-        int did = protect_one(top, dir, ".", true, owner, group, AS_TOP, out);
+        int did = protect_one(top, dir, ".", true, false, owner, group, AS_TOP, out);
 
         out->dirs += did == 1 ? 1 : 0;
         out->unchanged += did == 0 ? 1 : 0;
     }
     (void)close(top);
+    protect_waiting(&later, owner, group, out);
     return true;
 }
 
@@ -6744,7 +7001,7 @@ static bool copy_file(const char *from, const char *to, uint64_t *bytes, struct 
         return false;
     }
     (void)unlink(tmp);
-    out = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    out = create_new(tmp);
     ok = out >= 0;
     (void)adopt(out, tmp);
     while (ok && (n = read(in, chunk, sizeof(chunk))) != 0)

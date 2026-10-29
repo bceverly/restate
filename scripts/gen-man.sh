@@ -1829,7 +1829,17 @@ already protected cannot be signed afterwards: sign it as it is captured.
 .B capture \-\-create
 works into an empty directory made ready for it, root's and the group's,
 0770 and append-only on Linux, 0770 with that ACL, or 1770 \- and leaves it
-so. Over NFS, map every machine to one user and the
+so. In a 1770 one, a Linux client older than 6.x with
+.B fs.protected_regular=2
+(Ubuntu's default) refuses to open a file it has just made there, owned by
+the user the share maps root to; restate opens it again. A create that
+failed partway there, which no machine can remove, leaves empty
+.IR lock ,
+.IR readers ,
+.I packs
+or
+.IR snapshots ,
+and the next one finishes it. Over NFS, map every machine to one user and the
 group by name \- on FreeBSD,
 .B \-mapall=restate:restate
 in
@@ -1839,11 +1849,17 @@ make. The result says
 .BR files_protected ,
 .BR snapshots_protected ,
 .BR directories_protected ,
-.B unchanged
+.BR unchanged ,
+.B waited_for
 and
 .BR not_protected ,
 with each that could not be protected among its errors, and exit status 3
-if any.
+if any. A file an NFS server has lent out to the machine that has just
+written it (a delegation, held up to the server's lease time, 90 seconds by
+default) cannot be opened until the machine gives it back: protect goes on
+with the rest, then tries those again for up to 180 seconds, and counts them
+in
+.BR waited_for .
 .PP
 .B A machine makes its own.
 .B capture \-\-create
@@ -2206,7 +2222,8 @@ and
 .BR files_protected ,
 .BR snapshots_protected ,
 .BR directories_protected ,
-.B unchanged
+.BR unchanged ,
+.B waited_for
 and
 .BR not_protected ;
 .BR check ,

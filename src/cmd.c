@@ -2504,6 +2504,7 @@ int rs_cmd_protect(const struct rs_options *o)
     rs_jobj_u64(res, "directories_protected", done.dirs);
     rs_jobj_u64(res, "unchanged", done.unchanged);
     rs_jobj_u64(res, "not_protected", done.nfailed);
+    rs_jobj_u64(res, "waited_for", done.waited_for);
     if (!ok)
     {
         rs_error("%s", err.data);
@@ -2522,6 +2523,11 @@ int rs_cmd_protect(const struct rs_options *o)
         (void)fprintf(stderr, "restate: protected %zu files, %zu snapshots and %zu directories "
                       "for the group %s; %zu were already\n", done.files, done.snapshots,
                       done.dirs, name, done.unchanged);
+        if (done.waited_for > 0)
+        {
+            (void)fprintf(stderr, "restate: waited for %zu the file server had lent out to the "
+                          "machine that wrote them (an NFS delegation)\n", done.waited_for);
+        }
     }
     status = !ok             ? RESTATE_EXIT_TROUBLE
              : done.nfailed ? RESTATE_EXIT_INCOMPLETE
@@ -3222,6 +3228,12 @@ int rs_cmd_features(const struct rs_options *o)
     /* snapshots names each signature's issuer, and with --trusted-key its
      * checked signer; a job can be a sign. */
     rs_jobj_bool(&doc, "snapshot_signer", true);
+    /* protect waits for files an NFS server has lent out to the machine that
+     * wrote them, up to 180 seconds; capture --create finishes a create that
+     * failed partway, and makes files a Linux client refuses in a sticky
+     * directory. */
+    rs_jobj_bool(&doc, "protect_waits", true);
+    rs_jobj_bool(&doc, "create_resumes", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)

@@ -1461,7 +1461,11 @@ restate du /srv/restate/web01
   snapshots and read them, but not change, rename or remove one that is
   there. The marker, `lock` and `readers`, which a capture and a
   restore open as their own, are left as they are, and so is anything being
-  written. Only what is not so already is changed, so it is quick after every
+  written. A file an NFS server has still lent out to the machine that just
+  wrote it (a delegation, up to the lease time, 90 seconds by default) is
+  tried again, with the rest done meanwhile, for up to 180 seconds; the result
+  counts these in `"waited_for"`, and any still lent are `"not_protected"`,
+  exit 3, for the next run. Only what is not so already is changed, so it is quick after every
   capture; it takes no lock, follows no symlink, and refuses a file with a
   second name, which a machine could plant to have root give away a file
   elsewhere. The group is the repository directory's, or `--group`; root's
@@ -1469,7 +1473,10 @@ restate du /srv/restate/web01
   before. A snapshot cannot be signed once it is protected, so sign it as it
   is captured. `capture --create` works into an empty directory made ready
   for it -- root's and the group's, 0770 and append-only on Linux, 0770 with
-  that ACL, or 1770 -- and leaves it so. `features --json` says
+  that ACL, or 1770 -- and leaves it so. In a 1770 one, a Linux client older
+  than 6.x with `fs.protected_regular=2` (Ubuntu's default) refuses to open a
+  file it has just made there, owned by the user the share maps root to;
+  restate opens it again. `features --json` says
   `"protect_flags": true` where protect sets Linux's flags.
 
   ```bash
@@ -1493,7 +1500,10 @@ restate du /srv/restate/web01
   directory not there yet, under a parent that is, or an empty one -- as
   `restate init` would, encrypted with `--encrypt-to`. It is the machine's
   own, so over a share that maps it to one user, that user owns it. A
-  directory with anything else in it is refused, with nothing written; a
+  create that failed partway, in a directory made ready for it that no
+  machine can remove from, leaves empty `lock`, `readers`, `packs` or
+  `snapshots`; the next one finishes it. A directory with anything else in
+  it is refused, with nothing written; a
   repository already there is captured into as ever, and the result says
   which with `"created_repository"`.
 - **Checked without the keys.** Each pack's `.sum` is the digest of its file

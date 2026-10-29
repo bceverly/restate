@@ -1706,6 +1706,8 @@ contains "$OUT" '"keep_yearly": true' "and that prune keeps yearly snapshots"
 contains "$OUT" '"rebuild_arch": true' "and that it rebuilds for another processor"
 contains "$OUT" '"program_arch": true' "and records each program's"
 contains "$OUT" '"snapshot_signer": true' "and that snapshots says who signed each"
+contains "$OUT" '"protect_waits": true' "and that protect waits for files NFS has lent out"
+contains "$OUT" '"create_resumes": true' "and that --create finishes one that failed partway"
 contains "$OUT" '"sign": ["command", "repository", "snapshot", "sign_with"' "and that a job can sign"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
