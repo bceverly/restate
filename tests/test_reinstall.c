@@ -59,7 +59,8 @@ static const char inventory[] =
     " \"alternatives\": [{\"name\": \"editor\", \"path\": \"/usr/bin/vim.basic\"}]}";
 
 /* Each fake logs how it was called; apt-mark and dpkg-query answer as the
- * new machine would: cowsay installed by hand there, and jq at 1.6. */
+ * new machine would: cowsay installed by hand there, and jq at 1.6 -- and,
+ * once apt-get has installed them, jq at 1.6 and htop at 3.3. */
 static const char fake_apt_get[] =
     "#!/bin/sh\n"
     "[ \"$1\" = -s ] || echo \"apt-get $*\" >> \"$LOG\"\n";
@@ -76,9 +77,21 @@ static const char fake_dpkg_query[] =
     "  *'${Package}'*) printf 'jq:amd64 installed\\nlibjq1:amd64 installed\\n"
     "tzdata:all installed\\nhtop:amd64 installed\\ncowsay:amd64 installed\\n'; exit 0 ;;\n"
     "  *' jq:amd64') printf 'installed 1.6' ;;\n"
+    "  *'${Version}'*' jq') grep -q '^apt-get install' \"$LOG\" && printf 'installed 1.6' ||"
+    " printf installed ;;\n"
+    "  *'${Version}'*' htop') grep -q '^apt-get install' \"$LOG\" && printf 'installed 3.3' ||"
+    " printf installed ;;\n"
     "  *) printf installed ;;\n"
     "esac\n";
-static const char fake_dpkg[] = "#!/bin/sh\necho amd64\n";
+/* dpkg --compare-versions A gt B, by sort -V, enough for the versions here. */
+static const char fake_dpkg[] =
+    "#!/bin/sh\n"
+    "if [ \"$1\" = --compare-versions ]; then\n"
+    "  [ \"$2\" != \"$4\" ] && [ \"$(printf '%s\\n%s\\n' \"$2\" \"$4\" | sort -V | tail -n 1)\" = "
+    "\"$2\" ]\n"
+    "  exit\n"
+    "fi\n"
+    "echo amd64\n";
 static const char fake_log[] = "#!/bin/sh\necho \"$(basename \"$0\") $*\" >> \"$LOG\"\n";
 
 static void read_log(const char *dir, struct rs_buf *out)
@@ -129,9 +142,9 @@ void test_reinstall(void)
     CHECK_CONTAINS(script.data, "manual jq:amd64\nauto libjq1:amd64\nauto tzdata:amd64\n");
     /* Snaps: by channel, classic, from the kept file; not the bases, not one
      * from a file the image did not keep, not a name snapd does not allow. */
-    CHECK_CONTAINS(script.data, "snap install firefox --channel=latest/stable ");
-    CHECK_CONTAINS(script.data, "snap install code --classic ");
-    CHECK_CONTAINS(script.data, "snap install --dangerous /var/lib/snapd/snaps/mine_x1.snap ");
+    CHECK_CONTAINS(script.data, "snap install firefox --channel=latest/stable;");
+    CHECK_CONTAINS(script.data, "snap install code --classic;");
+    CHECK_CONTAINS(script.data, "snap install --dangerous /var/lib/snapd/snaps/mine_x1.snap;");
     CHECK(strstr(script.data, "core22") == NULL);
     CHECK(strstr(script.data, "lost") == NULL);
     CHECK(strstr(script.data, "Bad Snap") == NULL);
@@ -140,12 +153,12 @@ void test_reinstall(void)
     CHECK_CONTAINS(script.data, "flatpak install -y --noninteractive flathub "
                                 "org.gimp.GIMP//stable");
     CHECK(strstr(script.data, "org.home.App") == NULL);
-    CHECK_CONTAINS(script.data, "pip install --break-system-packages requests==2.31 ");
+    CHECK_CONTAINS(script.data, "pip install --break-system-packages requests==2.31;");
     CHECK(strstr(script.data, "mine==1") == NULL);
-    CHECK_CONTAINS(script.data, "npm install -g left-pad@1.3 ");
+    CHECK_CONTAINS(script.data, "npm install -g left-pad@1.3;");
     CHECK(strstr(script.data, "npm@9") == NULL);   /* apt's, in npm's own directory */
-    CHECK_CONTAINS(script.data, "gem install rake:13 ");
-    CHECK_CONTAINS(script.data, "update-alternatives --set editor /usr/bin/vim.basic ");
+    CHECK_CONTAINS(script.data, "gem install rake:13;");
+    CHECK_CONTAINS(script.data, "update-alternatives --set editor /usr/bin/vim.basic;");
     CHECK_CONTAINS(script.data, "\nexit 0\n");
 
     TEST_CASE("reinstall: run, against a new machine's apt");
@@ -182,9 +195,20 @@ void test_reinstall(void)
         }
         rs_test_write(t, "packages.sh", body, 0700);
         free(body);
-        cmd = rs_xasprintf("cd '%s' && LOG='%s/log' sh packages.sh > out 2>&1", t, t);
+        cmd = rs_xasprintf("cd '%s' && LOG='%s/log' sh packages.sh report > out 2>&1", t, t);
         CHECK(system(cmd) == 0);
         free(cmd);
+        /* What became of each, for the result. */
+        CHECK(rs_read_beneath(t, "/report", 65536, &log));
+        CHECK_CONTAINS(log.data, "apt older jq 1.7 1.6\n");
+        CHECK_CONTAINS(log.data, "apt installed htop 3.3\n");
+        CHECK_CONTAINS(log.data, "snap installed firefox\n");
+        CHECK_CONTAINS(log.data, "snap installed mine\n");
+        CHECK_CONTAINS(log.data, "flatpak installed org.gimp.GIMP//stable\n");
+        CHECK_CONTAINS(log.data, "pip installed requests 2.31\n");
+        CHECK_CONTAINS(log.data, "gem installed rake 13\n");
+        CHECK_CONTAINS(log.data, "alternatives installed editor /usr/bin/vim.basic\n");
+        rs_buf_free(&log);
         read_log(t, &log);
         CHECK_CONTAINS(log.data, "apt-get update\n");
         CHECK_CONTAINS(log.data, "apt-get install -y jq=1.7 htop=3.3\n");
@@ -307,7 +331,7 @@ void test_reinstall(void)
         CHECK(strstr(script.data, "<<'BASELINE'") == NULL);
         CHECK_CONTAINS(script.data, "export APT_CONFIG\n");
         /* The stores are on the network: only the snap the image keeps. */
-        CHECK_CONTAINS(script.data, "snap install --dangerous /var/lib/snapd/snaps/mine_x1.snap ");
+        CHECK_CONTAINS(script.data, "snap install --dangerous /var/lib/snapd/snaps/mine_x1.snap;");
         CHECK_CONTAINS(script.data, "offline, so the snap firefox is not put back");
         CHECK(strstr(script.data, "snap install firefox") == NULL);
         CHECK(strstr(script.data, "flatpak install") == NULL);
@@ -347,9 +371,15 @@ void test_reinstall(void)
         }
         rs_test_write(t, "packages.sh", body, 0700);
         free(body);
-        cmd = rs_xasprintf("cd '%s' && LOG='%s/log' sh packages.sh > out 2>&1", t, t);
+        rs_test_write(t, "report", "", 0644);
+        cmd = rs_xasprintf("cd '%s' && LOG='%s/log' sh packages.sh report > out 2>&1", t, t);
         CHECK(system(cmd) == 0);
         free(cmd);
+        CHECK(rs_read_beneath(t, "/report", 65536, &log));
+        CHECK_CONTAINS(log.data, "snap skipped firefox\n");
+        CHECK_CONTAINS(log.data, "flatpak skipped org.gimp.GIMP//stable\n");
+        CHECK_CONTAINS(log.data, "pip skipped requests 2.31\n");
+        rs_buf_free(&log);
         read_log(t, &log);
         /* Its own sources and lists, and the index made from dpkg-deb's
          * fields: the package's own Filename replaced, the size and digest
@@ -386,8 +416,64 @@ void test_reinstall(void)
         rs_buf_reset(&script);
         rs_reinstall_script(&sp, &o, &script);
         CHECK(strstr(script.data, "apt-get") == NULL);
-        CHECK_CONTAINS(script.data, "snap install hello ");
+        CHECK_CONTAINS(script.data, "snap install hello;");
         rs_jval_free(&sp);
+    }
+
+    TEST_CASE("reinstall: what the script reports, as a result has it");
+    {
+        static const char report[] =
+            "apt installed htop 3.3\n"
+            "apt newer jq 1.7 1.8\n"
+            "apt failed gone 2.0\n"
+            "snap installed firefox\n"
+            "snap failed code\n"
+            "pip skipped requests 2.31\n"
+            "too few\n"
+            "apt installed a b c d e f\n"
+            "apt installed bad\tname 1\n"
+            "\n"
+            "apt newer jq2 1.0 1.1";
+        static const char inv[] =
+            "{\"managers\": [{\"name\": \"apt\"}, {\"name\": \"rpm\"}, {\"name\": \"snap\"},"
+            " {\"name\": \"cargo\"}, {\"other\": 1}]}";
+        struct rs_jval        res;
+        struct rs_jval        im;
+        struct rs_buf         text;
+        const struct rs_jval *apt;
+
+        memset(&res, 0, sizeof(res));
+        rs_jval_set_object(&res);
+        rs_reinstall_report(report, &res);
+        apt = rs_jobject_get(rs_jobject_get(&res, "managers"), "apt");
+        CHECK(apt != NULL);
+        rs_buf_init(&text);
+        rs_json_write(&text, &res, 0, 0);
+        CHECK_CONTAINS(text.data, "\"installed\": [{\"name\": \"htop\", \"recorded\": \"3.3\"}]");
+        CHECK_CONTAINS(text.data, "\"newer\": [{\"name\": \"jq\", \"recorded\": \"1.7\", "
+                                  "\"installed\": \"1.8\"}, {\"name\": \"jq2\"");
+        CHECK_CONTAINS(text.data, "\"failed\": [{\"name\": \"gone\", \"recorded\": \"2.0\"}]");
+        CHECK_CONTAINS(text.data, "\"snap\": {\"installed\": [{\"name\": \"firefox\"}], "
+                                  "\"failed\": [{\"name\": \"code\"}]}");
+        CHECK_CONTAINS(text.data, "\"pip\": {\"skipped\": [{\"name\": \"requests\", "
+                                  "\"recorded\": \"2.31\"}]}");
+        CHECK(strstr(text.data, "too") == NULL);
+        CHECK(strstr(text.data, "\"a\"") == NULL);
+        CHECK(strstr(text.data, "bad") == NULL);
+        rs_buf_free(&text);
+
+        memset(&im, 0, sizeof(im));
+        rs_buf_init(&err);
+        rs_json_init(&jp, inv, sizeof(inv) - 1, &err);
+        CHECK(rs_json_value(&jp, &im));
+        rs_buf_free(&err);
+        rs_reinstall_others(&im, &res);
+        rs_buf_init(&text);
+        rs_json_write(&text, &res, 0, 0);
+        CHECK_CONTAINS(text.data, "\"not_installed\": [\"rpm\", \"cargo\"]");
+        rs_buf_free(&text);
+        rs_jval_free(&im);
+        rs_jval_free(&res);
     }
 
     rs_buf_free(&script);

@@ -128,6 +128,19 @@ void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages)
     }
 }
 
+/* Where a result's package changes go as well (rs_diff_collect_packages). */
+static struct rs_jval *collected_packages;
+
+void rs_diff_collect_packages(struct rs_jval *packages)
+{
+    collected_packages = packages;
+    if (packages)
+    {
+        memset(packages, 0, sizeof(*packages));
+        rs_jval_set_array(packages);
+    }
+}
+
 /* Where a result's changes go (rs_diff_collect), how many of each kind it
  * takes, how many of each it has, and whether it has had to leave any out. */
 static struct rs_jval *collected;
@@ -474,23 +487,33 @@ bool rs_diff_write_packages(const struct rs_index *old, const struct rs_index *n
                                        strcmp(c->arch, cs.native) != 0;
         struct rs_buf        b;
 
-        if (json_packages)
+        if (json_packages || collected_packages)
         {
-            struct rs_jval *j = rs_jarr_add(json_packages);
-            const char      k[2] = { c->kind, '\0' };
+            struct rs_jval j;
+            const char     k[2] = { c->kind, '\0' };
 
-            rs_jval_set_object(j);
-            rs_jobj_str(j, "change", k);
-            rs_jobj_str(j, "manager", c->manager);
-            rs_jobj_str(j, "name", c->name);
+            memset(&j, 0, sizeof(j));
+            rs_jval_set_object(&j);
+            rs_jobj_str(&j, "change", k);
+            rs_jobj_str(&j, "manager", c->manager);
+            rs_jobj_str(&j, "name", c->name);
             if (foreign)
             {
-                rs_jobj_str(j, "arch", c->arch);
+                rs_jobj_str(&j, "arch", c->arch);
             }
-            rs_jobj_str(j, "from", c->from);
-            rs_jobj_str(j, "to", c->to);
-            rs_jobj_u64(j, "files", c->files);
-            continue;
+            rs_jobj_str(&j, "from", c->from);
+            rs_jobj_str(&j, "to", c->to);
+            rs_jobj_u64(&j, "files", c->files);
+            if (collected_packages)
+            {
+                rs_jval_copy(rs_jarr_add(collected_packages), &j);
+            }
+            if (json_packages)
+            {
+                *rs_jarr_add(json_packages) = j;
+                continue;
+            }
+            rs_jval_free(&j);
         }
         rs_buf_init(&b);
         rs_buf_addf(&b, "%c\t%s:", c->kind, c->manager);

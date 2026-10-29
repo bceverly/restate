@@ -65,4 +65,20 @@ struct rs_reinstall_opts {
 void rs_reinstall_script(const struct rs_jval *packages, const struct rs_reinstall_opts *o,
                          struct rs_buf *out);
 
+/* The most of the script's report restore reads. */
+#define RS_REINSTALL_REPORT_MAX (16U << 20)
+
+/*
+ * What the script reported -- the lines it writes to the file its first
+ * argument names, "MANAGER STATE NAME [RECORDED [INSTALLED]]" -- into `pk`,
+ * an object, as "managers": for each manager, each state (installed, newer,
+ * older, failed, skipped) an array of {name, recorded, installed}. A line that
+ * is not one the script writes is left out.
+ */
+void rs_reinstall_report(const char *text, struct rs_jval *pk);
+
+/* The inventory's package managers the script does not install for, into
+ * `pk` as "not_installed": for a person to see to. */
+void rs_reinstall_others(const struct rs_jval *packages, struct rs_jval *pk);
+
 #endif /* RESTATE_REINSTALL_H */

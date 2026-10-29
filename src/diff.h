@@ -87,6 +87,13 @@ void rs_diff_json(struct rs_jval *changes, struct rs_jval *packages);
  */
 bool rs_diff_collect(struct rs_jval *changes, size_t cap);
 
+/*
+ * The package changes for a result as well, however they are written: each
+ * appended to `packages` as rs_diff_json makes them, `packages` made an empty
+ * array here. NULL stops collecting.
+ */
+void rs_diff_collect_packages(struct rs_jval *packages);
+
 /* "content,mode" and so on, into `out`. */
 void rs_diff_describe(unsigned what, struct rs_buf *out);
 

@@ -2209,6 +2209,7 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "gone=''\n"
                   "retry=''\n"
                   "kept=''\n"
+                  "wanted=''\n"
                   "# Installed already at a newer version than the one recorded -- a\n"
                   "# security update since the capture, or the installer's own: left at\n"
                   "# it. Taking it back would have apt take back, or remove, everything\n"
@@ -2232,7 +2233,8 @@ void rs_packages_apt_script(const struct rs_jval *packages, const struct rs_jval
                   "# A simulated install, not apt-cache show, which finds a package by name\n"
                   "# whatever version is asked for: this checks the version, and that what\n"
                   "# it needs can be had too.\n"
-                  "while read -r want; do\n");
+                  "while read -r want; do\n"
+                  "  wanted=\"$wanted $want\"\n");
     decide(out, "", "", "retry", snap);
     rs_buf_addstr(out, "done <<'PACKAGES'\n");
     for (i = 0; i < n; i++)

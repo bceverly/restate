@@ -321,6 +321,10 @@ contains "$OUT" "apt-get update" "writes the script that would put the packages 
 contains "$OUT" "hello=2.10-3" "with what was installed by hand, at its version"
 contains "$OUT" "[ -f /var/cache/apt/archives/by-hand_1.0_amd64.deb ]" "and the .deb the image kept"
 check "the script is sh" sh -n out.txt
+expect 0 "restore --packages --plan" -- \
+  "$BIN" restore --packages --plan --allow-unverified --root rp --result "$WORK/rplan.json" kept.tar
+contains "$(cat rplan.json)" '"script": "#!/bin/sh' "puts the script in the result, for a program"
+contains "$(cat rplan.json)" '"not_installed": [' "and the managers it leaves to a person"
 expect 2 "restore --packages onto another root" -- \
   "$BIN" restore --packages --allow-unverified --root rp kept.tar
 contains "$ERR" "installs onto the running system" "is refused: it installs onto this one"
@@ -826,6 +830,28 @@ expect 0 "snapshots" -- "$BIN" snapshots repo
 contains "$OUT" "20260101T000000Z" "lists the first"
 contains "$OUT" "20260102T000000Z" "and the second"
 expect 2 "snapshots of what is not a repository" -- "$BIN" snapshots rtree
+# A diff job, as a program runs one after each capture: the newest against
+# the one before it, the whole diff in a file and the first of it in the result.
+mkdir -m 700 djobs
+printf 'command = diff\nrepository = %s\noutput = %s\n' "$WORK/repo" "$WORK/djobs/diff.json" \
+  > djobs/diff.conf
+chmod 644 djobs/diff.conf
+expect 1 "run a diff job" -- "$BIN" run -q --result "$WORK/djobs/res.json" "$WORK/djobs/diff.conf"
+contains "$(cat djobs/res.json)" "\"from\": \"$WORK/repo::20260101T000000Z\"" \
+  "compares the one before the newest"
+contains "$(cat djobs/res.json)" "\"to\": \"$WORK/repo::20260102T000000Z\"" "with the newest"
+contains "$(cat djobs/res.json)" '"modified": 1' "and counts what changed"
+contains "$(cat djobs/res.json)" '"path": "/etc/hosts"' "and names it"
+contains "$(cat djobs/res.json)" "\"output\": \"$WORK/djobs/diff.json\"" "and where the rest is"
+contains "$(cat djobs/diff.json)" '"path": "/etc/hosts"' "which has every change"
+printf 'command = diff\nrepository = %s\nto = 20260101T000000Z\n' "$WORK/repo" > djobs/first.conf
+chmod 644 djobs/first.conf
+expect 2 "a diff job of the first snapshot, with no from" -- "$BIN" run -q "$WORK/djobs/first.conf"
+contains "$ERR" "there is no snapshot before 20260101T000000Z" "is refused, saying why"
+printf 'command = diff\nrepository = %s\nfrom = 20260102T000000Z\nto = 20260102T000000Z\n' \
+  "$WORK/repo" > djobs/same.conf
+chmod 644 djobs/same.conf
+expect 0 "a diff job of one snapshot with itself" -- "$BIN" run -q "$WORK/djobs/same.conf"
 expect 0 "status, nothing changed since" -- "$BIN" status repo
 contains "$ERR" "0 added, 0 deleted, 0 modified" "status finds nothing changed"
 echo "doc, edited" > "rtree/home/u/with space"
@@ -1708,6 +1734,8 @@ contains "$OUT" '"program_arch": true' "and records each program's"
 contains "$OUT" '"snapshot_signer": true' "and that snapshots says who signed each"
 contains "$OUT" '"protect_waits": true' "and that protect waits for files NFS has lent out"
 contains "$OUT" '"create_resumes": true' "and that --create finishes one that failed partway"
+contains "$OUT" '"diff_job": true' "and that a job can be a diff"
+contains "$OUT" '"restore_packages_report": true' "and that restore says what became of each package"
 contains "$OUT" '"sign": ["command", "repository", "snapshot", "sign_with"' "and that a job can sign"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"

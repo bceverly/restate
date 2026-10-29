@@ -265,6 +265,47 @@ static void other_jobs(void)
     free(why);
     CHECK_INT(job.opts.ntrusted, 1);
     rs_job_free(&job);
+
+    TEST_CASE("jobs: diff, the newest and the one before it, or two named");
+    CHECK(parse(&job, "command = diff\nrepository = /r\n", &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_DIFF);
+    CHECK_INT(job.opts.nargs, 2);
+    CHECK(job.opts.args[0] == NULL);
+    CHECK_STR(job.opts.args[1], "/r");
+    CHECK(!job.opts.json && !job.opts.packages && job.opts.output == NULL);
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = diff\nrepository = /r\nfrom = 20261020T030000Z\n"
+                      "to = /s::20261021T030000Z\npackages = true\noutput = /var/lib/d.json\n"
+                      "trusted_key = /k.asc\ndecrypt_with = /etc/restate/keys/d.gpg\n",
+                &why));
+    free(why);
+    CHECK_STR(job.opts.args[0], "/r::20261020T030000Z");
+    CHECK_STR(job.opts.args[1], "/s::20261021T030000Z");
+    CHECK(job.opts.packages && job.opts.json);
+    CHECK_STR(job.opts.output, "/var/lib/d.json");
+    CHECK_INT(job.opts.ntrusted, 1);
+    CHECK_INT(job.opts.ndecrypt_with, 1);
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = diff\nfrom = /r::a\nto = /r::b\n", &why));
+    free(why);
+    CHECK_STR(job.opts.args[0], "/r::a");
+    CHECK_STR(job.opts.args[1], "/r::b");
+    rs_job_free(&job);
+    refused("command = diff\nto = b\n", "a diff job needs repository, or to as REPO::NAME");
+    refused("command = diff\nto = /r::b\nfrom = a\n",
+            "a diff job needs repository, or from as REPO::NAME");
+    refused("command = diff\nrepository = /r\noutput = d.json\n", "output: not an absolute");
+    refused("command = diff\nrepository = /r\nsnapshot = a\n",
+            "snapshot means nothing to a diff job");
+    refused("command = capture\nrepository = /r\nfrom = a\n", "from means nothing");
+
+    TEST_CASE("jobs: restore, packages and all");
+    CHECK(parse(&job, "command = restore\nrepository = /r\npackages = true\nplan = true\n",
+                &why));
+    free(why);
+    CHECK(job.opts.packages && job.opts.plan_only);
+    rs_job_free(&job);
 }
 
 static void bad_jobs(void)
@@ -350,7 +391,7 @@ static void bad_jobs(void)
 
         CHECK(n > 30);
         CHECK_STR(keys[0], "command");
-        CHECK_STR(keys[n - 1], "group");
+        CHECK_STR(keys[n - 1], "output");
     }
 }
 

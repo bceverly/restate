@@ -1025,7 +1025,15 @@ virtual machine's guest tools (qemu-guest-agent, open-vm-tools and the like),
 which follow the hardware. Then the snaps, flatpaks, the Python, npm and Ruby
 packages installed system-wide, and the alternatives chosen by hand. It is
 all done by a shell script, as a person would do it; `--dry-run` writes the
-script out instead of running it, to read first:
+script out instead of running it, to read first. The result's `packages`
+says what became of each: `managers.apt.installed`, at the version recorded;
+`newer` or `older`, at another -- the one recorded gone from the
+repositories, or a newer one there already -- with `recorded` and
+`installed`; `failed`, not installed at all; and for snaps, flatpaks, pip,
+npm, gem and the alternatives, `installed`, `failed` or `skipped` (offline,
+or the tool not there). `not_installed` names the image's other package
+managers -- rpm, pacman, Homebrew and the like -- which restore lists but
+leaves to a person:
 
 ```console
 $ sudo restate restore --packages --dry-run -o packages.sh --trusted-key backup.pub web01.tar
@@ -1551,8 +1559,18 @@ report_group = restate-report
 ```
 
 A job can be a `capture`, `prune`, `check`, `copy`, `snapshots`, `restore`,
-`estimate`, `du`, `repack`, `protect`, `status`, `list` or `sign`; a `status`,
-`list` or `sign` job reads the newest snapshot unless `snapshot` names one.
+`estimate`, `du`, `repack`, `protect`, `status`, `list`, `sign` or `diff`; a
+`status`, `list` or `sign` job reads the newest snapshot unless `snapshot`
+names one. A `diff` job compares `from` with `to` -- each a snapshot's name in
+`repository`, or `REPO::NAME` -- `to` the newest if not given, and `from` the
+one before `to`; with `packages = true` it compares by package, as `diff
+--packages` does, and `output` writes the whole diff there as JSON. Its
+result names both (`from`, `to`, each `REPO::NAME`) and has the counts, the
+first 1000 changes and package changes (`diff.changes`, `diff.packages`,
+each with a `truncated` flag), and the `output`; like `restate diff`, it exits
+1 when they differ. A `restore` job takes `packages`, as `--packages`: with
+`plan` or `dry_run`, its result's `packages.script` is the script it would
+run.
 A `sign` job signs it with `sign_with` (and `passphrase_file`, if the key has
 a passphrase) -- as a storage host does after a capture, before `protect` --
 and its result says which snapshot (`signed`, `REPO::NAME`) and whose key

@@ -185,13 +185,14 @@ static bool output_open(const struct rs_options *o, struct output *out)
         out->final = NULL;
         return true;
     }
-    out->tmp = rs_xasprintf("%s.XXXXXX", o->output);
-    fd = mkstemp(out->tmp);
-    if (fd < 0)
+    /* Readable by --report-group, as the result is. */
+    fd = rs_result_open(o->output, o->report_group, &out->tmp);
+    if (fd < 0 || !out->tmp)
     {
-        rs_error("%s: %s", o->output, strerror(errno));
-        free(out->tmp);
-        out->tmp = NULL;
+        if (fd >= 0)
+        {
+            (void)close(fd);
+        }
         return false;
     }
     out->fp = fdopen(fd, "w");
@@ -256,7 +257,7 @@ static int emit(const struct rs_options *o, struct rs_buf *text)
         rs_buf_free(text);
         return RESTATE_EXIT_TROUBLE;
     }
-    ok = fwrite(text->data, 1, text->len, out.fp) == text->len;
+    ok = !text->data ? text->len == 0 : fwrite(text->data, 1, text->len, out.fp) == text->len;
     rs_buf_free(text);
     return output_close(&out, ok) ? RESTATE_EXIT_OK : RESTATE_EXIT_TROUBLE;
 }
@@ -3120,9 +3121,11 @@ int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
-    static const char *const members[] = { "capture.cache", "diff.changes", "list",
-                                           "snapshot", "status.capture_rules",
-                                           "verify.capture_rules" };
+    static const char *const members[] = { "capture.cache",        "diff.changes",
+                                           "diff.from",            "diff.packages",
+                                           "list",                 "protect.waited_for",
+                                           "restore.packages",     "snapshot",
+                                           "status.capture_rules", "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;
@@ -3233,6 +3236,10 @@ int rs_cmd_features(const struct rs_options *o)
      * failed partway, and makes files a Linux client refuses in a sticky
      * directory. */
     rs_jobj_bool(&doc, "protect_waits", true);
+    /* A job can be a diff, with from, to, packages and output; a restore
+     * job's packages, whose result says what became of each. */
+    rs_jobj_bool(&doc, "diff_job", true);
+    rs_jobj_bool(&doc, "restore_packages_report", true);
     rs_jobj_bool(&doc, "create_resumes", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
@@ -3308,12 +3315,69 @@ static void diff_summary(const struct rs_options *o, const struct rs_diff_stats 
  * names, of all a diff, verify or status finds. */
 #define RESULT_CHANGES 1000
 
+static char *pinned(const char *path);
+
+/*
+ * The snapshot before the one `to` (REPO::NAME) names, as REPO::NAME: what a
+ * diff job with no `from` compares it with. NULL, having said why, where there
+ * is none.
+ */
+static char *snapshot_before(const char *to)
+{
+    struct rs_repo *r;
+    struct rs_buf   err;
+    char           *dir;
+    char           *name;
+    char          **names;
+    char           *out = NULL;
+    size_t          n = 0;
+    bool            busy;
+
+    if (!rs_repo_ref(to, &dir, &name) || !name)
+    {
+        rs_error("diff: %s: a diff with no `from` compares a repository's snapshot with the "
+                 "one before it, and this is not a repository's snapshot", to);
+        free(dir);
+        free(name);
+        return NULL;
+    }
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_LOOK, &busy, &err);
+    if (!r)
+    {
+        rs_error("%s", err.data);
+    } else
+    {
+        size_t i;
+
+        names = rs_repo_snapshots(r, &n);
+        for (i = 1; i < n && !out; i++)
+        {
+            if (strcmp(names[i], name) == 0)
+            {
+                out = rs_xasprintf("%s" RS_REPO_SEP "%s", dir, names[i - 1]);
+            }
+        }
+        if (!out)
+        {
+            rs_error("diff: %s: there is no snapshot before %s to compare it with", dir, name);
+        }
+        rs_repo_free_names(names, n);
+        rs_repo_close(r);
+    }
+    rs_buf_free(&err);
+    free(dir);
+    free(name);
+    return out;
+}
+
 static int write_diff(const struct rs_options *o, const struct rs_index *a,
                       const struct rs_index *b, struct rs_diff_stats *d)
 {
     struct output   out;
     struct rs_jval  changes;
     struct rs_jval  packages;
+    struct rs_jval  listed;
     struct rs_jval  first;
     struct rs_jval *res;
     bool            by_package = o->packages && o->command == CMD_DIFF;
@@ -3326,13 +3390,19 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     }
     memset(&changes, 0, sizeof(changes));
     memset(&packages, 0, sizeof(packages));
+    memset(&listed, 0, sizeof(listed));
     if (o->json)
     {
         rs_diff_json(&changes, &packages);
     }
+    if (by_package)
+    {
+        rs_diff_collect_packages(&listed);
+    }
     (void)rs_diff_collect(&first, RESULT_CHANGES);
     ok = by_package ? rs_diff_write_packages(a, b, out.fp, d) : rs_diff_write(a, b, out.fp, d);
     truncated = rs_diff_collect(NULL, 0);
+    rs_diff_collect_packages(NULL);
     if (o->json)
     {
         struct rs_jval doc;
@@ -3369,6 +3439,7 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     if (!output_close(&out, ok))
     {
         rs_jval_free(&first);
+        rs_jval_free(&listed);
         return RESTATE_EXIT_TROUBLE;
     }
     res = rs_jobj_add(rs_result(), "diff");
@@ -3379,9 +3450,28 @@ static int write_diff(const struct rs_options *o, const struct rs_index *a,
     if (by_package)
     {
         rs_jobj_u64(res, "packages_changed", d->packages);
+        rs_jobj_u64(res, "explained", d->explained);
     }
     *rs_jobj_add(res, "changes") = first;
     rs_jobj_bool(res, "truncated", truncated);
+    if (by_package)
+    {
+        /* The first of them, as the changes are: -o has them all. */
+        bool more = listed.n > RESULT_CHANGES;
+
+        while (listed.n > RESULT_CHANGES)
+        {
+            rs_jval_free(&listed.items[--listed.n]);
+        }
+        *rs_jobj_add(res, "packages") = listed;
+        memset(&listed, 0, sizeof(listed));
+        rs_jobj_bool(res, "packages_truncated", more);
+    }
+    if (o->output && strcmp(o->output, "-") != 0)
+    {
+        rs_jobj_str(res, "output", o->output);
+    }
+    rs_jval_free(&listed);
     diff_summary(o, d);
     return (d->added || d->deleted || d->modified || d->packages) ? RESTATE_EXIT_DIFFERENT
                                                    : RESTATE_EXIT_OK;
@@ -3395,35 +3485,50 @@ int rs_cmd_diff(const struct rs_options *o)
     struct rs_buf        err;
     struct trust         ta;
     struct trust         tb;
+    char                *from;
+    char                *to;
     int                  status;
 
-    if (strcmp(o->args[0], "-") == 0 && strcmp(o->args[1], "-") == 0)
+    if (o->args[0] && strcmp(o->args[0], "-") == 0 && strcmp(o->args[1], "-") == 0)
     {
         rs_error("diff: only one of the two can be standard input");
         return RESTATE_EXIT_TROUBLE;
     }
-    status = trust_check(o, o->args[0], o->ntrusted > 0, &ta);
+    /* Each pinned, so the result names what was read; a job with no `from`
+     * compares `to` with the snapshot before it. */
+    to = pinned(o->args[1]);
+    from = o->args[0] ? pinned(o->args[0]) : snapshot_before(to);
+    if (!from)
+    {
+        free(to);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_jobj_str(rs_result(), "from", from);
+    rs_jobj_str(rs_result(), "to", to);
+    status = trust_check(o, from, o->ntrusted > 0, &ta);
     if (status == RESTATE_EXIT_OK)
     {
-        status = trust_check(o, o->args[1], o->ntrusted > 0, &tb);
+        status = trust_check(o, to, o->ntrusted > 0, &tb);
     }
     if (status != RESTATE_EXIT_OK)
     {
+        free(from);
+        free(to);
         return status;
     }
     rs_index_init(&a);
     rs_index_init(&b);
     rs_buf_init(&err);
-    if (!rs_index_load(&a, o->args[0], &err) || !rs_index_load(&b, o->args[1], &err))
+    if (!rs_index_load(&a, from, &err) || !rs_index_load(&b, to, &err))
     {
         rs_error("%s", err.data);
         status = RESTATE_EXIT_TROUBLE;
     } else
     {
-        status = trust_matches(o, o->args[0], &ta, &a);
+        status = trust_matches(o, from, &ta, &a);
         if (status == RESTATE_EXIT_OK)
         {
-            status = trust_matches(o, o->args[1], &tb, &b);
+            status = trust_matches(o, to, &tb, &b);
         }
         if (status == RESTATE_EXIT_OK)
         {
@@ -3433,6 +3538,8 @@ int rs_cmd_diff(const struct rs_options *o)
     rs_buf_free(&err);
     rs_index_free(&a);
     rs_index_free(&b);
+    free(from);
+    free(to);
     return status;
 }
 
@@ -3895,11 +4002,38 @@ static const char *baseline_cache(const struct rs_options *o)
     return cache;
 }
 
-/* Runs the package script `script`, from a file only root can reach. */
-static int run_script(const char *script)
+/* The member `key` of the object `obj`, an array or an object, made if it is
+ * not there. Good until the next member is added to `obj`. */
+static struct rs_jval *member_of(struct rs_jval *obj, const char *key, bool array)
+{
+    struct rs_jval *v;
+    size_t          i;
+
+    for (i = 0; i < obj->n; i++)
+    {
+        if (strcmp(obj->keys[i], key) == 0)
+        {
+            return &obj->items[i];
+        }
+    }
+    v = rs_jobj_add(obj, key);
+    if (array)
+    {
+        rs_jval_set_array(v);
+    } else
+    {
+        rs_jval_set_object(v);
+    }
+    return v;
+}
+
+/* Runs the package script `script`, from a file only root can reach, with
+ * what it reports (reinstall.c's note) into `report`. */
+static int run_script(const char *script, struct rs_buf *report)
 {
     char          dir[] = "/tmp/restate.XXXXXX";
     char         *path;
+    char         *said;
     struct rs_buf err;
     int           fd;
     int           code = -1;
@@ -3911,6 +4045,7 @@ static int run_script(const char *script)
         return RESTATE_EXIT_TROUBLE;
     }
     path = rs_xasprintf("%s/packages.sh", dir);
+    said = rs_xasprintf("%s/report", dir);
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
     ok = fd >= 0 && write(fd, script, strlen(script)) == (ssize_t)strlen(script);
     ok = fd >= 0 && close(fd) == 0 && ok;
@@ -3918,11 +4053,12 @@ static int run_script(const char *script)
     if (ok)
     {
         char  a0[] = "sh";
-        char *argv[3];
+        char *argv[4];
 
         argv[0] = a0;
         argv[1] = path;
-        argv[2] = NULL;
+        argv[2] = said;
+        argv[3] = NULL;
         ok = rs_run(RS_PROG_SH, argv, NULL, NULL, &code, &err);
         if (!ok)
         {
@@ -3932,8 +4068,19 @@ static int run_script(const char *script)
     {
         rs_error("%s: %s", path, strerror(errno));
     }
+    if (ok)
+    {
+        rs_buf_reset(&err);
+        if (!rs_read_beneath(dir, "/report", RS_REINSTALL_REPORT_MAX, report))
+        {
+            rs_buf_free(report);
+            rs_buf_init(report);
+        }
+    }
+    (void)unlink(said);
     (void)unlink(path);
     (void)rmdir(dir);
+    free(said);
     free(path);
     rs_buf_free(&err);
     if (!ok)
@@ -3990,7 +4137,9 @@ static int restore_packages(const struct rs_options *o, const struct rs_index *i
     struct rs_reinstall_opts io;
     struct rs_restore_stats  st;
     struct rs_buf            script;
+    struct rs_buf            report;
     struct rs_buf            err;
+    struct rs_jval          *pk;
     char                    *snapshot;
     int                      status;
 
@@ -4025,9 +4174,14 @@ static int restore_packages(const struct rs_options *o, const struct rs_index *i
     rs_buf_init(&script);
     rs_reinstall_script(&ix->packages, &io, &script);
     free(snapshot);
+    pk = rs_jobj_add(rs_result(), "packages");
+    rs_jval_set_object(pk);
+    rs_reinstall_others(&ix->packages, pk);
     if (o->dry_run)
     {
-        /* What would be run, to read: on standard output, or -o. */
+        /* What would be run, to read: on standard output, or -o; and in
+         * the result, for a program. */
+        rs_jobj_str(pk, "script", script.data ? script.data : "");
         return emit(o, &script);
     }
     rs_buf_init(&err);
@@ -4047,7 +4201,14 @@ static int restore_packages(const struct rs_options *o, const struct rs_index *i
         (void)fprintf(stderr, "restate: put back the image's apt configuration and kept "
                       "packages (%" PRIu64 " files); now its packages\n", st.files);
     }
-    status = run_script(script.data ? script.data : "");
+    rs_buf_init(&report);
+    status = run_script(script.data ? script.data : "", &report);
+    /* The result's "packages" again: rs_restore may have added members to
+     * the result since. */
+    pk = member_of(rs_result(), "packages", false);
+    rs_jobj_bool(pk, "script_ran", status != RESTATE_EXIT_TROUBLE);
+    rs_reinstall_report(report.data ? report.data : "", pk);
+    rs_buf_free(&report);
     rs_buf_free(&script);
     return status;
 }
@@ -4304,10 +4465,10 @@ int rs_cmd_restore(const struct rs_options *o)
         rs_error("--offline is how restore --packages installs them: give --packages too");
         return RESTATE_EXIT_TROUBLE;
     }
-    if (o->plan_only && (o->packages || o->check_first))
+    if (o->plan_only && o->check_first)
     {
-        rs_error("--plan reads only the index, and %s reads the image: give --dry-run instead",
-                 o->packages ? "--packages" : "--check-first");
+        rs_error("--plan reads only the index, and --check-first reads the image: give "
+                 "--dry-run instead");
         return RESTATE_EXIT_TROUBLE;
     }
     if (o->offline && o->exact_versions)

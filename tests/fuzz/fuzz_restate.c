@@ -28,7 +28,9 @@
  *   7  a LUKS1 or LUKS2 header, as the start of a block device holds it
  *   8  a SHA256SUMS file, as a vendor's mirror serves it: an image is picked
  *      from it, and what is picked must be a plain file name with a digest
- *   9  the package inventories: dpkg's status, apt's sources, snapd's state
+ *   9  the package inventories: dpkg's status, apt's sources, snapd's state;
+ *      and the whole input as the report restore --packages reads back from
+ *      its script
  *  10  account files, the system's and the image's, merged
  *  11  dpkg's record of the files it installed -- diversions, status,
  *      md5sums and list, between NULs -- loaded, and every path looked up
@@ -86,6 +88,7 @@
 #include "packages.h"
 #include "pgp.h"
 #include "pkgdb.h"
+#include "reinstall.h"
 #include "repo.h"
 #include "rules.h"
 #include "sha256.h"
@@ -1148,6 +1151,74 @@ static bool pkg_tree(void)
     return true;
 }
 
+/* Whether `w` is a word the package script's report can give: printable,
+ * with no spaces, and not empty. */
+static bool report_word_ok(const char *w)
+{
+    size_t i;
+
+    if (!w || !w[0])
+    {
+        return false;
+    }
+    for (i = 0; w[i]; i++)
+    {
+        if ((unsigned char)w[i] <= 0x20 || w[i] == 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The same input as the report restore --packages reads back from its script:
+ * each package it takes has a name, and every word in it is one word. */
+static void fuzz_package_report(const char *text, size_t len)
+{
+    char                 *s = rs_xstrndup(text, len);
+    struct rs_jval        res;
+    const struct rs_jval *managers;
+    size_t                m;
+    size_t                k;
+    size_t                i;
+
+    memset(&res, 0, sizeof(res));
+    rs_jval_set_object(&res);
+    rs_reinstall_report(s, &res);
+    managers = rs_jobject_get(&res, "managers");
+    for (m = 0; managers && m < managers->n; m++)
+    {
+        const struct rs_jval *states = &managers->items[m];
+
+        if (!report_word_ok(managers->keys[m]))
+        {
+            abort();
+        }
+        for (k = 0; k < states->n; k++)
+        {
+            const struct rs_jval *list = &states->items[k];
+
+            if (!report_word_ok(states->keys[k]) || list->type != RS_JARRAY)
+            {
+                abort();
+            }
+            for (i = 0; i < list->n; i++)
+            {
+                const char *rec = rs_jobject_str(&list->items[i], "recorded");
+                const char *ins = rs_jobject_str(&list->items[i], "installed");
+
+                if (!report_word_ok(rs_jobject_str(&list->items[i], "name")) ||
+                    (rec && !report_word_ok(rec)) || (ins && !report_word_ok(ins)))
+                {
+                    abort();
+                }
+            }
+        }
+    }
+    rs_jval_free(&res);
+    free(s);
+}
+
 static void fuzz_packages(const char *text, size_t len)
 {
     struct rs_jval inv;
@@ -1197,6 +1268,7 @@ static void fuzz_packages(const char *text, size_t len)
     free(kept);
     rs_buf_free(&missing);
     rs_jval_free(&inv);
+    fuzz_package_report(text, len);
 }
 
 /* The account merge restore does before any file goes back: the input's

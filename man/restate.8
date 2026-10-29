@@ -2188,9 +2188,10 @@ and the commands each means something to:
 .BR repack ,
 .BR protect ,
 .BR status ,
-.B list
+.BR list ,
+.B sign
 or
-.BR sign .
+.BR diff .
 .TP
 .B repository
 the repository; every command but estimate.
@@ -2232,7 +2233,7 @@ and whose key
 capture and prune: key files.
 .TP
 .BR decrypt_with " (repeatable), " passphrase_file
-every command but estimate, protect and sign (passphrase_file for sign
+every command but estimate, protect and sign, diff included (passphrase_file for sign
 too, the signing key's): the secret keys to decrypt with,
 as
 .B \-\-decrypt\-with
@@ -2258,12 +2259,49 @@ for prune, repack and check.
 .BR read_all ", " metadata_only
 check;
 .BR trusted_key " (repeatable)"
-for check, restore, status, list and snapshots.
+for check, restore, status, list, snapshots and diff.
 .TP
 .BR include ", " exclude " (repeatable), " check_first ", " plan ", " allow_unverified
 restore;
 .B plan
 is a dry run as well.
+.TP
+.BR from ", " to
+diff: the snapshots to compare, each a name in
+.B repository
+or
+.IR REPO :: NAME ;
+.B to
+the newest if not given, and
+.B from
+the one before
+.BR to .
+The result names both
+.RB ( from ", " to )
+and has the first 1000 changes, as
+.B restate diff
+gives them; the job exits 1 when they differ.
+.TP
+.B packages
+diff: by package, as
+.BR "diff \-\-packages" ,
+with the first 1000 package changes in the result's
+.BR diff.packages ;
+restore: as
+.BR "restore \-\-packages" ,
+the result's
+.B packages
+saying what became of each (or, with
+.B plan
+or
+.BR dry_run ,
+the script it would run, as
+.BR packages.script ).
+.TP
+.B output
+diff: the whole diff, as JSON, readable by
+.B report_group
+as the result is.
 .TP
 .B copy_to
 copy: where to.
@@ -2396,6 +2434,31 @@ the first 1000 of those paths; with
 .BR \-\-as ,
 an object
 .BR as ;
+with
+.BR \-\-packages ,
+an object
+.B packages
+\- with
+.BR \-\-dry\-run ,
+the
+.B script
+it would run; otherwise
+.BR managers ,
+for each package manager the packages
+.BR installed ,
+.B newer
+or
+.B older
+(at a version other than the one recorded, with
+.B recorded
+and
+.BR installed ),
+.B failed
+or
+.BR skipped ,
+and
+.BR not_installed ,
+the image's managers it leaves to a person;
 .BR copy ,
 .BR du ,
 .B estimate
@@ -2412,7 +2475,16 @@ the first 1000 of each kind of change, added, deleted and modified, as
 .B \-\-json
 writes them, and
 .B truncated
-if there were more;
+if there were more, and
+.B from
+and
+.B to
+naming what was compared; with
+.BR \-\-packages ,
+the first 1000 package changes too, in
+.BR packages ,
+with
+.BR packages_truncated ;
 .BR list ,
 an object
 .B list

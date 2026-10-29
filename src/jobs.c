@@ -36,7 +36,8 @@ enum {
     J_STATUS    = 1u << 10,
     J_LIST      = 1u << 11,
     J_SIGN      = 1u << 12,
-    J_ANY       = 0x1fffu,
+    J_DIFF      = 1u << 13,
+    J_ANY       = 0x3fffu,
     /* Every one that can read what is encrypted, and so may need a key. */
     J_DECRYPTS  = J_ANY & ~(J_ESTIMATE | J_PROTECT | J_SIGN)
 };
@@ -52,7 +53,7 @@ static const struct {
     { "estimate", CMD_ESTIMATE, J_ESTIMATE },    { "du", CMD_DU, J_DU },
     { "repack", CMD_REPACK, J_REPACK },          { "protect", CMD_PROTECT, J_PROTECT },
     { "status", CMD_STATUS, J_STATUS },          { "list", CMD_LIST, J_LIST },
-    { "sign", CMD_SIGN, J_SIGN },
+    { "sign", CMD_SIGN, J_SIGN },               { "diff", CMD_DIFF, J_DIFF },
 };
 
 enum kind {
@@ -107,6 +108,10 @@ enum key_id {
     KEY_PROGRESS,
     KEY_REPORT_GROUP,
     KEY_GROUP,
+    KEY_FROM,
+    KEY_TO,
+    KEY_PACKAGES,
+    KEY_OUTPUT,
     KEY_COUNT
 };
 
@@ -135,7 +140,7 @@ static const struct key {
     [KEY_DECRYPT_WITH] = { "decrypt_with", K_PATH, true, J_DECRYPTS },
     [KEY_PASSPHRASE_FILE] = { "passphrase_file", K_PATH, false, J_DECRYPTS | J_SIGN },
     [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true,
-                          J_RESTORE | J_CHECK | J_STATUS | J_LIST | J_SNAPSHOTS },
+                          J_RESTORE | J_CHECK | J_STATUS | J_LIST | J_SNAPSHOTS | J_DIFF },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
     [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
@@ -161,6 +166,10 @@ static const struct key {
     [KEY_PROGRESS] = { "progress", K_PATH, false, J_ANY },
     [KEY_REPORT_GROUP] = { "report_group", K_NAME, false, J_ANY },
     [KEY_GROUP] = { "group", K_NAME, false, J_PROTECT },
+    [KEY_FROM] = { "from", K_SNAPSHOT, false, J_DIFF },
+    [KEY_TO] = { "to", K_SNAPSHOT, false, J_DIFF },
+    [KEY_PACKAGES] = { "packages", K_BOOL, false, J_DIFF | J_RESTORE },
+    [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF },
 };
 
 const char *const *rs_job_keys(size_t *n)
@@ -553,10 +562,72 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     case KEY_GROUP:
         o->group = v;
         break;
+    case KEY_FROM:
+    case KEY_TO:
+        break;   /* made into arguments once the whole job is read */
+    case KEY_PACKAGES:
+        o->packages = b;
+        break;
+    case KEY_OUTPUT:
+        /* The whole diff, as JSON; the result has the first changes. */
+        o->output = v;
+        o->json = true;
+        break;
     case KEY_COUNT:
     default:
         break;
     }
+}
+
+/* `snap` (NAME or REPO::NAME) as a reference, in `repo` if it names none;
+ * NULL, saying why, if neither does. */
+static char *diff_ref(struct rs_job *job, const char *repo, const char *snap, const char *key,
+                      const char *name, struct rs_buf *err)
+{
+    char *made;
+    char *ref;
+
+    if (snap && strstr(snap, "::"))
+    {
+        made = rs_xstrdup(snap);
+    } else if (repo)
+    {
+        made = snap ? rs_xasprintf("%s::%s", repo, snap) : rs_xstrdup(repo);
+    } else
+    {
+        rs_buf_addf(err, "%s: a diff job needs repository, or %s as REPO::NAME", name, key);
+        return NULL;
+    }
+    ref = keep(job, made, strlen(made));
+    free(made);
+    return ref;
+}
+
+/* A diff's two: `to`, or the repository's newest; `from`, or else NULL for
+ * the snapshot before `to` (rs_cmd_diff). */
+static bool diff_args(struct rs_job *job, const char *const *vals, const char *name,
+                      struct rs_buf *err)
+{
+    const char *repo = vals[KEY_REPOSITORY];
+    char       *to = diff_ref(job, repo, vals[KEY_TO], "to", name, err);
+
+    if (!to)
+    {
+        return false;
+    }
+    job->args[0] = NULL;
+    if (vals[KEY_FROM])
+    {
+        job->args[0] = diff_ref(job, repo, vals[KEY_FROM], "from", name, err);
+        if (!job->args[0])
+        {
+            return false;
+        }
+    }
+    job->args[1] = to;
+    job->opts.nargs = 2;
+    job->opts.args = job->args;
+    return true;
 }
 
 /* The arguments the command takes, from the keys that make them. */
@@ -615,6 +686,8 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
             return false;
         }
         break;
+    case CMD_DIFF:
+        return diff_args(job, vals, name, err);
     case CMD_ESTIMATE:
     default:
         break;
@@ -816,7 +889,7 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
             {
                 rs_buf_addf(err, "%s:%u: command: \"%.40s\" is not one a job can run (capture, "
                             "prune, check, copy, snapshots, restore, estimate, du, repack, "
-                            "protect, status, list)", name, lineno, value);
+                            "protect, status, list, sign, diff)", name, lineno, value);
                 return false;
             }
         } else if (!value_ok(keys[k].kind, value))
