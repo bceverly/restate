@@ -1143,7 +1143,23 @@ LXD container and thaw it, and pause Docker's running containers; one
 paused already before is left so. The PostgreSQL hook also stops, first,
 the units listed in
 .I /etc/restate/also.d/postgresql
-\- services that write to the database \- and starts them again after. To
+\- services that write to the database \- and starts them again after.
+Its dump is gzipped as it is written, and is not begun where the dump
+directory has less free than the databases' size; one that fails leaves
+nothing of itself behind, and the cluster is stopped and its files copied
+all the same, with the capture incomplete. A stopped cluster's files are a
+consistent copy by themselves, and a dump of a large one is a great deal of
+new data in every capture, so
+.I /etc/restate/postgresql.conf
+says when to dump:
+.B "dump = auto"
+(the default) dumps unless the databases come to more than
+.B dump_limit
+(10G unless set, in bytes or with K, M, G or T),
+.B "dump = always"
+dumps whatever the size, and
+.B "dump = never"
+does not. To
 change what a hook does, copy it to
 .I /etc/restate/hooks.d
 and change the copy.
@@ -2807,6 +2823,12 @@ The hooks restate ships, beside the directory it is installed in.
 .I /etc/restate/also.d/postgresql
 Services the PostgreSQL hook stops before the database and starts after it,
 one to a line.
+.TP
+.I /etc/restate/postgresql.conf
+When the PostgreSQL hook dumps:
+.B dump
+(auto, always or never) and
+.BR dump_limit .
 .TP
 .I /var/lib/restate/dumps/
 Where hooks put the dumps a capture keeps with the files, a directory for

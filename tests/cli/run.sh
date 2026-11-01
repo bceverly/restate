@@ -1623,6 +1623,60 @@ HOOK
     wait "$locker"
   fi
 
+  # The PostgreSQL hook, with stand-ins for PostgreSQL's tools: the dump goes
+  # through gzip as it is written, is not begun where it cannot fit, leaves
+  # nothing behind when it fails, and is left out where the configuration says.
+  pg="$HERE/../../hooks/postgresql"
+  mkdir -p pgbin pgdump
+  printf '#!/bin/sh\nshift 3\nexec "$@"\n' > pgbin/runuser
+  printf '#!/bin/sh\n' > pgbin/pg_lsclusters
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "${PG_SIZE:-1000}"\n' > pgbin/psql
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "-- $*"\n[ -z "${PG_FAIL:-}" ]\n' > pgbin/pg_dumpall
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "x 1 1 ${PG_FREE_K:-1000000} 1%% /"\n' \
+    > pgbin/df
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "$*" >> "%s/pg.log"\n' "$WORK" > pgbin/systemctl
+  chmod 0755 pgbin/*
+  # pgrun [VAR=VALUE...] COMMAND... -- with the stand-ins first on the PATH.
+  # shellcheck disable=SC2329  # run by expect
+  pgrun() { env PATH="$WORK/pgbin:$PATH" RESTATE_DUMP_DIR="$WORK/pgdump" "$@"; }
+  pgdumped() { gzip -dc pgdump/pg_dumpall.sql.gz 2> /dev/null; }
+  expect 0 "the postgresql hook pauses" -- pgrun sh "$pg" pause 18-main
+  contains "$(pgdumped)" "-- --cluster 18/main" "dumps its cluster, gzipped"
+  contains "$(cat pg.log)" "stop postgresql@18-main" "and stops it"
+  expect 0 "and resumes" -- pgrun sh "$pg" resume 18-main
+  contains "$(cat pg.log)" "start postgresql@18-main" "starting it"
+  expect 1 "a pg_dumpall that fails" -- pgrun PG_FAIL=1 sh "$pg" pause 18-main
+  contains "$ERR" "the pg_dumpall did not finish" "says so"
+  check "and keeps nothing of it, nor the dump before" test -z "$(ls pgdump)"
+  contains "$(tail -n 1 pg.log)" "stop postgresql@18-main" "and stops the cluster all the same"
+  expect 1 "a dump with no room for it" -- pgrun PG_SIZE=2000000 PG_FREE_K=1 sh "$pg" pause 18-main
+  contains "$ERR" "no room for a pg_dumpall" "is not begun"
+  expect 0 "a cluster past dump_limit" -- \
+    pgrun PG_SIZE=20000000000 PG_FREE_K=100000000 sh "$pg" pause 18-main
+  contains "$ERR" "more than dump_limit (10G): no pg_dumpall" "is not dumped"
+  check "and has no dump" test ! -e pgdump/pg_dumpall.sql.gz
+  printf 'dump = always  # the files alone are not enough here\n' > /etc/restate/postgresql.conf
+  expect 0 "a cluster past it, with dump = always" -- \
+    pgrun PG_SIZE=20000000000 PG_FREE_K=100000000 sh "$pg" pause 18-main
+  contains "$(pgdumped)" "-- --cluster 18/main" "is dumped all the same"
+  printf 'dump = never\n' > /etc/restate/postgresql.conf
+  expect 0 "dump = never" -- pgrun sh "$pg" pause 18-main
+  contains "$ERR" "dump = never in /etc/restate/postgresql.conf" "is not dumped"
+  check "and has no dump" test ! -e pgdump/pg_dumpall.sql.gz
+  printf 'dump_limit = 1K\n' > /etc/restate/postgresql.conf
+  expect 0 "a dump_limit of its own" -- pgrun PG_SIZE=2000 sh "$pg" pause 18-main
+  contains "$ERR" "more than dump_limit (1K)" "is kept to"
+  printf 'dump = weekly\n' > /etc/restate/postgresql.conf
+  expect 1 "a dump setting that is not one" -- pgrun sh "$pg" pause 18-main
+  contains "$ERR" "dump = weekly in /etc/restate/postgresql.conf is not always, never or auto" \
+    "is refused"
+  expect 0 "and resumes" -- pgrun sh "$pg" resume 18-main
+  rm -f /etc/restate/postgresql.conf
+
   kill "$live_pid" 2> /dev/null
   wait "$live_pid" 2> /dev/null
   rm -rf /srv/restate-redis /etc/restate /var/lib/restate

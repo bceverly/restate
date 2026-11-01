@@ -641,7 +641,17 @@ shipped hook answers; one that prints neither is taken to be present. The shippe
 goes into the image beside the files) and stop the service; the others
 suspend the VM, freeze the container or pause Docker's containers. The
 PostgreSQL hook stops the units listed in `/etc/restate/also.d/postgresql`
-first -- services that write to the database -- and starts them after. To
+first -- services that write to the database -- and starts them after. Its
+dump is gzipped as it is written and is not begun where the dump directory
+has less free than the databases' size; one that fails leaves nothing behind,
+and the cluster is stopped and copied all the same, with the capture
+incomplete. A stopped cluster's files are a consistent copy by themselves,
+and a dump of a big one is tens of gigabytes of new data in every capture, so
+`/etc/restate/postgresql.conf` says when to dump: `dump = auto` (the default)
+dumps unless the databases come to more than `dump_limit` (`10G` unless set,
+in bytes or with `K`, `M`, `G` or `T`), `dump = always` whatever the size,
+`dump = never` not at all. The dump is what loads into another major version;
+the files alone need the same one. To
 change a hook, copy it to `/etc/restate/hooks.d` and edit the copy. A hook
 that fails to pause or to resume makes the capture incomplete (exit status 3),
 and its result says which.
