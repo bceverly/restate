@@ -74,6 +74,10 @@ struct rs_restore_opts {
     struct rs_jval    *plan;       /* an array the paths put back -- or that would
                                     * be -- are added to, up to plan_max; or NULL */
     size_t             plan_max;
+    /* An array the dump directories' markers (hooks.h) put back -- or that
+     * would be -- are added to, for their hooks to be asked "restored"; or
+     * NULL. */
+    struct rs_jval    *hooks;
     /* The processor of the machine restored onto, as rs_arch names it, or
      * NULL for any. A program the image keeps that is built for another, and
      * that a package installed, is left as this machine's package has it:
@@ -112,5 +116,35 @@ struct rs_restore_stats {
  */
 bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_restore_opts *o,
                 struct rs_restore_stats *st, struct rs_buf *err);
+
+/*
+ * An --include as the snapshot reaches it. The index holds real paths, and
+ * nothing is ever "under" a symlink there, so a pattern written through one
+ * -- /var/snap/nextcloud/current/..., where current is a symlink -- would
+ * match nothing. Its leading literal components (up to the first with a *,
+ * ? or \ in it) are walked through the index's own symlinks, never the
+ * host's: relative targets and absolute ones, . and .., at most
+ * RS_RESTORE_HOPS of them. A symlink that is the last thing a pattern names
+ * is not followed: the symlink itself is what that asks for.
+ */
+#define RS_RESTORE_HOPS 40
+
+struct rs_restore_followed {
+    char  *pattern;  /* the include through them, a pattern still */
+    char **through;  /* the symlinks it went through, as paths */
+    size_t nthrough;
+};
+
+/* True, filling `f`, if `pattern` goes through a symlink the index holds;
+ * false, with `f` empty, if it goes through none -- or through too many. */
+bool rs_restore_follow(const struct rs_index *ix, const char *pattern,
+                       struct rs_restore_followed *f);
+void rs_restore_followed_free(struct rs_restore_followed *f);
+
+/* True if `pattern` covers any entry of the index. */
+bool rs_restore_matches(const struct rs_index *ix, const char *pattern);
+
+/* `path` as a pattern that matches it alone. */
+char *rs_restore_literal(const char *path);
 
 #endif /* RESTATE_RESTORE_H */

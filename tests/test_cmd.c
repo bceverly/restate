@@ -5,12 +5,14 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "cmd.h"
 #include "image.h"
 #include "index.h"
+#include "mounts.h"
 #include "repo.h"
 #include "test.h"
 
@@ -113,6 +115,57 @@ void test_cmd(void)
     CHECK_CONTAINS(out_text, "\"format\": \"restate-index\"");
     CHECK_STR(err_text, "");
     o.quiet = false;
+
+    TEST_CASE("cmd: scan records a network filesystem's mount point, and walks it if told");
+    {
+        char       *real = realpath(root, NULL); /* Flawfinder: ignore */
+        char       *info = rs_xasprintf("%s/mountinfo", work);
+        char       *at = rs_xasprintf("%s/etc", real ? real : root);
+        const char *mounts[2];
+        FILE       *fp = fopen(info, "w");
+
+        CHECK(fp != NULL);
+        if (fp)
+        {
+            (void)fprintf(fp, "30 22 0:53 / %s rw - nfs4 nas:/p rw\n"
+                              "31 22 0:54 / %s rw - nfs4 nas:/q rw\n", at, real ? real : root);
+            (void)fclose(fp);
+        }
+        rs_mounts_set_mountinfo(info);
+        o.output = m2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(err_text, "recorded 1 network filesystem and automount as mount points "
+                                 "alone, walking nothing on it: /etc (nfs4)");
+        CHECK_CONTAINS(err_text, "1 network filesystems and automounts");
+        {
+            char *text = text_of(m2);
+
+            CHECK_CONTAINS(text, "\"/etc\"");
+            CHECK(strstr(text, "/etc/conf") == NULL);
+            free(text);
+        }
+        mounts[0] = at;
+        mounts[1] = "/nonexistent/share";
+        o.include_mounts = mounts;
+        o.ninclude_mounts = 2;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        CHECK_CONTAINS(err_text, "--include-mount /nonexistent/share: no network filesystem");
+        CHECK(strstr(err_text, "walking nothing") == NULL);
+        {
+            char *text = text_of(m2);
+
+            CHECK_CONTAINS(text, "/etc/conf");
+            CHECK_CONTAINS(text, "\"include_mounts\": [");
+            free(text);
+        }
+        o.include_mounts = NULL;
+        o.ninclude_mounts = 0;
+        o.output = NULL;
+        rs_mounts_set_mountinfo(NULL);
+        free(at);
+        free(info);
+        free(real);
+    }
 
     TEST_CASE("cmd: scan reports a bad root and a bad output path");
     o.root = "/nonexistent/restate";

@@ -112,6 +112,7 @@ enum key_id {
     KEY_TO,
     KEY_PACKAGES,
     KEY_OUTPUT,
+    KEY_INCLUDE_MOUNT,
     KEY_COUNT
 };
 
@@ -170,6 +171,7 @@ static const struct key {
     [KEY_TO] = { "to", K_SNAPSHOT, false, J_DIFF },
     [KEY_PACKAGES] = { "packages", K_BOOL, false, J_DIFF | J_RESTORE },
     [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF },
+    [KEY_INCLUDE_MOUNT] = { "include_mount", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_STATUS },
 };
 
 const char *const *rs_job_keys(size_t *n)
@@ -529,6 +531,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_INCLUDE:
         add(&o->includes, &o->nincludes, v);
+        break;
+    case KEY_INCLUDE_MOUNT:
+        add(&o->include_mounts, &o->ninclude_mounts, v);
         break;
     case KEY_EXCLUDE:
         add(&o->excludes, &o->nexcludes, v);
@@ -958,7 +963,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
                 o->as || o->clones || o->read_all || o->metadata_only || o->record ||
                 o->whole_packs || o->nquiesce_with || o->append_only || o->create || o->json ||
-                o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group;
+                o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group ||
+                o->ninclude_mounts;
 
     return !said;
 }

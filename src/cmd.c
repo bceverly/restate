@@ -36,6 +36,7 @@
 #include "live.h"
 #include "machine.h"
 #include "meta.h"
+#include "mounts.h"
 #include "packages.h"
 #include "pgp.h"
 #include "progress.h"
@@ -137,6 +138,17 @@ static void record_classification(const struct rs_options *o, const struct rs_ru
     rs_jobj_bool(out, "all", o->all);
     rs_jobj_bool(out, "one_file_system", o->one_fs);
     rs_jobj_bool(out, "rules_only", o->rules_only);
+    /* Every walk leaves out network filesystems and automounts (mounts.h):
+     * those it was told to walk all the same. */
+    if (o->ninclude_mounts > 0)
+    {
+        list = rs_jobj_add(out, "include_mounts");
+        rs_jval_set_array(list);
+        for (i = 0; i < o->ninclude_mounts; i++)
+        {
+            rs_jval_set_string(rs_jarr_add(list), o->include_mounts[i]);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -334,9 +346,10 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
                   st->recorded, st->by_class[RS_CLASS_STATE], st->by_class[RS_CLASS_IDENTITY],
                   st->by_class[RS_CLASS_BASELINE], st->by_class[RS_CLASS_EXPENDABLE], st->stored);
     (void)fprintf(stderr, "restate: skipped %" PRIu64 " ephemeral, %" PRIu64 " expendable, %"
-                          PRIu64 " sockets, %" PRIu64 " mount points\n",
+                          PRIu64 " sockets, %" PRIu64 " mount points, %" PRIu64 " network "
+                          "filesystems and automounts\n",
                   st->skipped_ephemeral, st->skipped_expendable, st->skipped_sockets,
-                  st->skipped_mounts);
+                  st->skipped_mounts, st->skipped_remote);
     if (st->bytes_hashed > 0)
     {
         (void)fprintf(stderr, "restate: hashed %" PRIu64 " bytes\n", st->bytes_hashed);
@@ -950,6 +963,138 @@ static bool around(const void *ctx, size_t group, bool before)
     return true;
 }
 
+/* The network filesystems and automounts a walk of `root` records and goes no
+ * further into (mounts.h), as paths beneath it, sorted. */
+struct remote {
+    struct rs_mount *mounts;
+    size_t           nmounts;
+    const char     **paths;  /* beneath the root, into mounts[].path */
+    const char     **types;
+    size_t           n;
+    bool            *reached;
+};
+
+/* Whether `named`, as --include-mount gives it, is the mount at `path`. */
+static bool names_mount(const char *named, const char *path)
+{
+    size_t len = named ? strlen(named) : 0;
+
+    while (len > 1 && named[len - 1] == '/')
+    {
+        len--;
+    }
+    return len > 0 && strncmp(named, path, len) == 0 && path[len] == '\0';
+}
+
+/* Whether --include-mount -- or, for verify and status, the capture's --
+ * names the mount at `path`. */
+static bool mount_included(const struct rs_options *o, const char *path)
+{
+    const struct rs_jval *was = o->classified && o->ninclude_mounts == 0
+                                    ? rs_jobject_get(o->classified, "include_mounts")
+                                    : NULL;
+    size_t                n = was && was->type == RS_JARRAY ? was->n : o->ninclude_mounts;
+    size_t                i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (names_mount(was ? was->items[i].s : o->include_mounts[i], path))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void remote_find(const struct rs_options *o, const char *root, struct remote *r)
+{
+    size_t len = strcmp(root, "/") == 0 ? 0 : strlen(root);
+    size_t i;
+
+    memset(r, 0, sizeof(*r));
+    rs_mounts_remote(&r->mounts, &r->nmounts);
+    r->paths = rs_xcalloc(r->nmounts + 1, sizeof(*r->paths));
+    r->types = rs_xcalloc(r->nmounts + 1, sizeof(*r->types));
+    r->reached = rs_xcalloc(r->nmounts + 1, sizeof(*r->reached));
+    for (i = 0; i < r->nmounts; i++)
+    {
+        const char *p = r->mounts[i].path;
+
+        /* Beneath the root, and not the root itself: a walk of what is all
+         * on one is a walk asked for. */
+        if (strncmp(p, root, len) != 0 || p[len] != '/' || p[len + 1] == '\0' ||
+            mount_included(o, p))
+        {
+            continue;
+        }
+        r->paths[r->n] = p + len;
+        r->types[r->n] = r->mounts[i].type;
+        r->n++;
+    }
+    for (i = 0; i < o->ninclude_mounts; i++)
+    {
+        size_t k;
+        bool   remote = false;
+
+        for (k = 0; k < r->nmounts && !remote; k++)
+        {
+            remote = names_mount(o->include_mounts[i], r->mounts[k].path);
+        }
+        if (!remote)
+        {
+            rs_warn("--include-mount %s: no network filesystem or automount is mounted there",
+                    o->include_mounts[i]);
+        }
+    }
+}
+
+/* The ones the walk reached, in the result and on standard error. */
+static void remote_said(const struct rs_options *o, const struct remote *r)
+{
+    struct rs_jval *list = rs_jobj_add(rs_result(), "skipped_network_mounts");
+    struct rs_buf   shown;
+    size_t          n = 0;
+    size_t          i;
+
+    rs_jval_set_array(list);
+    rs_buf_init(&shown);
+    for (i = 0; i < r->n; i++)
+    {
+        struct rs_jval *one;
+
+        if (!r->reached[i])
+        {
+            continue;
+        }
+        one = rs_jarr_add(list);
+        rs_jval_set_object(one);
+        rs_jobj_str(one, "path", r->paths[i]);
+        rs_jobj_str(one, "type", r->types[i]);
+        if (n++ > 0)
+        {
+            rs_buf_addstr(&shown, ", ");
+        }
+        rs_escape(&shown, r->paths[i]);
+        rs_buf_addf(&shown, " (%s)", r->types[i]);
+    }
+    if (n > 0 && !o->quiet)
+    {
+        (void)fprintf(stderr, "restate: recorded %zu network filesystem%s and automount%s as "
+                      "mount points alone, walking nothing on %s: %s (--include-mount PATH "
+                      "walks one)\n", n, n == 1 ? "" : "s", n == 1 ? "" : "s",
+                      n == 1 ? "it" : "them", shown.data);
+    }
+    rs_buf_free(&shown);
+}
+
+static void remote_free(struct remote *r)
+{
+    rs_mounts_free(r->mounts, r->nmounts);
+    free(r->paths);
+    free(r->types);
+    free(r->reached);
+}
+
 /* Where a walk's kept content goes: an image, or a new snapshot in a
  * repository; and, for an incremental run, the index of the last one. */
 struct sink {
@@ -982,6 +1127,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     char                  **keep = NULL;
     size_t                  nkeep = 0;
     const char            **kit = NULL;
+    struct remote           remote;
     size_t                  i;
     bool                    ok;
 
@@ -1078,6 +1224,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
             so.nkeep = nkeep;
         }
     }
+    remote_find(o, m->root, &remote);
+    so.remote = remote.paths;
+    so.nremote = remote.n;
+    so.remote_reached = remote.reached;
     m->content = rs_xstrdup(!storing ? "none" : o->baseline_content ? "state+baseline" : "state");
     record_classification(o, &rules, &m->classification);
     /* What is running and writing to files the image keeps: named, or with
@@ -1087,6 +1237,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         live = true;
         if (!quiesce_plan(o, &rules, root, &q))
         {
+            remote_free(&remote);
             quiesce_free(&q);
             rs_rules_free(&rules);
             rs_pkgdb_free(&db);
@@ -1177,6 +1328,11 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         resume_one(&actx, q.whole[i]);
     }
     rs_progress_done();
+    if (ok)
+    {
+        remote_said(o, &remote);
+    }
+    remote_free(&remote);
     if (live)
     {
         st->paused = q.paused;
@@ -3124,7 +3280,9 @@ int rs_cmd_features(const struct rs_options *o)
     static const char *const members[] = { "capture.cache",        "diff.changes",
                                            "diff.from",            "diff.packages",
                                            "list",                 "protect.waited_for",
-                                           "restore.packages",     "snapshot",
+                                           "restore.hooks",        "restore.packages",
+                                           "restore.resolved",     "restore.unmatched",
+                                           "skipped_network_mounts", "snapshot",
                                            "status.capture_rules", "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
@@ -3241,6 +3399,18 @@ int rs_cmd_features(const struct rs_options *o)
     rs_jobj_bool(&doc, "diff_job", true);
     rs_jobj_bool(&doc, "restore_packages_report", true);
     rs_jobj_bool(&doc, "create_resumes", true);
+    /* restore's --include goes through the snapshot's own symlinks, and its
+     * result names what it went through, and each include that matched
+     * nothing -- which leaves the restore incomplete. */
+    rs_jobj_bool(&doc, "restore_resolves_links", true);
+    rs_jobj_bool(&doc, "restore_unmatched", true);
+    /* A restore asks the hook of each dump directory it put back to put right
+     * what pausing it left; the result's restore.hooks says how each went. */
+    rs_jobj_bool(&doc, "restore_hooks", true);
+    /* Every walk records a network filesystem's or an automount's mount
+     * point and goes no further into it, unless --include-mount names it;
+     * the result's skipped_network_mounts says which. */
+    rs_jobj_bool(&doc, "skips_network_mounts", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)
@@ -4412,10 +4582,196 @@ static int renew_identity(const struct rs_options *o, const struct rs_index *ix,
     return is.failed > 0 ? RESTATE_EXIT_INCOMPLETE : RESTATE_EXIT_OK;
 }
 
+/* restore's --include as the snapshot reaches it: through the symlinks its
+ * index holds (rs_restore_follow), and which of them reach nothing at all. */
+struct reached {
+    const char   **include;   /* the patterns restore is given */
+    size_t         n;
+    char         **owned;     /* those of them made here */
+    size_t         nowned;
+    struct rs_jval resolved;  /* [{include, path, through}] */
+    struct rs_jval unmatched; /* the includes, as given, that cover nothing */
+    size_t         nunmatched;
+};
+
+static void reached_add(struct reached *r, char *pattern)
+{
+    r->owned = rs_xreallocarray(r->owned, r->nowned + 1, sizeof(*r->owned));
+    r->owned[r->nowned++] = pattern;
+    r->include[r->n++] = pattern;
+}
+
+static void reach(const struct rs_options *o, const struct rs_index *ix, struct reached *r)
+{
+    size_t room = o->nincludes;
+    size_t i;
+
+    memset(r, 0, sizeof(*r));
+    rs_jval_set_array(&r->resolved);
+    rs_jval_set_array(&r->unmatched);
+    r->include = rs_xcalloc(room + 1, sizeof(*r->include));
+    for (i = 0; i < o->nincludes; i++)
+    {
+        struct rs_restore_followed f;
+        const char                *as = o->includes[i];
+        struct rs_buf              b;
+
+        rs_buf_init(&b);
+        if (rs_restore_follow(ix, as, &f))
+        {
+            struct rs_jval *one = rs_jarr_add(&r->resolved);
+            struct rs_jval *through;
+            size_t          k;
+
+            rs_jval_set_object(one);
+            rs_jobj_str(one, "include", as);
+            rs_jobj_str(one, "path", f.pattern);
+            through = rs_jobj_add(one, "through");
+            rs_jval_set_array(through);
+            room += f.nthrough;
+            r->include = rs_xreallocarray(r->include, room + 1, sizeof(*r->include));
+            for (k = 0; k < f.nthrough; k++)
+            {
+                rs_jval_set_string(rs_jarr_add(through), f.through[k]);
+                /* The symlinks too: the path as it was asked for works on the
+                 * machine restored onto, as it did on the one captured. */
+                reached_add(r, rs_restore_literal(f.through[k]));
+            }
+            if (!o->quiet)
+            {
+                rs_escape(&b, as);
+                (void)fprintf(stderr, "restate: --include %s goes through %zu symlink%s in the "
+                              "snapshot: ", b.data, f.nthrough, f.nthrough == 1 ? "" : "s");
+                rs_buf_reset(&b);
+                rs_escape(&b, f.pattern);
+                (void)fprintf(stderr, "%s\n", b.data);
+                rs_buf_reset(&b);
+            }
+            {
+                char *to = f.pattern;
+
+                f.pattern = NULL;
+                reached_add(r, to);
+                as = to;
+            }
+            rs_restore_followed_free(&f);
+        } else
+        {
+            r->include[r->n++] = as;
+        }
+        if (!rs_restore_matches(ix, as))
+        {
+            rs_jval_set_string(rs_jarr_add(&r->unmatched), o->includes[i]);
+            r->nunmatched++;
+            rs_escape(&b, o->includes[i]);
+            rs_warn("--include %s matches nothing in the snapshot", b.data);
+        }
+        rs_buf_free(&b);
+    }
+}
+
+static void reached_free(struct reached *r)
+{
+    size_t i;
+
+    for (i = 0; i < r->nowned; i++)
+    {
+        free(r->owned[i]);
+    }
+    free(r->owned);
+    free(r->include);
+    rs_jval_free(&r->resolved);
+    rs_jval_free(&r->unmatched);
+}
+
+/* The hooks of the dump directories a restore put back, asked "restored"
+ * (hooks.h), or -- dry -- named as they would be; each in `done`. False if
+ * one failed. */
+static bool restored_hooks(const struct rs_options *o, const struct rs_jval *markers,
+                           const char *root, struct rs_jval *done)
+{
+    size_t i;
+    bool   ok = true;
+
+    rs_jval_set_array(done);
+    for (i = 0; i < markers->n; i++)
+    {
+        const char     *marker = markers->items[i].s;
+        struct rs_jval *one = rs_jarr_add(done);
+        struct rs_buf   text;
+        struct rs_buf   err;
+        char           *kind = NULL;
+        char           *name = NULL;
+        char           *dump = rs_xstrndup(marker, (size_t)(strrchr(marker, '/') - marker));
+        char           *at = strcmp(root, "/") == 0 ? rs_xstrdup(dump)
+                                                    : rs_xasprintf("%s%s", root, dump);
+        char           *hook = NULL;
+        const char     *status;
+        int             code = -1;
+
+        rs_buf_init(&err);
+        rs_jval_set_object(one);
+        rs_jobj_str(one, "dump_dir", dump);
+        if (o->dry_run)
+        {
+            /* Nothing is put back to read it from: the index says only
+             * that it would be. */
+            status = "would_run";
+        } else if (!rs_read_beneath(root, marker, RS_HOOKS_MARKER_WORD * 2 + 2, &text) ||
+                   !rs_hook_marker_parse(text.data, text.len, &kind, &name))
+        {
+            rs_buf_free(&text);
+            rs_warn("%s%s: not a hook's marker; no hook is asked to put right what it paused",
+                    strcmp(root, "/") == 0 ? "" : root, marker);
+            status = "unreadable";
+        } else
+        {
+            rs_buf_free(&text);
+            rs_jobj_str(one, "kind", kind);
+            rs_jobj_str(one, "name", name);
+            hook = rs_hook_find(kind);
+            if (!hook)
+            {
+                hook = rs_hook_for_program(kind);
+            }
+            if (!hook)
+            {
+                rs_warn("%s %s: there is no %s hook here to put right what pausing it left "
+                        "(%s/%s)", kind, name, kind, RS_HOOKS_SITE_DIR, kind);
+                status = "no_hook";
+            } else if (!rs_hook_restored(hook, kind, name, root, at, &code, &err) ||
+                       (code != 0 && code != 2))
+            {
+                rs_warn("%s restored %s: %s", hook, name,
+                        err.len > 0 ? err.data : "it failed");
+                status = "failed";
+                ok = false;
+            } else
+            {
+                status = code == 0 ? "ran" : "unknown";
+            }
+        }
+        rs_jobj_str(one, "status", status);
+        if (!o->quiet && strcmp(status, "ran") == 0)
+        {
+            (void)fprintf(stderr, "restate: %s %s: its hook put right what pausing it left\n",
+                          kind, name);
+        }
+        free(hook);
+        free(kind);
+        free(name);
+        free(at);
+        free(dump);
+        rs_buf_free(&err);
+    }
+    return ok;
+}
+
 /* What restore put back, or would, in its result: the counts, and the
  * first paths, which a dry run shows before anything is written. */
 static void restore_result(const struct rs_options *o, const struct rs_restore_stats *st,
-                           struct rs_jval *plan, const char *root)
+                           struct rs_jval *plan, struct reached *r, struct rs_jval *hooks,
+                           const char *root)
 {
     struct rs_jval *res = rs_jobj_add(rs_result(), "restore");
 
@@ -4441,6 +4797,12 @@ static void restore_result(const struct rs_options *o, const struct rs_restore_s
     rs_jobj_u64(res, "other_arch_left", st->other_arch_left);
     *rs_jobj_add(res, "plan") = *plan;
     memset(plan, 0, sizeof(*plan));
+    *rs_jobj_add(res, "resolved") = r->resolved;
+    memset(&r->resolved, 0, sizeof(r->resolved));
+    *rs_jobj_add(res, "unmatched") = r->unmatched;
+    memset(&r->unmatched, 0, sizeof(r->unmatched));
+    *rs_jobj_add(res, "hooks") = *hooks;
+    memset(hooks, 0, sizeof(*hooks));
 }
 
 int rs_cmd_restore(const struct rs_options *o)
@@ -4451,6 +4813,10 @@ int rs_cmd_restore(const struct rs_options *o)
     struct rs_restore_stats st;
     struct rs_buf           err;
     struct trust            tr;
+    struct reached          wanted;
+    struct rs_jval          markers;
+    struct rs_jval          hooks;
+    size_t                  unmatched;
     int                     status;
     int                     packages = RESTATE_EXIT_OK;
     int                     renewed = RESTATE_EXIT_OK;
@@ -4458,6 +4824,7 @@ int rs_cmd_restore(const struct rs_options *o)
     const char             *left_out = "--exclude";
     bool                   *leave = NULL;
     bool                    keep_fstab;
+    bool                    hooks_failed = false;
     bool                    ok;
 
     if (o->offline && !o->packages)
@@ -4505,8 +4872,9 @@ int rs_cmd_restore(const struct rs_options *o)
     ro.root = o->root ? o->root : "/";
     ro.exclude = o->excludes;
     ro.nexclude = o->nexcludes;
-    ro.include = o->includes;
-    ro.ninclude = o->nincludes;
+    reach(o, &ix, &wanted);
+    ro.include = wanted.include;
+    ro.ninclude = wanted.n;
     ro.verbose = o->verbose;
     ro.numeric_owner = o->numeric_owner;
     if (o->as)
@@ -4515,6 +4883,7 @@ int rs_cmd_restore(const struct rs_options *o)
         if (!leave)
         {
             rs_buf_free(&err);
+            reached_free(&wanted);
             rs_index_free(&ix);
             return RESTATE_EXIT_TROUBLE;
         }
@@ -4539,6 +4908,7 @@ int rs_cmd_restore(const struct rs_options *o)
         {
             rs_error("%s; nothing was written (--check-first)", err.data);
             rs_buf_free(&err);
+            reached_free(&wanted);
             rs_index_free(&ix);
             free(leave);
             return RESTATE_EXIT_TROUBLE;
@@ -4556,6 +4926,7 @@ int rs_cmd_restore(const struct rs_options *o)
         if (packages != RESTATE_EXIT_OK && packages != RESTATE_EXIT_INCOMPLETE)
         {
             rs_buf_free(&err);
+            reached_free(&wanted);
             rs_index_free(&ix);
             free(leave);
             return packages;
@@ -4603,13 +4974,24 @@ int rs_cmd_restore(const struct rs_options *o)
 
         ro.arch = a ? a->name : NULL;
     }
+    memset(&markers, 0, sizeof(markers));
+    rs_jval_set_array(&markers);
+    ro.hooks = &markers;
     ok = rs_restore(o->args[0], &ix, &ro, &st, &err);
     free(excludes);
-    restore_result(o, &st, &plan, ro.root);
+    memset(&hooks, 0, sizeof(hooks));
+    rs_jval_set_array(&hooks);
+    if (ok && !restored_hooks(o, &markers, ro.root, &hooks))
+    {
+        hooks_failed = true;
+    }
+    rs_jval_free(&markers);
+    restore_result(o, &st, &plan, &wanted, &hooks, ro.root);
     if (!ok)
     {
         rs_error("%s", err.data);
         rs_buf_free(&err);
+        reached_free(&wanted);
         rs_index_free(&ix);
         free(leave);
         return RESTATE_EXIT_TROUBLE;
@@ -4676,6 +5058,8 @@ int rs_cmd_restore(const struct rs_options *o)
         renewed = renew_identity(o, &ix, leave, ro.root, st.identity);
         free(leave);
     }
+    unmatched = wanted.nunmatched;
+    reached_free(&wanted);
     rs_index_free(&ix);
     if (renewed == RESTATE_EXIT_TROUBLE)
     {
@@ -4686,6 +5070,18 @@ int rs_cmd_restore(const struct rs_options *o)
         (void)fprintf(stderr, "restate: %" PRIu64 " refused, %" PRIu64 " not written, %" PRIu64
                       " missing from the image; the restore is incomplete\n",
                       st.refused, st.failed, st.missing);
+        return RESTATE_EXIT_INCOMPLETE;
+    }
+    if (hooks_failed)
+    {
+        (void)fprintf(stderr, "restate: a hook could not put right what pausing it left (see "
+                      "above); the restore is incomplete\n");
+        return RESTATE_EXIT_INCOMPLETE;
+    }
+    if (unmatched > 0)
+    {
+        (void)fprintf(stderr, "restate: %zu of the --include patterns matched nothing in the "
+                      "snapshot; the restore is incomplete\n", unmatched);
         return RESTATE_EXIT_INCOMPLETE;
     }
     return packages != RESTATE_EXIT_OK ? packages : renewed;

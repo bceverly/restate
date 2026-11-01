@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "fstab.h"
+#include "glob.h"
 #include "image.h"
 #include "index.h"
 #include "meta.h"
@@ -260,6 +261,64 @@ static void whole_seconds(const char *tree)
     }
 }
 
+/* A symlink, in an index made by hand. */
+static void add_link(struct rs_index *ix, const char *path, const char *target)
+{
+    struct rs_entry *e = add(ix, path, 'l');
+
+    e->target = rs_xstrdup(target);
+}
+
+static void check_follow(const struct rs_index *ix, const char *pattern, const char *want,
+                         size_t through)
+{
+    struct rs_restore_followed f;
+    bool                       went = rs_restore_follow(ix, pattern, &f);
+
+    CHECK(went == (want != NULL));
+    CHECK_STR(f.pattern ? f.pattern : "(none)", want ? want : "(none)");
+    CHECK_INT(f.nthrough, through);
+    rs_restore_followed_free(&f);
+}
+
+static void test_follow(void)
+{
+    struct rs_index ix;
+    char           *lit;
+
+    TEST_CASE("restore: an include through the snapshot's symlinks");
+    rs_index_init(&ix);
+    (void)add(&ix, "/", 'd');
+    (void)add(&ix, "/srv", 'd');
+    (void)add(&ix, "/srv/a*b", 'd');
+    (void)add(&ix, "/srv/a*b/f", 'f');
+    add_link(&ix, "/srv/odd", "a*b");
+    add_link(&ix, "/srv/up", "../srv/./odd");
+    add_link(&ix, "/srv/top", "../../..");
+    add_link(&ix, "/srv/empty", "");
+    add_link(&ix, "/srv/self", "self");
+    check_follow(&ix, "/srv/odd/f", "/srv/a\\*b/f", 1);
+    check_follow(&ix, "/srv/up/*", "/srv/a\\*b/*", 2);
+    check_follow(&ix, "/srv/odd/", NULL, 0);
+    check_follow(&ix, "/srv/odd/**", "/srv/a\\*b/**", 1);
+    check_follow(&ix, "/srv/./odd/../odd/f", "/srv/a\\*b/f", 1);
+    check_follow(&ix, "/srv/top/srv", "/srv", 1);
+    check_follow(&ix, "/srv/top/*", "/*", 1);
+    check_follow(&ix, "/srv/empty/f", NULL, 0);
+    check_follow(&ix, "/srv/self/f", NULL, 0);
+    check_follow(&ix, "srv/odd/f", NULL, 0);
+    check_follow(&ix, "/srv/od?/f", NULL, 0);
+    check_follow(&ix, "/", NULL, 0);
+    CHECK(rs_restore_matches(&ix, "/srv/a\\*b/f"));
+    CHECK(!rs_restore_matches(&ix, "/srv/odd/f"));
+    lit = rs_restore_literal("/a?b\\c*");
+    CHECK_STR(lit, "/a\\?b\\\\c\\*");
+    CHECK(rs_glob_match(lit, "/a?b\\c*"));
+    CHECK(!rs_glob_match(lit, "/axb\\cd"));
+    free(lit);
+    rs_index_free(&ix);
+}
+
 void test_restore(void)
 {
     char           *dir = rs_test_tmpdir();
@@ -271,6 +330,7 @@ void test_restore(void)
     char           *errs = NULL;
     char           *p;
 
+    test_follow();
     put(tree, "etc/hosts", "127.0.0.1 localhost\n");
     put(tree, "etc/app/key", "secret\n");
     put(tree, "home/u/doc", "doc\n");

@@ -67,7 +67,8 @@ enum {
     OPT_PROGRESS_FILE,
     OPT_TMPDIR,
     OPT_PASSPHRASE_FD,
-    OPT_DECRYPT_WITH
+    OPT_DECRYPT_WITH,
+    OPT_INCLUDE_MOUNT
 };
 
 enum rs_command {
@@ -143,6 +144,8 @@ struct rs_options {
     bool            json;           /* --json */
     const char    **includes;       /* restore --include PATTERN, each */
     size_t          nincludes;
+    const char    **include_mounts; /* --include-mount PATH, each */
+    size_t          ninclude_mounts;
     bool            progress_json;  /* --progress=json */
     const char     *progress_file;  /* --progress-file FILE */
     const char     *tmpdir;         /* --tmpdir DIR */

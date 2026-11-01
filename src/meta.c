@@ -217,6 +217,13 @@ void rs_stat_times(const struct stat *st, struct rs_time *atime,
     from_timespec(ctime, (int64_t)st->RS_CTIM.tv_sec, (long)st->RS_CTIM.tv_nsec);
 }
 
+/* An automount's mount point is asked of itself, mounting nothing. */
+#ifdef AT_NO_AUTOMOUNT
+#define BTIME_NO_AUTOMOUNT AT_NO_AUTOMOUNT
+#else
+#define BTIME_NO_AUTOMOUNT 0
+#endif
+
 void rs_birth_time_at(int dirfd, const char *name, const struct stat *st,
                       struct rs_time *out)
 {
@@ -228,8 +235,8 @@ void rs_birth_time_at(int dirfd, const char *name, const struct stat *st,
         (void)st;
         /* AT_STATX_DONT_SYNC: a network filesystem may otherwise go and ask
          * the server, for a timestamp that is a nice-to-have. */
-        if (statx(dirfd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC, STATX_BTIME,
-                  &stx) == 0 && (stx.stx_mask & STATX_BTIME))
+        if (statx(dirfd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC | BTIME_NO_AUTOMOUNT,
+                  STATX_BTIME, &stx) == 0 && (stx.stx_mask & STATX_BTIME))
         {
             from_timespec(out, (int64_t)stx.stx_btime.tv_sec, (long)stx.stx_btime.tv_nsec);
         }

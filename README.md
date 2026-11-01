@@ -45,7 +45,7 @@ records.
 ```console
 # restate capture -o /var/backups/web01.tar
 restate: recorded 41873 paths (40102 state, 1771 baseline, 0 expendable); kept the content of 40102
-restate: skipped 2114 ephemeral, 9 expendable, 14 sockets, 0 mount points
+restate: skipped 2114 ephemeral, 9 expendable, 14 sockets, 0 mount points, 0 network filesystems and automounts
 restate: hashed 812447112 bytes
 
 # restate verify /var/backups/web01.tar
@@ -446,6 +446,10 @@ Options:
                           check that against the source's keys
   -x, --one-file-system   record mount points but do not descend into other
                           filesystems
+      --include-mount=PATH
+                          descend into the network filesystem or automount
+                          mounted at PATH, which every walk otherwise records
+                          and goes no further into; repeatable
   -n, --no-hash           record metadata only; much faster, but content is
                           then judged by size and mtime
       --cache=DIR         installer fetch, baseline fetch: keep what is
@@ -642,6 +646,17 @@ change a hook, copy it to `/etc/restate/hooks.d` and edit the copy. A hook
 that fails to pause or to resume makes the capture incomplete (exit status 3),
 and its result says which.
 
+Each dump directory holds `.restate-hook` too, restate's own record of which
+hook it is for. A restore that puts one back asks that hook -- the one
+installed on the machine restored onto, never one from the image -- `HOOK
+restored NAME`, once the files are back, with `RESTATE_ROOT` (the root
+restored into) and `RESTATE_DUMP_DIR` (the dump directory beneath it): to put
+right what pausing it left in the files the capture copied. A hook that exits
+2, as every shipped one does for an action it does not know, has nothing to
+do; any other failure leaves the restore incomplete. The result's
+`restore.hooks` says how each went (`ran`, `unknown`, `failed`, `no_hook`,
+`unreadable`, or for `--plan` and `--dry-run`, `would_run`).
+
 What `/proc` does not show as one of these is named instead:
 `--quiesce-with NAME` runs the hook `NAME` whether or not anything is found.
 It is asked first, as `HOOK paths NAME`, which paths it covers, and those are
@@ -670,7 +685,13 @@ Two are shipped for this:
   `--quiesce` pauses its MySQL, MariaDB or PostgreSQL with that database's
   own hook, and without it the hook warns that the database is copied as it
   runs. The snap's database is its own, and is dumped
-  (`nextcloud.mysqldump`) while in maintenance mode.
+  (`nextcloud.mysqldump`) while in maintenance mode. `config/config.php` is
+  copied in maintenance mode as well, so the hook keeps it as it was before
+  the pause in the dump directory, and on `restored` puts that back over the
+  restored one -- only where that is exactly what the capture copied, so a
+  `config.php` changed since is left alone. Nextcloud comes back out of
+  maintenance mode with no `occ` to run. (A snapshot from a restate before
+  this has no such copy: run `occ maintenance:mode --off` after restoring one.)
 
 ```bash
 sudo restate capture --quiesce --quiesce-with nextcloud -o /mnt/nas/restate/cloud01
@@ -1011,6 +1032,18 @@ From a repository, `--include` reads only the packs that hold what it
 covers, for a restore and a dry run alike: one directory back from a large
 snapshot is as quick as that directory is small.
 
+An `--include` written through a symlink the snapshot holds -- a snap's
+`/var/snap/nextcloud/current/...`, where `current` is a symlink to its
+revision -- is followed through the snapshot's own symlinks, never the
+host's: relative and absolute, `.` and `..`, at most 40 of them. What it
+reaches is put back, and the symlinks it went through, and the result's
+`resolved` says where each went (`include`, the `path` it reached and the
+symlinks it went `through`). A symlink that is the last thing an include
+names is put back as itself. An include that matches nothing in the snapshot
+is named, in the result's `unmatched` and on standard error, and leaves the
+restore incomplete (exit status 3) -- for `--plan` and `--dry-run` too, so
+it shows before anything is written.
+
 **The packages too.** On a fresh install, `restore --packages` puts the old
 machine's packages back before its files, as root, onto the running system:
 the image's `/etc/apt` -- its repositories, and the keys kept there -- and the
@@ -1215,6 +1248,20 @@ so a path the capture left out on purpose is not reported as added.
 `--all`, `--one-file-system` and `--rules-only` add to what was recorded. An
 index from a restate before this one records no rules, and is classified by
 the options alone, as it always was.
+
+No walk -- capture, scan, verify, status, estimate -- goes into a network
+filesystem or an automount: another server's files are that server's to back
+up, and an automount mounts what it stands for the moment anything opens it.
+Each is told by its filesystem type, never by where it is mounted
+(`/proc/self/mountinfo` on Linux; `getmntinfo`, which asks no server, on the
+BSDs and macOS): NFS, SMB and CIFS, 9p, virtiofs, Ceph, GlusterFS, Lustre,
+AFS, WebDAV, sshfs, rclone and the like through FUSE, and `autofs`. Its
+mount point is recorded, as `--one-file-system` records one, and it is never
+opened, so an automount is never set off; `/boot` and every other local
+filesystem are walked as before. `--include-mount PATH` (in a job,
+`include_mount = PATH`) walks the one mounted at PATH all the same; the
+index records it, and verify and status walk it too. The result's
+`skipped_network_mounts` lists those left out, each `path` and `type`.
 
 **`list`** says what is directly in one directory of a snapshot -- each
 name's type, mode, owner, size and time, and a symlink's target -- from its
@@ -1576,8 +1623,9 @@ a passphrase) -- as a storage host does after a capture, before `protect` --
 and its result says which snapshot (`signed`, `REPO::NAME`) and whose key
 (`signer`). A `list` job
 lists the directory `path` says (`/` if it says none). A `status` job takes
-`rules`, `all` and `one_file_system` as a capture does, though it seldom
-needs them: it classifies by the capture's own rules unless given others.
+`rules`, `all`, `one_file_system` and `include_mount` as a capture does,
+though it seldom needs them: it classifies by the capture's own rules unless
+given others.
 
 Any job but `estimate`, `protect` and `sign` can read what is encrypted, and takes
 `decrypt_with`, the secret key as `--decrypt-with` takes it -- repeatable,

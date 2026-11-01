@@ -302,10 +302,133 @@ bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_pat
             return false;
         }
     }
+    /* Which hook it is, and for what, for a restore to ask it "restored"
+     * (rs_hook_restored): the dump directory's own name is made safe, and
+     * is not both of them again. */
+    {
+        char   *mark = rs_xasprintf("%s\n%s\n", l->kind, l->name);
+        size_t  len = strlen(mark);
+        int     flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC;
+        int     m = fd < 0 ? -1 : openat(fd, RS_HOOKS_MARKER, flags, 0600);
+        ssize_t w = m >= 0 ? write(m, mark, len) : -1;
+        bool    wrote = w == (ssize_t)len;
+
+        if (w >= 0 && !wrote)
+        {
+            errno = EIO;
+        }
+
+        if (m >= 0 && close(m) != 0)
+        {
+            wrote = false;
+        }
+        free(mark);
+        if (!wrote)
+        {
+            rs_buf_addf(err, "%s%s/%s/%s: %s", strcmp(root, "/") == 0 ? "" : root,
+                        RS_HOOKS_DUMPS, name, RS_HOOKS_MARKER, strerror(errno));
+            (void)close(fd);
+            free(name);
+            return false;
+        }
+    }
     (void)close(fd);
     *tree_path = rs_xasprintf("%s/%s", RS_HOOKS_DUMPS, name);
     free(name);
     return true;
+}
+
+bool rs_hook_is_marker(const char *path)
+{
+    static const char dumps[] = RS_HOOKS_DUMPS "/";
+    const char       *slash;
+
+    if (strncmp(path, dumps, sizeof(dumps) - 1) != 0)
+    {
+        return false;
+    }
+    path += sizeof(dumps) - 1;
+    slash = strchr(path, '/');
+    return slash && slash != path && strcmp(slash + 1, RS_HOOKS_MARKER) == 0;
+}
+
+/* A kind or a name as a marker may hold it: a line of printable characters,
+ * and a kind no more than a hook's file name can be. */
+static bool marker_word(const char *s, size_t n, bool kind)
+{
+    size_t i;
+
+    if (n == 0 || n > RS_HOOKS_MARKER_WORD)
+    {
+        return false;
+    }
+    for (i = 0; i < n; i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+
+        if (kind ? !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')
+                 : c < 0x20 || c == 0x7f)
+        {
+            return false;
+        }
+    }
+    return !kind || (s[0] != '.' && s[0] != '-');
+}
+
+bool rs_hook_marker_parse(const char *text, size_t len, char **kind, char **name)
+{
+    const char *nl = text ? memchr(text, '\n', len) : NULL;
+    const char *rest;
+    const char *end;
+
+    *kind = NULL;
+    *name = NULL;
+    if (!nl)
+    {
+        return false;
+    }
+    rest = nl + 1;
+    end = memchr(rest, '\n', len - (size_t)(rest - text));
+    if (!end || end + 1 != text + len || !marker_word(text, (size_t)(nl - text), true) ||
+        !marker_word(rest, (size_t)(end - rest), false))
+    {
+        return false;
+    }
+    *kind = rs_xstrndup(text, (size_t)(nl - text));
+    *name = rs_xstrndup(rest, (size_t)(end - rest));
+    return true;
+}
+
+bool rs_hook_restored(const char *hook, const char *kind, const char *name, const char *root,
+                      const char *dump_dir, int *code, struct rs_buf *err)
+{
+    char  *env[6];
+    char  *argv[4];
+    size_t i;
+    bool   ok;
+
+    env[0] = rs_xstrdup("RESTATE_ACTION=restored");
+    env[1] = rs_xasprintf("RESTATE_KIND=%s", kind);
+    env[2] = rs_xasprintf("RESTATE_NAME=%s", name);
+    env[3] = rs_xasprintf("RESTATE_ROOT=%s", root);
+    env[4] = rs_xasprintf("RESTATE_DUMP_DIR=%s", dump_dir);
+    env[5] = NULL;
+    argv[0] = rs_xstrdup(hook);
+    argv[1] = rs_xstrdup("restored");
+    argv[2] = rs_xstrdup(name);
+    argv[3] = NULL;
+    *code = -1;
+    ok = rs_run_hook(hook, argv, env, RESUME_TIMEOUT, -1, code, err);
+    for (i = 0; i < 3; i++)
+    {
+        free(argv[i]);
+    }
+    for (i = 0; i < 5; i++)
+    {
+        free(env[i]);
+    }
+    return ok;
 }
 
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,

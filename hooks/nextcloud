@@ -11,6 +11,13 @@
 #   pause NAME    put it in maintenance mode, so that no one changes a file
 #                 while it is copied
 #   resume NAME   take it out of maintenance mode
+#   restored NAME after a restore: config/config.php put back as it was before
+#                 the pause, which the capture copied in maintenance mode
+#
+# The pause keeps config.php as it was before it, and as it was once paused,
+# in $RESTATE_DUMP_DIR; "restored" puts the first back over the restored one
+# only where that is the second exactly -- what the capture copied -- so a
+# config.php changed since, or put back from somewhere else, is left alone.
 #
 # It is found as the snap (nextcloud.occ), or as the first directory with occ
 # and config/config.php in it beneath /var/www, /usr/local/www or /srv/www;
@@ -66,6 +73,34 @@ occ() {
   fi
 }
 
+# config/config.php's real path, symlinks and all resolved.
+config_path() {
+  if snapped; then
+    dir=/var/snap/nextcloud/current/nextcloud/config
+  else
+    dir=$NEXTCLOUD/config
+  fi
+  dir="$(cd -P "$dir" 2> /dev/null && pwd -P)" || return 1
+  echo "$dir/config.php"
+}
+
+# After a restore, beneath $RESTATE_ROOT, which need not be this machine's
+# own root: nothing here is asked of the Nextcloud that may be running.
+if [ "$action" = restored ]; then
+  dump=${RESTATE_DUMP_DIR:-}
+  if [ -z "$dump" ] || [ ! -f "$dump/config.path" ] || [ ! -f "$dump/config.before" ] ||
+    [ ! -f "$dump/config.paused" ]; then
+    exit 0
+  fi
+  target="${RESTATE_ROOT%/}$(cat "$dump/config.path")"
+  if [ -f "$target" ] && [ ! -L "$target" ] && cmp -s "$target" "$dump/config.paused"; then
+    # Written into, not replaced: it keeps the owner and mode it was given.
+    cat "$dump/config.before" > "$target"
+    echo "restate hook: $target put back as it was before maintenance mode" >&2
+  fi
+  exit 0
+fi
+
 # Looks, and changes nothing.
 if [ "$action" = present ]; then
   if snapped || find_nextcloud; then
@@ -95,7 +130,17 @@ paths)
   fi
   ;;
 pause)
+  config=
+  if [ -n "${RESTATE_DUMP_DIR:-}" ] && config="$(config_path)" && [ -f "$config" ]; then
+    printf '%s\n' "$config" > "$RESTATE_DUMP_DIR/config.path"
+    cat "$config" > "$RESTATE_DUMP_DIR/config.before"
+  else
+    config=
+  fi
   occ maintenance:mode --on
+  if [ -n "$config" ]; then
+    cat "$config" > "$RESTATE_DUMP_DIR/config.paused"
+  fi
   if snapped; then
     if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
       out="$RESTATE_DUMP_DIR/mysqldump.sql"
@@ -118,7 +163,7 @@ resume)
   occ maintenance:mode --off
   ;;
 *)
-  echo "usage: $0 present|paths|pause|resume NAME" >&2
+  echo "usage: $0 present|paths|pause|resume|restored NAME" >&2
   exit 2
   ;;
 esac

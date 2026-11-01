@@ -17,6 +17,7 @@
 #include "accounts.h"
 #include "arch.h"
 #include "glob.h"
+#include "hooks.h"
 #include "image.h"
 #include "meta.h"
 #include "progress.h"
@@ -1012,6 +1013,10 @@ static bool put_back(struct ctx *c, struct rs_tar_reader *r, const struct rs_ent
         rs_jval_set_string(rs_jarr_add(c->o->plan), shown);
         free(shown);
     }
+    if (want == 'f' && c->o->hooks && rs_hook_is_marker(e->path))
+    {
+        rs_jval_set_string(rs_jarr_add(c->o->hooks), e->path);
+    }
     switch (want)
     {
     case 'f':
@@ -1412,4 +1417,233 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     rs_accounts_free(&c.accounts);
     (void)close(c.root);
     return ok;
+}
+
+/* ------------------------------------------------------------------------- */
+/* What an --include reaches                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* A pattern's characters that are not themselves (glob.h). */
+static bool special(char ch)
+{
+    return ch == '*' || ch == '?' || ch == '\\';
+}
+
+static void add_literal(struct rs_buf *b, const char *s)
+{
+    for (; *s != '\0'; s++)
+    {
+        if (special(*s))
+        {
+            rs_buf_addc(b, '\\');
+        }
+        rs_buf_addc(b, *s);
+    }
+}
+
+char *rs_restore_literal(const char *path)
+{
+    struct rs_buf b;
+
+    rs_buf_init(&b);
+    add_literal(&b, path);
+    return rs_buf_detach(&b);
+}
+
+/* Where `pattern` stops being a path: the start of its first component with
+ * something special in it, or its end. */
+static size_t literal_part(const char *pattern)
+{
+    size_t start = 0;
+    size_t i;
+
+    for (i = 0; pattern[i] != '\0'; i++)
+    {
+        if (pattern[i] == '/')
+        {
+            start = i + 1;
+        } else if (special(pattern[i]))
+        {
+            return start;
+        }
+    }
+    return i;
+}
+
+/* The next component of `*todo`, which it is moved past; false at the end. */
+static bool next_component(const char **todo, const char **name, size_t *len)
+{
+    const char *p = *todo;
+
+    while (*p == '/')
+    {
+        p++;
+    }
+    if (*p == '\0')
+    {
+        *todo = p;
+        return false;
+    }
+    *name = p;
+    while (*p != '\0' && *p != '/')
+    {
+        p++;
+    }
+    *len = (size_t)(p - *name);
+    *todo = p;
+    return true;
+}
+
+static bool more_components(const char *todo)
+{
+    while (*todo == '/')
+    {
+        todo++;
+    }
+    return *todo != '\0';
+}
+
+static bool went_through(const struct rs_restore_followed *f, const char *link)
+{
+    size_t i;
+
+    for (i = 0; i < f->nthrough; i++)
+    {
+        if (strcmp(f->through[i], link) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool rs_restore_follow(const struct rs_index *ix, const char *pattern,
+                       struct rs_restore_followed *f)
+{
+    size_t        lit = literal_part(pattern);
+    const char   *rest = pattern + lit;
+    char         *path;
+    const char   *todo;
+    struct rs_buf done;
+    struct rs_buf b;
+    const char   *name;
+    size_t        len;
+    unsigned      hops = 0;
+
+    memset(f, 0, sizeof(*f));
+    if (pattern[0] != '/')
+    {
+        return false;
+    }
+    path = rs_xstrndup(pattern, lit);
+    todo = path;
+    rs_buf_init(&done);
+    rs_buf_init(&b);
+    while (next_component(&todo, &name, &len))
+    {
+        const struct rs_entry *e;
+        size_t                 was = done.len;
+
+        if (len == 1 && name[0] == '.')
+        {
+            continue;
+        }
+        if (len == 2 && name[0] == '.' && name[1] == '.')
+        {
+            while (done.len > 0 && done.data[done.len - 1] != '/')
+            {
+                done.len--;
+            }
+            if (done.len > 0)
+            {
+                done.data[--done.len] = '\0';
+            }
+            continue;
+        }
+        rs_buf_addc(&done, '/');
+        rs_buf_add(&done, name, len);
+        /* The last thing the pattern names is what it asks for, symlink or
+         * not; only one with more beyond it is gone through. */
+        if (!more_components(todo) && *rest == '\0')
+        {
+            break;
+        }
+        e = rs_index_find(ix, done.data);
+        if (!e || e->type != 'l' || !e->target || e->target[0] == '\0')
+        {
+            continue;
+        }
+        if (++hops > RS_RESTORE_HOPS)
+        {
+            break;
+        }
+        if (!went_through(f, done.data))
+        {
+            f->through = rs_xreallocarray(f->through, f->nthrough + 1, sizeof(*f->through));
+            f->through[f->nthrough++] = rs_xstrdup(done.data);
+        }
+        done.len = e->target[0] == '/' ? 0 : was;
+        done.data[done.len] = '\0';
+        rs_buf_reset(&b);
+        rs_buf_addstr(&b, e->target);
+        rs_buf_addc(&b, '/');
+        rs_buf_addstr(&b, todo);
+        free(path);
+        path = rs_buf_detach(&b);
+        todo = path;
+    }
+    free(path);
+    rs_buf_free(&b);
+    if (hops == 0 || hops > RS_RESTORE_HOPS)
+    {
+        rs_buf_free(&done);
+        rs_restore_followed_free(f);
+        return false;
+    }
+    rs_buf_init(&b);
+    if (done.len == 0)
+    {
+        rs_buf_addc(&b, '/');
+    } else
+    {
+        add_literal(&b, done.data);
+    }
+    if (*rest != '\0')
+    {
+        if (b.data[b.len - 1] != '/')
+        {
+            rs_buf_addc(&b, '/');
+        }
+        rs_buf_addstr(&b, rest);
+    }
+    f->pattern = rs_buf_detach(&b);
+    rs_buf_free(&done);
+    return true;
+}
+
+void rs_restore_followed_free(struct rs_restore_followed *f)
+{
+    size_t i;
+
+    for (i = 0; i < f->nthrough; i++)
+    {
+        free(f->through[i]);
+    }
+    free(f->through);
+    free(f->pattern);
+    memset(f, 0, sizeof(*f));
+}
+
+bool rs_restore_matches(const struct rs_index *ix, const char *pattern)
+{
+    size_t i;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        if (rs_glob_covers(pattern, ix->entries[i].path))
+        {
+            return true;
+        }
+    }
+    return false;
 }

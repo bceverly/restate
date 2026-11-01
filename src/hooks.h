@@ -35,6 +35,19 @@
  *   RESTATE_QUIESCE    yes if the capture is --quiesce's, which pauses the
  *                      databases it finds running, and no if it is not
  *
+ * Each dump directory holds RS_HOOKS_MARKER too, restate's own: the kind
+ * and the name, a line each. A restore that puts one back runs
+ *
+ *   HOOK restored NAME     after the files are back, to put right what the
+ *                          pause left in them (Nextcloud's maintenance mode)
+ *
+ * with RESTATE_ACTION, RESTATE_KIND and RESTATE_NAME as before, RESTATE_ROOT
+ * the root restored into, and RESTATE_DUMP_DIR the dump directory as it was
+ * put back beneath it -- the hook installed on the machine restored onto,
+ * never one from the image. A hook that exits 2, as one does for an action
+ * it does not know, has nothing to do; any other failure leaves the restore
+ * incomplete.
+ *
  * It is asked too, as
  *
  *   HOOK present NAME      whether what it pauses is on this host
@@ -58,6 +71,9 @@
 #define RS_HOOKS_SITE_DIR "/etc/restate/hooks.d"
 /* Where the dumps go, a directory per thing paused, beneath the root. */
 #define RS_HOOKS_DUMPS    "/var/lib/restate/dumps"
+/* In each, which hook it is for: "KIND\nNAME\n". */
+#define RS_HOOKS_MARKER   ".restate-hook"
+#define RS_HOOKS_MARKER_WORD 255
 
 /*
  * Replaces the directories hooks are looked for in, for the tests' benefit.
@@ -92,6 +108,15 @@ bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_pat
  * capture with --quiesce. True if it exited 0. */
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
                  const char *dump_dir, bool quiescing, struct rs_buf *err);
+
+/* True if `path` is a dump directory's RS_HOOKS_MARKER, as the walk sees it. */
+bool rs_hook_is_marker(const char *path);
+/* A marker's kind and name, which the caller frees; false, with both NULL, if
+ * it is not "KIND\nNAME\n" with a kind a hook could be named. */
+bool rs_hook_marker_parse(const char *text, size_t len, char **kind, char **name);
+/* Runs `HOOK restored NAME` (above). True if it ran; its status in *code. */
+bool rs_hook_restored(const char *hook, const char *kind, const char *name, const char *root,
+                      const char *dump_dir, int *code, struct rs_buf *err);
 
 enum rs_hook_presence {
     RS_HOOK_UNKNOWN, /* it prints neither word, fails or cannot be run */

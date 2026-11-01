@@ -16,6 +16,7 @@
 
 #include "arch.h"
 #include "bsd.h"
+#include "mounts.h"
 
 /* Text files read here are small; anything larger is not what it claims. */
 #define TEXT_MAX ((size_t)4 * 1024 * 1024)
@@ -1958,31 +1959,6 @@ static void describe_lvm(const char *root, struct rs_jval *machine)
     free_list(names, n);
 }
 
-/* Undo the octal escapes mountinfo and fstab use for spaces and the like. */
-static char *unoctal(const char *s, size_t len)
-{
-    struct rs_buf b;
-    size_t        i;
-
-    rs_buf_init(&b);
-    rs_buf_add(&b, "", 0);
-    for (i = 0; i < len; i++)
-    {
-        if (s[i] == '\\' && i + 3 < len &&
-            s[i + 1] >= '0' && s[i + 1] <= '3' && s[i + 2] >= '0' && s[i + 2] <= '7' &&
-            s[i + 3] >= '0' && s[i + 3] <= '7')
-        {
-            rs_buf_addc(&b, (char)(((s[i + 1] - '0') << 6) | ((s[i + 2] - '0') << 3) |
-                                   (s[i + 3] - '0')));
-            i += 3;
-        } else
-        {
-            rs_buf_addc(&b, s[i]);
-        }
-    }
-    return rs_buf_detach(&b);
-}
-
 /* Splits a line on runs of spaces and tabs into at most `max` fields. */
 static size_t split_ws(const char *line, size_t len, const char **f, size_t *flen, size_t max)
 {
@@ -2089,11 +2065,11 @@ static void describe_mounts(const char *sysroot, struct rs_jval *machine)
                 char           *s;
 
                 rs_jval_set_object(m);
-                s = unoctal(f[4], fl[4]);
+                s = rs_mount_unescape(f[4], fl[4]);
                 rs_jobj_str(m, "mountpoint", s);
                 free(s);
                 rs_jobj_str(m, "type", type);
-                s = unoctal(f[dash + 2], fl[dash + 2]);
+                s = rs_mount_unescape(f[dash + 2], fl[dash + 2]);
                 rs_jobj_str(m, "source", s);
                 free(s);
                 s = rs_xstrndup(f[2], fl[2]);
@@ -2138,7 +2114,7 @@ static void describe_table(const char *root, const char *rel, const char *key,
             rs_jval_set_object(row);
             for (k = 0; k < nf; k++)
             {
-                char *s = unoctal(f[k], fl[k]);
+                char *s = rs_mount_unescape(f[k], fl[k]);
 
                 rs_jobj_str(row, names[k], s);
                 free(s);
@@ -2176,7 +2152,7 @@ static void describe_swap(const char *sysroot, struct rs_jval *machine)
             char           *v;
 
             rs_jval_set_object(s);
-            v = unoctal(f[0], fl[0]);
+            v = rs_mount_unescape(f[0], fl[0]);
             rs_jobj_str(s, "file", v);
             free(v);
             v = rs_xstrndup(f[1], fl[1]);

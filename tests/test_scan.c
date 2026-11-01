@@ -11,6 +11,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "mounts.h"
 #include "scan.h"
 #include "test.h"
 
@@ -146,6 +147,67 @@ static int scan_pretending(const void *arg)
     return ok && st.grew == 1 && st.unreadable == 2 ? 1 : 0;
 }
 
+static void test_mounts(const char *dir)
+{
+    static const char info[] =
+        "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+        "30 22 0:53 / /home/b/dev/RAMBOUILLET/productions rw shared:9 - nfs4 nas:/p rw\n"
+        "31 22 0:54 / /home/b/rambo\\040copy rw - cifs //100.78.140.20/r rw\n"
+        "32 22 0:55 / /home/b/dev/RAMBOUILLET-backup rw shared:3 - autofs systemd-1 rw\n"
+        "33 32 0:56 / /home/b/dev/RAMBOUILLET-backup rw - nfs4 nas:/zfs-pool/gdr rw\n"
+        "34 22 0:57 / /mnt/s rw - fuse.sshfs u@h: rw\n"
+        "35 22 0:58 / /boot/efi rw - vfat /dev/nvme0n1p1 rw\n"
+        "36 22 0:59 / /x rw - fuse.portal portal rw\n"
+        "37 22 0:60 / relative rw - nfs x:/y rw\n"
+        "short line\n"
+        "38 22 0:61 / /nodash rw nfs\n"
+        "39 22 0:62 / /m rw - fusefs.sshfs h: rw";
+    struct rs_mount *m;
+    size_t           n;
+    char            *path;
+
+    TEST_CASE("mounts: network filesystems and automounts, by their type");
+    CHECK(rs_mount_remote_type("nfs4") && rs_mount_remote_type("autofs"));
+    CHECK(rs_mount_remote_type("fuse.rclone") && rs_mount_remote_type("fusefs.sshfs"));
+    CHECK(rs_mount_remote_type("smbfs") && rs_mount_remote_type("9p"));
+    CHECK(!rs_mount_remote_type("ext4") && !rs_mount_remote_type("fuse.portal"));
+    CHECK(!rs_mount_remote_type("fuse.") && !rs_mount_remote_type("fuseblk"));
+    rs_mounts_parse_mountinfo(info, sizeof(info) - 1, &m, &n);
+    CHECK_INT(n, 6);
+    CHECK_STR(n > 1 ? m[1].path : "", "/home/b/rambo copy");
+    CHECK_STR(n > 1 ? m[1].type : "", "cifs");
+    CHECK_STR(n > 5 ? m[5].path : "", "/m");
+    rs_mounts_free(m, n);
+    rs_mounts_parse_mountinfo(NULL, 0, &m, &n);
+    CHECK(m == NULL && n == 0);
+    rs_test_write(dir, "mountinfo", info, 0644);
+    path = rs_xasprintf("%s/mountinfo", dir);
+    rs_mounts_set_mountinfo(path);
+    rs_mounts_remote(&m, &n);
+    /* Sorted, and the automount and what it mounted there once. */
+    CHECK_INT(n, 5);
+    CHECK_STR(n > 0 ? m[0].path : "", "/home/b/dev/RAMBOUILLET-backup");
+    CHECK_STR(n > 1 ? m[1].path : "", "/home/b/dev/RAMBOUILLET/productions");
+    CHECK_STR(n > 4 ? m[4].path : "", "/mnt/s");
+    rs_mounts_free(m, n);
+    rs_mounts_set_mountinfo("/nonexistent/mountinfo");
+    rs_mounts_remote(&m, &n);
+    CHECK(m == NULL && n == 0);
+    rs_mounts_set_mountinfo(NULL);
+    /* This machine's own, whatever they are: each one remote, from /. */
+    rs_mounts_remote(&m, &n);
+    {
+        size_t i;
+
+        for (i = 0; i < n; i++)
+        {
+            CHECK(m[i].path[0] == '/' && rs_mount_remote_type(m[i].type));
+        }
+    }
+    rs_mounts_free(m, n);
+    free(path);
+}
+
 void test_scan(void)
 {
     char                  *root = rs_test_tmpdir();
@@ -156,6 +218,7 @@ void test_scan(void)
     struct rs_buf          err;
     const struct rs_entry *e;
 
+    test_mounts(root);
     build_tree(root);
     rs_buf_init(&err);
     memset(&o, 0, sizeof(o));
@@ -354,6 +417,35 @@ void test_scan(void)
     CHECK(rs_index_find(&m, "/etc/hosts") != NULL);
     rs_index_free(&m);
     o.one_fs = false;
+
+    TEST_CASE("scan: a network filesystem's mount point, recorded and not walked");
+    {
+        const char *const remote[] = { "/etc", "/zz/not-here" };
+        bool              reached[2] = { false, false };
+        const char *const keep[] = { "/etc/hosts" };
+
+        o.remote = remote;
+        o.nremote = 2;
+        o.remote_reached = reached;
+        o.keep = keep;
+        o.nkeep = 1;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/etc") != NULL);
+        CHECK(rs_index_find(&m, "/etc/hosts") == NULL);
+        CHECK_INT(st.skipped_remote, 1);
+        CHECK(reached[0] && !reached[1]);
+        rs_index_free(&m);
+        o.remote_reached = NULL;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/etc/hosts") == NULL);
+        rs_index_free(&m);
+        o.remote = NULL;
+        o.nremote = 0;
+        o.keep = NULL;
+        o.nkeep = 0;
+    }
 
     TEST_CASE("scan: sockets are never recorded");
     {

@@ -77,6 +77,7 @@
 #include "clones.h"
 #include "diff.h"
 #include "glob.h"
+#include "hooks.h"
 #include "identity.h"
 #include "index.h"
 #include "installer.h"
@@ -85,11 +86,13 @@
 #include "live.h"
 #include "machine.h"
 #include "meta.h"
+#include "mounts.h"
 #include "packages.h"
 #include "pgp.h"
 #include "pkgdb.h"
 #include "reinstall.h"
 #include "repo.h"
+#include "restore.h"
 #include "rules.h"
 #include "sha256.h"
 #include "sources.h"
@@ -201,6 +204,37 @@ static void fuzz_live(const char *text, size_t len)
         abort();
     }
     (void)rs_live_parse_fdflags(parts[1], &flags);
+    {
+        char *kind;
+        char *name;
+
+        /* A dump directory's marker: the kind a hook's name, the name a
+         * line. */
+        if (rs_hook_marker_parse(parts[0], strlen(parts[0]), &kind, &name) &&
+            (kind[0] == '\0' || kind[0] == '.' || strchr(kind, '/') || strchr(kind, '\n') ||
+             name[0] == '\0' || strchr(name, '\n')))
+        {
+            abort();
+        }
+        free(kind);
+        free(name);
+    }
+    {
+        struct rs_mount *m;
+        size_t           n;
+        size_t           k;
+
+        /* mountinfo: only remote mounts, each at an absolute path. */
+        rs_mounts_parse_mountinfo(text, len, &m, &n);
+        for (k = 0; k < n; k++)
+        {
+            if (m[k].path[0] != '/' || !rs_mount_remote_type(m[k].type))
+            {
+                abort();
+            }
+        }
+        rs_mounts_free(m, n);
+    }
     db = rs_live_mongo_dbpath(parts[2]);
     if (db && (db[0] == '\0' || strchr(db, '\n')))
     {
@@ -835,6 +869,66 @@ static bool reaches(const char *pattern)
     return true;
 }
 
+/* restore's --include through a snapshot's symlinks: `path` a symlink to
+ * `target`, followed from beneath it and from `target` itself. */
+static void fuzz_follow(const char *path, const char *target)
+{
+    struct rs_index            ix;
+    struct rs_entry            e;
+    struct rs_restore_followed f;
+    struct rs_buf              err;
+    char                      *below = rs_xasprintf("%s/x", path);
+    char                      *lit = rs_restore_literal(path);
+    const char                *from[2];
+    size_t                     i;
+    size_t                     k;
+
+    if (!rs_glob_match(lit, path))
+    {
+        abort();
+    }
+    free(lit);
+    rs_index_init(&ix);
+    memset(&e, 0, sizeof(e));
+    e.path = rs_xstrdup(path);
+    e.target = rs_xstrdup(target);
+    e.type = 'l';
+    rs_index_add(&ix, &e);
+    rs_buf_init(&err);
+    (void)rs_index_sort(&ix, &err);
+    rs_buf_free(&err);
+    from[0] = below;
+    from[1] = target;
+    for (i = 0; i < 2; i++)
+    {
+        if (!rs_restore_follow(&ix, from[i], &f))
+        {
+            if (f.pattern || f.nthrough != 0)
+            {
+                abort();
+            }
+            continue;
+        }
+        /* Gone through that symlink, the one there is, and come out
+         * anchored. */
+        if (f.pattern[0] != '/' || f.nthrough != 1 || strcmp(f.through[0], path) != 0)
+        {
+            abort();
+        }
+        for (k = 0; k < f.nthrough; k++)
+        {
+            if (!rs_index_find(&ix, f.through[k]))
+            {
+                abort();
+            }
+        }
+        (void)rs_restore_matches(&ix, f.pattern);
+        rs_restore_followed_free(&f);
+    }
+    rs_index_free(&ix);
+    free(below);
+}
+
 static void fuzz_glob(const char *text, size_t len)
 {
     const char *nul = memchr(text, '\0', len);
@@ -894,6 +988,10 @@ static void fuzz_glob(const char *text, size_t len)
                 }
             }
             free(dir);
+        }
+        if (path[0] == '/')
+        {
+            fuzz_follow(path, pattern);
         }
     }
     free(pattern);

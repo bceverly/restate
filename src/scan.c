@@ -22,6 +22,11 @@
 
 /* O_DIRECTORY and O_NOFOLLOW are POSIX.1-2008, but be tolerant of a libc that
  * only exposes them under a feature macro this build did not ask for. */
+/* Linux's: a stat that mounts nothing an automount stands for (which stat
+ * does not since 4.11 anyway). Elsewhere there is no such flag to give. */
+#ifndef AT_NO_AUTOMOUNT
+#define AT_NO_AUTOMOUNT 0
+#endif
 #ifndef O_DIRECTORY
 #define O_DIRECTORY 0
 #endif
@@ -50,6 +55,37 @@ struct walk {
     bool                       forced;    /* visiting a kept path: state, whatever the rules */
     bool                       deferring; /* visiting a deferred group, at the end */
 };
+
+/* Whether `path` is a network filesystem's or an automount's mount point,
+ * which the walk records and goes no further into; noted as reached. */
+static bool remote_at(const struct walk *w, const char *path)
+{
+    size_t lo = 0;
+    size_t hi = w->opts->nremote;
+
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int    c = strcmp(w->opts->remote[mid], path);
+
+        if (c == 0)
+        {
+            if (w->opts->remote_reached)
+            {
+                w->opts->remote_reached[mid] = true;
+            }
+            return true;
+        }
+        if (c < 0)
+        {
+            lo = mid + 1;
+        } else
+        {
+            hi = mid;
+        }
+    }
+    return false;
+}
 
 /* Whether `path` is one the walk leaves to the end. */
 static bool deferred(const struct walk *w, const char *path)
@@ -979,7 +1015,7 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     {
         return;
     }
-    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) < 0)
+    if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) < 0)
     {
         unreadable(w, tree_path, errno);
         return;
@@ -1094,6 +1130,12 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
         unreadable(w, tree_path, ELOOP);
         return;
     }
+    if (remote_at(w, tree_path))
+    {
+        w->stats->skipped_remote++;
+        verbose_skip(w, tree_path, "a network filesystem or an automount");
+        return;
+    }
     if (w->opts->one_fs && st.st_dev != w->root_dev)
     {
         w->stats->skipped_mounts++;
@@ -1177,6 +1219,17 @@ static bool reachable(const struct walk *w, const char *path, size_t len)
     return in;
 }
 
+/* Whether the first `len` bytes of `path` are a remote mount point: never
+ * opened on the way to anything, forced or not. */
+static bool remote_beneath(const struct walk *w, const char *path, size_t len)
+{
+    char *dir = rs_xstrndup(path, len);
+    bool  is = remote_at(w, dir);
+
+    free(dir);
+    return is;
+}
+
 /*
  * Visits `path`, reached from the root one directory at a time and never
  * through a symlink. One that is not there is not recorded, and the caller,
@@ -1207,7 +1260,8 @@ static void visit_path(struct walk *w, int rootfd, const char *path, bool forced
         int next;
 
         *slash = '\0';
-        if (!forced && !reachable(w, path, (size_t)(slash - copy) + 1))
+        if ((!forced && !reachable(w, path, (size_t)(slash - copy) + 1)) ||
+            remote_beneath(w, path, (size_t)(slash - copy) + 1))
         {
             reached = false;
             break;
@@ -1224,7 +1278,8 @@ static void visit_path(struct walk *w, int rootfd, const char *path, bool forced
 
         reached = fstat(dirfd, &dir) == 0 && dir.st_dev == w->root_dev;
     }
-    if (reached && dirfd >= 0 && fstatat(dirfd, p, &st, AT_SYMLINK_NOFOLLOW) == 0)
+    if (reached && dirfd >= 0 &&
+        fstatat(dirfd, p, &st, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) == 0)
     {
         w->forced = forced;
         visit(w, dirfd, p, path, depth);

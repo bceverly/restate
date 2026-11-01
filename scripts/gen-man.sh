@@ -1118,6 +1118,25 @@ are; resume is run all the same, and the capture ends incomplete, with exit
 status 3, as one that fails to resume does. A pause may take 30 minutes and
 a resume 10; then the hook is stopped.
 .PP
+Each dump directory holds
+.I .restate\-hook
+too, restate's own record of which hook it is for. A restore that puts one
+back runs that hook \- the one installed on the machine restored onto, never
+one from the image \- as
+.I HOOK
+.B restored
+.I NAME
+once the files are back, with
+.B RESTATE_ROOT
+(the root restored into) and
+.B RESTATE_DUMP_DIR
+(the dump directory beneath it), to put right what pausing it left in the
+files. A hook that exits 2, as every shipped one does for an action it does
+not know, has nothing to do; any other failure leaves the restore incomplete.
+The result's
+.B restore.hooks
+says how each went.
+.PP
 The shipped hooks stop a database's service and start it again, suspend a
 VM and resume it (through the user's own libvirt for a user's VM), freeze an
 LXD container and thaw it, and pause Docker's running containers; one
@@ -1194,6 +1213,12 @@ without it the hook warns that the database is copied as it runs. The snap's
 database is its own, and is dumped
 .RB ( nextcloud.mysqldump )
 while in maintenance mode.
+.I config/config.php
+is copied in maintenance mode too, so the hook keeps it as it was before the
+pause, and on
+.B restored
+puts that back over the restored one where that is exactly what the capture
+copied.
 A mail store kept as Maildir needs neither: every message is a file of its
 own, written beside its name and renamed into place, so a copy taken while
 mail arrives misses at most what arrived meanwhile.
@@ -1257,6 +1282,26 @@ is the check. From a repository,
 .B \-\-include
 reads only the packs that hold what it covers, for a restore and a dry run
 alike.
+.PP
+An
+.B \-\-include
+written through a symlink the snapshot holds is followed through the
+snapshot's own symlinks, never the host's: relative and absolute,
+.B .\&
+and
+.BR .. ,
+at most 40 of them. What it reaches is put back, and the symlinks it went
+through; the result's
+.B resolved
+says where each went. A symlink that is the last thing an include names is
+put back as itself. An include that matches nothing in the snapshot is named,
+in the result's
+.B unmatched
+and on standard error, and leaves the restore incomplete (exit status 3), for
+.B \-\-plan
+and
+.B \-\-dry\-run
+too.
 .PP
 Owners, modes and times (to the nanosecond) come from the index, a
 directory's only once everything in it is in; hard links are made links
@@ -1523,6 +1568,20 @@ and
 .B \-\-rules\-only
 add to what was recorded. An index from an older restate records no rules
 and is classified by the options alone.
+.PP
+No walk goes into a network filesystem or an automount: each is told by its
+filesystem type (mountinfo on Linux, getmntinfo on the BSDs and macOS) \-
+NFS, SMB and CIFS, 9p, virtiofs, Ceph, GlusterFS, Lustre, AFS, WebDAV, sshfs
+and rclone through FUSE, and autofs \- and its mount point is recorded and
+never opened, so an automount is never set off.
+.B \-\-include\-mount
+.I PATH
+walks the one mounted at
+.I PATH
+all the same, and the index records it for verify and status. The result's
+.B skipped_network_mounts
+lists those left out.
+.PP
 .B list
 says what is directly in one directory of a snapshot or an image \- each
 name's type, mode, owner, size and time, and a symbolic link's target \-
@@ -2057,7 +2116,7 @@ capture, estimate and status, and restore: the tree.
 .B path
 list: the directory to list; / if not given.
 .TP
-.BR rules " (repeatable), " all ", " one_file_system
+.BR rules " (repeatable), " all ", " one_file_system ", " include_mount " (repeatable)"
 capture, estimate and status (rules for restore too); a status job
 classifies by the capture's own rules unless given these.
 .TP

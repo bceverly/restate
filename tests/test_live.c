@@ -11,6 +11,7 @@
 
 #include "hooks.h"
 #include "live.h"
+#include "packages.h"
 #include "run.h"
 #include "test.h"
 
@@ -948,13 +949,38 @@ void test_live(void)
         CHECK_STR(tree ? tree : "", "/var/lib/restate/dumps/libvirt-my_vm_1");
         full = rs_xasprintf("%s%s", root, tree ? tree : "");
         CHECK(stat(full, &st) == 0 && (st.st_mode & 07777) == 0700);
+        {
+            struct rs_buf mark;
+            char         *at = rs_xasprintf("%s/%s", tree ? tree : "", RS_HOOKS_MARKER);
+
+            /* Which hook it is for, for a restore to ask. */
+            CHECK(rs_read_beneath(root, at, 1024, &mark));
+            CHECK_STR(mark.data ? mark.data : "", "libvirt\nmy vm/1\n");
+            CHECK(rs_hook_is_marker(at));
+            rs_buf_free(&mark);
+            free(at);
+        }
         /* Made already: the same again. */
         free(tree);
         tree = NULL;
         CHECK(rs_hook_dump_dir(root, &one, &tree, &err));
         free(tree);
-        free(full);
         tree = NULL;
+        /* Its marker a symlink: not written through. */
+        {
+            char *mark = rs_xasprintf("%s/var/lib/restate/dumps/libvirt-my_vm_1/%s", root,
+                                      RS_HOOKS_MARKER);
+
+            CHECK(unlink(mark) == 0);
+            CHECK(symlink("/nonexistent/x", mark) == 0);
+            CHECK(!rs_hook_dump_dir(root, &one, &tree, &err));
+            CHECK_CONTAINS(err.data ? err.data : "", RS_HOOKS_MARKER);
+            CHECK(tree == NULL);
+            CHECK(unlink(mark) == 0);
+            rs_buf_reset(&err);
+            free(mark);
+        }
+        free(full);
         /* /var a symlink: refused. */
         full = rs_xasprintf("%s/root2", dir);
         mkdirs(dir, "root2");
@@ -966,6 +992,69 @@ void test_live(void)
         rs_buf_free(&err);
         free(one.name);
         free(root);
+    }
+
+    TEST_CASE("hooks: a dump directory's marker, and restored");
+    {
+        static const char *const not_markers[] = {
+            "/var/lib/restate/dumps/.restate-hook", "/var/lib/restate/dumps//.restate-hook",
+            "/var/lib/restate/dumps/x/y/.restate-hook", "/var/lib/restate/dumps/x/.restate-hookx",
+            "/var/lib/restate/x/.restate-hook", "/var/lib/restate/dumps/x",
+        };
+        struct rs_buf err;
+        char         *kind;
+        char         *name;
+        char         *word = rs_xcalloc(RS_HOOKS_MARKER_WORD + 2, 1);
+        char         *text;
+        size_t        i;
+        int           code;
+
+        CHECK(rs_hook_is_marker("/var/lib/restate/dumps/nextcloud-nextcloud/.restate-hook"));
+        for (i = 0; i < sizeof(not_markers) / sizeof(not_markers[0]); i++)
+        {
+            CHECK(!rs_hook_is_marker(not_markers[i]));
+        }
+        CHECK(rs_hook_marker_parse("nextcloud\nnextcloud\n", 20, &kind, &name));
+        CHECK_STR(kind ? kind : "", "nextcloud");
+        CHECK_STR(name ? name : "", "nextcloud");
+        free(kind);
+        free(name);
+        CHECK(rs_hook_marker_parse("libvirt\nmy vm/1\n", 16, &kind, &name));
+        CHECK_STR(name ? name : "", "my vm/1");
+        free(kind);
+        free(name);
+        CHECK(!rs_hook_marker_parse(NULL, 0, &kind, &name));
+        CHECK(kind == NULL && name == NULL);
+        CHECK(!rs_hook_marker_parse("nextcloud", 9, &kind, &name));
+        CHECK(!rs_hook_marker_parse("nextcloud\nx", 11, &kind, &name));
+        CHECK(!rs_hook_marker_parse("nextcloud\nx\ny\n", 14, &kind, &name));
+        CHECK(!rs_hook_marker_parse("\nx\n", 3, &kind, &name));
+        CHECK(!rs_hook_marker_parse("a\n\n", 3, &kind, &name));
+        CHECK(!rs_hook_marker_parse("../x\nx\n", 7, &kind, &name));
+        CHECK(!rs_hook_marker_parse("-x\nx\n", 5, &kind, &name));
+        CHECK(!rs_hook_marker_parse(".x\nx\n", 5, &kind, &name));
+        CHECK(!rs_hook_marker_parse("a b\nx\n", 6, &kind, &name));
+        CHECK(!rs_hook_marker_parse("a\nx\ty\n", 6, &kind, &name));
+        CHECK(!rs_hook_marker_parse("a\nx\x7fy\n", 6, &kind, &name));
+        memset(word, 'k', RS_HOOKS_MARKER_WORD + 1);
+        text = rs_xasprintf("%s\nx\n", word);
+        CHECK(!rs_hook_marker_parse(text, strlen(text), &kind, &name));
+        free(text);
+        word[RS_HOOKS_MARKER_WORD] = '\0';
+        text = rs_xasprintf("%s\nx\n", word);
+        CHECK(rs_hook_marker_parse(text, strlen(text), &kind, &name));
+        free(kind);
+        free(name);
+        free(text);
+        free(word);
+        rs_buf_init(&err);
+        CHECK(rs_hook_restored(bin_true, "nextcloud", "nextcloud", "/", "/var/lib/restate/dumps/x",
+                               &code, &err));
+        CHECK_INT(code, 0);
+        CHECK(rs_hook_restored(bin_false, "nextcloud", "nextcloud", "/mnt", "/mnt/x", &code,
+                               &err));
+        CHECK_INT(code, 1);
+        rs_buf_free(&err);
     }
 
     free(proc);

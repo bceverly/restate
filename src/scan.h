@@ -74,6 +74,13 @@ struct rs_scan_opts {
      * one directory at a time, never through a symlink. */
     const char *const     *keep;
     size_t                 nkeep;
+    /* Mount points recorded and gone no further into, as paths beneath the
+     * root, sorted: network filesystems' and automounts' (mounts.h). Not
+     * opened at all, so an automount mounts nothing. Each one the walk reaches
+     * is set in remote_reached, an array as long, if that is not NULL. */
+    const char *const     *remote;
+    size_t                 nremote;
+    bool                  *remote_reached;
     /* The package manager's record of the files it installed (pkgdb.h), or
      * NULL to classify by the rules alone. With it, every regular file the
      * rules call baseline or state is checked against its package:
@@ -123,6 +130,7 @@ struct rs_scan_stats {
     uint64_t skipped_expendable;
     uint64_t skipped_sockets;
     uint64_t skipped_mounts;
+    uint64_t skipped_remote;  /* network filesystems and automounts (opts->remote) */
     uint64_t unreadable;
     uint64_t grew;            /* kept as they were when their copy began */
     uint64_t pkg_unmodified;  /* files as their package installed them */

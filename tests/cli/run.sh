@@ -1509,6 +1509,27 @@ HOOK
   contains "$live_files" "restate/files/var/lib/restate/dumps/redis-redis-server/dump.txt" \
     "and the dump with them"
   check "the dump directory is root's alone" test "$(file_mode /var/lib/restate/dumps/redis-redis-server)" = 700
+  check "and says which hook it is for" \
+    test "$(cat /var/lib/restate/dumps/redis-redis-server/.restate-hook)" = "$(printf 'redis\nredis-server')"
+  mkdir -p live-out
+  expect 0 "a restore of it" -- "$BIN" restore --allow-unverified --root live-out \
+    --result live-r.json live.tar
+  contains "$(cat "$WORK/hook.log")" "restored redis-server" "asks its hook to put right what it paused"
+  contains "$(cat live-r.json)" '"status": "ran"' "and says it did"
+  contains "$ERR" "its hook put right what pausing it left" "on standard error too"
+  # A script, written as it is: nothing to expand here.
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\n[ "$1" = restored ] && exit 2\nexit 0\n' > /etc/restate/hooks.d/redis
+  expect 0 "a hook that has nothing to do after a restore" -- \
+    "$BIN" restore --allow-unverified --root live-out --result live-r.json live.tar
+  contains "$(cat live-r.json)" '"status": "unknown"' "is not a failure"
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\n[ "$1" = restored ] && exit 1\nexit 0\n' > /etc/restate/hooks.d/redis
+  expect 3 "a hook that fails after a restore" -- \
+    "$BIN" restore --allow-unverified --root live-out --result live-r.json live.tar
+  contains "$(cat live-r.json)" '"status": "failed"' "is"
+  contains "$ERR" "the restore is incomplete" "and leaves it incomplete"
+  rm -rf live-out
 
   # A script, written as it is: nothing to expand here.
   # shellcheck disable=SC2016
@@ -1736,6 +1757,10 @@ contains "$OUT" '"protect_waits": true' "and that protect waits for files NFS ha
 contains "$OUT" '"create_resumes": true' "and that --create finishes one that failed partway"
 contains "$OUT" '"diff_job": true' "and that a job can be a diff"
 contains "$OUT" '"restore_packages_report": true' "and that restore says what became of each package"
+contains "$OUT" '"restore_resolves_links": true' "that restore goes through the snapshot's symlinks"
+contains "$OUT" '"restore_unmatched": true' "and names what matched nothing"
+contains "$OUT" '"restore_hooks": true' "and asks the hooks of the dumps it puts back"
+contains "$OUT" '"skips_network_mounts": true' "and that a walk leaves network filesystems out"
 contains "$OUT" '"sign": ["command", "repository", "snapshot", "sign_with"' "and that a job can sign"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
@@ -2008,6 +2033,98 @@ check "writes nothing" test -z "$(ls -A pout)"
 expect 2 "restore --plan --check-first" -- \
   "$BIN" restore --allow-unverified --plan --check-first --root pout prepo
 contains "$ERR" "give --dry-run instead" "is refused"
+
+expect 2 "--include-mount of a relative path" -- "$BIN" scan --include-mount share -r .
+contains "$ERR" '--include-mount: "share" is not an absolute path' "is refused"
+
+# An --include through a symlink the snapshot holds, as a snap's current is.
+mkdir -p ltree/snap/54589/conf ltree/etc
+echo kept > ltree/snap/54589/conf/config.php
+echo one > ltree/etc/one
+ln -s 54589 ltree/snap/current
+ln -s /snap/current ltree/snap/abs
+ln -s ../snap/abs ltree/etc/up
+ln -s loop2 ltree/snap/loop1
+ln -s loop1 ltree/snap/loop2
+expect 0 "a snapshot with symlinks in it" -- "$BIN" capture -N -r ltree -q -o lrepo
+mkdir -p lout
+expect 0 "restore --include through a symlink" -- \
+  "$BIN" restore --allow-unverified --include /snap/current/conf/config.php --root lout \
+  --result lr.json lrepo
+check "puts back the file it reaches" test "$(cat lout/snap/54589/conf/config.php)" = kept
+check "and the symlink it went through" test "$(readlink lout/snap/current)" = 54589
+check "and nothing else" test ! -e lout/etc/one
+contains "$(cat lr.json)" '"path": "/snap/54589/conf/config.php"' "the result says what it reached"
+contains "$(cat lr.json)" '"through": ["/snap/current"]' "and through what"
+contains "$(cat lr.json)" '"unmatched": []' "and that every include matched"
+contains "$ERR" "goes through 1 symlink in the snapshot" "and says so"
+rm -rf lout
+mkdir -p lout
+expect 0 "restore --plan through symlinks, absolute and relative" -- \
+  "$BIN" restore --allow-unverified --plan --include '/etc/up/conf/*.php' --root lout \
+  --result lp.json lrepo
+contains "$(cat lp.json)" '"path": "/snap/54589/conf/*.php"' "goes through all three"
+contains "$(cat lp.json)" '"through": ["/etc/up", "/snap/abs", "/snap/current"]' "names each"
+contains "$OUT" "/snap/54589/conf/config.php" "the plan holds what they reach"
+expect 3 "restore --dry-run of what matches nothing" -- \
+  "$BIN" restore --allow-unverified --dry-run --include /etc/one --include /etc/none \
+  --include /snap/loop1/x --root lout --result lu.json lrepo
+contains "$(cat lu.json)" '"unmatched": ["/etc/none", "/snap/loop1/x"]' "names it"
+contains "$(cat lu.json)" '"status": "incomplete"' "and is incomplete"
+contains "$ERR" "--include /etc/none matches nothing in the snapshot" "says which"
+contains "$ERR" "2 of the --include patterns matched nothing" "and how many"
+expect 0 "a symlink asked for by its own name" -- \
+  "$BIN" restore --allow-unverified --plan --include /snap/current --root lout \
+  --result ll.json lrepo
+contains "$(cat ll.json)" '"resolved": []' "is not gone through"
+lacks "$OUT" "config.php" "and what it points to is left"
+
+# A dump directory's marker, put back: its hook is asked "restored". Not
+# root, there is no hook restate would run, and that is said.
+mkdir -p htree/var/lib/restate/dumps/nosuchkind-x htree/var/lib/restate/dumps/bad
+echo other > htree/var/lib/restate/other
+printf 'nosuchkind\nx\n' > htree/var/lib/restate/dumps/nosuchkind-x/.restate-hook
+printf 'not a marker' > htree/var/lib/restate/dumps/bad/.restate-hook
+expect 0 "a snapshot with dump directories" -- "$BIN" capture -N -r htree -q -o hrepo
+mkdir -p hout
+expect 0 "restore --dry-run names the hooks it would ask" -- \
+  "$BIN" restore --allow-unverified --dry-run --root hout --result hd.json hrepo
+contains "$(cat hd.json)" '"dump_dir": "/var/lib/restate/dumps/nosuchkind-x", "status": "would_run"' \
+  "each dump directory's"
+contains "$(cat hd.json)" '"dump_dir": "/var/lib/restate/dumps/bad", "status": "would_run"' \
+  "however its marker reads"
+expect 0 "restore of them" -- "$BIN" restore --allow-unverified --root hout --result hr.json hrepo
+contains "$(cat hr.json)" '"kind": "nosuchkind", "name": "x", "status": "no_hook"' \
+  "says there is no hook for one"
+contains "$(cat hr.json)" '"dump_dir": "/var/lib/restate/dumps/bad", "status": "unreadable"' \
+  "and that the other's marker is not one"
+contains "$ERR" "there is no nosuchkind hook here" "on standard error too"
+contains "$ERR" "not a hook's marker" "both"
+expect 0 "restore --include of neither" -- \
+  "$BIN" restore --allow-unverified --plan --include /var/lib/restate/other --root hout \
+  --result hn.json hrepo
+contains "$(cat hn.json)" '"hooks": []' "asks no hook"
+
+# The Nextcloud hook, restored: config.php as it was before maintenance mode,
+# over the one the capture copied -- and only over that one.
+nc="$HERE/../../hooks/nextcloud"
+mkdir -p ncroot/srv/nc/config ncdump
+echo "'maintenance' => true," > ncroot/srv/nc/config/config.php
+echo "'maintenance' => true," > ncdump/config.paused
+echo "'maintenance' => false," > ncdump/config.before
+echo /srv/nc/config/config.php > ncdump/config.path
+expect 0 "the nextcloud hook, restored" -- \
+  env RESTATE_ROOT="$WORK/ncroot/" RESTATE_DUMP_DIR="$WORK/ncdump" sh "$nc" restored nextcloud
+check "puts config.php back as it was before the pause" \
+  test "$(cat ncroot/srv/nc/config/config.php)" = "'maintenance' => false,"
+contains "$ERR" "put back as it was before maintenance mode" "and says so"
+echo "'changed' => true," > ncroot/srv/nc/config/config.php
+expect 0 "and again, over a config.php changed since" -- \
+  env RESTATE_ROOT="$WORK/ncroot" RESTATE_DUMP_DIR="$WORK/ncdump" sh "$nc" restored nextcloud
+check "leaves that alone" test "$(cat ncroot/srv/nc/config/config.php)" = "'changed' => true,"
+rm ncdump/config.before
+expect 0 "and from a dump with nothing kept before the pause" -- \
+  env RESTATE_ROOT="$WORK/ncroot" RESTATE_DUMP_DIR="$WORK/ncdump" sh "$nc" restored nextcloud
 
 if command -v python3 > /dev/null 2>&1; then
   # A TERM that came before it started, held over the exec, so that the
