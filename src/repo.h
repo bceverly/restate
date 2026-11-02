@@ -555,6 +555,12 @@ void rs_repo_set_cache_dir(const char *dir);
 void rs_repo_set_pack_size(uint64_t bytes);
 /* The same for RS_REPO_SEGMENT_SIZE. */
 void rs_repo_set_segment_size(uint64_t bytes);
+/* The same for how much of an encrypted repository's packs a read keeps
+ * decrypted in temporary files -- 4 GiB, or a quarter of what is free there,
+ * if less -- for tests whose packs are few. */
+void rs_repo_set_unsealed_bytes(uint64_t bytes);
+/* How many encrypted packs reads have decrypted into such files, so far. */
+uint64_t rs_repo_unsealed(void);
 /* With `always`, what restate makes in a repository is given the owner and
  * group of the directory it is made in as it is when run as root, for the
  * unit tests' benefit: they are not root. Nothing in restate itself calls it. */

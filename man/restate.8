@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE 8 "November 1, 2026" "restate 2.2.0.16" "System Manager's Manual"
+.TH RESTATE 8 "November 2, 2026" "restate 2.2.0.16" "System Manager's Manual"
 .nh
 .SH NAME
 restate \- back up what a fresh OS install would not put back, to rebuild the machine
@@ -1807,7 +1807,12 @@ keeping what it has written, and the next repack goes on from there. An
 encrypted repository's packs are encrypted whole, and gpg too reads one only
 from its start: they are written without a
 .IR .seek ,
-and repack refuses one.
+and repack refuses one. A restore, or
+.BR "check \-\-read\-all" ,
+decrypts each such pack once instead, into a temporary file of its own read
+from anywhere in it: up to 4 GiB of them at a time, or a quarter of what is
+free where temporary files go if that is less, the least recently read let go
+first.
 .PP
 .B "restate init \-\-encrypt\-to"
 .I KEYFILE

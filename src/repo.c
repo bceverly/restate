@@ -15,12 +15,11 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/vfs.h>
-#elif defined(__NetBSD__)
-#include <sys/statvfs.h>
 #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
 #include <sys/mount.h>
 #include <sys/param.h>
@@ -4420,10 +4419,19 @@ struct group {
     uint32_t               member;
 };
 
-/* A pack being read, forward only. */
+/* Where a reader of a decrypted pack's file is in it. */
+struct at_fd {
+    int      fd;
+    uint64_t off;
+};
+
+/* A pack being read, forward only: through gzip, and gpg if it is encrypted,
+ * or from the file it was decrypted into once (struct unsealed). */
 struct reader {
     bool                 open;
     uint32_t             pack;
+    bool                 unsealed;    /* from that file, not `z` */
+    struct at_fd         from;
     struct zin           z;
     struct rs_tar_reader tr;
     struct rs_tar_entry  te;
@@ -4437,6 +4445,19 @@ struct seeks {
     bool                 loaded;
     struct rs_repo_seek *at;
     size_t               n;
+};
+
+/*
+ * An encrypted pack, decrypted and unzipped once into a temporary file of its
+ * own, with where each member begins (its .seeks): gpg reads a pack only
+ * from its start, and a file whose chunks are in several packs, or a chunk
+ * more than one file has, sends the stream back into one it has read past.
+ * Kept until they come to UNSEALED_BYTES, then the least recently read goes.
+ */
+struct unsealed {
+    FILE    *f;
+    uint64_t bytes;
+    uint64_t used;
 };
 
 /* A chunk more than one content has, kept once read. */
@@ -4455,6 +4476,12 @@ struct cached {
  * to it: gzip, started anew, reads a quarter of a mebibyte before it writes
  * anything, so a jump shorter than about twice that saves nothing. */
 #define SEEK_NEAR   ((uint64_t)512 * 1024)
+/* Of encrypted packs, decrypted: at most this much, and no more than a quarter
+ * of what is free where temporary files go. */
+#define UNSEALED_BYTES ((uint64_t)4 * 1024 * 1024 * 1024)
+#ifndef P_tmpdir
+#define P_tmpdir "/tmp"
+#endif
 
 enum phase {
     PH_OTHERS = 0,   /* directories, symlinks and FIFOs, from the index */
@@ -4496,6 +4523,10 @@ struct rs_repo_stream {
     size_t                 cache_bytes;
     bool                  *warned;    /* per pack */
     struct seeks          *seeks;     /* per pack */
+    struct unsealed       *unsealed;  /* per pack, in an encrypted repository */
+    uint64_t               unsealed_bytes;
+    uint64_t               unsealed_max;
+    bool                   unsealed_off;  /* no room for them: read through gpg */
     /* The content being made: its next chunk, and the chunk being read. */
     const struct group    *g;
     size_t                 ci;
@@ -4609,6 +4640,36 @@ static bool included(const char *path, const char *const *include, size_t ninclu
     return ninclude == 0;
 }
 
+static uint64_t unsealed_set;
+static uint64_t unsealed_made;
+
+uint64_t rs_repo_unsealed(void)
+{
+    return unsealed_made;
+}
+
+void rs_repo_set_unsealed_bytes(uint64_t bytes)
+{
+    unsealed_set = bytes;
+}
+
+static uint64_t unsealed_budget(void)
+{
+    struct statvfs sv;
+    uint64_t       max = UNSEALED_BYTES;
+
+    if (unsealed_set)
+    {
+        return unsealed_set;
+    }
+    if (statvfs(P_tmpdir, &sv) == 0 && sv.f_frsize > 0 &&
+        (uint64_t)sv.f_bavail / 4 < max / sv.f_frsize)
+    {
+        max = (uint64_t)sv.f_bavail / 4 * sv.f_frsize;
+    }
+    return max;
+}
+
 struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_index *ix,
                                            const char *const *only, size_t nonly,
                                            struct rs_buf *err)
@@ -4686,6 +4747,11 @@ struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const str
     }
     s->warned = rs_xcalloc(r->npacks + 1, sizeof(*s->warned));
     s->seeks = rs_xcalloc(r->npacks + 1, sizeof(*s->seeks));
+    if (r->encrypted)
+    {
+        s->unsealed = rs_xcalloc(r->npacks + 1, sizeof(*s->unsealed));
+        s->unsealed_max = unsealed_budget();
+    }
     rs_buf_init(&s->out);
     rs_buf_init(&s->err);
     return s;
@@ -4730,23 +4796,247 @@ static void close_reader(struct reader *rd)
         return;
     }
     rs_buf_init(&ignore);
-    (void)zin_close(&rd->z, true, &ignore);
+    if (!rd->unsealed)
+    {
+        (void)zin_close(&rd->z, true, &ignore);
+    }
     rs_buf_free(&ignore);
     rs_tar_entry_free(&rd->te);
     memset(rd, 0, sizeof(*rd));
 }
 
-/* Pack `pack` open from `offset` in its file, where a gzip stream starts. */
+static ssize_t read_at_fd(void *ctx, void *data, size_t n)
+{
+    struct at_fd *a = ctx;
+    ssize_t       got = pread(a->fd, data, n, (off_t)a->off);
+
+    if (got > 0)
+    {
+        a->off += (uint64_t)got;
+    }
+    return got;
+}
+
+/* What is read through the pipeline, copied into `to` as it passes. */
+struct tee {
+    int      in;
+    FILE    *to;
+    uint64_t off;
+    int      write_errno;
+};
+
+static ssize_t read_tee(void *ctx, void *data, size_t n)
+{
+    struct tee *t = ctx;
+    ssize_t     got = read(t->in, data, n);
+
+    if (got > 0 && fwrite(data, 1, (size_t)got, t->to) != (size_t)got)
+    {
+        t->write_errno = errno ? errno : EIO;
+        errno = t->write_errno;
+        return -1;
+    }
+    if (got > 0)
+    {
+        t->off += (uint64_t)got;
+    }
+    return got;
+}
+
+/* Room for another decrypted pack: the least recently read go, but none a
+ * reader has open, nor `keep`. */
+static void unsealed_room(struct rs_repo_stream *s, uint32_t keep)
+{
+    while (s->unsealed_bytes > s->unsealed_max)
+    {
+        struct unsealed *old = NULL;
+        uint32_t         p;
+        size_t           i;
+
+        for (p = 0; p < s->r->npacks; p++)
+        {
+            struct unsealed *u = &s->unsealed[p];
+            bool             reading = false;
+
+            for (i = 0; i < READERS; i++)
+            {
+                reading = reading || (s->readers[i].open && s->readers[i].unsealed &&
+                                      s->readers[i].pack == p);
+            }
+            if (u->f && p != keep && !reading && (!old || u->used < old->used))
+            {
+                old = u;
+            }
+        }
+        if (!old)
+        {
+            return;
+        }
+        (void)fclose(old->f);
+        old->f = NULL;
+        s->unsealed_bytes -= old->bytes;
+        old->bytes = 0;
+    }
+}
+
+/*
+ * Encrypted pack `pack` decrypted, unzipped, into a temporary file, and where
+ * its members begin into its .seeks -- once, unless it was let go to make
+ * room. False if that file could not be made: this pack, and every one after
+ * it, is then read through gpg each time, as before. A pack that could not be decrypted, or is not
+ * whole, is said so, and what of it could be read is kept.
+ */
+static bool unseal(struct rs_repo_stream *s, uint32_t pack)
+{
+    struct unsealed     *u = &s->unsealed[pack];
+    struct seeks        *t = &s->seeks[pack];
+    char                *path;
+    struct zin           z;
+    struct tee           tee;
+    struct rs_buf        why;
+    size_t               cap = 0;
+    int                  fd;
+    bool                 ok;
+
+    if (u->f)
+    {
+        u->used = ++s->tick;
+        return true;
+    }
+    if (s->unsealed_off)
+    {
+        return false;
+    }
+    memset(&tee, 0, sizeof(tee));
+    tee.to = tmpfile();
+    if (!tee.to)
+    {
+        s->unsealed_off = true;
+        return false;
+    }
+    path = rs_xasprintf("%s/packs/%s.tar.gz", s->r->dir, s->r->packs[pack]);
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    free(path);
+    rs_buf_init(&why);
+    ok = fd >= 0;
+    if (!ok)
+    {
+        rs_buf_addstr(&why, strerror(errno));
+    }
+    ok = ok && zin_open(&z, fd, true, &why);
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+    free(t->at);
+    t->at = NULL;
+    t->n = 0;
+    t->loaded = true;
+    if (ok)
+    {
+        struct rs_tar_reader tr;
+        struct rs_tar_entry  te;
+        uint64_t             begins = 0;
+        int                  more;
+
+        tee.in = z.fd;
+        rs_tar_reader_init(&tr, read_tee, &tee);
+        rs_tar_entry_init(&te);
+        /* Each member's header begins where the one before ends: what came
+         * before it in the file, its data, and the data's padding. */
+        while ((more = rs_tar_next(&tr, &te, &why)) == 1)
+        {
+            const char *p = te.name.data;
+            uint64_t    num = 0;
+
+            if (te.typeflag == '0' && number(&p, te.name.data + te.name.len, &num) && *p == '\0')
+            {
+                if (t->n == cap)
+                {
+                    cap = cap ? cap * 2 : 256;
+                    t->at = rs_xreallocarray(t->at, cap, sizeof(*t->at));
+                }
+                t->at[t->n].member = num;
+                t->at[t->n].offset = begins;
+                t->n++;
+            }
+            begins = tee.off + te.size + (RS_TAR_BLOCK - te.size % RS_TAR_BLOCK) % RS_TAR_BLOCK;
+        }
+        rs_tar_entry_free(&te);
+        ok = more == 0;
+        /* The rest, for gpg and gzip to finish -- and, failing, to say why:
+         * the secret key not there, say, rather than that what came out of
+         * them ended early. */
+        {
+            unsigned char rest[4096];
+            struct rs_buf how;
+
+            while (read(z.fd, rest, sizeof(rest)) > 0)
+            {
+            }
+            rs_buf_init(&how);
+            if (!zin_close(&z, false, &how))
+            {
+                rs_buf_reset(&why);
+                rs_buf_addstr(&why, how.data ? how.data : "");
+                ok = false;
+            }
+            rs_buf_free(&how);
+        }
+    }
+    if (tee.write_errno != 0 || fflush(tee.to) != 0)
+    {
+        /* Not this pack's fault: this machine's temporary files', so no
+         * other is tried either. */
+        (void)fclose(tee.to);
+        free(t->at);
+        t->at = NULL;
+        t->n = 0;
+        t->loaded = false;
+        s->unsealed_off = true;
+        rs_buf_free(&why);
+        return false;
+    }
+    if (!ok)
+    {
+        warn_pack(s, pack, why.data);
+    }
+    rs_buf_free(&why);
+    unsealed_made++;
+    u->f = tee.to;
+    u->bytes = tee.off;
+    u->used = ++s->tick;
+    s->unsealed_bytes += u->bytes;
+    unsealed_room(s, pack);
+    return true;
+}
+
+/* Pack `pack` open from `offset` in its file, where a gzip stream starts --
+ * or, encrypted, from `offset` in the file it was decrypted into. */
 static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pack,
                         uint64_t offset)
 {
-    char         *path = rs_xasprintf("%s/packs/%s.tar.gz", s->r->dir, s->r->packs[pack]);
-    int           fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    char         *path;
+    int           fd;
     struct rs_buf why;
-    bool          ok = fd >= 0;
+    bool          ok;
 
-    rs_buf_init(&why);
     memset(rd, 0, sizeof(*rd));
+    if (s->unsealed && unseal(s, pack))
+    {
+        rd->open = true;
+        rd->pack = pack;
+        rd->unsealed = true;
+        rd->from.fd = fileno(s->unsealed[pack].f);
+        rd->from.off = offset;
+        rs_tar_reader_init(&rd->tr, read_at_fd, &rd->from);
+        rs_tar_entry_init(&rd->te);
+        return true;
+    }
+    path = rs_xasprintf("%s/packs/%s.tar.gz", s->r->dir, s->r->packs[pack]);
+    fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    ok = fd >= 0;
+    rs_buf_init(&why);
     if (!ok)
     {
         rs_buf_addstr(&why, strerror(errno));
@@ -4776,8 +5066,9 @@ static bool open_reader(struct rs_repo_stream *s, struct reader *rd, uint32_t pa
 }
 
 /* The segment of pack `pack` that member `member` is in: its first member
- * and where it begins -- the pack's start, if the pack has no .seek. The
- * .seek of an encrypted repository's pack is not even looked for. */
+ * and where it begins -- the pack's start, if the pack has no .seek. An
+ * encrypted repository's pack has none; where its members begin in the file
+ * it is decrypted into is its .seeks instead, each member a segment. */
 static void segment_of(struct rs_repo_stream *s, uint32_t pack, uint64_t member,
                        uint64_t *first, uint64_t *offset)
 {
@@ -4785,7 +5076,10 @@ static void segment_of(struct rs_repo_stream *s, uint32_t pack, uint64_t member,
     size_t        lo = 0;
     size_t        hi;
 
-    if (!t->loaded && !s->r->encrypted)
+    if (s->unsealed)
+    {
+        (void)unseal(s, pack);
+    } else if (!t->loaded)
     {
         char         *path = rs_xasprintf("%s/packs/%s.seek", s->r->dir, s->r->packs[pack]);
         struct rs_buf text;
@@ -5332,6 +5626,14 @@ bool rs_repo_stream_close(struct rs_repo_stream *s, struct rs_buf *err)
         free(s->seeks[i].at);
     }
     free(s->seeks);
+    for (i = 0; s->unsealed && i < s->r->npacks; i++)
+    {
+        if (s->unsealed[i].f)
+        {
+            (void)fclose(s->unsealed[i].f);
+        }
+    }
+    free(s->unsealed);
     free(s->want);
     free(s->refs);
     free(s->groups);

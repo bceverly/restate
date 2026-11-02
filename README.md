@@ -1312,7 +1312,13 @@ every snapshot and dropping on the way what none of them needs, as prune
 does; `--dry-run` says how many packs it would write, and a repack stopped by
 a signal keeps what it wrote, for the next to go on from. An encrypted
 repository's packs are encrypted whole, and gpg reads one only from its
-start too, so they are written as before and repack refuses one.
+start too, so they are written as before and repack refuses one. A restore,
+or `check --read-all`, decrypts each of them once instead, into a temporary
+file of its own that is read from anywhere: up to 4 GiB of them at a time,
+or a quarter of what is free where temporary files go if that is less, the
+least recently read let go first. A file whose chunks lie in many packs, out
+of order, would otherwise have gpg read a pack again from its start each
+time the read went back into it.
 
 ```console
 $ sudo restate repack --dry-run /mnt/nas/laptop

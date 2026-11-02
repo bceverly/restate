@@ -1652,7 +1652,12 @@ keeping what it has written, and the next repack goes on from there. An
 encrypted repository's packs are encrypted whole, and gpg too reads one only
 from its start: they are written without a
 .IR .seek ,
-and repack refuses one.
+and repack refuses one. A restore, or
+.BR "check \-\-read\-all" ,
+decrypts each such pack once instead, into a temporary file of its own read
+from anywhere in it: up to 4 GiB of them at a time, or a quarter of what is
+free where temporary files go if that is less, the least recently read let go
+first.
 .PP
 .B "restate init \-\-encrypt\-to"
 .I KEYFILE

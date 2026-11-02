@@ -1786,6 +1786,92 @@ static void test_encrypted(const char *dir)
     rs_index_free(&ix);
     rs_repo_close(r);
 
+    TEST_CASE("repo: an encrypted repository's packs decrypted once a read, however often "
+              "it goes back into them");
+    {
+        char           *otree = rs_xasprintf("%s/otree", dir);
+        char           *orepo = rs_xasprintf("%s/orepo", dir);
+        char           *oname = NULL;
+        char           *a = rs_xasprintf("%s/a", otree);
+        char           *b = rs_xasprintf("%s/b", otree);
+        FILE           *in;
+        FILE           *out;
+        struct rs_repo *o;
+        int             k;
+
+        put(otree, "etc/conf", "conf\n", 0644);
+        big_file(otree, "a", 8 * 1024 * 1024, 21);
+        /* b: a's quarters, last first, so its chunks are a's out of order. */
+        in = fopen(a, "r");
+        out = fopen(b, "w");
+        for (k = 3; in && out && k >= 0; k--)
+        {
+            char   chunk[65536];
+            size_t left = 2 * 1024 * 1024;
+
+            (void)fseek(in, (long)k * 2 * 1024 * 1024, SEEK_SET);
+            while (left > 0)
+            {
+                size_t got = fread(chunk, 1, sizeof(chunk), in);
+
+                if (got == 0)
+                {
+                    break;
+                }
+                (void)fwrite(chunk, 1, got, out);
+                left -= got;
+            }
+        }
+        if (in)
+        {
+            (void)fclose(in);
+        }
+        if (out)
+        {
+            (void)fclose(out);
+        }
+        CHECK(rs_repo_init(orepo, true, &err));
+        o = rs_repo_open(orepo, RS_REPO_WRITE, &busy, &err);
+        CHECK(o != NULL);
+        if (o)
+        {
+            uint64_t before;
+            size_t   packs;
+
+            rs_repo_set_recipients(o, recips, 1);
+            CHECK(snap(o, otree, "2026-04-01T00:00:00.000000000Z", NULL, &st, &oname));
+            pattern = rs_xasprintf("'%s'/packs/*.tar.gz", orepo);
+            packs = count(pattern);
+            free(pattern);
+            CHECK(packs >= 4);
+            rs_index_init(&ix);
+            CHECK(rs_repo_load_index(o, oname, &ix, &err));
+            before = rs_repo_unsealed();
+            s = rs_repo_stream_open(o, &ix, NULL, 0, &err);
+            CHECK(read_stream(s, &seen, &err));
+            CHECK(rs_repo_stream_close(s, &err));
+            CHECK_INT(matching(&ix, seen.data), 3);
+            CHECK(rs_repo_unsealed() - before <= packs);
+            CHECK(rs_repo_unsealed() - before > 0);
+            rs_buf_reset(&seen);
+            /* Room for one at a time: each let go as the next is read. */
+            rs_repo_set_unsealed_bytes(1);
+            s = rs_repo_stream_open(o, &ix, NULL, 0, &err);
+            CHECK(read_stream(s, &seen, &err));
+            CHECK(rs_repo_stream_close(s, &err));
+            CHECK_INT(matching(&ix, seen.data), 3);
+            rs_repo_set_unsealed_bytes(0);
+            rs_buf_reset(&seen);
+            rs_index_free(&ix);
+            rs_repo_close(o);
+        }
+        free(oname);
+        free(a);
+        free(b);
+        free(otree);
+        free(orepo);
+    }
+
     TEST_CASE("repo: captured into, and pruned, without the secret key");
     (void)setenv("GNUPGHOME", empty, 1);
     rs_quiet = true;
