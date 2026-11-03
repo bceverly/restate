@@ -954,11 +954,21 @@ jobs:
           name: srpm
           path: srpm
 
+      # The lock file alone: nothing else of the tree is wanted here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          path: src
+          sparse-checkout: .github/requirements/copr.txt
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Install copr-cli
         run: |
           set -eu
-          # rich is a dependency copr-cli does not declare.
-          pip3 install --user --quiet copr-cli rich
+          # Every package pinned by hash: see the file for how it is made.
+          python3 -m pip install --user --quiet --require-hashes \
+            -r src/.github/requirements/copr.txt
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # printf, not a heredoc through sed: a token can hold a '/'.
