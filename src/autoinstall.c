@@ -668,6 +668,14 @@ static void storage(struct gen *g)
         {
             continue;
         }
+        /* A disk wholly another's -- a ZFS pool's -- is not named at all:
+         * curtin then never touches it. */
+        if (rs_layout_disk_left(&g->l, d))
+        {
+            rs_buf_addf(g->out, "      # %s: %s, left alone\n", g->l.disks[d].name,
+                        rs_layout_disk_left(&g->l, d));
+            continue;
+        }
         put_disk(g, d);
         put_partitions(g, d);
     }
@@ -1650,7 +1658,7 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     for (i = 0; i < g.l.nvols; i++)
     {
         if (g.l.vols[i].foreign && g.l.vols[i].kind == RS_VOL_PART && o->target == RS_TARGET_SAME &&
-            !g.l.disks[g.l.vols[i].disk].removable)
+            !g.l.disks[g.l.vols[i].disk].removable && !rs_layout_disk_left(&g.l, g.l.vols[i].disk))
         {
             g.keep_table = true;
         }

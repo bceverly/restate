@@ -343,8 +343,9 @@ Commands:
                           repository's signed index, into a cache that restore
                           --packages installs from
   buildsheet [IMAGE]      write a plain-text runbook to rebuild this machine,
-                          or the one IMAGE was taken from: disks, encryption,
-                          LVM, filesystems, installer, restore
+                          or the one IMAGE (or a snapshot in a repository) was
+                          taken from: disks, encryption, LVM, filesystems,
+                          installer, restore
   autoinstall [IMAGE]     write an Ubuntu autoinstall file that rebuilds this
                           machine, or the one IMAGE was taken from, unattended:
                           storage, locale, network, identity
@@ -915,6 +916,11 @@ Another operating system's partitions -- Windows, BitLocker, macOS, VeraCrypt
 -- are never formatted. For the same machine, both keep them, and the EFI
 partition they boot from, in place.
 
+A disk with no Linux volume on it -- a ZFS pool's, on a storage host -- is
+never wiped, on any target: the build sheet prints no `wipefs` or `sfdisk` for
+it and the autoinstall file leaves it out, so after the system disk fails the
+pool is still there for `zpool import`.
+
 `--firmware uefi` or `--firmware bios`, with either target, changes how the
 rebuilt machine boots: the partition the new mode needs replaces the old
 one's on the disk it boots from -- an EFI system partition (512 MiB, mounted
@@ -959,8 +965,16 @@ with `dasdfmt` and partitioned with `fdasd` in its own volume table, and a
 SCSI disk reached through an FCP adapter (zFCP) by that adapter, its WWPN and
 its LUN. The build sheet brings each online (`chzdev`) before partitioning it.
 
+A build sheet can also be made from a snapshot where it is, in its
+repository: `restate buildsheet /var/backups/web01` for the newest, or
+`/var/backups/web01::NAME` for another. Its commands unpack an image's file,
+so the sheet starts with the `restate export` that makes it, for that exact
+snapshot. An autoinstall file, which runs unattended, is still made from an
+exported image.
+
 ```console
 $ restate buildsheet web01.tar -o web01-rebuild.txt
+$ restate buildsheet /var/backups/web01 -o web01-rebuild.txt
 $ restate autoinstall --target vm web01.tar -o user-data
 $ restate buildsheet --target metal --firmware uefi old-bios-box.tar -o new-box.txt
 $ restate buildsheet --target vm --arch arm64 web01.tar -o web01-on-arm.txt
@@ -1316,9 +1330,12 @@ start too, so they are written as before and repack refuses one. A restore,
 or `check --read-all`, decrypts each of them once instead, into a temporary
 file of its own that is read from anywhere: up to 4 GiB of them at a time,
 or a quarter of what is free where temporary files go if that is less, the
-least recently read let go first. A file whose chunks lie in many packs, out
-of order, would otherwise have gpg read a pack again from its start each
-time the read went back into it.
+least recently read let go first. A pack is kept only while a chunk still to
+be read is in it, so a read that goes forward through the repository -- the
+usual case -- holds one or two at a time, which matters where `/tmp` is in
+memory. A file whose chunks lie in many packs, out of order, would otherwise
+have gpg read a pack again from its start each time the read went back into
+it.
 
 ```console
 $ sudo restate repack --dry-run /mnt/nas/laptop
@@ -1337,8 +1354,10 @@ that was written wrong, or a file someone removed. (`--metadata-only` checks
 without reading any index, so without any key -- see [Storage on a file
 server](#storage-on-a-file-server).) `--read-all` goes on to read
 every snapshot in full exactly as a restore would, each file checked against
-its index, writing nothing: a test restore of every snapshot. Run both on a
-schedule, with `--syslog`:
+its index, writing nothing: a test restore of every snapshot. Content an
+earlier snapshot of the same run was found right with -- the same digest -- is
+not read again, so after the first snapshot only what changed is read. Run
+both on a schedule, with `--syslog`:
 
 ```console
 $ restate check --read-all /var/backups/web01

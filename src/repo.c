@@ -4452,7 +4452,8 @@ struct seeks {
  * own, with where each member begins (its .seeks): gpg reads a pack only
  * from its start, and a file whose chunks are in several packs, or a chunk
  * more than one file has, sends the stream back into one it has read past.
- * Kept until they come to UNSEALED_BYTES, then the least recently read goes.
+ * Kept while a chunk still to come is in it (last_uses), and never more than
+ * UNSEALED_BYTES of them: past that, the least recently read goes.
  */
 struct unsealed {
     FILE    *f;
@@ -4525,8 +4526,17 @@ struct rs_repo_stream {
     struct seeks          *seeks;     /* per pack */
     struct unsealed       *unsealed;  /* per pack, in an encrypted repository */
     uint64_t               unsealed_bytes;
+    uint64_t               unsealed_n;    /* how many are held */
     uint64_t               unsealed_max;
     bool                   unsealed_off;  /* no room for them: read through gpg */
+    /* In an encrypted repository: where each group's chunks begin among all
+     * the chunks the stream reads, in order; per pack, one more than where
+     * the last chunk read from it is, 0 for none; and the packs in that
+     * order, let go as the stream passes them (`done` of them so far). */
+    size_t                *first_chunk;
+    size_t                *last_use;
+    uint32_t              *by_last;
+    uint32_t               done;
     /* The content being made: its next chunk, and the chunk being read. */
     const struct group    *g;
     size_t                 ci;
@@ -4642,10 +4652,19 @@ static bool included(const char *path, const char *const *include, size_t ninclu
 
 static uint64_t unsealed_set;
 static uint64_t unsealed_made;
+static uint64_t unsealed_most;
 
 uint64_t rs_repo_unsealed(void)
 {
     return unsealed_made;
+}
+
+uint64_t rs_repo_unsealed_most(void)
+{
+    uint64_t most = unsealed_most;
+
+    unsealed_most = 0;
+    return most;
 }
 
 void rs_repo_set_unsealed_bytes(uint64_t bytes)
@@ -4670,17 +4689,72 @@ static uint64_t unsealed_budget(void)
     return max;
 }
 
+/* For sorting packs by their last use. */
+static const size_t *last_of;
+
+static int by_last_use(const void *a, const void *b)
+{
+    size_t x = last_of[*(const uint32_t *)a];
+    size_t y = last_of[*(const uint32_t *)b];
+
+    return x < y ? -1 : x > y;
+}
+
+/*
+ * Where the stream is done with each pack: the last chunk it reads from it.
+ * A decrypted pack is kept only while a chunk still to come is in it -- a
+ * repository read forward holds one or two at a time, however many it has,
+ * and however large a file -- and the budget is for the ones read again.
+ */
+static void last_uses(struct rs_repo_stream *s)
+{
+    size_t   i;
+    size_t   at = 0;
+    uint32_t p;
+
+    s->first_chunk = rs_xcalloc(s->ngroups + 1, sizeof(*s->first_chunk));
+    s->last_use = rs_xcalloc(s->r->npacks + 1, sizeof(*s->last_use));
+    s->by_last = rs_xcalloc(s->r->npacks + 1, sizeof(*s->by_last));
+    for (i = 0; i < s->ngroups; i++)
+    {
+        const struct group *g = &s->groups[i];
+        size_t              c;
+
+        s->first_chunk[i] = at;
+        for (c = 0; c < g->n; c++, at++)
+        {
+            const struct obj *o = map_find(&s->r->objects, chunk_of(g, c));
+
+            if (o && o->pack < s->r->npacks)
+            {
+                s->last_use[o->pack] = at + 1;
+            }
+        }
+    }
+    for (p = 0; p < s->r->npacks; p++)
+    {
+        s->by_last[p] = p;
+    }
+    last_of = s->last_use;
+    if (s->r->npacks > 1)
+    {
+        qsort(s->by_last, s->r->npacks, sizeof(*s->by_last), by_last_use);
+    }
+    last_of = NULL;
+}
+
 struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_index *ix,
                                            const char *const *only, size_t nonly,
                                            struct rs_buf *err)
 {
-    return rs_repo_stream_open_matching(r, ix, only, nonly, NULL, 0, err);
+    return rs_repo_stream_open_matching(r, ix, only, nonly, NULL, 0, NULL, err);
 }
 
 struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const struct rs_index *ix,
                                                     const char *const *only, size_t nonly,
                                                     const char *const *include,
-                                                    size_t ninclude, struct rs_buf *err)
+                                                    size_t ninclude, const bool *skip,
+                                                    struct rs_buf *err)
 {
     struct rs_repo_stream *s = rs_xcalloc(1, sizeof(*s));
     size_t                 i;
@@ -4696,7 +4770,8 @@ struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const str
         const struct rs_entry *e = &ix->entries[i];
 
         s->want[i] = e->stored && (!only || rs_image_in_list(e->path, only, nonly)) &&
-                     (e->type != 'f' || included(e->path, include, ninclude));
+                     (e->type != 'f' || included(e->path, include, ninclude)) &&
+                     !(e->type == 'f' && skip && skip[i]);
         if (s->want[i] && e->type == 'f' && e->hash_state == RS_HASH_PRESENT)
         {
             memcpy(s->refs[s->nrefs].hash, e->hash, RS_SHA256_HEX_SIZE);
@@ -4751,6 +4826,7 @@ struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const str
     {
         s->unsealed = rs_xcalloc(r->npacks + 1, sizeof(*s->unsealed));
         s->unsealed_max = unsealed_budget();
+        last_uses(s);
     }
     rs_buf_init(&s->out);
     rs_buf_init(&s->err);
@@ -4875,7 +4951,37 @@ static void unsealed_room(struct rs_repo_stream *s, uint32_t keep)
         (void)fclose(old->f);
         old->f = NULL;
         s->unsealed_bytes -= old->bytes;
+        s->unsealed_n--;
         old->bytes = 0;
+    }
+}
+
+/* The decrypted packs no chunk from `next` on (of last_uses' count) is in,
+ * let go -- with any reader still open on one, done with it too. */
+static void unsealed_done(struct rs_repo_stream *s, size_t next)
+{
+    while (s->by_last && s->done < s->r->npacks && s->last_use[s->by_last[s->done]] <= next)
+    {
+        uint32_t         p = s->by_last[s->done++];
+        struct unsealed *u = &s->unsealed[p];
+        size_t           i;
+
+        if (!u->f)
+        {
+            continue;
+        }
+        for (i = 0; i < READERS; i++)
+        {
+            if (s->readers[i].open && s->readers[i].unsealed && s->readers[i].pack == p)
+            {
+                close_reader(&s->readers[i]);
+            }
+        }
+        (void)fclose(u->f);
+        u->f = NULL;
+        s->unsealed_bytes -= u->bytes;
+        s->unsealed_n--;
+        u->bytes = 0;
     }
 }
 
@@ -5007,7 +5113,12 @@ static bool unseal(struct rs_repo_stream *s, uint32_t pack)
     u->bytes = tee.off;
     u->used = ++s->tick;
     s->unsealed_bytes += u->bytes;
+    s->unsealed_n++;
     unsealed_room(s, pack);
+    if (s->unsealed_n > unsealed_most)
+    {
+        unsealed_most = s->unsealed_n;
+    }
     return true;
 }
 
@@ -5333,6 +5444,11 @@ static ssize_t content_read(struct rs_repo_stream *s, unsigned char *buf, size_t
                 s->content_left -= want;
                 continue;
             }
+            if (s->first_chunk)
+            {
+                /* What only the chunks before this one were in is done with. */
+                unsealed_done(s, s->first_chunk[(size_t)(s->g - s->groups)] + s->ci);
+            }
             start_chunk(s, chunk_of(s->g, s->ci++));
             continue;
         }
@@ -5634,6 +5750,9 @@ bool rs_repo_stream_close(struct rs_repo_stream *s, struct rs_buf *err)
         }
     }
     free(s->unsealed);
+    free(s->first_chunk);
+    free(s->last_use);
+    free(s->by_last);
     free(s->want);
     free(s->refs);
     free(s->groups);

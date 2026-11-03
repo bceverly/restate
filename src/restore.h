@@ -83,6 +83,11 @@ struct rs_restore_opts {
      * that a package installed, is left as this machine's package has it:
      * the package is this processor's build, and the image's would not run. */
     const char        *arch;
+    /* Per index entry, or NULL: a file whose content this run has read whole
+     * already, and found as the index says -- check --read-all, reading each
+     * content once over every snapshot. Not read again, and counted as
+     * known; only a snapshot in a repository leaves it out of the stream. */
+    const bool        *known;
 };
 
 struct rs_restore_stats {
@@ -95,6 +100,7 @@ struct rs_restore_stats {
     uint64_t bytes;
     uint64_t excluded;
     uint64_t identity;    /* left out by o->leave */
+    uint64_t known;       /* files not read, o->known: read whole already */
     uint64_t refused;     /* not in the index, or not what it says */
     uint64_t failed;      /* could not be written */
     uint64_t missing;     /* the index says stored; the image does not have it */

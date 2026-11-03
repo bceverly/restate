@@ -2704,14 +2704,74 @@ int rs_cmd_protect(const struct rs_options *o)
  * given. How many files were not what the index says, or not there, into
  * *bad; false if it could not be read at all.
  */
+/*
+ * The contents check --read-all has read whole and found right, by digest,
+ * sorted: each is read once, in the first snapshot that has it, however many
+ * snapshots after it have it too. Successive snapshots share nearly all
+ * their content, so the snapshots after the first read only what changed.
+ */
+struct known_set {
+    char  (*d)[RS_SHA256_HEX_SIZE];
+    size_t n;
+};
+
+static int by_digest(const void *a, const void *b)
+{
+    return strcmp(a, b);
+}
+
+static bool known_has(const struct known_set *k, const char *hash)
+{
+    return k->n > 0 && bsearch(hash, k->d, k->n, sizeof(*k->d), by_digest) != NULL;
+}
+
+/* The files of `ix` that were read whole and right, added; `known` the ones
+ * that already were. */
+static void known_add(struct known_set *k, const struct rs_index *ix, const bool *known)
+{
+    size_t i;
+    size_t j;
+    size_t add = 0;
+
+    for (i = 0; i < ix->count; i++)
+    {
+        add += ix->entries[i].type == 'f' && ix->entries[i].stored &&
+               ix->entries[i].hash_state == RS_HASH_PRESENT && !known[i];
+    }
+    if (add == 0)
+    {
+        return;
+    }
+    k->d = rs_xreallocarray(k->d, k->n + add, sizeof(*k->d));
+    for (i = 0; i < ix->count; i++)
+    {
+        const struct rs_entry *e = &ix->entries[i];
+
+        if (e->type == 'f' && e->stored && e->hash_state == RS_HASH_PRESENT && !known[i])
+        {
+            memcpy(k->d[k->n++], e->hash, RS_SHA256_HEX_SIZE);
+        }
+    }
+    qsort(k->d, k->n, sizeof(*k->d), by_digest);
+    for (i = 0, j = 0; i < k->n; i++)
+    {
+        if (j == 0 || strcmp(k->d[i], k->d[j - 1]) != 0)
+        {
+            memmove(k->d[j++], k->d[i], RS_SHA256_HEX_SIZE);
+        }
+    }
+    k->n = j;
+}
+
 static bool read_snapshot(const struct rs_options *o, const char *ref, const char *empty,
-                          uint64_t *files, uint64_t *bad)
+                          uint64_t *files, uint64_t *bad, struct known_set *k)
 {
     struct rs_index         ix;
     struct rs_restore_opts  ro;
     struct rs_restore_stats st;
     struct rs_buf           err;
     struct trust            tr;
+    bool                   *known = NULL;
     bool                    ok;
 
     memset(&tr, 0, sizeof(tr));
@@ -2725,19 +2785,37 @@ static bool read_snapshot(const struct rs_options *o, const char *ref, const cha
          (o->ntrusted == 0 || trust_matches(o, ref, &tr, &ix) == RESTATE_EXIT_OK);
     if (ok)
     {
+        size_t i;
+
+        known = rs_xcalloc(ix.count + 1, sizeof(*known));
+        for (i = 0; i < ix.count; i++)
+        {
+            const struct rs_entry *e = &ix.entries[i];
+
+            known[i] = e->type == 'f' && e->stored && e->hash_state == RS_HASH_PRESENT &&
+                       known_has(k, e->hash);
+        }
         memset(&ro, 0, sizeof(ro));
         ro.root = empty;
         ro.dry_run = true;
         ro.quiet = true;
         ro.numeric_owner = true;
+        ro.known = known;
         ok = rs_restore(ref, &ix, &ro, &st, &err);
-        *files += st.files;
+        *files += st.files + st.known;
         *bad += st.refused + st.missing;
+        /* Only from a snapshot read whole and right: one that was not is
+         * read again whole by the next, and each counts what it finds. */
+        if (ok && st.refused + st.missing == 0)
+        {
+            known_add(k, &ix, known);
+        }
     }
     if (!ok && err.len > 0)
     {
         rs_warn("%s", err.data);
     }
+    free(known);
     rs_index_free(&ix);
     rs_buf_free(&err);
     return ok;
@@ -2828,10 +2906,12 @@ int rs_cmd_check(const struct rs_options *o)
         /* Where the snapshots are restored to, in a dry run: an empty
          * directory only this run knows, under /tmp as restate's others are,
          * never where the environment says. */
-        char   empty[] = "/tmp/restate-check.XXXXXX";
-        char **names = rs_repo_snapshots(r, &n);
-        size_t i;
+        char             empty[] = "/tmp/restate-check.XXXXXX";
+        char           **names = rs_repo_snapshots(r, &n);
+        struct known_set known;
+        size_t           i;
 
+        memset(&known, 0, sizeof(known));
         if (!mkdtemp(empty))
         {
             rs_error("%s: %s", empty, strerror(errno));
@@ -2842,7 +2922,8 @@ int rs_cmd_check(const struct rs_options *o)
             char    *ref = rs_xasprintf("%s" RS_REPO_SEP "%s", o->args[0], names[i]);
             uint64_t before = read_bad;
 
-            if (!read_snapshot(o, ref, empty, &read_files, &read_bad) || read_bad > before)
+            if (!read_snapshot(o, ref, empty, &read_files, &read_bad, &known) ||
+                read_bad > before)
             {
                 unread++;
             }
@@ -2852,6 +2933,7 @@ int rs_cmd_check(const struct rs_options *o)
         {
             (void)rmdir(empty);
         }
+        free(known.d);
         rs_repo_free_names(names, n);
     }
     rs_repo_close(r);
@@ -5680,9 +5762,10 @@ int rs_cmd_baseline(const struct rs_options *o)
 }
 
 /*
- * Whether the build files can be made from `image`: not from a snapshot in a
- * repository, which is no file their commands could unpack -- it is exported
- * as an image first, and they are made from that.
+ * Whether an autoinstall file can be made from `image`: not from a snapshot
+ * in a repository, which is no file its unattended commands could unpack --
+ * it is exported as an image first, and the file made from that. (A build
+ * sheet says how to export it, and is made from the snapshot.)
  */
 static bool from_a_file(const char *image)
 {
@@ -5693,12 +5776,59 @@ static bool from_a_file(const char *image)
     {
         return true;
     }
-    rs_error("%s is a snapshot in a repository, and the commands a build sheet or autoinstall "
-             "file writes unpack an image's file: export it first (restate export %s -o "
-             "FILE.tar), and make them from that", image, image);
+    rs_error("%s is a snapshot in a repository, and the commands an autoinstall file writes "
+             "unpack an image's file: export it first (restate export %s -o FILE.tar), and "
+             "make it from that", image, image);
     free(dir);
     free(name);
     return false;
+}
+
+/*
+ * A build sheet's snapshot, named exactly -- a repository alone means its
+ * newest, which is resolved now, so that the image exported for the sheet is
+ * the snapshot it describes: "REPO::NAME" into *exact, and the image's file,
+ * "NAME.tar", into *file, both the caller's to free, and whether the
+ * repository is encrypted into *sealed. Not a snapshot: true,
+ * both NULL. No such snapshot: false, having said why.
+ */
+static bool snapshot_exact(const char *image, char **exact, char **file, bool *sealed)
+{
+    char           *dir;
+    char           *name;
+    char           *found = NULL;
+    struct rs_repo *r;
+    struct rs_buf   err;
+    bool            busy;
+
+    *exact = NULL;
+    *file = NULL;
+    *sealed = false;
+    if (!image || !rs_repo_ref(image, &dir, &name))
+    {
+        return true;
+    }
+    *sealed = rs_repo_dir_encrypted(dir);
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_LOOK, &busy, &err);
+    if (r)
+    {
+        found = rs_repo_resolve(r, name, &err);
+    }
+    if (found)
+    {
+        *exact = rs_xasprintf("%s::%s", dir, found);
+        *file = rs_xasprintf("%s.tar", found);
+    } else
+    {
+        rs_error("%s", err.data ? err.data : image);
+    }
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    free(found);
+    free(dir);
+    free(name);
+    return *exact != NULL;
 }
 
 /* The --target option as the layout spells it. */
@@ -5879,18 +6009,26 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     char                *keyring = NULL;
     char                *created = NULL;
     char                *snapshot;
+    char                *exact;
+    char                *file;
+    bool                 sealed;
     bool                 ok;
 
-    if (!from_a_file(image) || !firmware_ok(o))
+    /* A snapshot in a repository is read where it is; the sheet says how to
+     * export it as the image its commands unpack. */
+    if (!firmware_ok(o) || !snapshot_exact(image, &exact, &file, &sealed))
     {
         return RESTATE_EXIT_TROUBLE;
     }
-    if (!machine_for(o, image, &machine, &packages, &old_image, &knows, &created) ||
+    if (!machine_for(o, exact ? exact : image, &machine, &packages, &old_image, &knows,
+                     &created) ||
         !retarget(o, &machine, &firmware) || !trust_for(o, knows, false, &trust, &keyring))
     {
         rs_jval_free(&machine);
         rs_jval_free(&packages);
         free(created);
+        free(exact);
+        free(file);
         return RESTATE_EXIT_TROUBLE;
     }
     snapshot = o->exact_versions ? rs_repo_snapshot_name(created) : NULL;
@@ -5900,7 +6038,9 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     so.old_image = old_image;
     so.target = target_of(o);
     so.firmware = firmware;
-    so.image = image;
+    so.image = file ? file : image;
+    so.export_from = exact;
+    so.export_sealed = sealed;
     so.version = RESTATE_VERSION;
     so.packages = packages.type == RS_JOBJECT ? &packages : NULL;
     rs_buf_init(&text);
@@ -5912,6 +6052,8 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     free(keyring);
     free(created);
     free(snapshot);
+    free(exact);
+    free(file);
     if (!ok)
     {
         rs_error("%s", err.data);

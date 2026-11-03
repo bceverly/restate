@@ -170,10 +170,13 @@ bool rs_image_open_files(const char *path, struct rs_image_stream *s, struct rs_
  * What is not covered may still be in the stream, as an image file's always
  * is, for the reader to pass over; every directory, symlink and FIFO is.
  * `ix`, if not NULL, is the snapshot's index, read already -- and held, as it
- * is, until the stream is closed -- so that it is not read again. */
+ * is, until the stream is closed -- so that it is not read again. `skip`, if
+ * not NULL, is per entry of `ix`: a file a snapshot's stream leaves out, its
+ * content read already (an image file's is there to pass over). */
 bool rs_image_open_files_matching(const char *path, const struct rs_index *ix,
                                   const char *const *include, size_t ninclude,
-                                  struct rs_image_stream *s, struct rs_buf *err);
+                                  const bool *skip, struct rs_image_stream *s,
+                                  struct rs_buf *err);
 /* The kit, the same way; an image from before 1.1 has none. */
 bool rs_image_open_kit(const char *path, const struct rs_index *ix, struct rs_image_stream *s,
                        struct rs_buf *err);

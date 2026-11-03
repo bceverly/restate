@@ -243,11 +243,13 @@ struct rs_repo_stream *rs_repo_stream_open(struct rs_repo *r, const struct rs_in
 /* The same, with only the files `include`'s patterns cover (rs_glob_covers)
  * read from the packs, and none when `ninclude` is 0 means every file; every
  * directory, symlink and FIFO is in the stream whatever the patterns, so the
- * ones above a file are there to be put back with it. */
+ * ones above a file are there to be put back with it. `skip`, if not NULL,
+ * is per entry of `ix`: a file not sent at all, its content read already. */
 struct rs_repo_stream *rs_repo_stream_open_matching(struct rs_repo *r, const struct rs_index *ix,
                                                     const char *const *only, size_t nonly,
                                                     const char *const *include,
-                                                    size_t ninclude, struct rs_buf *err);
+                                                    size_t ninclude, const bool *skip,
+                                                    struct rs_buf *err);
 /* Up to `n` bytes of the stream: how many, 0 at its end, -1 on an error. */
 ssize_t rs_repo_stream_read(struct rs_repo_stream *s, void *buf, size_t n);
 /* True if every pack read was read cleanly. */
@@ -561,6 +563,9 @@ void rs_repo_set_segment_size(uint64_t bytes);
 void rs_repo_set_unsealed_bytes(uint64_t bytes);
 /* How many encrypted packs reads have decrypted into such files, so far. */
 uint64_t rs_repo_unsealed(void);
+/* The most of them one read has held at once since this was last asked; for
+ * the tests, as the others. */
+uint64_t rs_repo_unsealed_most(void);
 /* With `always`, what restate makes in a repository is given the owner and
  * group of the directory it is made in as it is when run as root, for the
  * unit tests' benefit: they are not root. Nothing in restate itself calls it. */

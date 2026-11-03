@@ -12,8 +12,12 @@
 #include "cmd.h"
 #include "image.h"
 #include "index.h"
+#include "json.h"
 #include "mounts.h"
 #include "repo.h"
+#include "restore.h"
+#include "rules.h"
+#include "scan.h"
 #include "test.h"
 
 static int run(const void *arg)
@@ -59,6 +63,125 @@ static void run_done(void)
     free(err_text);
     out_text = NULL;
     err_text = NULL;
+}
+
+/* A snapshot of `root` with a machine description, as a capture of a
+ * machine's own root has, into the repository `repo`; its name, to free. */
+static char *snapshot_with_machine(const char *repo, const char *root, const char *machine)
+{
+    static const char *const kit[] = { "/etc/" };
+    struct rs_rules          rules;
+    struct rs_scan_opts      so;
+    struct rs_scan_stats     st;
+    struct rs_index          ix;
+    struct rs_repo          *r;
+    struct rs_repo_writer   *w;
+    struct rs_repo_written   done;
+    struct rs_json_parser    jp;
+    struct rs_buf            err;
+    bool                     busy;
+    char                    *name = NULL;
+
+    rs_rules_init(&rules);
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    memset(&so, 0, sizeof(so));
+    memset(&st, 0, sizeof(st));
+    CHECK(rs_repo_init(repo, false, &err));
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    w = r ? rs_repo_writer_begin(r, &err) : NULL;
+    if (w)
+    {
+        rs_repo_writer_kit(w, kit, 1);
+        so.root = root;
+        so.rules = &rules;
+        so.hash = true;
+        so.store = rs_repo_store;
+        so.store_ctx = w;
+        so.have = rs_repo_have;
+        CHECK(rs_scan(&so, &ix, &st, &err));
+        ix.created = rs_xstrdup("2026-11-03T12:00:00Z");
+        ix.root = rs_xstrdup("/");
+        ix.host = rs_xstrdup("store");
+        ix.version = rs_xstrdup(RESTATE_VERSION);
+        ix.content = rs_xstrdup("state");
+        ix.hashed = true;
+        rs_json_init(&jp, machine, strlen(machine), &err);
+        CHECK(rs_json_value(&jp, &ix.machine));
+        CHECK(rs_repo_writer_finish(w, &ix, NULL, &done, &err));
+        name = done.name;
+    }
+    CHECK_STR(err.data ? err.data : "", "");
+    rs_repo_close(r);
+    rs_index_free(&ix);
+    rs_rules_free(&rules);
+    rs_buf_free(&err);
+    return name;
+}
+
+/* A build sheet made from a snapshot where it is, in its repository: it says
+ * how to export the image its commands unpack. */
+static void buildsheet_snapshot_cases(const char *root, const char *work)
+{
+    static const char machine[] =
+        "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"hostname\": \"store\"},"
+        " \"firmware\": {\"mode\": \"uefi\"},"
+        " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": \"gpt\"},"
+        "   \"partitions\": [{\"name\": \"vda1\", \"number\": 1, \"start\": 1048576,"
+        "     \"size\": 20000000000, \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+        "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"r\"}}]},"
+        "  {\"name\": \"vdb\", \"size\": 107374182400, \"table\": {\"type\": \"gpt\"},"
+        "   \"partitions\": [{\"name\": \"vdb1\", \"number\": 1, \"start\": 1048576,"
+        "     \"size\": 107355308032, \"type\": \"6a898cc3-1dd2-11b2-99a6-080020736631\","
+        "     \"content\": {\"type\": \"zfs_member\", \"usage\": \"filesystem\"}}]}],"
+        " \"fstab\": [{\"spec\": \"UUID=r\", \"file\": \"/\", \"type\": \"ext4\"}]}";
+    char             *repo = rs_xasprintf("%s/sheetrepo", work);
+    char             *name = snapshot_with_machine(repo, root, machine);
+    char             *ref = rs_xasprintf("%s::%s", repo, name ? name : "");
+    char             *want;
+    char             *args[1];
+    struct rs_options o;
+
+    TEST_CASE("cmd: buildsheet from a repository, for its newest snapshot");
+    memset(&o, 0, sizeof(o));
+    o.command = CMD_BUILDSHEET;
+    args[0] = repo;
+    o.args = args;
+    o.nargs = 1;
+    CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+    want = rs_xasprintf("restate export %s -o %s.tar", ref, name ? name : "");
+    CHECK_CONTAINS(out_text, want);
+    free(want);
+    want = rs_xasprintf("Made by    restate %s from %s", RESTATE_VERSION, ref);
+    CHECK_CONTAINS(out_text, want);
+    free(want);
+    CHECK_CONTAINS(out_text, "# $DISK2 (was vdb): ZFS, left alone");
+    CHECK(strstr(out_text, "--decrypt-with") == NULL);
+
+    TEST_CASE("cmd: buildsheet from a named snapshot");
+    args[0] = ref;
+    CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+    want = rs_xasprintf("%s.tar", name ? name : "");
+    CHECK_CONTAINS(out_text, want);
+    free(want);
+
+    TEST_CASE("cmd: buildsheet from a snapshot that is not there");
+    want = rs_xasprintf("%s::19990101T000000Z", repo);
+    args[0] = want;
+    CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+    CHECK_CONTAINS(err_text, "19990101T000000Z");
+    free(want);
+
+    TEST_CASE("cmd: autoinstall from a snapshot still asks for an image");
+    o.command = CMD_AUTOINSTALL;
+    args[0] = ref;
+    CHECK_INT(run_cmd(&o), RESTATE_EXIT_TROUBLE);
+    CHECK_CONTAINS(err_text, "export it first");
+
+    free(ref);
+    free(name);
+    free(repo);
 }
 
 void test_cmd(void)
@@ -527,6 +650,91 @@ void test_cmd(void)
         free(repo);
         free(result);
         free(record);
+    }
+
+    buildsheet_snapshot_cases(root, work);
+
+    TEST_CASE("cmd: check --read-all reads each content once over the snapshots");
+    {
+        char             *repo = rs_xasprintf("%s/allrepo", work);
+        char             *ref;
+        char            **names;
+        size_t            n = 0;
+        struct rs_repo   *r;
+        struct rs_index   ix;
+        struct rs_buf     err;
+        bool              busy;
+        bool             *known;
+        size_t            i;
+        size_t            files = 0;
+
+        rs_buf_init(&err);
+        CHECK(rs_repo_init(repo, false, &err));
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CAPTURE;
+        o.root = root;
+        o.os = "linux";
+        o.output = repo;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        (void)setenv("SOURCE_DATE_EPOCH", "1700000100", 1);
+        rs_test_write(root, "etc/new", "two\n", 0644);
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        (void)setenv("SOURCE_DATE_EPOCH", "1700000000", 1);
+        memset(&o, 0, sizeof(o));
+        o.command = CMD_CHECK;
+        args[0] = repo;
+        o.args = args;
+        o.nargs = 1;
+        o.read_all = true;
+        CHECK_INT(run_cmd(&o), RESTATE_EXIT_OK);
+        /* Every file of both counted, though the second's unchanged ones
+         * are not read again (below). */
+        CHECK_CONTAINS(err_text, "read 2 snapshots in full, as restore would: ");
+        CHECK_CONTAINS(err_text, " files, 0 not as their indexes say");
+
+        /* What restore makes of it: the files known left out, and counted. */
+        r = rs_repo_open(repo, RS_REPO_LOOK, &busy, &err);
+        names = r ? rs_repo_snapshots(r, &n) : NULL;
+        CHECK_INT(n, 2);
+        rs_repo_close(r);
+        rs_index_init(&ix);
+        ref = rs_xasprintf("%s::%s", repo, n ? names[n - 1] : "");
+        CHECK(rs_index_load(&ix, ref, &err));
+        known = rs_xcalloc(ix.count + 1, sizeof(*known));
+        for (i = 0; i < ix.count; i++)
+        {
+            known[i] = ix.entries[i].type == 'f' && strcmp(ix.entries[i].path, "/etc/new") != 0;
+            files += known[i];
+        }
+        {
+            struct rs_restore_opts  ro;
+            struct rs_restore_stats rst;
+            char                   *empty = rs_test_tmpdir();
+
+            memset(&ro, 0, sizeof(ro));
+            memset(&rst, 0, sizeof(rst));
+            ro.root = empty;
+            ro.dry_run = true;
+            ro.quiet = true;
+            ro.numeric_owner = true;
+            ro.known = known;
+            CHECK(rs_restore(ref, &ix, &ro, &rst, &err));
+            CHECK_INT(rst.known, files);
+            CHECK_INT(rst.files, 1);
+            CHECK_INT(rst.missing, 0);
+            CHECK_INT(rst.refused, 0);
+            rs_test_rmtree(empty);
+            free(empty);
+        }
+        free(known);
+        free(ref);
+        rs_index_free(&ix);
+        rs_repo_free_names(names, n);
+        rs_buf_free(&err);
+        ref = rs_xasprintf("%s/etc/new", root);
+        (void)unlink(ref);
+        free(ref);
+        free(repo);
     }
 
     TEST_CASE("cmd: no command is trouble");

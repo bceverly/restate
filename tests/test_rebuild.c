@@ -232,6 +232,51 @@ static const char dual_json[] =
     "            {\"spec\": \"UUID=AAAA-BBBB\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
     "}";
 
+/* A storage host: the system on one disk, a whole-disk ZFS pool on another
+ * (zpool create's layout: the pool, then the reserved partition 9). */
+static const char zfs_json[] =
+    "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"architecture\": \"x86_64\","
+    "   \"type\": \"server\", \"hostname\": \"store\"},"
+    " \"firmware\": {\"mode\": \"uefi\"},"
+    " \"disks\": [{\"name\": \"vda\", \"size\": 21474836480, \"table\": {\"type\": \"gpt\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"vda1\", \"number\": 1, \"start\": 1048576, \"size\": 1073741824,"
+    "     \"type\": \"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\","
+    "     \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\", \"uuid\": \"ESP1-0001\"}},"
+    "    {\"name\": \"vda2\", \"number\": 2, \"start\": 1074790400, \"size\": 20000000000,"
+    "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"st-root\"}}]},"
+    "  {\"name\": \"vdb\", \"size\": 107374182400, \"table\": {\"type\": \"gpt\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"vdb1\", \"number\": 1, \"start\": 1048576, \"size\": 107355308032,"
+    "     \"type\": \"6a898cc3-1dd2-11b2-99a6-080020736631\","
+    "     \"content\": {\"type\": \"zfs_member\", \"usage\": \"filesystem\", \"label\": \"tank\"}},"
+    "    {\"name\": \"vdb9\", \"number\": 9, \"start\": 107356356608, \"size\": 8388608,"
+    "     \"type\": \"6a945a3b-1dd2-11b2-99a6-080020736631\"}]}],"
+    " \"fstab\": [{\"spec\": \"UUID=st-root\", \"file\": \"/\", \"type\": \"ext4\"},"
+    "            {\"spec\": \"UUID=ESP1-0001\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
+    "}";
+
+/* The same pool in a partition beside the system's, on one disk; the
+ * partition's label unread, so only its type says ZFS. */
+static const char zfs_shared_json[] =
+    "{\"system\": {\"id\": \"ubuntu\", \"version_id\": \"26.04\", \"architecture\": \"x86_64\","
+    "   \"type\": \"server\", \"hostname\": \"store\"},"
+    " \"firmware\": {\"mode\": \"uefi\"},"
+    " \"disks\": [{\"name\": \"sda\", \"size\": 500107862016, \"table\": {\"type\": \"gpt\"},"
+    "   \"partitions\": ["
+    "    {\"name\": \"sda1\", \"number\": 1, \"start\": 1048576, \"size\": 1073741824,"
+    "     \"type\": \"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\","
+    "     \"content\": {\"type\": \"vfat\", \"usage\": \"filesystem\", \"uuid\": \"ESP1-0002\"}},"
+    "    {\"name\": \"sda2\", \"number\": 2, \"start\": 1074790400, \"size\": 100000000000,"
+    "     \"type\": \"0fc63daf-8483-4772-8e79-3d69d8477de4\","
+    "     \"content\": {\"type\": \"ext4\", \"usage\": \"filesystem\", \"uuid\": \"sh-root\"}},"
+    "    {\"name\": \"sda3\", \"number\": 3, \"start\": 101074790400, \"size\": 399000000000,"
+    "     \"type\": \"6a898cc3-1dd2-11b2-99a6-080020736631\"}]}],"
+    " \"fstab\": [{\"spec\": \"UUID=sh-root\", \"file\": \"/\", \"type\": \"ext4\"},"
+    "            {\"spec\": \"UUID=ESP1-0002\", \"file\": \"/boot/efi\", \"type\": \"vfat\"}]"
+    "}";
+
 /* A package inventory with one of everything the build sheet handles. */
 static const char *const packages_json[] = {
     "{\"managers\": [{\"name\": \"apt\", \"inventory\": true},"
@@ -620,7 +665,8 @@ static void sheet_cases(void)
     TEST_CASE("buildsheet: keeping another system on the disk");
     parse(dual_json, &m);
     s = sheet(&m, RS_TARGET_SAME, NULL);
-    CHECK_CONTAINS(s, "B. The same disk, keeping the other system");
+    CHECK_CONTAINS(s, "A disk below also holds another operating system, not rebuilt here.");
+    CHECK_CONTAINS(s, "B. The same disk, keeping the rest");
     CHECK_CONTAINS(s, "# new disk only: it holds the other system's boot loader too");
     CHECK_CONTAINS(s, "nvme0n1p3 is Windows (BitLocker)");
     CHECK_CONTAINS(s, "nvme0n1p4 is a device-mapper volume restate cannot recreate");
@@ -637,7 +683,8 @@ static void sheet_cases(void)
 
     TEST_CASE("buildsheet: what it cannot do");
     {
-        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false, NULL, NULL, NULL };
+        struct rs_sheet_opts o = { RS_TARGET_SAME, NULL, NULL, NULL, false,
+                                   NULL, NULL, NULL, NULL, false };
         struct rs_buf        out;
         struct rs_buf        err;
 
@@ -1751,6 +1798,85 @@ static void arch_cases(void)
     rs_jval_free(&m);
 }
 
+/* A ZFS pool is never wiped: not by the build sheet's commands, not by the
+ * autoinstall's storage, on any target. */
+static void zfs_cases(void)
+{
+    struct rs_jval   m;
+    struct rs_layout l;
+    char            *s;
+    int              t;
+
+    TEST_CASE("layout: a ZFS pool's disk");
+    parse(zfs_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK(l.vols[rs_layout_find(&l, "vdb1")].foreign);
+    CHECK(l.vols[rs_layout_find(&l, "vdb9")].foreign);
+    CHECK_STR(l.vols[rs_layout_find(&l, "vdb9")].foreign_why, "ZFS");
+    CHECK_STR(rs_layout_disk_left(&l, 1), "ZFS");
+    CHECK(rs_layout_disk_left(&l, 0) == NULL);
+    rs_layout_free(&l);
+
+    for (t = RS_TARGET_SAME; t <= RS_TARGET_METAL; t++)
+    {
+        TEST_CASE("buildsheet: a ZFS pool's disk is left alone");
+        s = sheet(&m, (enum rs_target)t, NULL);
+        CHECK_CONTAINS(s, "wipefs --all \"$DISK1\"");
+        CHECK(strstr(s, "\"$DISK2\" <<") == NULL);
+        CHECK(strstr(s, "wipefs --all \"$DISK2\"") == NULL);
+        if (t == RS_TARGET_VM)
+        {
+            CHECK_CONTAINS(s, "# $DISK2 (was vdb): ZFS, not part of the virtual machine");
+        } else
+        {
+            CHECK_CONTAINS(s, "# $DISK2 (was vdb): ZFS, left alone -- no wipefs, no sfdisk; "
+                              "zpool import brings the pool back");
+        }
+        CHECK_CONTAINS(s, " -- left alone: ZFS");
+        if (t == RS_TARGET_VM)
+        {
+            CHECK(strstr(s, "Disk 2:") == NULL);
+        } else
+        {
+            CHECK_CONTAINS(s, "  - Disk 2: vdb itself, as it is -- ZFS, left alone.");
+        }
+        CHECK_CONTAINS(s, "/dev/vdb1 is part of a ZFS pool: left alone");
+        CHECK(strstr(s, "vdb9 is") == NULL);
+        CHECK(strstr(s, "A disk below also holds") == NULL);
+        CHECK(strstr(s, "new disk only") == NULL);
+        free(s);
+
+        TEST_CASE("autoinstall: a ZFS pool's disk is left alone");
+        s = autoinst(&m, (enum rs_target)t);
+        CHECK(strstr(s, "vdb1") == NULL);
+        CHECK(strstr(s, "preserve: true") == NULL);
+        CHECK_CONTAINS(s, "wipe: superblock-recursive");
+        free(s);
+    }
+    s = autoinst(&m, RS_TARGET_SAME);
+    CHECK_CONTAINS(s, "      # vdb: ZFS, left alone\n");
+    CHECK(strstr(s, "path: \"/dev/vdb\"") == NULL && strstr(s, "path: /dev/vdb\n") == NULL);
+    free(s);
+    rs_jval_free(&m);
+
+    TEST_CASE("buildsheet: a ZFS pool beside the system, on its disk");
+    parse(zfs_shared_json, &m);
+    CHECK(rs_layout_build(&m, &l));
+    CHECK_STR(l.vols[rs_layout_find(&l, "sda3")].foreign_why, "ZFS");
+    CHECK(rs_layout_disk_left(&l, 0) == NULL);
+    rs_layout_free(&l);
+    s = sheet(&m, RS_TARGET_SAME, NULL);
+    CHECK_CONTAINS(s, "A disk below also holds a ZFS pool, not rebuilt here.");
+    CHECK_CONTAINS(s, "B. The same disk, keeping the rest: SKIP this step");
+    CHECK_CONTAINS(s, "/dev/sda3 is part of a ZFS pool");
+    free(s);
+    s = sheet(&m, RS_TARGET_VM, NULL);
+    CHECK(strstr(s, "A disk below also holds") == NULL);
+    CHECK(strstr(s, "type=6a898cc3") == NULL);
+    free(s);
+    rs_jval_free(&m);
+}
+
 void test_rebuild(void)
 {
     package_cases();
@@ -1760,6 +1886,7 @@ void test_rebuild(void)
     layout_cases();
     sheet_cases();
     autoinstall_cases();
+    zfs_cases();
     clones_cases();
     arch_cases();
 }

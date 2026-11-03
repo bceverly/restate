@@ -883,6 +883,16 @@ every command is printed for a person to check against
 .BR lsblk (8)
 and run.
 .PP
+Given a snapshot in a repository rather than an image \-
+.I REPO
+for its newest, or
+.IR REPO :: NAME
+\- the build sheet is made from the snapshot where it is, and begins with the
+.B restate export
+that writes it as the image its commands unpack, naming that exact snapshot.
+.B restate autoinstall
+runs unattended, and is made from an exported image.
+.PP
 The packages come from the image's inventory (see
 .BR PACKAGES ),
 and go back before the files, because a restored configuration file where a
@@ -927,6 +937,14 @@ macOS, a VeraCrypt container \- are never formatted. Rebuilding the same
 machine, the sheet offers two paths: a blank disk, where they are recreated
 empty for that system's own restore, or the same disk, where the partition
 table and the EFI system partition they boot from are left alone.
+.PP
+A disk holding no Linux volume at all \- a ZFS pool's, typically, on a
+storage host \- is left alone on every target: the build sheet names it and
+prints no wipefs or sfdisk for it, and the autoinstall file leaves it out of
+its storage. After the system disk fails, the pool is still there for
+.B zpool import
+on the new system. A ZFS partition on the system's own disk is kept the way
+another system's is.
 .PP
 .B restate autoinstall
 writes the same layout as an Ubuntu autoinstall file, for an install nobody
@@ -1657,7 +1675,8 @@ and repack refuses one. A restore, or
 decrypts each such pack once instead, into a temporary file of its own read
 from anywhere in it: up to 4 GiB of them at a time, or a quarter of what is
 free where temporary files go if that is less, the least recently read let go
-first.
+first. A pack is kept only while some chunk still to be read is in it, so a
+read that goes forward through the repository holds one or two at a time.
 .PP
 .B "restate init \-\-encrypt\-to"
 .I KEYFILE
@@ -1748,8 +1767,10 @@ short or removed.
 then reads every snapshot in full, as
 .B restore
 would, each file checked against its index and nothing written: a test
-restore of every snapshot. An encrypted repository is checked this way only
-with its secret key;
+restore of every snapshot. A file whose content an earlier snapshot of the
+same run was found right with \- the same digest \- is not read again, so
+the snapshots after the first read only what changed. An encrypted
+repository is checked this way only with its secret key;
 .B \-\-metadata\-only
 checks one without (see
 .BR STORAGE ).

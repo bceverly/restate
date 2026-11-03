@@ -889,7 +889,7 @@ static void test_written(const char *dir)
     {
         static const char *const dup[] = { "/etc/dup*" };
 
-        s = rs_repo_stream_open_matching(r, &ix, NULL, 0, dup, 1, &err);
+        s = rs_repo_stream_open_matching(r, &ix, NULL, 0, dup, 1, NULL, &err);
         CHECK(read_stream(s, &seen, &err));
         CHECK(rs_repo_stream_close(s, &err));
         CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/dup1 0");
@@ -900,6 +900,25 @@ static void test_written(const char *dir)
         CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc 5");
         CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/link 2");
         rs_buf_reset(&seen);
+    }
+
+    TEST_CASE("repo: a file whose content is read already left out");
+    {
+        bool  *skip = rs_xcalloc(ix.count + 1, sizeof(*skip));
+        size_t i;
+
+        for (i = 0; i < ix.count; i++)
+        {
+            skip[i] = strcmp(ix.entries[i].path, "/etc/conf") == 0;
+        }
+        s = rs_repo_stream_open_matching(r, &ix, NULL, 0, NULL, 0, skip, &err);
+        CHECK(read_stream(s, &seen, &err));
+        CHECK(rs_repo_stream_close(s, &err));
+        CHECK(strstr(seen.data ? seen.data : "", "restate/files/etc/conf 0") == NULL);
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc/dup1 0");
+        CHECK_CONTAINS(seen.data ? seen.data : "", "restate/files/etc 5");
+        rs_buf_reset(&seen);
+        free(skip);
     }
 
     TEST_CASE("repo: a file that could not be read is zeros, for restore to refuse");
@@ -1835,8 +1854,11 @@ static void test_encrypted(const char *dir)
         CHECK(o != NULL);
         if (o)
         {
-            uint64_t before;
-            size_t   packs;
+            static const char *const only_a[] = { "/a" };
+            uint64_t                 before;
+            uint64_t                 most;
+            uint64_t                 ahead;
+            size_t                   packs;
 
             rs_repo_set_recipients(o, recips, 1);
             CHECK(snap(o, otree, "2026-04-01T00:00:00.000000000Z", NULL, &st, &oname));
@@ -1847,12 +1869,31 @@ static void test_encrypted(const char *dir)
             rs_index_init(&ix);
             CHECK(rs_repo_load_index(o, oname, &ix, &err));
             before = rs_repo_unsealed();
+            (void)rs_repo_unsealed_most();
             s = rs_repo_stream_open(o, &ix, NULL, 0, &err);
             CHECK(read_stream(s, &seen, &err));
             CHECK(rs_repo_stream_close(s, &err));
             CHECK_INT(matching(&ix, seen.data), 3);
             CHECK(rs_repo_unsealed() - before <= packs);
             CHECK(rs_repo_unsealed() - before > 0);
+            most = rs_repo_unsealed_most();
+            rs_buf_reset(&seen);
+
+            TEST_CASE("repo: a decrypted pack let go once the read is past it");
+            before = rs_repo_unsealed();
+            /* a alone, its chunks in one pack after another: each let go as
+             * the read goes on to the next, so that two at most are held,
+             * where every one of them was kept before. */
+            s = rs_repo_stream_open(o, &ix, only_a, 1, &err);
+            CHECK(read_stream(s, &seen, &err));
+            CHECK(rs_repo_stream_close(s, &err));
+            CHECK_CONTAINS(seen.data, "/a");
+            CHECK(strstr(seen.data, "/b") == NULL);
+            ahead = rs_repo_unsealed_most();
+            CHECK(ahead > 0);
+            CHECK(ahead <= 2);
+            CHECK(ahead < most || most <= 2);
+            CHECK(rs_repo_unsealed() - before >= 4);
             rs_buf_reset(&seen);
             /* Room for one at a time: each let go as the next is read. */
             rs_repo_set_unsealed_bytes(1);

@@ -38,6 +38,10 @@ struct rs_sheet_opts {
     /* As rs_auto_opts.snapshot. */
     const char           *snapshot;
     const char           *firmware;   /* "uefi" or "bios" to boot by, or NULL: as it did */
+    /* The snapshot, "REPO::NAME", `image` is to be exported from before the
+     * rebuild -- the sheet says how -- or NULL: `image` is a file already. */
+    const char           *export_from;
+    bool                  export_sealed;  /* that repository is encrypted */
 };
 
 /* Writes the build sheet for `machine` (a machine.h description) to `out`. */

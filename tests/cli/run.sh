@@ -896,8 +896,9 @@ mkdir -p expout
 expect 0 "restore what was exported" -- "$BIN" restore --allow-unverified --root expout exported.tar
 check "it is the snapshot's" test "$(cat expout/etc/hosts)" = "127.0.0.1 localhost"
 check "and keeps the kit" eval 'tar -tf exported.tar | grep -x restate/kit.tar.gz > /dev/null'
-expect 2 "buildsheet from a snapshot" -- "$BIN" buildsheet repo
-contains "$ERR" "export it first" "says to export it"
+expect 2 "buildsheet from a snapshot of a tree, not a machine" -- "$BIN" buildsheet repo
+contains "$ERR" "::20260102T000000Z has no machine description" \
+  "reads the newest snapshot where it is, and says what it lacks"
 expect 2 "autoinstall from a snapshot" -- "$BIN" autoinstall repo::20260101T000000Z
 expect 0 "packages from a snapshot" -- "$BIN" packages repo
 expect 2 "export with nowhere to write" -- "$BIN" export repo

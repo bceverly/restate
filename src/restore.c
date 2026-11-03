@@ -59,12 +59,18 @@ static bool as_identity(const struct ctx *c, const struct rs_entry *e)
     return c->o->leave && c->o->leave[e - c->ix->entries];
 }
 
-/* Left out, by --exclude or as identity. */
+/* A file read whole already, in an earlier snapshot of the same check. */
+static bool is_known(const struct ctx *c, const struct rs_entry *e)
+{
+    return e->type == 'f' && c->o->known && c->o->known[e - c->ix->entries];
+}
+
+/* Left out, by --exclude or as identity, or known. */
 static bool excluded(const struct ctx *c, const struct rs_entry *e)
 {
     size_t i;
 
-    if (as_identity(c, e))
+    if (as_identity(c, e) || is_known(c, e))
     {
         return true;
     }
@@ -990,6 +996,11 @@ static bool put_back(struct ctx *c, struct rs_tar_reader *r, const struct rs_ent
         c->st->identity++;
         return true;
     }
+    if (is_known(c, e))
+    {
+        c->st->known++;
+        return true;
+    }
     if (excluded(c, e))
     {
         c->st->excluded++;
@@ -1317,7 +1328,8 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
     }
     if (!o->index_only &&
         (o->kit ? !rs_image_open_kit(path, ix, &s, err)
-                : !rs_image_open_files_matching(path, ix, o->include, o->ninclude, &s, err)))
+                : !rs_image_open_files_matching(path, ix, o->include, o->ninclude, o->known, &s,
+                                                err)))
     {
         (void)sigaction(SIGPIPE, &saved, NULL);
         rs_accounts_free(&c.accounts);
@@ -1388,6 +1400,10 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
             if ((e->type == 'c' || e->type == 'b') && !excluded(&c, e))
             {
                 restore_special(&c, e);
+            } else if (!c.seen[i] && is_known(&c, e))
+            {
+                /* Left out of a snapshot's stream: read whole already. */
+                c.st->known++;
             } else if (e->stored && !c.seen[i] && strcmp(e->path, "/") != 0 &&
                        !excluded(&c, e))
             {

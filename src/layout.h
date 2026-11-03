@@ -201,6 +201,14 @@ bool rs_ptype_is(const char *ptype, const char *type);
  */
 uint64_t rs_layout_fit(const struct rs_layout *l, size_t vol, enum rs_target target);
 
+/*
+ * Whose partitioned disk `d` is when no Linux volume is on it -- a ZFS pool's
+ * before anyone else's -- so that it is left alone, never wiped or
+ * partitioned, on any target; NULL for a disk with a Linux partition on it,
+ * or with no partitions at all.
+ */
+const char *rs_layout_disk_left(const struct rs_layout *l, size_t d);
+
 /* "1.2 TiB", "200 MiB": binary units, one decimal place below ten. */
 void rs_human_size(uint64_t bytes, char *out, size_t len);
 

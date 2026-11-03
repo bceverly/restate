@@ -44,7 +44,10 @@ static const struct {
     { "516e7cba-6ecf-11d6-8ff8-00022d09712b", "FreeBSD ZFS", "FreeBSD" },
     { "824cc7a0-36a8-11e3-890a-952519ad3f61", "OpenBSD data", "OpenBSD" },
     { "49f48d5a-b10e-11dc-b99b-0019d1879648", "NetBSD FFS", "NetBSD" },
-    { "6a898cc3-1dd2-11b2-99a6-080020736631", "ZFS", NULL },
+    /* A ZFS pool's: the pool outlives the system, so it is never rebuilt. A
+     * whole-disk pool has the reserved partition at its end too (number 9). */
+    { "6a898cc3-1dd2-11b2-99a6-080020736631", "ZFS", "ZFS" },
+    { "6a945a3b-1dd2-11b2-99a6-080020736631", "ZFS reserved", "ZFS" },
     { "0x83", "Linux", NULL },
     { "0x82", "Linux swap", NULL },
     { "0x8e", "Linux LVM", NULL },
@@ -1275,6 +1278,31 @@ static uint64_t fit_fs(const struct rs_vol *v)
         want = (v->size > 0 && v->size < GIB) ? v->size : GIB;
     }
     return want;
+}
+
+const char *rs_layout_disk_left(const struct rs_layout *l, size_t d)
+{
+    const char *why = NULL;
+    size_t      i;
+
+    for (i = 0; i < l->nvols; i++)
+    {
+        const struct rs_vol *v = &l->vols[i];
+
+        if (v->disk != d || v->kind != RS_VOL_PART)
+        {
+            continue;
+        }
+        if (!v->foreign)
+        {
+            return NULL;
+        }
+        if (!why || eq(v->foreign_why, "ZFS"))
+        {
+            why = v->foreign_why;
+        }
+    }
+    return why;
 }
 
 /* NOLINTNEXTLINE(misc-no-recursion) */

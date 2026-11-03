@@ -27,7 +27,8 @@ struct sheet {
     struct rs_buf              *out;
     struct rs_installer         in;
     bool                        have_installer;
-    bool                        any_foreign;
+    bool                        any_foreign;  /* another system on a disk rebuilt */
+    bool                        shared_zfs;   /* a ZFS pool on a disk rebuilt */
     bool                        shared_esp;   /* an ESP another system boots from too */
     unsigned                   *newnum;       /* per volume: its partition number now */
     bool                       *done;         /* per volume: created by the steps so far */
@@ -101,6 +102,19 @@ static bool is_esp(const struct rs_vol *v)
 static bool kept(const struct sheet *s, size_t i)
 {
     return !s->l.vols[i].foreign;
+}
+
+/* A ZFS pool's volume: the pool outlives the system, so nothing here touches
+ * it. */
+static bool is_zfs(const struct rs_vol *v)
+{
+    return v->foreign && eq(v->foreign_why, "ZFS");
+}
+
+/* Whose a disk is, if it is left alone. */
+static const char *disk_left(const struct sheet *s, size_t d)
+{
+    return rs_layout_disk_left(&s->l, d);
 }
 
 /* The shell expression for a volume's device, in the commands. */
@@ -291,8 +305,12 @@ static void intro(struct sheet *s)
         say(s, "  Firmware   %s%s", firmware_text(s->l.firmware), sb);
     }
     say(s, "  Rebuilt as %s", targets[s->o->target]);
-    say(s, "  Made by    restate %s%s%s", s->o->version ? s->o->version : "",
-        s->o->image ? " from " : " from the running system", s->o->image ? s->o->image : "");
+    {
+        const char *from = s->o->export_from ? s->o->export_from : s->o->image;
+
+        say(s, "  Made by    restate %s%s%s", s->o->version ? s->o->version : "",
+            from ? " from " : " from the running system", from ? from : "");
+    }
     say(s, "%s", "");
     say(s, "%s", "Read it all before starting. The commands below are printed, not run: each");
     say(s, "%s", "one destroys whatever is on the device it names, so check every device name");
@@ -314,6 +332,17 @@ static void needs(struct sheet *s)
 
         if (disk->removable)
         {
+            continue;
+        }
+        if (disk_left(s, d))
+        {
+            /* Not one to provide: the one there, kept -- and no part of a
+             * virtual machine. */
+            if (s->o->target != RS_TARGET_VM)
+            {
+                say(s, "  - Disk %zu: %s itself, as it is -- %s, left alone.", d + 1,
+                    disk->name, disk_left(s, d));
+            }
             continue;
         }
         for (i = 0; i < s->l.nvols; i++)
@@ -368,20 +397,64 @@ static void needs(struct sheet *s)
     }
     if (s->have_installer)
     {
-        char *iso = s->in.point ? rs_xasprintf("ubuntu-%s-%s-%s.iso", s->in.point, s->in.flavor,
-                                               s->in.arch)
-                                : rs_xstrdup(s->in.pattern);
+        char         *iso = s->in.point ? rs_xasprintf("ubuntu-%s-%s-%s.iso", s->in.point,
+                                                       s->in.flavor, s->in.arch)
+                                        : rs_xstrdup(s->in.pattern);
+        const char   *from = s->o->export_from ? s->o->export_from : s->o->image;
+        struct rs_buf cmd;
 
+        rs_buf_init(&cmd);
+        rs_buf_addstr(&cmd, "      restate installer fetch");
+        if (from)
+        {
+            rs_buf_addc(&cmd, ' ');
+            rs_shell_word(&cmd, from);
+        }
         say(s, "  - The installer: %s, on a USB stick.", s->in.description);
-        say(s, "      restate installer fetch%s%s   # downloads and verifies %s",
-            s->o->image ? " " : "", s->o->image ? s->o->image : "", iso);
+        say(s, "%s   # downloads and verifies %s", cmd.data, iso);
+        rs_buf_free(&cmd);
         free(iso);
     } else
     {
         say(s, "%s", "  - The installer for this system: see `restate installer`.");
     }
-    say(s, "  - The image to restore%s%s, on a disk the new machine can read.",
-        s->o->image ? ": " : "", s->o->image ? s->o->image : "");
+    if (s->o->export_from)
+    {
+        struct rs_buf cmd;
+        bool          signed_ = s->o->trust && rs_starts_with(s->o->trust, "--trusted-key");
+
+        /* The commands below unpack an image's file: the snapshot as one. */
+        rs_buf_init(&cmd);
+        rs_buf_addstr(&cmd, "      restate export ");
+        rs_shell_word(&cmd, s->o->export_from);
+        rs_buf_addstr(&cmd, " -o ");
+        rs_shell_word(&cmd, s->o->image);
+        if (s->o->export_sealed)
+        {
+            rs_buf_addstr(&cmd, " --decrypt-with DECRYPTION-KEYFILE");
+        }
+        if (signed_)
+        {
+            rs_buf_addstr(&cmd, " --sign-with SIGNING-KEYFILE");
+        }
+        say(s, "%s", "  - The image to restore, exported from the repository by any machine with");
+        say(s, "%s", "    restate that reaches it, onto a disk the new machine can read:");
+        say(s, "%s", cmd.data);
+        if (s->o->export_sealed)
+        {
+            say(s, "%s", "    DECRYPTION-KEYFILE: the secret key the repository is encrypted to.");
+        }
+        if (signed_)
+        {
+            say(s, "%s", "    SIGNING-KEYFILE: the secret half of the key the restore's "
+                         "--trusted-key names.");
+        }
+        rs_buf_free(&cmd);
+    } else
+    {
+        say(s, "  - The image to restore%s%s, on a disk the new machine can read.",
+            s->o->image ? ": " : "", s->o->image ? s->o->image : "");
+    }
 }
 
 static void tree_line(struct sheet *s, size_t i, int depth) /* NOLINT(misc-no-recursion) */
@@ -531,17 +604,20 @@ static void shell(struct sheet *s)
     say(s, "%s", "    lsblk -o NAME,SIZE,MODEL,SERIAL");
     for (d = 0; d < s->l.ndisks; d++)
     {
-        char *def;
-        char  buf[32];
+        char       *def;
+        char        buf[32];
+        const char *left;
 
         if (s->l.disks[d].removable)
         {
             continue;
         }
         def = disk_default(s, d);
-        say(s, "    DISK%zu=%-14s # was %s: %s%s%s", d + 1, def, s->l.disks[d].name,
+        left = disk_left(s, d);
+        say(s, "    DISK%zu=%-14s # was %s: %s%s%s%s%s", d + 1, def, s->l.disks[d].name,
             size_text(s->l.disks[d].size, buf, sizeof(buf)), s->l.disks[d].model ? ", " : "",
-            s->l.disks[d].model ? s->l.disks[d].model : "");
+            s->l.disks[d].model ? s->l.disks[d].model : "", left ? " -- left alone: " : "",
+            left ? left : "");
         free(def);
     }
     say(s, "%s", "    part() { case \"$1\" in *[0-9]) echo \"${1}p$2\" ;; "
@@ -609,28 +685,47 @@ static void partition(struct sheet *s)
     size_t i;
 
     heading(s, "Partition the disks");
-    if (s->any_foreign && s->o->target == RS_TARGET_SAME)
+    if ((s->any_foreign || s->shared_zfs) && s->o->target == RS_TARGET_SAME)
     {
-        say(s, "%s", "This disk also holds another operating system. Two ways from here:");
+        say(s, "A disk below also holds %s%s%s, not rebuilt here. Two ways from here:",
+            s->any_foreign ? "another operating system" : "",
+            s->any_foreign && s->shared_zfs ? " and " : "", s->shared_zfs ? "a ZFS pool" : "");
         say(s, "%s", "");
         say(s, "%s", "  A. A new or blank disk: run this step. Only the Linux volumes are filled");
-        say(s, "%s", "     in afterwards; the other system's partitions are recreated empty, at");
-        say(s, "%s", "     the same places, ready for its own restore.");
-        say(s, "%s", "  B. The same disk, keeping the other system: SKIP this step, and skip");
-        say(s, "%s", "     every command marked \"new disk only\" below. The partition "
-                     "table stays,");
-        say(s, "%s", "     and with it the other system and its boot loader.");
+        say(s, "%s", "     in afterwards; the others' partitions are recreated empty, at the");
+        say(s, "%s", "     same places, ready for their own restore.");
+        say(s, "%s", "  B. The same disk, keeping the rest: SKIP this step, and skip every");
+        say(s, "%s", "     command marked \"new disk only\" below. The partition table stays,");
+        say(s, "%s", "     and with it everything on the disk that is not Linux's.");
         say(s, "%s", "");
     }
     for (d = 0; d < s->l.ndisks; d++)
     {
         const struct rs_disk *disk = &s->l.disks[d];
+        const char           *left = disk_left(s, d);
         bool                  gpt;
         bool                  any = false;
         unsigned              num = 0;
 
         if (!disk->table || disk->removable)
         {
+            continue;
+        }
+        if (left)
+        {
+            /* Nothing of the system's own on it: never wiped, on any target.
+             * After a system disk fails, this one still holds the pool. */
+            if (s->o->target == RS_TARGET_VM)
+            {
+                say(s, "    # $DISK%zu (was %s): %s, not part of the virtual machine", d + 1,
+                    disk->name, left);
+            } else
+            {
+                say(s, "    # $DISK%zu (was %s): %s, left alone -- no wipefs, no sfdisk%s",
+                    d + 1, disk->name, left,
+                    eq(left, "ZFS") ? "; zpool import brings the pool back" : "");
+            }
+            say(s, "%s", "");
             continue;
         }
         for (i = 0; i < s->l.nvols; i++)
@@ -2381,7 +2476,15 @@ static void notes(struct sheet *s)
     {
         const struct rs_vol *v = &s->l.vols[i];
 
-        if (v->foreign && (v->kind == RS_VOL_PART || v->kind == RS_VOL_DISK))
+        if (is_zfs(v) && rs_ptype_is(v->ptype, "6a945a3b-1dd2-11b2-99a6-080020736631"))
+        {
+            continue;    /* the reserved end of a pool's disk: the pool says it */
+        }
+        if (is_zfs(v))
+        {
+            note(s, "%s is part of a ZFS pool: left alone, never wiped. Once the new system is "
+                 "up, `zpool import` brings the pool back; restate does not restore it.", v->path);
+        } else if (v->foreign && (v->kind == RS_VOL_PART || v->kind == RS_VOL_DISK))
         {
             note(s, "%s is %s: not rebuilt here%s.", v->path, v->foreign_why,
                  s->o->target == RS_TARGET_SAME ? "; restore it with that system's own tools" : "");
@@ -2455,10 +2558,20 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
     s.vg_done = rs_xcalloc(s.l.nvgs + 1, sizeof(*s.vg_done));
     for (i = 0; i < s.l.nvols; i++)
     {
-        if (s.l.vols[i].foreign &&
-            (s.l.vols[i].kind == RS_VOL_PART || s.l.vols[i].kind == RS_VOL_DISK))
+        const struct rs_vol *v = &s.l.vols[i];
+
+        /* Only what shares a disk with the system: a disk wholly another's
+         * is left alone, and asks no choice. */
+        if (v->foreign && v->kind == RS_VOL_PART && v->disk != SIZE_MAX &&
+            !s.l.disks[v->disk].removable && !disk_left(&s, v->disk))
         {
-            s.any_foreign = true;
+            if (is_zfs(v))
+            {
+                s.shared_zfs = true;
+            } else
+            {
+                s.any_foreign = true;
+            }
         }
     }
     for (i = 0; i < s.l.nvols; i++)
