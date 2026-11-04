@@ -1294,12 +1294,57 @@ static bool import_secret(const char *home, const char *keyfile, struct rs_buf *
 }
 
 /*
+ * The few bytes `open_` decrypts in `home`, tried up to three times: the once
+ * gpg-agent refuses a key it has just imported, and twice more should it
+ * refuse again: a release run on GitHub's Ubuntu runner once failed with "Bad
+ * passphrase" for the right one, on the run's first decrypting after. False
+ * only if gpg, the last time, says it has no such key or calls it bad. When a
+ * passphrase was given and every try fails for some other reason, what gpg
+ * said is kept, for rs_pgp_key_place.
+ */
+/* What gpg said when the key --decrypt-with gives was first used and would
+ * not be, a passphrase given; for the error the run then ends with. */
+static char *first_said;
+
+static bool first_open(const char *home, const char *const *open_)
+{
+    struct rs_buf said;
+    bool          opened = false;
+    bool          usable = true;
+    int           tries;
+
+    rs_buf_init(&said);
+    for (tries = 0; !opened && tries < 3; tries++)
+    {
+        rs_buf_reset(&said);
+        opened = gpg_in(home, open_, 5, NULL, &said);
+    }
+    if (!opened && said.data &&
+        (strstr(said.data, "No secret key") || strstr(said.data, "Bad secret key")))
+    {
+        usable = false;
+    } else if (!opened && passphrase)
+    {
+        /* A passphrase was given and gpg still would not: what it said, the
+         * one clue to why, since the run's own decrypting fails the same way
+         * and says only that it did. Its first line, without "gpg: ". */
+        const char *why = said.data ? strstr(said.data, "failed: gpg: ") : NULL;
+
+        why = why ? why + strlen("failed: gpg: ") : "gpg failed";
+        free(first_said);
+        first_said = rs_xstrndup(why, strcspn(why, "\n"));
+    }
+    rs_buf_free(&said);
+    return usable;
+}
+
+/*
  * Each secret key in `home` used once, on a few bytes encrypted to it there,
  * however that ends. gpg-agent keeps an imported key as it came until it is
  * first used, and gpg-agent 2.4 with libgcrypt 1.12 then refuses it once --
  * "Bad secret key", or "Bad passphrase" for the right one -- and takes it
  * every time after: so the once is here, not on the first thing the run
- * decrypts. False if gpg refuses a second time what was just encrypted to a
+ * decrypts. False if gpg refuses every try at what was just encrypted to a
  * key it holds, for want of the key or calling it bad, as it refuses an
  * imported cv25519 key every time with GnuPG 2.5 and libgcrypt 1.12, and
  * with libgcrypt 1.12.0, which cannot validate one (GnuPG T8094) -- there
@@ -1350,16 +1395,9 @@ static bool first_use(const char *home)
                 fpr[40] = '\0';
                 /* Refused again for want of the key, that is: not for a
                  * passphrase, which the decrypting says for itself. */
-                if (gpg_in(home, seal, 9, NULL, &ignored) &&
-                    !gpg_in(home, open_, 5, NULL, &ignored))
+                if (gpg_in(home, seal, 9, NULL, &ignored) && !first_open(home, open_))
                 {
-                    rs_buf_reset(&ignored);
-                    if (!gpg_in(home, open_, 5, NULL, &ignored) && ignored.data &&
-                        (strstr(ignored.data, "No secret key") ||
-                         strstr(ignored.data, "Bad secret key")))
-                    {
-                        usable = false;
-                    }
+                    usable = false;
                 }
                 (void)unlink(sealed);
             }
@@ -1417,11 +1455,26 @@ bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf 
 
 const char *rs_pgp_key_place(void)
 {
-    return secret_home ? "the key files --decrypt-with gives" : "this user's GnuPG home";
+    static char *place;
+
+    if (!secret_home)
+    {
+        return "this user's GnuPG home";
+    }
+    if (!first_said)
+    {
+        return "the key files --decrypt-with gives";
+    }
+    free(place);
+    place = rs_xasprintf("the key files --decrypt-with gives (used once as it was imported, "
+                         "gpg said \"%s\")", first_said);
+    return place;
 }
 
 void rs_pgp_forget_secret_key(void)
 {
+    free(first_said);
+    first_said = NULL;
     if (secret_home)
     {
         end_home(secret_home);

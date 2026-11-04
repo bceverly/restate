@@ -1238,6 +1238,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
   expect 2 "the wrong passphrase in passphrase_file" -- \
     env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" "$BIN" run -q "$WORK/pjobs/wrong.conf"
   contains "$ERR" "or its passphrase was not given" "says why"
+  contains "$ERR" '(used once as it was imported, gpg said "' "with what gpg said of the key"
   gpgconf --homedir "$WORK/dgnupg" --kill gpg-agent 2> /dev/null || true
   fi
   expect 0 "prune --whole-packs an encrypted repository, with no key at all" -- \

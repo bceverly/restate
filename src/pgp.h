@@ -157,7 +157,9 @@ bool rs_pgp_sign(const char *keyfile, const char *data, struct rs_buf *sig,
 bool rs_pgp_use_secret_key(const char *const *keyfiles, size_t n, struct rs_buf *err);
 void rs_pgp_forget_secret_key(void);
 /* Where the secret key decrypting needs would be, for saying it was not:
- * "this user's GnuPG home", or the --decrypt-with key file. */
+ * "this user's GnuPG home", or the --decrypt-with key file -- with what gpg
+ * said when that key, imported, was first used and would not be. Good until
+ * the next call. */
 const char *rs_pgp_key_place(void);
 
 #endif /* RESTATE_PGP_H */
