@@ -109,6 +109,12 @@ fresh=0
   seed ingest-seek 19 'ip\0\0a\0001b\0restate-seek 1\n1 0\n\0\0\0'
   seed ingest-sum 19 's\0restate-pack 2\n\0x\0\0restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 3\n\0\0'
   seed ingest-noidx 19 'pn\0\0x\0\0\0\0'
+  seed grant 20 'web01\0# a grant\nrepository = /srv/restate/web01\noperations = append, read\ntoken_sha256 = b0d08104f387506682a201508de2c3d998ad11753841680470407365a2e47653\nexpires = 2026-12-31T00:00:00Z\nlabel = managed: a=b #1\n\0rsp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  seed grant-time 20 'web01\0repository = /r\noperations = read\ntoken_sha256 = b0d08104f387506682a201508de2c3d998ad11753841680470407365a2e47653\n\00002028-02-29T23:59:59Z'
+  seed request 21 'PUT /v1/web01/sessions/6f1c0a9d2e7b4c35a8f0e1d2c3b4a596/files/packs/P.tar.gz HTTP/1.1\r\nHost: proxy\r\nAuthorization: Bearer rsp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\nbody'
+  seed request-range 21 'GET /v1/web01/f/packs/P.tar.gz HTTP/1.1\r\nHost: proxy\r\nRestate-Session: 6f1c0a9d2e7b4c35a8f0e1d2c3b4a596\r\nRange: bytes=1048576-2097151\r\nConnection: close\r\n\r\n'
+  seed route 21 '/v1/web01/sessions/6f1c0a9d2e7b4c35a8f0e1d2c3b4a596/commit/chunk-key.20261020T030000Z-000'
+  seed route-list 21 '/v1/web01/list/snapshots/20261020T030000Z/'
   seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
   # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
   # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.

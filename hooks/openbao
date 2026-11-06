@@ -1,0 +1,255 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate hook: OpenBao, for capture --quiesce-with openbao.
+#
+#   present NAME  whether OpenBao is on this host: prints present or absent
+#   paths NAME    its storage's directory, as its configuration names it:
+#                 what the capture copies while it is paused
+#   pause NAME    with raft storage, a snapshot into $RESTATE_DUMP_DIR
+#                 (openbao.snap), nothing stopped, and the storage's own files
+#                 left out of the capture; with file storage, OpenBao stopped
+#                 so that its files are copied as they stand
+#   resume NAME   with file storage, OpenBao started again and unsealed:
+#                 the unit unseal_unit names run, or, with auto-unseal, left
+#                 to unseal itself, and waited for
+#
+# Raft's snapshot is OpenBao's own consistent copy, taken while it runs; it
+# is put back with `bao operator raft snapshot restore openbao.snap`. Its
+# files copied as it runs are no copy at all, so they are left out.
+#
+# File storage has no snapshot: the copy is of its directory, stopped. An
+# OpenBao started again is sealed until it is unsealed, which a host does in
+# its own way, so resume runs unseal_unit if one is set (a one-shot unit
+# that unseals it -- SysManage's sysmanage-openbao-init) and then waits up
+# to unseal_wait seconds for it to say it is unsealed. With auto-unseal (a
+# seal stanza: transit, a cloud's KMS) it unseals itself, and is only waited
+# for. Still sealed after that, the resume fails, and so the capture says it
+# is incomplete: OpenBao is running but of no use until someone unseals it.
+#
+# Nothing of the unseal material is touched here. The keys, and any file
+# that holds them (SysManage's /var/lib/openbao/init.json), are left out of
+# the capture by the site's rules if they are to be; this hook copies
+# neither into the dump directory.
+#
+# /etc/restate/openbao.conf, "KEY = VALUE" a line, all optional:
+#
+#   config = /etc/openbao/openbao.hcl
+#                       OpenBao's configuration, which says the storage
+#   storage = auto      raft or file; auto (the default) reads it from config
+#   unit = openbao      the service that runs it
+#   address = https://127.0.0.1:8200
+#                       where bao reaches it (BAO_ADDR, if set, else this)
+#   ca_cert = FILE      the certificate authority bao trusts it by (BAO_CACERT)
+#   token_file = FILE   raft: a token allowed sys/storage/raft/snapshot, a
+#                       file root's alone and no one else's to read
+#   unseal_unit = UNIT  file: run once OpenBao is started again, to unseal it
+#   unseal_wait = 120   file: how long resume waits for it to be unsealed
+#
+# Each can be given for one capture as --hook-option openbao.KEY=VALUE (a
+# job's hook_option), which is read over this file.
+#
+# To change what this does, copy it to /etc/restate/hooks.d/openbao (root's,
+# mode 0755) and edit the copy: that one is used in place of this.
+set -eu
+
+conf=/etc/restate/openbao.conf
+
+# KEY's value: --hook-option openbao.KEY=VALUE, the last one given, else
+# $conf's ("KEY = VALUE", the last one given), else $2.
+setting() {
+  v=$(printf '%s\n' "${RESTATE_SETTINGS:-}" | sed -n "s/^$1=//p" | tail -n 1)
+  if [ -z "$v" ] && [ -r "$conf" ]; then
+    v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" |
+      sed 's/[[:space:]]*\(#.*\)\{0,1\}$//' | tail -n 1)
+  fi
+  printf '%s\n' "${v:-$2}"
+}
+
+unit=$(setting unit openbao)
+config=$(setting config /etc/openbao/openbao.hcl)
+
+# Before anything is made: present only looks.
+if [ "$1" = present ]; then
+  if command -v bao > /dev/null 2>&1 || [ -d /var/lib/openbao ] || [ -r "$config" ] ||
+    systemctl cat "$unit" > /dev/null 2>&1; then
+    echo present
+  else
+    echo absent
+  fi
+  exit 0
+fi
+
+action=$1
+name=${2:-openbao}
+state=/run/restate/hooks
+stopped="$state/openbao-$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+
+say() { echo "restate hook: openbao $name: $*" >&2; }
+
+# The storage stanza's type in $config ("raft", "file"), or nothing.
+config_storage() {
+  [ -r "$config" ] || return 0
+  sed -n 's/^[[:space:]]*storage[[:space:]]*"\([a-z_]*\)".*/\1/p' "$config" | head -n 1
+}
+
+# The path the storage stanza gives, or nothing.
+config_path() {
+  [ -r "$config" ] || return 0
+  awk '
+    /^[[:space:]]*storage[[:space:]]*"/ { inside = 1 }
+    inside && /^[[:space:]]*path[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*"/, ""); sub(/".*/, ""); print; exit
+    }
+    inside && /^[[:space:]]*}/ { inside = 0 }
+  ' "$config"
+}
+
+storage=$(setting storage auto)
+if [ "$storage" = auto ]; then
+  storage=$(config_storage)
+fi
+
+# bao, at the address and with the authority the settings give.
+bao_cmd() {
+  BAO_ADDR=${BAO_ADDR:-$(setting address https://127.0.0.1:8200)}
+  export BAO_ADDR
+  ca=$(setting ca_cert '')
+  if [ -n "$ca" ]; then
+    BAO_CACERT=$ca
+    export BAO_CACERT
+  fi
+  bao "$@"
+}
+
+# The token in token_file, held to what a passphrase file is: a regular file,
+# root's, that no one else can read or write.
+token() {
+  file=$(setting token_file '')
+  if [ -z "$file" ]; then
+    say "raft storage needs token_file in $conf: a token allowed sys/storage/raft/snapshot"
+    return 1
+  fi
+  if [ ! -f "$file" ] || [ -L "$file" ]; then
+    say "token_file $file is not a regular file"
+    return 1
+  fi
+  owner=$(stat -c %u "$file" 2> /dev/null || stat -f %u "$file")
+  mode=$(stat -c %a "$file" 2> /dev/null || stat -f %Lp "$file")
+  case "$owner:$mode" in
+  0:[0-7]00) ;;
+  *)
+    say "token_file $file must be root's, and no one else's to read (it is $owner, mode $mode)"
+    return 1
+    ;;
+  esac
+  head -n 1 "$file"
+}
+
+# Raft's snapshot into the dump directory, or why not. Called as
+# "snapshot || ...", so set -e does not apply: every step is checked.
+snapshot() {
+  out="$RESTATE_DUMP_DIR/openbao.snap"
+  tmp="$out.tmp"
+  rm -f "$out" "$tmp" || return 1
+  t=$(token) || return 1
+  trap 'rm -f "$tmp"' EXIT
+  trap 'exit 1' HUP INT TERM
+  if ! BAO_TOKEN=$t bao_cmd operator raft snapshot save "$tmp"; then
+    rm -f "$tmp"
+    say "bao operator raft snapshot save failed: nothing of it is kept"
+    return 1
+  fi
+  mv -f "$tmp" "$out" || return 1
+  trap - EXIT HUP INT TERM
+}
+
+# Waits until OpenBao says it is unsealed (bao status: 0 unsealed, 2 sealed,
+# 1 not reachable yet), for up to unseal_wait seconds.
+wait_unsealed() {
+  wait=$(setting unseal_wait 120)
+  case "$wait" in
+  '' | *[!0-9]*)
+    say "unseal_wait = $wait is not a number of seconds"
+    return 1
+    ;;
+  esac
+  waited=0
+  while :; do
+    if bao_cmd status > /dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$waited" -ge "$wait" ]; then
+      return 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+}
+
+case "$action" in
+paths)
+  dir=$(config_path)
+  if [ -z "$dir" ] && [ -d /var/lib/openbao/data ]; then
+    dir=/var/lib/openbao/data
+  fi
+  if [ -n "$dir" ] && [ -d "$dir" ]; then
+    echo "$dir"
+  fi
+  ;;
+pause)
+  case "$storage" in
+  raft)
+    # Its files are left out whatever happens: copied while it runs they are
+    # no copy of it.
+    if [ -n "${RESTATE_REPLY:-}" ]; then
+      echo leave-out > "$RESTATE_REPLY"
+    fi
+    if [ -z "${RESTATE_DUMP_DIR:-}" ]; then
+      say "raft storage, and no dump directory for its snapshot: nothing of it is captured"
+      exit 1
+    fi
+    if ! snapshot; then
+      say "no snapshot: nothing of it is captured"
+      exit 1
+    fi
+    ;;
+  file)
+    (umask 077 && mkdir -p "$state")
+    if systemctl is-active --quiet "$unit"; then
+      systemctl stop "$unit"
+      : > "$stopped"
+    fi
+    ;;
+  *)
+    say "its storage is ${storage:-not found in $config}: storage = raft or file in $conf says which"
+    exit 1
+    ;;
+  esac
+  ;;
+resume)
+  # Only what pause stopped is started, and only that is unsealed.
+  if [ "$storage" != file ] || [ ! -e "$stopped" ]; then
+    exit 0
+  fi
+  systemctl start "$unit"
+  rm -f "$stopped"
+  unseal=$(setting unseal_unit '')
+  if [ -n "$unseal" ]; then
+    # restart, not start: a one-shot unit that has run once, and is still
+    # "active" for it, would not run again for start.
+    systemctl restart "$unseal" || say "$unseal did not run"
+  fi
+  if ! wait_unsealed; then
+    say "started, but still sealed after $(setting unseal_wait 120) seconds: unseal it" \
+      "(bao operator unseal)${unseal:+, or see why $unseal did not}"
+    exit 1
+  fi
+  ;;
+*)
+  echo "usage: $0 present|paths|pause|resume NAME" >&2
+  exit 2
+  ;;
+esac

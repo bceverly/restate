@@ -1220,6 +1220,34 @@ if usable gpg && usable gpgv && usable gpgconf; then
   dk --export-secret-keys dpass@example.invalid > dpass.key 2> /dev/null
   dk --export dpass@example.invalid > dpass.pub 2> /dev/null
   chmod 600 dpass.key pw.txt
+  # Whether gpg alone, in a home of its own, can use the key it has just
+  # exported, with its passphrase: now and then on GitHub's runner it cannot
+  # -- "Bad passphrase" for the right one, every try, as the reimports above
+  # (GnuPG T8094) -- and then nothing restate does could. So the checks are
+  # skipped, saying what gpg said, rather than failed; where gpg can and
+  # restate cannot, they fail.
+  mkdir -m 700 dprobe
+  dp() { gpg --homedir "$WORK/dprobe" --batch --quiet --pinentry-mode loopback --passphrase pw "$@"; }
+  echo probe > dprobe.txt
+  dusable=no
+  if dp --import dpass.key 2> dprobe.err &&
+     dp --trust-model always --yes --recipient dpass@example.invalid \
+        --output dprobe.gpg --encrypt dprobe.txt 2>> dprobe.err; then
+    # Three tries, as restate gives it: gpg-agent refuses a key it has just
+    # imported once, on some versions, and takes it after.
+    for _ in 1 2 3; do
+      if dp --yes --output dprobe.out --decrypt dprobe.gpg 2>> dprobe.err; then
+        dusable=yes
+        break
+      fi
+    done
+  fi
+  gpgconf --homedir "$WORK/dprobe" --kill gpg-agent 2> /dev/null || true
+  if [ "$dusable" = no ]; then
+    echo "  (passphrase_file restore tests skipped: this gpg cannot use the key it exported:"
+    sed 's/^/      /' dprobe.err | head -5
+    echo "  )"
+  else
   expect 0 "an encrypted repository for decrypt_with" -- \
     env XDG_CACHE_HOME="$WORK/pcache5" GNUPGHOME="$WORK/pnokey" \
     "$BIN" capture -q -r rtree --os=linux --encrypt-to dpass.pub -o drepo --create
@@ -1239,6 +1267,7 @@ if usable gpg && usable gpgv && usable gpgconf; then
     env XDG_CACHE_HOME="$WORK/pcache6" GNUPGHOME="$WORK/pnokey" "$BIN" run -q "$WORK/pjobs/wrong.conf"
   contains "$ERR" "or its passphrase was not given" "says why"
   contains "$ERR" '(used once as it was imported, gpg said "' "with what gpg said of the key"
+  fi
   gpgconf --homedir "$WORK/dgnupg" --kill gpg-agent 2> /dev/null || true
   fi
   expect 0 "prune --whole-packs an encrypted repository, with no key at all" -- \
@@ -1533,6 +1562,28 @@ HOOK
   contains "$ERR" "the restore is incomplete" "and leaves it incomplete"
   rm -rf live-out
 
+  # A pause that says to leave its files out, given a setting for it: only
+  # its dump directory is copied, and the result says so.
+  cat > /etc/restate/hooks.d/redis <<HOOK
+#!/bin/sh
+echo "\$1 settings=\$RESTATE_SETTINGS" >> "$WORK/hook.log"
+if [ "\$1" = pause ]; then
+  echo dumped > "\$RESTATE_DUMP_DIR/dump.txt"
+  echo leave-out > "\$RESTATE_REPLY"
+fi
+exit 0
+HOOK
+  : > "$WORK/hook.log"
+  expect 0 "a hook that leaves its files out" -- "$BIN" capture -N -R live.rules --quiesce \
+    --hook-option redis.mode=live --hook-option postgresql.stop=never -o live.tar --result live.json
+  contains "$(cat "$WORK/hook.log")" "pause settings=mode=live" "is given its own settings alone"
+  contains "$ERR" "its files are left out, as its hook says" "says so"
+  live_files="$(part live.tar files.tar.gz | gzip -dc | tar -tf -)"
+  lacks "$live_files" "restate/files/srv/restate-redis/dump.rdb" "its files are not in the image"
+  contains "$live_files" "restate/files/var/lib/restate/dumps/redis-redis-server/dump.txt" \
+    "but its dump is"
+  contains "$(cat live.json)" '"left_out": true' "and the result says they were left out"
+
   # A script, written as it is: nothing to expand here.
   # shellcheck disable=SC2016
   printf '#!/bin/sh\n[ "$1" = pause ] && exit 3\nexit 0\n' > /etc/restate/hooks.d/redis
@@ -1677,7 +1728,92 @@ HOOK
   contains "$ERR" "dump = weekly in /etc/restate/postgresql.conf is not always, never or auto" \
     "is refused"
   expect 0 "and resumes" -- pgrun sh "$pg" resume 18-main
+
+  # stop = never, as a capture's --hook-option gives it (RESTATE_SETTINGS),
+  # over the file: dumped uncompressed whatever its size, nothing stopped,
+  # and the cluster's files left out.
+  printf 'stop = always\ndump_limit = 1K\n' > /etc/restate/postgresql.conf
+  : > pg.log
+  : > reply
+  # shellcheck disable=SC2329  # run by expect
+  pgnever() { pgrun RESTATE_SETTINGS="stop=never" RESTATE_REPLY="$WORK/reply" "$@"; }
+  expect 0 "stop = never" -- pgnever PG_SIZE=2000000 PG_FREE_K=100000000 sh "$pg" pause 18-main
+  contains "$(cat pgdump/pg_dumpall.sql)" "-- --cluster 18/main" "dumps it uncompressed, past dump_limit"
+  check "and has no gzipped dump" test ! -e pgdump/pg_dumpall.sql.gz
+  check "stops nothing" test ! -s pg.log
+  contains "$(cat reply)" "leave-out" "and leaves its files out"
+  expect 0 "stop = never resumes" -- pgnever sh "$pg" resume 18-main
+  check "starting nothing" test ! -s pg.log
+  : > reply
+  expect 1 "stop = never, and a pg_dumpall that fails" -- pgnever PG_FAIL=1 sh "$pg" pause 18-main
+  contains "$ERR" "nothing of it is captured" "says so"
+  contains "$(cat reply)" "leave-out" "and leaves the files out all the same"
+  check "stopping nothing" test ! -s pg.log
+  expect 1 "stop = never with dump = never" -- \
+    pgrun RESTATE_SETTINGS="$(printf 'stop=never\ndump=never')" sh "$pg" pause 18-main
+  contains "$ERR" "dump = never with stop = never would capture nothing" "is refused"
+  expect 1 "stop = never with no dump directory" -- \
+    env PATH="$WORK/pgbin:$PATH" RESTATE_SETTINGS=stop=never sh "$pg" pause 18-main
+  contains "$ERR" "no dump directory" "is refused"
+  expect 1 "a stop setting that is not one" -- pgrun RESTATE_SETTINGS=stop=sometimes sh "$pg" pause 18-main
+  contains "$ERR" "stop = sometimes is not always or never" "is refused"
   rm -f /etc/restate/postgresql.conf
+
+  # The OpenBao hook, with stand-ins for bao and systemctl: raft's snapshot,
+  # taken with nothing stopped and its files left out; file storage stopped,
+  # started again, unsealed by the unit named for it, and a resume that
+  # fails while it is still sealed.
+  bao="$HERE/../../hooks/openbao"
+  mkdir -p baobin baodump baodata
+  cat > baobin/bao << EOF
+#!/bin/sh
+echo "bao \$* \${BAO_TOKEN:-}" >> "$WORK/bao.log"
+case "\$1" in
+operator) [ -z "\${BAO_FAIL:-}" ] || exit 1; echo snap > "\$5" ;;
+status) [ -e "$WORK/unsealed" ] && exit 0; exit 2 ;;
+esac
+EOF
+  cat > baobin/systemctl << EOF
+#!/bin/sh
+echo "systemctl \$*" >> "$WORK/bao.log"
+case "\$1" in restart) touch "$WORK/unsealed" ;; esac
+EOF
+  chmod 0755 baobin/*
+  printf 'storage "raft" {\n  path = "%s/baodata"\n}\n' "$WORK" > openbao.hcl
+  printf 'bao-token\n' > bao.token
+  chmod 0600 bao.token
+  printf 'config = %s/openbao.hcl\ntoken_file = %s/bao.token\n' "$WORK" "$WORK" \
+    > /etc/restate/openbao.conf
+  # shellcheck disable=SC2329  # run by expect
+  baorun() { env PATH="$WORK/baobin:$PATH" RESTATE_DUMP_DIR="$WORK/baodump" RESTATE_REPLY="$WORK/reply" "$@"; }
+  : > reply
+  expect 0 "the openbao hook names its storage" -- baorun sh "$bao" paths openbao
+  contains "$OUT" "$WORK/baodata" "from its configuration"
+  expect 0 "raft storage pauses" -- baorun sh "$bao" pause openbao
+  contains "$(cat baodump/openbao.snap)" "snap" "with a snapshot"
+  contains "$(cat bao.log)" "operator raft snapshot save" "taken by bao"
+  contains "$(cat bao.log)" "bao-token" "with the token from token_file"
+  contains "$(cat reply)" "leave-out" "and leaves its files out"
+  lacks "$(cat bao.log)" "systemctl stop" "stopping nothing"
+  expect 1 "a snapshot that fails" -- baorun BAO_FAIL=1 sh "$bao" pause openbao
+  contains "$ERR" "nothing of it is kept" "keeps nothing of it"
+  check "nor the snapshot before" test ! -e baodump/openbao.snap
+  chmod 0644 bao.token
+  expect 1 "a token anyone can read" -- baorun sh "$bao" pause openbao
+  contains "$ERR" "no one else's to read" "is refused"
+  printf 'storage "file" {\n  path = "%s/baodata"\n}\n' "$WORK" > openbao.hcl
+  : > bao.log
+  expect 0 "file storage pauses" -- baorun sh "$bao" pause openbao
+  contains "$(cat bao.log)" "systemctl stop openbao" "by stopping it"
+  expect 0 "and resumes, unsealed" -- \
+    baorun RESTATE_SETTINGS=unseal_unit=sysmanage-openbao-init sh "$bao" resume openbao
+  contains "$(cat bao.log)" "systemctl start openbao" "started again"
+  contains "$(cat bao.log)" "systemctl restart sysmanage-openbao-init" "and unsealed by its unit"
+  rm -f unsealed
+  expect 0 "pauses again" -- baorun sh "$bao" pause openbao
+  expect 1 "and stays sealed" -- baorun RESTATE_SETTINGS=unseal_wait=2 sh "$bao" resume openbao
+  contains "$ERR" "still sealed after 2 seconds" "which fails the resume"
+  rm -f /etc/restate/openbao.conf
 
   kill "$live_pid" 2> /dev/null
   wait "$live_pid" 2> /dev/null

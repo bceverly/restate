@@ -478,6 +478,7 @@ struct quiesce {
     size_t                nwhole;
     time_t               *paused_at;
     bool                 *pause_ok;
+    bool                 *left_out; /* its pause said its paths are not to be copied */
     char                **said;     /* why a pause or a resume failed */
     uint64_t              paused;
     uint64_t              failed;
@@ -632,6 +633,7 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
     q->whole = rs_xcalloc(n, sizeof(*q->whole));
     q->paused_at = rs_xcalloc(n, sizeof(*q->paused_at));
     q->pause_ok = rs_xcalloc(n, sizeof(*q->pause_ok));
+    q->left_out = rs_xcalloc(n, sizeof(*q->left_out));
     q->said = rs_xcalloc(n, sizeof(*q->said));
     for (i = 0; i < found; i++)
     {
@@ -776,6 +778,7 @@ static bool quiesce_plan(const struct rs_options *o, const struct rs_rules *rule
                 }
                 q->groups[q->ngroups].paths = q->paths[q->ngroups];
                 q->groups[q->ngroups].npaths = np;
+                q->groups[q->ngroups].always = q->dumps[i] ? 1 : 0;
                 q->of[q->ngroups++] = i;
             }
         }
@@ -811,6 +814,7 @@ static void quiesce_free(struct quiesce *q)
     free(q->whole);
     free(q->paused_at);
     free(q->pause_ok);
+    free(q->left_out);
     free(q->said);
 }
 
@@ -880,16 +884,29 @@ static void let_stops(void)
     }
 }
 
+/* What every hook of this capture is given, with `dump_dir` its own. */
+static struct rs_hook_call hook_call(const struct rs_options *o, const char *dump_dir)
+{
+    struct rs_hook_call c;
+
+    c.dump_dir = dump_dir;
+    c.quiescing = o->quiesce;
+    c.settings = o->hook_options;
+    c.nsettings = o->nhook_options;
+    return c;
+}
+
 /*
  * Pauses the live thing `i`. While anything is paused the signals that would
  * end restate are held, so nothing can stop it between the pause and the
  * resume; a Ctrl-C reaches the hook itself, and once everything is resumed
  * restate goes the way the signal says. False if a signal came meanwhile.
  */
-static bool pause_one(const struct around_ctx *a, size_t i)
+static bool pause_one(const struct around_ctx *a, size_t i, bool grouped)
 {
     struct quiesce       *q = a->q;
     const struct rs_live *l = &q->live[i];
+    struct rs_hook_call   c = hook_call(a->o, q->dumps[i]);
     struct rs_buf         err;
 
     if (q->depth++ == 0)
@@ -906,12 +923,21 @@ static bool pause_one(const struct around_ctx *a, size_t i)
     rs_progress_hook(l->name);
     q->paused++;
     q->paused_at[i] = time(NULL);
-    q->pause_ok[i] = rs_hook_run(q->hooks[i], "pause", l, q->dumps[i], a->o->quiesce, &err);
+    /* Only what has paths of its own walked between its pause and resume
+     * can have them left out; one paused for the whole walk cannot. */
+    q->pause_ok[i] = rs_hook_run(q->hooks[i], "pause", l, &c, grouped ? &q->left_out[i] : NULL,
+                                 &err);
     if (!q->pause_ok[i])
     {
-        tell(a->o, LOG_WARNING, "%s %s was not paused (%s): its files are copied as they are",
-             rs_live_what(l), l->name, err.data);
+        tell(a->o, LOG_WARNING, "%s %s was not paused (%s): %s", rs_live_what(l), l->name,
+             err.data,
+             q->left_out[i] ? "its files are left out" : "its files are copied as they are");
         q->said[i] = rs_xstrdup(err.data ? err.data : "");
+    } else if (q->left_out[i])
+    {
+        tell(a->o, LOG_NOTICE,
+             "%s %s: its files are left out, as its hook says: its dump is the copy",
+             rs_live_what(l), l->name);
     }
     rs_buf_free(&err);
     return !interrupted();
@@ -925,7 +951,11 @@ static void resume_one(const struct around_ctx *a, size_t i)
     bool                  ok;
 
     rs_buf_init(&err);
-    ok = rs_hook_run(q->hooks[i], "resume", l, q->dumps[i], a->o->quiesce, &err);
+    {
+        struct rs_hook_call c = hook_call(a->o, q->dumps[i]);
+
+        ok = rs_hook_run(q->hooks[i], "resume", l, &c, NULL, &err);
+    }
     if (!ok)
     {
         tell(a->o, LOG_ERR, "%s %s was not resumed, and may still be stopped: %s",
@@ -941,7 +971,7 @@ static void resume_one(const struct around_ctx *a, size_t i)
         q->failed++;
     }
     rs_result_quiesce(l->kind, l->name, q->paused_at[i], ok ? time(NULL) : 0,
-                      ok && q->pause_ok[i], q->said[i]);
+                      ok && q->pause_ok[i], q->left_out[i], q->said[i]);
     rs_progress_hook(NULL);
     rs_buf_free(&err);
     if (--q->depth == 0)
@@ -951,16 +981,21 @@ static void resume_one(const struct around_ctx *a, size_t i)
 }
 
 /* The scan's call on each side of a group: pause before, resume after. */
-static bool around(const void *ctx, size_t group, bool before)
+static enum rs_around around(const void *ctx, size_t group, bool before)
 {
     const struct around_ctx *a = ctx;
+    size_t                   i = a->q->of[group];
 
     if (before)
     {
-        return pause_one(a, a->q->of[group]);
+        if (!pause_one(a, i, true))
+        {
+            return RS_AROUND_STOP;
+        }
+        return a->q->left_out[i] ? RS_AROUND_LEAVE_OUT : RS_AROUND_WALK;
     }
-    resume_one(a, a->q->of[group]);
-    return true;
+    resume_one(a, i);
+    return RS_AROUND_WALK;
 }
 
 /* The network filesystems and automounts a walk of `root` records and goes no
@@ -1314,7 +1349,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     ok = true;
     for (i = 0; live && i < q.nwhole; i++)
     {
-        ok = pause_one(&actx, q.whole[i]) && ok;
+        ok = pause_one(&actx, q.whole[i], false) && ok;
     }
     if (ok)
     {

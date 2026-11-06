@@ -55,6 +55,7 @@ static void capture_job(void)
                 "quiesce = true\n"
                 "quiesce_with = unifi\n"
                 "quiesce_with = nextcloud\n"
+                "hook_option = postgresql.stop=never\n"
                 "encrypt_to = /etc/restate/keys/a.asc\n"
                 "sign_with = /etc/restate/keys/s.gpg\n"
                 "append_only = true\n"
@@ -74,6 +75,9 @@ static void capture_job(void)
               "/etc/restate/more.rules");
     CHECK(job.opts.all && !job.opts.baseline_content && job.opts.one_fs && job.opts.quiesce);
     CHECK_INT(job.opts.nquiesce_with, 2);
+    CHECK_INT(job.opts.nhook_options, 1);
+    CHECK_STR(job.opts.nhook_options == 1 ? job.opts.hook_options[0] : NULL,
+              "postgresql.stop=never");
     CHECK_INT(job.opts.nrecipients, 1);
     CHECK_STR(job.opts.sign_with, "/etc/restate/keys/s.gpg");
     CHECK(job.opts.append_only && job.opts.log_outcome);
@@ -339,6 +343,8 @@ static void bad_jobs(void)
     refused("command = capture\nrepository = /r\nquiesce_with = ../x\n",
             "quiesce_with: not a name");
     refused("command = capture\nrepository = /r\nreport_group = -g\n", "not a name");
+    refused("command = capture\nrepository = /r\nhook_option = stop=never\n",
+            "hook_option: not HOOK.KEY=VALUE");
     refused("command = restore\nsnapshot = ../x\nrepository = /r\n", "snapshot: not a snapshot");
     refused("command = restore\nsnapshot = r::x\n", "not a snapshot");
     refused("command = restore\nsnapshot = /r::a::b\n", "not a snapshot");

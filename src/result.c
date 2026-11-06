@@ -150,7 +150,7 @@ void rs_result_time(time_t t, char out[32])
 }
 
 void rs_result_quiesce(const char *kind, const char *name, time_t paused, time_t resumed,
-                       bool ok, const char *message)
+                       bool ok, bool left_out, const char *message)
 {
     struct rs_jval *e;
     char            when[32];
@@ -178,6 +178,7 @@ void rs_result_quiesce(const char *kind, const char *name, time_t paused, time_t
         (void)rs_jobj_add(e, "resumed_at");   /* null: it was not */
     }
     rs_jobj_str(e, "status", ok ? "ok" : "failed");
+    rs_jobj_bool(e, "left_out", left_out);
     rs_jobj_str(e, "message", message ? message : "");
 }
 

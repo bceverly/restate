@@ -18,6 +18,7 @@
 int         rs_test_checks = 0;
 int         rs_test_failures = 0;
 const char *rs_test_case = "(none)";
+const char *rs_test_argv0 = NULL;
 
 static int case_count = 0;
 
@@ -144,7 +145,7 @@ void rs_test_write(const char *dir, const char *name, const char *text, unsigned
     free(path);
 }
 
-static char *slurp(const char *path)
+char *rs_test_slurp(const char *path)
 {
     struct rs_buf b;
     char          chunk[4096];
@@ -201,8 +202,8 @@ int rs_test_capture(int (*fn)(const void *), const void *arg, char **out, char *
     (void)close(saved_out);
     (void)close(saved_err);
 
-    *out = slurp(out_path);
-    *err = slurp(err_path);
+    *out = rs_test_slurp(out_path);
+    *err = rs_test_slurp(err_path);
     rs_test_rmtree(dir);
     free(out_path);
     free(err_path);
@@ -210,9 +211,20 @@ int rs_test_capture(int (*fn)(const void *), const void *arg, char **out, char *
     return status;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    int report_fd = dup(STDERR_FILENO);
+    char *self = argc > 0 ? realpath(argv[0], NULL) : NULL;
+    int   report_fd;
+
+#ifdef RS_WITH_PROXY
+    if (argc == 6 && strcmp(argv[1], "--tls-serve") == 0)
+    {
+        free(self);
+        return test_tls_serve(argv + 2);
+    }
+#endif
+    rs_test_argv0 = self;
+    report_fd = dup(STDERR_FILENO);
 
     if (report_fd >= 0)
     {
@@ -261,6 +273,12 @@ int main(void)
     test_jobs();
     test_arch();
     test_result();
+    test_grant();
+    test_request();
+#ifdef RS_WITH_PROXY
+    test_tls();
+    test_serve();
+#endif
     test_cmd();
 
     rs_name_cache_free();
@@ -277,5 +295,7 @@ int main(void)
     {
         (void)fclose(report);
     }
+    rs_test_argv0 = NULL;
+    free(self);
     return rs_test_failures == 0 ? 0 : 1;
 }

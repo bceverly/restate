@@ -55,6 +55,11 @@ printf '\n\033[1mSecurity scan\033[0m \033[2m(same tools as CI)\033[0m\n'
 read -r -a RS_FEATURES <<< "$(scripts/features.sh)"
 CPPFLAGS_ALL=(-Iinclude -Isrc "${RS_FEATURES[@]}"
               -DRESTATE_VERSION="\"$VERSION\"")
+# restate-proxy's sources too, where its TLS library is here to compile them.
+# shellcheck source=scripts/proxy-sources.sh
+. scripts/proxy-sources.sh
+C_FILES=(src/*.c "${PROXY_LIB[@]+"${PROXY_LIB[@]}"}" "${PROXY_MAIN[@]+"${PROXY_MAIN[@]}"}")
+CPPFLAGS_ALL+=("${PROXY_CPPFLAGS[@]+"${PROXY_CPPFLAGS[@]}"}")
 
 # ---------------------------------------------------------------------------
 section "binary hardening"
@@ -63,77 +68,88 @@ section "binary hardening"
 # the Makefile say. The two come apart more easily than they should: a
 # distribution's CFLAGS override, a linker that quietly drops an option, a
 # _FORTIFY_SOURCE that did nothing because the build was -O0.
-if [ ! -x bin/restate ]; then
-  skip "bin/restate is not built — run 'make build' first"
-elif command -v hardening-check > /dev/null 2>&1; then
-  #
-  # The report is read rather than the exit status trusted, because which
-  # features hardening-check knows about — and which command-line options it
-  # offers to skip them — varies between devscripts releases. Asking it to
-  # skip a check it has never heard of is a hard error: passing
-  # --nobranchprotection is fine on 26.04 and fails outright on 24.04 with
-  # "Unknown option", which is how a scan that was green on a laptop failed on
-  # a runner. Parsing the lines works on every version.
-  #
-  # Branch Protection is deliberately not required. It is an AArch64
-  # pointer-authentication feature; on x86 the equivalent is CET, which is
-  # checked on its own line and which this build does enable.
-  hardening-check bin/restate > "$REPORTS/hardening.txt" 2>&1 || true
+check_hardening() {
+  local bin="$1" target="$2"
+  local report
+  report="$REPORTS/hardening-$(basename "$bin").txt"
+  if [ ! -x "$bin" ]; then
+    skip "$bin is not built — run 'make $target' first"
+  elif command -v hardening-check > /dev/null 2>&1; then
+    #
+    # The report is read rather than the exit status trusted, because which
+    # features hardening-check knows about — and which command-line options it
+    # offers to skip them — varies between devscripts releases. Asking it to
+    # skip a check it has never heard of is a hard error: passing
+    # --nobranchprotection is fine on 26.04 and fails outright on 24.04 with
+    # "Unknown option", which is how a scan that was green on a laptop failed on
+    # a runner. Parsing the lines works on every version.
+    #
+    # Branch Protection is deliberately not required. It is an AArch64
+    # pointer-authentication feature; on x86 the equivalent is CET, which is
+    # checked on its own line and which this build does enable.
+    hardening-check "$bin" > "$report" 2>&1 || true
 
-  #
-  # "unknown" is not "missing", and treating it as such is stricter than the
-  # tool itself (which exits 0 on it). It means hardening-check found no
-  # evidence either way -- for stack-clash protection that is the normal
-  # result on a program whose stack frames are all small, since the compiler
-  # only emits a probe where one is actually needed. The flag is passed; there
-  # was simply nothing for it to do.
-  missing=()
-  unknown=()
-  present=0
-  while IFS= read -r line; do
-    feature="${line%%:*}"
-    feature="${feature#"${feature%%[![:space:]]*}"}"   # trim leading spaces
-    verdict="${line#*: }"
-    case "$feature" in
-      # AArch64 pointer authentication. On x86 the equivalent is CET, which
-      # has a line of its own and which this build enables.
-      "Branch Protection") continue ;;
-      "") continue ;;
-    esac
-    case "$verdict" in
-      yes*)     present=$((present + 1)) ;;
-      unknown*) unknown+=("$feature") ;;
-      *)        missing+=("$feature") ;;
-    esac
-  done < <(grep ':' "$REPORTS/hardening.txt" | grep -v '^[^ ]')
+    #
+    # "unknown" is not "missing", and treating it as such is stricter than the
+    # tool itself (which exits 0 on it). It means hardening-check found no
+    # evidence either way -- for stack-clash protection that is the normal
+    # result on a program whose stack frames are all small, since the compiler
+    # only emits a probe where one is actually needed. The flag is passed; there
+    # was simply nothing for it to do.
+    missing=()
+    unknown=()
+    present=0
+    while IFS= read -r line; do
+      feature="${line%%:*}"
+      feature="${feature#"${feature%%[![:space:]]*}"}"   # trim leading spaces
+      verdict="${line#*: }"
+      case "$feature" in
+        # AArch64 pointer authentication. On x86 the equivalent is CET, which
+        # has a line of its own and which this build enables.
+        "Branch Protection") continue ;;
+        "") continue ;;
+      esac
+      case "$verdict" in
+        yes*)     present=$((present + 1)) ;;
+        unknown*) unknown+=("$feature") ;;
+        *)        missing+=("$feature") ;;
+      esac
+    done < <(grep ':' "$report" | grep -v '^[^ ]')
 
-  if [ ${#missing[@]} -eq 0 ] && [ "$present" -gt 0 ]; then
-    ok "$present hardening features present (PIE, stack protector, fortify, RELRO, BIND_NOW, CET)"
-    if [ ${#unknown[@]} -gt 0 ]; then
-      note "not determinable from the binary: ${unknown[*]}"
-      note "(enabled at compile time; the compiler emitted no instruction needing it)"
+    if [ ${#missing[@]} -eq 0 ] && [ "$present" -gt 0 ]; then
+      ok "$bin: $present hardening features present (PIE, stack protector, fortify, RELRO, BIND_NOW, CET)"
+      if [ ${#unknown[@]} -gt 0 ]; then
+        note "not determinable from the binary: ${unknown[*]}"
+        note "(enabled at compile time; the compiler emitted no instruction needing it)"
+      fi
+    elif [ "$present" -eq 0 ]; then
+      bad "could not read hardening-check's report"
+      sed 's/^/      /' "$report"
+    else
+      bad "$bin is missing: ${missing[*]}"
+      sed 's/^/      /' "$report"
     fi
-  elif [ "$present" -eq 0 ]; then
-    bad "could not read hardening-check's report"
-    sed 's/^/      /' "$REPORTS/hardening.txt"
+  elif command -v readelf > /dev/null 2>&1; then
+    # The parts that can be seen without devscripts installed.
+    missing=()
+    readelf -d "$bin" 2>/dev/null | grep -q "BIND_NOW" || missing+=("BIND_NOW")
+    readelf -lW "$bin" 2>/dev/null | grep -q "GNU_RELRO" || missing+=("RELRO")
+    readelf -sW "$bin" 2>/dev/null | grep -q "__stack_chk_fail" || missing+=("stack protector")
+    readelf -sW "$bin" 2>/dev/null | grep -q "_chk@" || missing+=("_FORTIFY_SOURCE")
+    if [ ${#missing[@]} -eq 0 ]; then
+      ok "$bin: RELRO, BIND_NOW, the stack protector and fortified calls are all present"
+    else
+      bad "$bin is missing: ${missing[*]}"
+    fi
   else
-    bad "the binary is missing: ${missing[*]}"
-    sed 's/^/      /' "$REPORTS/hardening.txt"
+    skip "neither hardening-check nor readelf is installed"
   fi
-elif command -v readelf > /dev/null 2>&1; then
-  # The parts that can be seen without devscripts installed.
-  missing=()
-  readelf -d bin/restate 2>/dev/null | grep -q "BIND_NOW" || missing+=("BIND_NOW")
-  readelf -lW bin/restate 2>/dev/null | grep -q "GNU_RELRO" || missing+=("RELRO")
-  readelf -sW bin/restate 2>/dev/null | grep -q "__stack_chk_fail" || missing+=("stack protector")
-  readelf -sW bin/restate 2>/dev/null | grep -q "_chk@" || missing+=("_FORTIFY_SOURCE")
-  if [ ${#missing[@]} -eq 0 ]; then
-    ok "RELRO, BIND_NOW, the stack protector and fortified calls are all present"
-  else
-    bad "the binary is missing: ${missing[*]}"
-  fi
-else
-  skip "neither hardening-check nor readelf is installed"
+}
+
+check_hardening bin/restate build
+# restate-proxy is held to the same, where it can be built here.
+if [ -n "$PROXY_OK" ]; then
+  check_hardening bin/restate-proxy proxy
 fi
 
 # ---------------------------------------------------------------------------
@@ -150,7 +166,7 @@ if command -v cppcheck > /dev/null 2>&1; then
        "${ADDONS[@]+"${ADDONS[@]}"}" --inline-suppr \
        --suppress=missingIncludeSystem --suppress=unusedFunction \
        --suppress=checkersReport \
-       -I include -I src src 2> "$REPORTS/cppcheck.log"; then
+       -I include -I src -I proxy src proxy 2> "$REPORTS/cppcheck.log"; then
     ok "no findings${ADDONS[0]:+ (CERT rules included)}"
   else
     bad "cppcheck found something"
@@ -165,7 +181,7 @@ fi
 section "clang static analyzer"
 if command -v scan-build > /dev/null 2>&1; then
   if scan-build -o "$REPORTS/scan-build" --status-bugs \
-       "$CC" -std=c11 "${CPPFLAGS_ALL[@]}" -fsyntax-only src/*.c \
+       "$CC" -std=c11 "${CPPFLAGS_ALL[@]}" -fsyntax-only "${C_FILES[@]}" \
        > "$REPORTS/scan-build.log" 2>&1; then
     ok "no findings"
   else
@@ -184,7 +200,7 @@ if command -v flawfinder > /dev/null 2>&1; then
   # --error-level=3 is "medium and above". Levels 1 and 2 are almost entirely
   # reports of memcpy and snprintf existing, which is what a parser is made of.
   if flawfinder --quiet --dataonly --error-level=3 --minlevel=3 \
-       src include > "$REPORTS/flawfinder.txt" 2>&1; then
+       src proxy include > "$REPORTS/flawfinder.txt" 2>&1; then
     ok "no findings at level 3 or above"
   else
     bad "flawfinder found something"
@@ -199,7 +215,7 @@ fi
 section "semgrep — pattern-based static analysis"
 if command -v semgrep > /dev/null 2>&1; then
   if semgrep --config=p/c --config=p/secrets --error --quiet --metrics=off \
-       --json --output="$REPORTS/semgrep.json" src include tests scripts \
+       --json --output="$REPORTS/semgrep.json" src proxy include tests scripts \
        > /dev/null 2>&1; then
     ok "no findings"
   else
@@ -332,6 +348,38 @@ elif command -v otool > /dev/null 2>&1; then
   fi
 else
   skip "neither ldd nor otool is available to list what the binary links"
+fi
+
+# restate-proxy links one thing more, its TLS library -- OpenSSL's libssl and
+# libcrypto, or libtls -- and nothing else. What it names itself is read, not
+# what ldd lists: OpenSSL's own dependencies (zlib, zstd on some systems) are
+# the library's choice, and not something this build links.
+if [ -z "$PROXY_OK" ]; then
+  :
+elif [ ! -x bin/restate-proxy ]; then
+  skip "bin/restate-proxy is not built — run 'make proxy' first"
+elif command -v readelf > /dev/null 2>&1 && readelf -d bin/restate-proxy > /dev/null 2>&1; then
+  OTHER="$(readelf -d bin/restate-proxy 2>/dev/null \
+           | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p' \
+           | grep -vE '^(libc|libm|libdl|libpthread|librt|ld-linux[^/]*|ld-musl[^/]*|libssl|libcrypto|libtls)[.-]' \
+           || true)"
+  if [ -n "$OTHER" ]; then
+    bad "restate-proxy links something beyond the C runtime and $PROXY_NAME"
+    printf '%s\n' "$OTHER" | sed 's/^/      /'
+  else
+    ok "restate-proxy links the C runtime and $PROXY_NAME, nothing else"
+  fi
+elif command -v otool > /dev/null 2>&1; then
+  OTHER="$(otool -L bin/restate-proxy | tail -n +2 \
+           | grep -vE 'libSystem|/lib(ssl|crypto)\.[0-9.]*dylib' || true)"
+  if [ -n "$OTHER" ]; then
+    bad "restate-proxy links something beyond libSystem and $PROXY_NAME"
+    printf '%s\n' "$OTHER" | sed 's/^/      /'
+  else
+    ok "restate-proxy links libSystem and $PROXY_NAME, nothing else"
+  fi
+else
+  skip "neither readelf nor otool is available to list what restate-proxy links"
 fi
 
 # ---------------------------------------------------------------------------

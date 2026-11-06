@@ -189,6 +189,9 @@ void rs_options_free(struct rs_options *o)
     free(o->quiesce_with);
     o->quiesce_with = NULL;
     o->nquiesce_with = 0;
+    free(o->hook_options);
+    o->hook_options = NULL;
+    o->nhook_options = 0;
 }
 
 /* A hook's name: what a file in hooks.d can be called. */
@@ -210,6 +213,33 @@ bool rs_hook_name_ok(const char *name)
         }
     }
     return true;
+}
+
+bool rs_hook_setting_ok(const char *s)
+{
+    const char *dot = strchr(s, '.');
+    const char *eq = strchr(s, '=');
+    const char *p;
+    char       *hook;
+    bool        ok;
+
+    if (!dot || !eq || eq < dot || dot == s || eq == dot + 1)
+    {
+        return false;
+    }
+    hook = rs_xstrndup(s, (size_t)(dot - s));
+    ok = rs_hook_name_ok(hook);
+    free(hook);
+    for (p = dot + 1; ok && p < eq; p++)
+    {
+        ok = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_';
+    }
+    /* The value: anything printable, which a hook reads as one line. */
+    for (p = eq + 1; ok && *p; p++)
+    {
+        ok = (unsigned char)*p >= 0x20 && *p != 0x7f;
+    }
+    return ok;
 }
 
 /* The most of anything prune is told to keep: far more than anyone means. */
@@ -443,6 +473,18 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->quiesce_with = rs_xreallocarray(o->quiesce_with, o->nquiesce_with + 1,
                                                sizeof(*o->quiesce_with));
             o->quiesce_with[o->nquiesce_with++] = optarg;
+            break;
+        case OPT_HOOK_OPTION:
+            if (!rs_hook_setting_ok(optarg))
+            {
+                rs_buf_addf(err, "--hook-option: \"%s\" is not HOOK.KEY=VALUE (a hook's name, a "
+                            "key of lowercase letters, digits and '_', and a value on one line)",
+                            optarg);
+                return false;
+            }
+            o->hook_options = rs_xreallocarray(o->hook_options, o->nhook_options + 1,
+                                               sizeof(*o->hook_options));
+            o->hook_options[o->nhook_options++] = optarg;
             break;
         case OPT_APPEND_ONLY:
             o->append_only = true;

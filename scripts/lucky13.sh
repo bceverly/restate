@@ -60,7 +60,7 @@ trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 # code and not the system headers the preprocessor would paste in.
 SOURCE="$WORK/source.i"
 : > "$SOURCE"
-for f in src/*.c; do
+for f in src/*.c proxy/*.c; do
   sed -e 's|^#include.*||' "$f" \
     | "$CC" -E -P -x c - 2>/dev/null | sed "s|^|$f: |" >> "$SOURCE"
 done

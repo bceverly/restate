@@ -33,6 +33,12 @@ concurrency:
 permissions:
   contents: read
 
+# Every job installs restate-proxy's TLS library, so the proxy being passed
+# over for want of it is a broken install here, and fails (scripts/tls.sh).
+# The BSD virtual machines do not see this; their base systems have it.
+env:
+  RS_REQUIRE_PROXY: 1
+
 jobs:
   # ==========================================================================
   lint:
@@ -48,8 +54,10 @@ jobs:
       - name: Install the analyzers
         run: |
           sudo apt-get update -qq
+          # libssl-dev for restate-proxy alone: restate links nothing but
+          # libc, and its build never looks for OpenSSL.
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential cppcheck clang-tidy shellcheck
+            build-essential libssl-dev cppcheck clang-tidy shellcheck
           ACTIONLINT_VERSION=1.7.7
           curl -sSfL \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
@@ -89,7 +97,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential ${{ matrix.cc }}
+            build-essential libssl-dev ${{ matrix.cc }}
 
       - name: make build
         run: make build
@@ -190,6 +198,12 @@ jobs:
           echo "running on $arch"
           test "$arch" = "aarch64"
 
+      # For restate-proxy alone, as in every job that builds it.
+      - name: Install OpenSSL's headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libssl-dev
+
       - name: make build
         run: make build WERROR=-Werror
 
@@ -227,13 +241,13 @@ jobs:
 
       - name: Build and test in a ${{ matrix.arch }} container
         run: |
-          docker run --rm --platform "linux/$ARCH" -v "$PWD:/w" -w /w -e ARCH \
+          docker run --rm --platform "linux/$ARCH" -v "$PWD:/w" -w /w -e ARCH -e RS_REQUIRE_PROXY \
             docker.io/library/ubuntu:24.04 sh -c '
             set -e
             test "$(uname -m)" = "$ARCH"
             apt-get update -q
             DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-              gcc make gnupg gzip diffutils ca-certificates > /dev/null
+              gcc make libssl-dev openssl gnupg gzip diffutils ca-certificates > /dev/null
             make build WERROR=-Werror
             make test-unit test-cli
             # Static, for the runner to run beside its own build.
@@ -268,32 +282,32 @@ jobs:
           # Busybox's find, awk and tar: what the tests have to get by with.
           - name: Alpine
             image: alpine:latest
-            setup: apk add -q build-base bash gzip gnupg
+            setup: apk add -q build-base openssl-dev openssl bash gzip gnupg
             package: sh scripts/build-apk.sh "" dist
             verify: verify-apk.sh
           - name: Fedora
             image: registry.fedoraproject.org/fedora:latest
-            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            setup: dnf install -y -q gcc make openssl-devel openssl diffutils findutils gawk gzip tar gnupg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: EL 9
             image: docker.io/library/almalinux:9
-            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            setup: dnf install -y -q gcc make openssl-devel openssl diffutils findutils gawk gzip tar gnupg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: EL 10
             image: docker.io/library/almalinux:10
-            setup: dnf install -y -q gcc make diffutils findutils gawk gzip tar gnupg2
+            setup: dnf install -y -q gcc make openssl-devel openssl diffutils findutils gawk gzip tar gnupg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: openSUSE Leap 16
             image: registry.opensuse.org/opensuse/leap:16.0
-            setup: zypper --non-interactive -q install -y gcc make diffutils findutils gawk gzip tar gpg2
+            setup: zypper --non-interactive -q install -y gcc make libopenssl-devel openssl diffutils findutils gawk gzip tar gpg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: openSUSE Tumbleweed
             image: registry.opensuse.org/opensuse/tumbleweed:latest
-            setup: zypper --non-interactive -q install -y gcc make diffutils findutils gawk gzip tar gpg2
+            setup: zypper --non-interactive -q install -y gcc make libopenssl-devel openssl diffutils findutils gawk gzip tar gpg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
     steps:
@@ -402,6 +416,11 @@ jobs:
           cc --version | head -1
           make --version | head -1
           bash --version | head -1
+
+      # macOS has no OpenSSL headers of its own; Homebrew's, for
+      # restate-proxy alone.
+      - name: Install OpenSSL 3
+        run: brew install openssl@3
 
       - name: make build
         run: make build WERROR=-Werror
@@ -650,7 +669,7 @@ jobs:
       - name: Install valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential valgrind
+          sudo apt-get install -y -qq --no-install-recommends build-essential libssl-dev valgrind
 
       - name: make test-memory
         run: make test-memory
@@ -679,7 +698,7 @@ jobs:
       - name: Install gcovr
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential gcovr
+          sudo apt-get install -y -qq --no-install-recommends build-essential libssl-dev gcovr
 
       # Both suites against one instrumented build: the unit tests never reach
       # main.c, and the end-to-end tests are what cover it.

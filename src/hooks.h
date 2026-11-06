@@ -34,6 +34,18 @@
  *                      copied along with them, after "pause" returns
  *   RESTATE_QUIESCE    yes if the capture is --quiesce's, which pauses the
  *                      databases it finds running, and no if it is not
+ *   RESTATE_SETTINGS   what --hook-option (a job's hook_option) gives this
+ *                      hook, by its name: "KEY=VALUE" a line, in the order
+ *                      given. A hook reads them over its own configuration
+ *                      file, so that a job can say what a site's file need
+ *                      not ("stop = never" for one server's PostgreSQL)
+ *   RESTATE_REPLY      for pause, a file, empty and root's alone, the hook
+ *                      may write one line to. "leave-out" (RS_HOOK_LEAVE_OUT)
+ *                      says that its paths are not to be copied at all: it
+ *                      did not stop what writes them, and the dump directory
+ *                      holds the copy that counts. The capture records none
+ *                      of them, and its result says so. Read whether the
+ *                      pause succeeded or not.
  *
  * Each dump directory holds RS_HOOKS_MARKER too, restate's own: the kind
  * and the name, a line each. A restore that puts one back runs
@@ -104,10 +116,24 @@ char **rs_hooks_list(size_t *n);
 bool rs_hook_dump_dir(const char *root, const struct rs_live *l, char **tree_path,
                       struct rs_buf *err);
 
-/* Runs `hook` for `action` ("pause", "resume") on `l`, `quiescing` for a
- * capture with --quiesce. True if it exited 0. */
+/* What the capture gives every hook it runs, beyond the thing itself. */
+struct rs_hook_call {
+    const char        *dump_dir;    /* RESTATE_DUMP_DIR, or NULL */
+    bool               quiescing;   /* a capture with --quiesce */
+    const char *const *settings;    /* --hook-option's, "HOOK.KEY=VALUE" each */
+    size_t             nsettings;
+};
+
+/* The one reply a pause can give in RESTATE_REPLY. */
+#define RS_HOOK_LEAVE_OUT "leave-out"
+
+/*
+ * Runs `hook` for `action` ("pause", "resume") on `l`. True if it exited 0.
+ * With `leave_out`, the hook is given RESTATE_REPLY, and *leave_out says
+ * whether it replied RS_HOOK_LEAVE_OUT.
+ */
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
-                 const char *dump_dir, bool quiescing, struct rs_buf *err);
+                 const struct rs_hook_call *c, bool *leave_out, struct rs_buf *err);
 
 /* True if `path` is a dump directory's RS_HOOKS_MARKER, as the walk sees it. */
 bool rs_hook_is_marker(const char *path);

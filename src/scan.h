@@ -51,6 +51,17 @@ typedef bool (*rs_store_fn)(void *ctx, struct rs_entry *e, int fd,
 struct rs_scan_group {
     const char *const *paths;
     size_t             npaths;
+    /* How many at the end of `paths` are walked even when the group is left
+     * out (RS_AROUND_LEAVE_OUT): a hook's dump directory, which holds the
+     * copy that counts when the rest is not copied. */
+    size_t             always;
+};
+
+/* What the first call of rs_scan_opts.around says to do with its group. */
+enum rs_around {
+    RS_AROUND_WALK = 0,     /* walk its paths */
+    RS_AROUND_LEAVE_OUT,    /* record none of them: what they hold is copied otherwise */
+    RS_AROUND_STOP          /* walk no more: an interrupted capture */
 };
 
 struct rs_scan_opts {
@@ -101,13 +112,15 @@ struct rs_scan_opts {
      * paths walked as they would have been, and around(around_ctx, i,
      * false). capture --quiesce pauses a database or a VM in the first call
      * and resumes it in the second, so it is paused only while its own
-     * files are copied. The second call is made whatever the first returned;
-     * the first returning false stops the walk there (an interrupted
-     * capture), and rs_scan then fails with "interrupted".
+     * files are copied. The second call is made whatever the first returned,
+     * and what it returns is not looked at. The first returning
+     * RS_AROUND_LEAVE_OUT passes over the group's paths, recording none of
+     * them; RS_AROUND_STOP stops the walk there (an interrupted capture), and
+     * rs_scan then fails with "interrupted".
      */
     const struct rs_scan_group *defer;
     size_t                      ndefer;
-    bool                        (*around)(const void *ctx, size_t group, bool before);
+    enum rs_around              (*around)(const void *ctx, size_t group, bool before);
     const void                 *around_ctx;
     /*
      * An incremental run: the index of the last capture, sorted. A regular

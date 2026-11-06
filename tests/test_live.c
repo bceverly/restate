@@ -892,8 +892,14 @@ void test_live(void)
         one.paths = paths;
         one.npaths = 2;
         rs_buf_init(&err);
-        CHECK(rs_hook_run(bin_true, "pause", &one, "/var/lib/restate/dumps/x", true, &err));
-        CHECK(!rs_hook_run(bin_false, "resume", &one, NULL, false, &err));
+        {
+            struct rs_hook_call c = { "/var/lib/restate/dumps/x", true, NULL, 0 };
+            bool                leave = true;
+
+            CHECK(rs_hook_run(bin_true, "pause", &one, &c, &leave, &err));
+            CHECK(!leave);
+        }
+        CHECK(!rs_hook_run(bin_false, "resume", &one, NULL, NULL, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "resume 18-main exited 1");
         rs_buf_reset(&err);
         /* Anyone's file is not run, however executable. */
@@ -903,9 +909,41 @@ void test_live(void)
         {
             CHECK(chown(mine, 1, (gid_t)-1) == 0);
         }
-        CHECK(!rs_hook_run(mine, "pause", &one, NULL, false, &err));
+        CHECK(!rs_hook_run(mine, "pause", &one, NULL, NULL, &err));
         CHECK_CONTAINS(err.data ? err.data : "", "not run");
         rs_buf_reset(&err);
+        /*
+         * Its settings, and its reply. /bin/sh is a hook restate would run,
+         * root's; run as "/bin/sh pause 18-main", it reads the script
+         * "pause" from where the tests are, which may be anyone's.
+         */
+        if (rs_hook_usable("/bin/sh"))
+        {
+            static const char *const settings[] = { "sh.stop=never", "postgresql.dump=always",
+                                                    "sh.label=a = b # c" };
+            struct rs_hook_call      c = { NULL, false, settings, 3 };
+            char                    *here = getcwd(NULL, 0);
+            char                    *got;
+            bool                     leave = false;
+
+            rs_test_write(dir, "pause", "printf '%s\\n' \"$RESTATE_SETTINGS\" > settings.out\n"
+                                        "echo leave-out > \"$RESTATE_REPLY\"\nexit 1\n", 0644);
+            CHECK(chdir(dir) == 0);
+            CHECK(!rs_hook_run("/bin/sh", "pause", &one, &c, &leave, &err));
+            CHECK(leave);
+            got = rs_test_slurp("settings.out");
+            CHECK_STR(got, "stop=never\nlabel=a = b # c\n");
+            free(got);
+            /* A reply of anything else is not one, and resume has none to give. */
+            rs_test_write(dir, "pause", "echo keep > \"$RESTATE_REPLY\"\n", 0644);
+            CHECK(rs_hook_run("/bin/sh", "pause", &one, &c, &leave, &err));
+            CHECK(!leave);
+            rs_test_write(dir, "resume", "test -z \"$RESTATE_REPLY\"\n", 0644);
+            CHECK(rs_hook_run("/bin/sh", "resume", &one, &c, NULL, &err));
+            CHECK(here && chdir(here) == 0);
+            free(here);
+            rs_buf_reset(&err);
+        }
         {
             char *argv[] = { (char *)(uintptr_t)"sleep", (char *)(uintptr_t)"10", NULL };
             int   code = -1;

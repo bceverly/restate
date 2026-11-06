@@ -54,6 +54,7 @@ enum {
     OPT_CLONES,
     OPT_READ_ALL,
     OPT_QUIESCE_WITH,
+    OPT_HOOK_OPTION,
     OPT_APPEND_ONLY,
     OPT_CREATE,
     OPT_RESULT,
@@ -136,6 +137,8 @@ struct rs_options {
     bool            whole_packs;    /* prune: no index read, whole packs only */
     const char    **quiesce_with;   /* --quiesce-with NAME, each */
     size_t          nquiesce_with;
+    const char    **hook_options;   /* --hook-option HOOK.KEY=VALUE, each */
+    size_t          nhook_options;
     bool            append_only;    /* capture: add files only */
     bool            create;         /* capture: init the repository if need be */
     const char     *result;         /* --result FILE */
@@ -181,6 +184,10 @@ const char *rs_command_name_at(size_t i);
 /* Whether `name` can be a hook's (--quiesce-with): lowercase letters, digits,
  * '-' and '_', not starting with '-'. */
 bool rs_hook_name_ok(const char *name);
+/* Whether `s` is a setting for a hook (--hook-option): "HOOK.KEY=VALUE", with
+ * HOOK a hook's name, KEY lowercase letters, digits and '_', and VALUE
+ * printable, on one line. */
+bool rs_hook_setting_ok(const char *s);
 
 void rs_print_help(FILE *out);
 void rs_print_version(FILE *out);

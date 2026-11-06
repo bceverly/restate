@@ -137,6 +137,9 @@ mkdir -p "$WORK"
 read -r -a RS_FEATURES <<< "$(scripts/features.sh)"
 CPPFLAGS_ALL=(-Iinclude -Isrc -Itests "${RS_FEATURES[@]}"
               -DRESTATE_VERSION="\"$VERSION\"")
+# restate-proxy's sources and tests too, where its TLS library is here.
+# shellcheck source=scripts/proxy-sources.sh
+. scripts/proxy-sources.sh
 
 # ---------------------------------------------------------------------------
 # A corpus to point the instrumented binary at: a tree to scan, and hand-made
@@ -244,8 +247,15 @@ done
 
 if "$CC" "${CPPFLAGS_ALL[@]}" "${SAN_FLAGS[@]}" -o "$WORK/restate-asan" src/*.c \
      2> "$WORK/build-asan.log"; then
-  "$CC" "${CPPFLAGS_ALL[@]}" "${SAN_FLAGS[@]}" -o "$WORK/unittests-asan" \
-     "${LIB_SOURCES[@]}" tests/*.c 2>> "$WORK/build-asan.log"
+  "$CC" "${CPPFLAGS_ALL[@]}" "${PROXY_CPPFLAGS[@]+"${PROXY_CPPFLAGS[@]}"}" "${SAN_FLAGS[@]}" \
+     -o "$WORK/unittests-asan" "${LIB_SOURCES[@]}" tests/*.c \
+     "${PROXY_LIB[@]+"${PROXY_LIB[@]}"}" "${PROXY_TESTS[@]+"${PROXY_TESTS[@]}"}" \
+     "${PROXY_LIBS[@]+"${PROXY_LIBS[@]}"}" 2>> "$WORK/build-asan.log"
+  if [ -n "$PROXY_OK" ]; then
+    "$CC" "${CPPFLAGS_ALL[@]}" "${PROXY_CPPFLAGS[@]}" "${SAN_FLAGS[@]}" \
+       -o "$WORK/restate-proxy-asan" "${LIB_SOURCES[@]}" proxy/*.c \
+       "${PROXY_LIBS[@]+"${PROXY_LIBS[@]}"}" 2>> "$WORK/build-asan.log"
+  fi
 
   export ASAN_OPTIONS="detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1:check_initialization_order=1:detect_invalid_pointer_pairs=2:log_path=$PWD/$WORK/asan"
   export UBSAN_OPTIONS="print_stacktrace=1:log_path=$PWD/$WORK/ubsan"
@@ -257,6 +267,15 @@ if "$CC" "${CPPFLAGS_ALL[@]}" "${SAN_FLAGS[@]}" -o "$WORK/restate-asan" src/*.c 
     bad "unit tests failed under the sanitizers"
     show_failure "$WORK/unittests-asan.log"
     note "and $WORK/asan.*"
+  fi
+
+  if [ -n "$PROXY_OK" ]; then
+    if tests/cli/proxy.sh "$WORK/restate-proxy-asan" > "$WORK/cli-proxy-asan.log" 2>&1; then
+      ok "restate-proxy's end-to-end tests are clean under ASan/UBSan"
+    else
+      bad "restate-proxy's end-to-end tests failed under the sanitizers"
+      show_failure "$WORK/cli-proxy-asan.log"
+    fi
   fi
 
   if tests/cli/run.sh "$WORK/restate-asan" > "$WORK/cli-asan.log" 2>&1; then
@@ -297,9 +316,11 @@ if command -v valgrind > /dev/null 2>&1; then
   # optimizer's view is the one a released binary has.
   "$CC" "${CPPFLAGS_ALL[@]}" -std=c11 -O1 -g -Wall -Wextra \
         -o "$WORK/restate-plain" src/*.c 2> "$WORK/build-plain.log"
-  "$CC" "${CPPFLAGS_ALL[@]}" -std=c11 -O1 -g -Wall -Wextra \
+  "$CC" "${CPPFLAGS_ALL[@]}" "${PROXY_CPPFLAGS[@]+"${PROXY_CPPFLAGS[@]}"}" \
+        -std=c11 -O1 -g -Wall -Wextra \
         -o "$WORK/unittests-plain" "${LIB_SOURCES[@]}" tests/*.c \
-        2>> "$WORK/build-plain.log"
+        "${PROXY_LIB[@]+"${PROXY_LIB[@]}"}" "${PROXY_TESTS[@]+"${PROXY_TESTS[@]}"}" \
+        "${PROXY_LIBS[@]+"${PROXY_LIBS[@]}"}" 2>> "$WORK/build-plain.log"
 
   # --error-exitcode=42 is what valgrind returns when IT finds something; a
   # clean run passes the program's own status through. Half the corpus is

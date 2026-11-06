@@ -1115,7 +1115,29 @@ for a capture with
 .BR \-\-quiesce ,
 else
 .BR no )
-in its environment. It is asked too, as
+in its environment, and
+.BR RESTATE_SETTINGS :
+what
+.BI \-\-hook\-option " HOOK.KEY=VALUE"
+(a job's
+.BR hook_option )
+gives this hook, by its name, as
+.IB KEY = VALUE
+a line, which the shipped hooks read over their own file in
+.IR /etc/restate ,
+so that a job can say for one machine what that machine's file need not.
+.B pause
+is given
+.B RESTATE_REPLY
+too, an empty file it may write one line to:
+.B leave\-out
+says that the paths it covers are not to be copied at all \- it stopped
+nothing, and its dump is the copy that counts \- and the capture records
+none of them but the dump directory, with
+.B left_out
+true for it in the result's
+.BR quiesce .
+It is read whether the pause succeeded or not. It is asked too, as
 .I HOOK
 .B present
 .IR NAME ,
@@ -1178,7 +1200,19 @@ says when to dump:
 .B "dump = always"
 dumps whatever the size, and
 .B "dump = never"
-does not. To
+does not.
+.B "stop = never"
+stops nothing at all, for a database that has to stay up: the dump, a
+single consistent snapshot taken while it runs, is made whatever its size
+and written uncompressed, as
+.IR pg_dumpall.sql ,
+since restate compresses what it stores and keeps only the parts of a dump
+that changed, of which a gzipped dump has none; the cluster's own files are
+left out of the capture, as a copy made while it runs is of no use, and
+.B "dump = never"
+with it is refused. A job gives it for one server as
+.BR "hook_option = postgresql.stop=never" .
+To
 change what a hook does, copy it to
 .I /etc/restate/hooks.d
 and change the copy.
@@ -1207,7 +1241,7 @@ is paused by the
 .B unifi
 hook, never by
 .BR mongodb .
-Two are shipped for this:
+Three are shipped for this:
 .B unifi
 dumps the database the UniFi Network application runs itself (port 27117)
 and stops its service, for
@@ -1254,6 +1288,39 @@ pause, and on
 .B restored
 puts that back over the restored one where that is exactly what the capture
 copied.
+.B openbao
+pauses OpenBao, for its storage's directory, as its configuration
+.RI ( /etc/openbao/openbao.hcl )
+names it. With raft storage it stops nothing: it saves a snapshot with
+.B bao operator raft snapshot save
+.RI ( openbao.snap ,
+put back with
+.BR "bao operator raft snapshot restore" ),
+with the token in
+.BR token_file ,
+a file root's alone, allowed
+.IR sys/storage/raft/snapshot ,
+and the storage's files are left out. With file storage it stops the
+service, and on resume starts it again and waits until it is unsealed: the
+unit
+.B unseal_unit
+names is run for that, if one is set, and one that unseals itself (a
+.B seal
+stanza) is only waited for, up to
+.B unseal_wait
+seconds (120); still sealed then, the resume fails, and the capture is
+incomplete. The unseal keys are never copied into the dump.
+.I /etc/restate/openbao.conf
+holds these, and
+.BR config ,
+.BR storage ,
+.BR unit ,
+.B address
+and
+.BR ca_cert ;
+each can be given as
+.BI \-\-hook\-option " openbao.KEY=VALUE"
+too.
 A mail store kept as Maildir needs neither: every message is a file of its
 own, written beside its name and renamed into place, so a copy taken while
 mail arrives misses at most what arrived meanwhile.
@@ -2356,7 +2423,8 @@ this run's whole result or the last one's:
  "cache": null,
  "unreadable": {"count": 1, "first": [{"path": "/srv/x", "reason": "..."}]},
  "quiesce": [{"kind": "postgresql", "name": "16\-main",
-   "paused_at": "...", "resumed_at": "...", "status": "ok", "message": ""}],
+   "paused_at": "...", "resumed_at": "...", "status": "ok", "left_out": false,
+   "message": ""}],
  "warnings": ["..."], "warnings_count": 1, "errors": [], "errors_count": 0}
 .fi
 .RE

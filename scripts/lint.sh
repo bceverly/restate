@@ -61,10 +61,17 @@ read -r -a RS_FEATURES <<< "$(scripts/features.sh)"
 CPPFLAGS_ALL=(-Iinclude -Isrc -Itests "${RS_FEATURES[@]}"
               -D_FORTIFY_SOURCE=2 -DRESTATE_VERSION="\"$VERSION\"")
 
+# restate-proxy's sources too, where its TLS library is here to compile them
+# against; scripts/proxy-sources.sh says which, and says so when it is not.
+# shellcheck source=scripts/proxy-sources.sh
+. scripts/proxy-sources.sh
+C_FILES=(src/*.c "${PROXY_LIB[@]+"${PROXY_LIB[@]}"}" "${PROXY_MAIN[@]+"${PROXY_MAIN[@]}"}")
+CPPFLAGS_ALL+=("${PROXY_CPPFLAGS[@]+"${PROXY_CPPFLAGS[@]}"}")
+
 # ---------------------------------------------------------------------------
 section "the compiler, with -Werror"
 if "$CC" -std=c11 -O2 "${CPPFLAGS_ALL[@]}" "${WARNINGS[@]}" -Werror \
-     -fsyntax-only src/*.c 2> "$WORK/compiler.log"; then
+     -fsyntax-only "${C_FILES[@]}" 2> "$WORK/compiler.log"; then
   ok "no warnings from $("$CC" --version | head -1 | cut -d' ' -f1-3)"
 else
   bad "the compiler found something"
@@ -106,7 +113,7 @@ section "gcc -fanalyzer — path-sensitive analysis"
 # something printed.
 if "$CC" -fanalyzer -fsyntax-only -x c /dev/null > /dev/null 2>&1; then
   : > "$WORK/analyzer.log"
-  if printf '%s\0' src/*.c |
+  if printf '%s\0' "${C_FILES[@]}" |
        xargs -0 -n 1 -P "$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 2)" \
          "$CC" -std=c11 -O2 "${CPPFLAGS_ALL[@]}" -fanalyzer -Wall -Wextra -Werror \
          -c -o /dev/null 2>> "$WORK/analyzer.log"; then
@@ -132,8 +139,8 @@ if command -v cppcheck > /dev/null 2>&1; then
        --inline-suppr \
        --suppress=missingIncludeSystem --suppress=unusedFunction \
        --suppress=checkersReport \
-       -I include -I src -I tests \
-       src tests 2> "$WORK/cppcheck.log"; then
+       -I include -I src -I proxy -I tests \
+       src proxy tests 2> "$WORK/cppcheck.log"; then
     ok "no findings"
   else
     bad "cppcheck found something"
@@ -196,7 +203,7 @@ if command -v clang-tidy > /dev/null 2>&1; then
   if clang-tidy --quiet \
        '-checks=-*,bugprone-*,cert-*,clang-analyzer-*,misc-*,performance-*,readability-braces-around-statements,-misc-include-cleaner,-bugprone-easily-swappable-parameters,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-bugprone-multi-level-implicit-pointer-conversion,-clang-analyzer-valist.Uninitialized' \
        --warnings-as-errors='*' \
-       src/*.c -- -std=c11 "${CPPFLAGS_ALL[@]}" > "$WORK/clang-tidy.log" 2>&1; then
+       "${C_FILES[@]}" -- -std=c11 "${CPPFLAGS_ALL[@]}" > "$WORK/clang-tidy.log" 2>&1; then
     # Name the version, as the compiler section above does.
     #
     # clang-tidy's checks change between releases: 19 refined
@@ -254,7 +261,8 @@ BRACE_HITS="$(awk '
     if (body ~ /=[ \t]*\{$/) next                          # an initializer
     printf "%s:%d: %s\n", FILENAME, FNR, body
   }
-' src/*.c src/*.h include/*.h tests/*.c tests/*.h tests/fuzz/*.c || true)"
+' src/*.c src/*.h proxy/*.c proxy/*.h include/*.h tests/*.c tests/*.h tests/fuzz/*.c \
+  tests/proxy/*.c || true)"
 
 if [ -z "$BRACE_HITS" ]; then
   ok "every control statement puts its opening brace on its own line"
@@ -352,7 +360,7 @@ section "American spelling"
 # and quoted material keeps the spelling it was written in. Add an exemption
 # for either by putting "spelling: ok" on the same line.
 BRITISH='colours?|coloured|behaviours?|favourites?|honours?|labours?|neighbours?|licences?|initialis(e|ed|es|ing|ation)|organis(e|ed|es|ing|ation|ations)|recognis(e|ed|es|ing)|analys(e|ed|es|ing)|serialis(e|ed|es|ing|ation)|normalis(e|ed|es|ing|ation)|optimis(e|ed|es|ing|ation)|summaris(e|ed|es|ing)|prioritis(e|ed|es|ing)|customis(e|ed|es|ing|ation)|centre[sd]?|fibre|metres?|catalogue[sd]?|dialogue|judgement|travell(ed|ing|er|ers)|modell(ed|ing)|labell(ed|ing)|cancell(ed|ing)|defence|greys?|programme[sd]?|enquir(y|ies)|aluminium|artefacts?|whilst|amongst|cheque'
-SPELL_FILES="$(find src include tests scripts .githooks .github man docs hooks \
+SPELL_FILES="$(find src proxy include tests scripts .githooks .github man docs hooks \
                     -type f \( -name '*.c' -o -name '*.h' -o -name '*.def' -o -name '*.sh' \
                     -o -name '*.yml' -o -name '*.8' -o -name '*.md' -o -path '.githooks/*' -o -path 'hooks/*' \) \
                     2>/dev/null; ls ./*.md Makefile .gitignore 2>/dev/null)"
@@ -405,7 +413,7 @@ done < <(
     # kind of file (a suppressions list, an awk program, a hook with no
     # extension at all) is source the moment it is added, and an extension
     # list would let it in without a header.
-    find src include tests scripts .githooks hooks systemd -type f 2>/dev/null
+    find src proxy include tests scripts .githooks hooks systemd -type f 2>/dev/null
     # And the code outside them: the build, the CI and the repository's own
     # configuration. Prose (the Markdown) and data (VERSION, the generated
     # badge) are not code and carry no header.

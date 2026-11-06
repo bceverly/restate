@@ -43,6 +43,7 @@ bold "restate — development environment"
 case "$(uname -s)" in
 FreeBSD)
   bold "FreeBSD"
+  # restate-proxy's TLS is the base system's OpenSSL: nothing to install.
   sudo pkg install -y gmake bash cppcheck || die "pkg install failed"
   # FreeBSD names it for its Haskell port, and some architectures have no
   # build of it: without it lint skips the shell scripts, nothing more.
@@ -53,12 +54,14 @@ FreeBSD)
   ;;
 OpenBSD)
   bold "OpenBSD"
+  # restate-proxy's TLS is the base system's libtls (LibreSSL).
   doas pkg_add -I gmake bash shellcheck cppcheck || die "pkg_add failed"
   ok "installed; build with: gmake build && gmake test-unit test-cli"
   exit 0
   ;;
 NetBSD)
   bold "NetBSD"
+  # restate-proxy's TLS is the base system's OpenSSL.
   sudo pkgin -y install gmake bash shellcheck cppcheck || die "pkgin failed"
   ok "installed; build with: gmake build && gmake test-unit test-cli"
   exit 0
@@ -66,7 +69,8 @@ NetBSD)
 Darwin)
   bold "macOS"
   command -v brew > /dev/null 2>&1 || die "Homebrew is needed: https://brew.sh"
-  brew install make bash shellcheck cppcheck llvm actionlint gitleaks \
+  # openssl@3 for restate-proxy's TLS: macOS ships no OpenSSL headers.
+  brew install make bash shellcheck cppcheck llvm actionlint gitleaks openssl@3 \
     || die "brew install failed"
   ok "installed; the Xcode command line tools provide the compiler"
   exit 0
@@ -80,6 +84,7 @@ if ! command -v apt-get > /dev/null 2>&1; then
   warn "This script installs with apt. On another Linux, the equivalents are:"
   printf '\n'
   printf '    build       gcc make\n'
+  printf '    the proxy   OpenSSL 3 headers (libssl-dev, openssl-devel, openssl-dev)\n'
   printf '    tests       valgrind\n'
   printf '    coverage    gcov (ships with gcc), gcovr for the XML report\n'
   printf '    lint        cppcheck clang-tidy shellcheck actionlint\n'
@@ -92,6 +97,7 @@ fi
 PACKAGES=(
   # --- build ---------------------------------------------------------------
   build-essential          # gcc, make, libc headers
+  libssl-dev               # OpenSSL 3: restate-proxy's TLS, and nothing else's
   # --- tests ---------------------------------------------------------------
   valgrind                 # the uninitialized-read pass in make test-memory
   # --- coverage ------------------------------------------------------------

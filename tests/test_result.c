@@ -101,8 +101,8 @@ static void collecting(const char *dir)
         rs_result_unreadable("/srv/a\xff", "Input/output error");
     }
     CHECK_INT(rs_result_unreadable_count(), RS_RESULT_UNREADABLE + 5);
-    rs_result_quiesce("postgresql", "16-main", 1000, 1010, true, NULL);
-    rs_result_quiesce("unifi", "unifi", 1000, 0, false, "exited 1");
+    rs_result_quiesce("postgresql", "16-main", 1000, 1010, true, true, NULL);
+    rs_result_quiesce("unifi", "unifi", 1000, 0, false, false, "exited 1");
     CHECK_INT(rs_result_quiesce_failed(), 1);
     CHECK(rs_result_write(RESTATE_EXIT_INCOMPLETE, path, NULL));
     CHECK(read_json(path, &v));
@@ -129,6 +129,10 @@ static void collecting(const char *dir)
         {
             CHECK_STR(rs_jobject_str(&q->items[0], "status"), "ok");
             CHECK_STR(rs_jobject_str(&q->items[0], "resumed_at"), "1970-01-01T00:16:50Z");
+            CHECK(rs_jobject_get(&q->items[0], "left_out") &&
+                  rs_jobject_get(&q->items[0], "left_out")->b);
+            CHECK(rs_jobject_get(&q->items[1], "left_out") &&
+                  !rs_jobject_get(&q->items[1], "left_out")->b);
             CHECK_STR(rs_jobject_str(&q->items[1], "status"), "failed");
             CHECK(rs_jobject_get(&q->items[1], "resumed_at") &&
                   rs_jobject_get(&q->items[1], "resumed_at")->type == RS_JNULL);

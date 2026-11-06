@@ -35,6 +35,27 @@ TEST_SRC    := $(wildcard tests/*.c)
 # bring their own entry point.
 LIB_SRC     := $(filter-out src/main.c,$(SRC))
 
+# restate-proxy: restate's library code and proxy/, linked with a TLS library.
+# restate itself never is -- it links the C library and nothing else, which
+# `make security` checks -- so nothing below is part of `make build`, and a
+# machine without OpenSSL's headers builds and tests restate as before.
+PROXY          := restate-proxy
+PROXY_SRC      := $(wildcard proxy/*.c)
+PROXY_LIB_SRC  := $(filter-out proxy/main.c,$(PROXY_SRC))
+PROXY_TEST_SRC := $(wildcard tests/proxy/*.c)
+
+# Asked of scripts/tls.sh only by a target that uses them, and once: each
+# replaces itself with its answer the first time it is expanded.
+TLS_CFLAGS   = $(eval TLS_CFLAGS := $$(shell scripts/tls.sh --cflags))$(TLS_CFLAGS)
+TLS_LIBS     = $(eval TLS_LIBS := $$(shell scripts/tls.sh --libs))$(TLS_LIBS)
+TLS_NAME     = $(eval TLS_NAME := $$(shell scripts/tls.sh --name))$(TLS_NAME)
+PROXY_OK     = $(eval PROXY_OK := $$(shell scripts/tls.sh --check && echo yes))$(PROXY_OK)
+
+# Where the TLS library is missing, the proxy is passed over and said to be
+# -- unless RS_REQUIRE_PROXY is set, as CI sets it, where that is a failure:
+# CI installs the headers, so a skip there is a broken install.
+PROXY_MISSING = $(if $(RS_REQUIRE_PROXY),{ echo "restate-proxy: $(TLS_NAME) is not installed, and RS_REQUIRE_PROXY is set" >&2; exit 1; },printf '  \033[93m-\033[0m restate-proxy passed over: %s is not installed (make install-dev)\n' '$(TLS_NAME)')
+
 # -----------------------------------------------------------------------------
 # Flags
 #
@@ -170,15 +191,32 @@ $(OBJ_DIR)/version.stamp: FORCE | $(OBJ_DIR)
 $(OBJ_DIR)/%.o: src/%.c $(OBJ_DIR)/version.stamp | $(OBJ_DIR)
 	@$(CC) $(ALL_CPPFLAGS) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BIN_DIR) $(OBJ_DIR) $(COV_DIR):
+$(BIN_DIR) $(OBJ_DIR) $(OBJ_DIR)/proxy $(COV_DIR):
 	@mkdir -p $@
+
+.PHONY: proxy
+proxy: $(BIN_DIR)/$(PROXY) ## Compile restate-proxy into ./bin (needs OpenSSL 3, or libtls on OpenBSD)
+
+$(BIN_DIR)/$(PROXY): $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(LIB_SRC)) \
+                     $(patsubst proxy/%.c,$(OBJ_DIR)/proxy/%.o,$(PROXY_SRC)) | $(BIN_DIR)
+	@$(CC) $(ALL_CFLAGS) -o $@ $^ $(ALL_LDFLAGS) $(TLS_LIBS)
+	@printf '  \033[92m✓\033[0m %s (%s, %s)\n' "$@" "$(VERSION)" "$(TLS_NAME)"
+
+# tls-check first, so that a missing library is said to be missing once, in
+# words, and not as a compiler's "No such file" for every object.
+$(OBJ_DIR)/proxy/%.o: proxy/%.c $(OBJ_DIR)/version.stamp | $(OBJ_DIR)/proxy tls-check
+	@$(CC) $(ALL_CPPFLAGS) -Iproxy $(TLS_CFLAGS) $(ALL_CFLAGS) -MMD -MP -c $< -o $@
+
+.PHONY: tls-check
+tls-check:
+	@$(if $(PROXY_OK),:,{ echo "restate-proxy needs $(TLS_NAME)'s headers and library: make install-dev" >&2; exit 1; })
 
 # The manpage is generated from the program's own --help, so it depends on the
 # binary that prints it and the tables that binary was built from.
 $(MAN_PAGE): $(BIN_DIR)/$(PROG) src/options.def src/commands.def scripts/gen-man.sh VERSION
 	@scripts/gen-man.sh $(BIN_DIR)/$(PROG) $@
 
--include $(wildcard $(OBJ_DIR)/*.d)
+-include $(wildcard $(OBJ_DIR)/*.d $(OBJ_DIR)/proxy/*.d)
 
 .PHONY: debug
 debug: ## Rebuild unoptimized with symbols, for a debugger
@@ -199,17 +237,24 @@ test: ## Unit + CLI tests, sanitizers, valgrind, and the 80% coverage gate
 	@scripts/passed.sh test $(MAKE) --no-print-directory test-unit test-cli test-memory coverage
 
 .PHONY: test-unit
-test-unit: $(BIN_DIR)/unittests ## Run the C unit tests
+test-unit: $(BIN_DIR)/unittests ## Run the C unit tests (restate-proxy's too, where it can be built)
 	@./$(BIN_DIR)/unittests
 
-# $(filter %.c,$^): the stamp is a real prerequisite, so a version change
-# rebuilds the tests too, but it must not reach the linker as an input file.
-$(BIN_DIR)/unittests: $(LIB_SRC) $(TEST_SRC) $(wildcard src/*.h tests/*.h) $(OBJ_DIR)/version.stamp | $(BIN_DIR)
-	@$(CC) $(ALL_CPPFLAGS) $(ALL_TESTFLAGS) -o $@ $(filter %.c,$^) $(ALL_LDFLAGS)
+# The stamp is a real prerequisite, so a version change rebuilds the tests
+# too, but it must not reach the linker as an input file. proxy/ and
+# tests/proxy/ are compiled in only where the TLS library is there.
+$(BIN_DIR)/unittests: $(LIB_SRC) $(TEST_SRC) $(PROXY_LIB_SRC) $(PROXY_TEST_SRC) \
+                      $(wildcard src/*.h tests/*.h proxy/*.h) $(OBJ_DIR)/version.stamp | $(BIN_DIR)
+	@$(if $(PROXY_OK),:,$(PROXY_MISSING))
+	@$(CC) $(ALL_CPPFLAGS) $(ALL_TESTFLAGS) \
+	       $(if $(PROXY_OK),-DRS_WITH_PROXY -Iproxy $(TLS_CFLAGS)) -o $@ \
+	       $(LIB_SRC) $(TEST_SRC) $(if $(PROXY_OK),$(PROXY_LIB_SRC) $(PROXY_TEST_SRC)) \
+	       $(ALL_LDFLAGS) $(if $(PROXY_OK),$(TLS_LIBS))
 
 .PHONY: test-cli
-test-cli: build ## Run the end-to-end tests against the built binary
+test-cli: build ## Run the end-to-end tests against the built binaries
 	@tests/cli/run.sh ./$(BIN_DIR)/$(PROG)
+	@$(if $(PROXY_OK),$(MAKE) --no-print-directory proxy && tests/cli/proxy.sh ./$(BIN_DIR)/$(PROXY),$(PROXY_MISSING))
 
 # The repository on other storage: a share, a USB disk, anything mounted.
 .PHONY: test-share

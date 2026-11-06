@@ -49,6 +49,13 @@ VERSION="$(cat VERSION)"
 read -r -a RS_FEATURES <<< "$(scripts/features.sh)"
 CPPFLAGS_ALL=(-Iinclude -Isrc -Itests "${RS_FEATURES[@]}"
               -DRESTATE_VERSION="\"$VERSION\"")
+# restate-proxy, where its TLS library is here: its files are held to the
+# same gates. Its objects go in a directory of their own, since proxy/main.c
+# and src/main.c share a name.
+# shellcheck source=scripts/proxy-sources.sh
+. scripts/proxy-sources.sh
+CPPFLAGS_ALL+=("${PROXY_CPPFLAGS[@]+"${PROXY_CPPFLAGS[@]}"}")
+PROXY_OBJ_DIR="$COV_DIR/obj-proxy"
 # -O0: an optimized build merges and reorders lines, and the resulting report
 # blames coverage on lines that no longer exist as written.
 CFLAGS_ALL=(-std=c11 -O0 -g --coverage -fprofile-abs-path -Wall -Wextra)
@@ -72,8 +79,26 @@ for source in src/*.c; do
   objects+=("$object")
 done
 
+proxy_lib_objects=()
+proxy_main_objects=()
+if [ -n "$PROXY_OK" ]; then
+  mkdir -p "$PROXY_OBJ_DIR"
+  for source in proxy/*.c; do
+    object="$PROXY_OBJ_DIR/$(basename "$source" .c).o"
+    if ! "$CC" "${CPPFLAGS_ALL[@]}" "${CFLAGS_ALL[@]}" -c "$source" -o "$object"; then
+      echo "  build failed: $source" >&2
+      exit 1
+    fi
+    if [ "$source" = proxy/main.c ]; then
+      proxy_main_objects+=("$object")
+    else
+      proxy_lib_objects+=("$object")
+    fi
+  done
+fi
+
 test_objects=()
-for source in tests/*.c; do
+for source in tests/*.c "${PROXY_TESTS[@]+"${PROXY_TESTS[@]}"}"; do
   object="$OBJ_DIR/test_$(basename "$source" .c).o"
   if ! "$CC" "${CPPFLAGS_ALL[@]}" "${CFLAGS_ALL[@]}" -c "$source" -o "$object"; then
     echo "  build failed: $source" >&2
@@ -88,7 +113,13 @@ lib_objects=()
 for object in "${objects[@]}"; do
   [ "$(basename "$object")" = "main.o" ] || lib_objects+=("$object")
 done
-"$CC" --coverage -o "$COV_DIR/unittests" "${lib_objects[@]}" "${test_objects[@]}" || exit 1
+"$CC" --coverage -o "$COV_DIR/unittests" "${lib_objects[@]}" \
+      "${proxy_lib_objects[@]+"${proxy_lib_objects[@]}"}" "${test_objects[@]}" \
+      "${PROXY_LIBS[@]+"${PROXY_LIBS[@]}"}" || exit 1
+if [ -n "$PROXY_OK" ]; then
+  "$CC" --coverage -o "$COV_DIR/restate-proxy" "${lib_objects[@]}" "${proxy_lib_objects[@]}" \
+        "${proxy_main_objects[@]}" "${PROXY_LIBS[@]+"${PROXY_LIBS[@]}"}" || exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Exercise it
@@ -107,10 +138,25 @@ if ! tests/cli/run.sh "$COV_DIR/restate" > "$COV_DIR/cli.log" 2>&1; then
   exit 1
 fi
 
+if [ -n "$PROXY_OK" ]; then
+  printf '  \033[96m→\033[0m running the restate-proxy end-to-end tests\n'
+  if ! tests/cli/proxy.sh "$COV_DIR/restate-proxy" > "$COV_DIR/cli-proxy.log" 2>&1; then
+    echo "  restate-proxy end-to-end tests failed — see $COV_DIR/cli-proxy.log" >&2
+    tail -20 "$COV_DIR/cli-proxy.log" >&2
+    exit 1
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 ( cd "$COV_DIR" && gcov -o obj ../src/*.c ) > "$COV_DIR/gcov.log" 2>&1 || true
+# proxy/'s reports in a directory of their own, for the same reason its
+# objects are: main.c.gcov is src/main.c's.
+if [ -n "$PROXY_OK" ]; then
+  mkdir -p "$COV_DIR/proxy"
+  ( cd "$COV_DIR/proxy" && gcov -o ../obj-proxy ../../proxy/*.c ) >> "$COV_DIR/gcov.log" 2>&1 || true
+fi
 
 printf '\n  \033[1m%-16s %8s %8s %7s\033[0m\n' "file" "lines" "covered" "%"
 
@@ -120,9 +166,11 @@ worst_file=""
 worst_pct=101
 below=()
 
-for source in src/*.c; do
-  name="$(basename "$source")"
-  report="$COV_DIR/$name.gcov"
+for source in src/*.c "${PROXY_LIB[@]+"${PROXY_LIB[@]}"}" "${PROXY_MAIN[@]+"${PROXY_MAIN[@]}"}"; do
+  case "$source" in
+    proxy/*) name="$source"; report="$COV_DIR/proxy/$(basename "$source").gcov" ;;
+    *)       name="$(basename "$source")"; report="$COV_DIR/$name.gcov" ;;
+  esac
   [ -f "$report" ] || continue
 
   # A .gcov line is "<count>:<line>:<source>". "#####" and "=====" mean the
@@ -169,7 +217,7 @@ printf '  %-16s %8d %8d %6d%%\n' "----" "$total_lines" "$total_covered" "$total_
 
 # gcovr, when it is installed, writes the machine-readable report CI keeps.
 if command -v gcovr > /dev/null 2>&1; then
-  gcovr --root . --filter 'src/.*' \
+  gcovr --root . --filter '(src|proxy)/.*' \
         --xml-pretty --output "$COV_DIR/coverage.xml" \
         --html-details "$COV_DIR/index.html" \
         --gcov-object-directory "$OBJ_DIR" > /dev/null 2>&1 \

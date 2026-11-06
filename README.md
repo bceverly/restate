@@ -428,6 +428,11 @@ Options:
                           such as unifi or nextcloud) around the walk, pausing
                           what it names whether or not it is found running;
                           repeatable (see LIVE SERVICES)
+      --hook-option=HOOK.KEY=VALUE
+                          capture: give the hook HOOK the setting KEY = VALUE,
+                          over what its own file in /etc/restate says
+                          (postgresql.stop=never); repeatable (see LIVE
+                          SERVICES)
       --append-only       capture: into a repository only by adding files,
                           never changing one already there; refused where that
                           cannot be done (see STORAGE)
@@ -661,8 +666,25 @@ and a dump of a big one is tens of gigabytes of new data in every capture, so
 dumps unless the databases come to more than `dump_limit` (`10G` unless set,
 in bytes or with `K`, `M`, `G` or `T`), `dump = always` whatever the size,
 `dump = never` not at all. The dump is what loads into another major version;
-the files alone need the same one. To
-change a hook, copy it to `/etc/restate/hooks.d` and edit the copy. A hook
+the files alone need the same one.
+
+`stop = never` stops nothing, for a database that has to stay up (one that
+queues messages for other machines): the dump -- `pg_dumpall`'s single
+consistent snapshot, taken while it runs -- is made whatever its size and
+written uncompressed, as `pg_dumpall.sql`, since restate compresses what it
+stores and keeps only the parts of a dump that changed, of which a gzipped
+dump has none; the cluster's own files are left out of the capture, since a
+copy made while it runs is of no use; and `dump = never` with it is refused.
+
+A capture can give any hook a setting of its own file for one run, as
+`--hook-option HOOK.KEY=VALUE` (in a job, `hook_option = HOOK.KEY=VALUE`,
+repeatable), which the hook reads over the file, in `RESTATE_SETTINGS`: a job
+can say `hook_option = postgresql.stop=never` for one server without that
+server's `postgresql.conf` saying so. A hook's pause can answer, in the file
+`RESTATE_REPLY` names, `leave-out`: its paths are not copied at all, only its
+dump directory, and the result's `quiesce` entry for it has `left_out: true`.
+
+To change a hook, copy it to `/etc/restate/hooks.d` and edit the copy. A hook
 that fails to pause or to resume makes the capture incomplete (exit status 3),
 and its result says which.
 
@@ -685,7 +707,7 @@ walk. One that answers `absent` to `HOOK present NAME` is not run, with a
 notice, so one policy can name it for every host. Anything found running whose
 files all lie within the paths it covers is its to pause, not the hook for its
 kind's: UniFi's own `mongod` is paused by the `unifi` hook, never by `mongodb`.
-Two are shipped for this:
+Three are shipped for this:
 
 - **`unifi`** -- the UniFi Network application runs a MongoDB of its own,
   started by its own service, which the `mongodb` hook cannot pause. This one
@@ -712,6 +734,20 @@ Two are shipped for this:
   `config.php` changed since is left alone. Nextcloud comes back out of
   maintenance mode with no `occ` to run. (A snapshot from a restate before
   this has no such copy: run `occ maintenance:mode --off` after restoring one.)
+- **`openbao`** -- OpenBao, for its storage's directory as its configuration
+  (`/etc/openbao/openbao.hcl`) names it. With raft storage nothing is
+  stopped: it saves a snapshot (`bao operator raft snapshot save`, into
+  `openbao.snap`; put back with `bao operator raft snapshot restore`) with
+  the token in `token_file` -- a file root's alone, for a token allowed
+  `sys/storage/raft/snapshot` -- and the storage's own files are left out.
+  With file storage it stops the service, and on resume starts it again and
+  waits for it to be unsealed: `unseal_unit` names a unit to run for that
+  (SysManage's `sysmanage-openbao-init`), and one with auto-unseal (a `seal`
+  stanza) is only waited for, up to `unseal_wait` seconds (120). Still sealed
+  then, the resume fails and the capture is incomplete. The unseal keys are
+  never copied into the dump. `/etc/restate/openbao.conf` holds these, with
+  `config`, `storage`, `unit`, `address` and `ca_cert`; any of them can be
+  given as `--hook-option openbao.KEY=VALUE`.
 
 ```bash
 sudo restate capture --quiesce --quiesce-with nextcloud -o /mnt/nas/restate/cloud01
@@ -1741,7 +1777,8 @@ into `FILE` when the run ends, replaced whole:
   "repository_bytes": 178241380352, "cache": null,
   "unreadable": {"count": 0, "first": []},
   "quiesce": [{"kind": "postgresql", "name": "18-main", "paused_at": "2026-10-20T03:12:40Z",
-               "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "message": ""}],
+               "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "left_out": false,
+               "message": ""}],
   "warnings": [], "warnings_count": 0, "errors": [], "errors_count": 0
 }
 ```

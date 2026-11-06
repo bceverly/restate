@@ -157,6 +157,16 @@ void test_opts(void)
     CHECK(!parse_args(&o, &err, ARGS("--quiesce-with", "../x", "capture")));
     CHECK_CONTAINS(err.data, "is not a hook's name");
     CHECK(!parse_args(&o, &err, ARGS("--quiesce-with", "Big", "capture")));
+    CHECK(parse_args(&o, &err, ARGS("--hook-option", "postgresql.stop=never",
+                                    "--hook-option=openbao.token_file=/etc/a=b", "capture")));
+    CHECK_INT(o.nhook_options, 2);
+    CHECK_STR(o.nhook_options == 2 ? o.hook_options[1] : NULL, "openbao.token_file=/etc/a=b");
+    CHECK(!parse_args(&o, &err, ARGS("--hook-option", "stop=never", "capture")));
+    CHECK_CONTAINS(err.data, "is not HOOK.KEY=VALUE");
+    CHECK(!rs_hook_setting_ok("postgresql.stop") && !rs_hook_setting_ok(".stop=x") &&
+          !rs_hook_setting_ok("postgresql.=x") && !rs_hook_setting_ok("Big.stop=x") &&
+          !rs_hook_setting_ok("postgresql.Stop=x") && !rs_hook_setting_ok("pg.a=b\nc") &&
+          !rs_hook_setting_ok("pg=a.b") && rs_hook_setting_ok("pg.a="));
     CHECK(!parse_args(&o, &err, ARGS("--tmpdir", "tmp", "capture")));
     CHECK_CONTAINS(err.data, "--tmpdir: \"tmp\" is not an absolute path");
     CHECK(!parse_args(&o, &err, ARGS("--passphrase-fd", "x", "sign", "a")));

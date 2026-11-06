@@ -56,7 +56,7 @@ else
   FILES=()
   while IFS= read -r f; do
     FILES+=("$f")
-  done < <(find src include tests -type f \( -name '*.c' -o -name '*.h' \) | sort)
+  done < <(find src proxy include tests -type f \( -name '*.c' -o -name '*.h' \) | sort)
 fi
 
 status=0

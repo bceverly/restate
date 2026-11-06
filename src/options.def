@@ -69,6 +69,9 @@ RS_OPT(OPT_QUIESCE_WITH, "quiesce-with", required_argument, "NAME",
        "capture: also run the hook NAME (/etc/restate/hooks.d/NAME, or one restate ships, "
        "such as unifi or nextcloud) around the walk, pausing what it names whether or not "
        "it is found running; repeatable (see LIVE SERVICES)")
+RS_OPT(OPT_HOOK_OPTION, "hook-option", required_argument, "HOOK.KEY=VALUE",
+       "capture: give the hook HOOK the setting KEY = VALUE, over what its own file in "
+       "/etc/restate says (postgresql.stop=never); repeatable (see LIVE SERVICES)")
 RS_OPT(OPT_APPEND_ONLY, "append-only", no_argument,     NULL,
        "capture: into a repository only by adding files, never changing one already there; "
        "refused where that cannot be done (see STORAGE)")

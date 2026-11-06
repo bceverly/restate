@@ -23,6 +23,8 @@
 extern int         rs_test_checks;
 extern int         rs_test_failures;
 extern const char *rs_test_case;
+/* This program, as an absolute path, for a test that runs it again. */
+extern const char *rs_test_argv0;
 
 void rs_test_begin(const char *name);
 void rs_test_fail(const char *file, int line, const char *fmt, ...)
@@ -41,6 +43,8 @@ void  rs_test_write(const char *dir, const char *name, const char *text, unsigne
 /* Runs `fn` with stdout and stderr sent to files, and returns what it
  * returned; the captured text lands in `out` and `err` (caller frees). */
 int   rs_test_capture(int (*fn)(const void *), const void *arg, char **out, char **err);
+/* What is in the file at `path`, "" if it cannot be read; the caller frees it. */
+char *rs_test_slurp(const char *path);
 
 #define TEST_CASE(name) rs_test_begin(name)
 
@@ -118,5 +122,14 @@ void test_clones(void);
 void test_jobs(void);
 void test_arch(void);
 void test_result(void);
+void test_grant(void);
+void test_request(void);
+#ifdef RS_WITH_PROXY
+/* tests/proxy/: built only where restate-proxy can be (scripts/tls.sh). */
+void test_tls(void);
+void test_serve(void);
+/* The server half of test_tls, as `unittests --tls-serve FD CERT KEY HOW`. */
+int  test_tls_serve(char **args);
+#endif
 
 #endif /* RESTATE_TEST_H */

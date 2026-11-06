@@ -431,22 +431,97 @@ bool rs_hook_restored(const char *hook, const char *kind, const char *name, cons
     return ok;
 }
 
+/* The settings in `c` for the hook at `hook`, by its file's name: "KEY=VALUE"
+ * a line, the order they were given in. */
+static void settings_for(const char *hook, const struct rs_hook_call *c, struct rs_buf *out)
+{
+    const char *slash = strrchr(hook, '/');
+    const char *name = slash ? slash + 1 : hook;
+    size_t      len = strlen(name);
+    size_t      i;
+
+    for (i = 0; c && i < c->nsettings; i++)
+    {
+        if (strncmp(c->settings[i], name, len) == 0 && c->settings[i][len] == '.')
+        {
+            rs_buf_addf(out, "%s%s", out->len ? "\n" : "", c->settings[i] + len + 1);
+        }
+    }
+}
+
+/* A file for a pause to reply in, empty, root's alone: its path, or NULL. */
+static char *reply_file(void)
+{
+    const char *dir = getenv("TMPDIR"); /* Flawfinder: ignore -- only where a file is made */
+    char       *path;
+    int         fd;
+
+    if (!dir || dir[0] != '/')
+    {
+        dir = "/tmp";
+    }
+    path = rs_xasprintf("%s/restate-hook.XXXXXX", dir);
+    fd = mkstemp(path);
+    if (fd < 0)
+    {
+        free(path);
+        return NULL;
+    }
+    (void)close(fd);
+    return path;
+}
+
+/* Whether the reply at `path` is RS_HOOK_LEAVE_OUT, a line of its own; the
+ * file removed either way. */
+static bool replied_leave_out(const char *path)
+{
+    char    text[64];
+    ssize_t got = 0;
+    int     fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    size_t  len;
+
+    if (fd >= 0)
+    {
+        got = read(fd, text, sizeof(text) - 1);
+        (void)close(fd);
+    }
+    (void)unlink(path);
+    if (got <= 0)
+    {
+        return false;
+    }
+    len = (size_t)got;
+    while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == ' ' || text[len - 1] == '\t'))
+    {
+        len--;
+    }
+    return len == strlen(RS_HOOK_LEAVE_OUT) && memcmp(text, RS_HOOK_LEAVE_OUT, len) == 0;
+}
+
 bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
-                 const char *dump_dir, bool quiescing, struct rs_buf *err)
+                 const struct rs_hook_call *c, bool *leave_out, struct rs_buf *err)
 {
     struct rs_buf  paths;
+    struct rs_buf  settings;
     struct passwd *pw = getpwuid((uid_t)l->uid);
-    char          *env[10];
+    char          *reply = leave_out ? reply_file() : NULL;
+    char          *env[12];
     char          *argv[4];
     size_t         i;
     int            code = -1;
     bool           ok;
 
+    if (leave_out)
+    {
+        *leave_out = false;
+    }
     rs_buf_init(&paths);
+    rs_buf_init(&settings);
     for (i = 0; i < l->npaths; i++)
     {
         rs_buf_addf(&paths, "%s%s", i ? "\n" : "", l->paths[i]);
     }
+    settings_for(hook, c, &settings);
     env[0] = rs_xasprintf("RESTATE_ACTION=%s", action);
     env[1] = rs_xasprintf("RESTATE_KIND=%s", l->kind);
     env[2] = rs_xasprintf("RESTATE_NAME=%s", l->name);
@@ -454,9 +529,11 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
     env[4] = rs_xasprintf("RESTATE_UID=%lu", l->uid);
     env[5] = rs_xasprintf("RESTATE_USER=%s", pw && pw->pw_name ? pw->pw_name : "");
     env[6] = rs_xasprintf("RESTATE_PATHS=%s", paths.data ? paths.data : "");
-    env[7] = rs_xasprintf("RESTATE_DUMP_DIR=%s", dump_dir ? dump_dir : "");
-    env[8] = rs_xasprintf("RESTATE_QUIESCE=%s", quiescing ? "yes" : "no");
-    env[9] = NULL;
+    env[7] = rs_xasprintf("RESTATE_DUMP_DIR=%s", c && c->dump_dir ? c->dump_dir : "");
+    env[8] = rs_xasprintf("RESTATE_QUIESCE=%s", c && c->quiescing ? "yes" : "no");
+    env[9] = rs_xasprintf("RESTATE_SETTINGS=%s", settings.data ? settings.data : "");
+    env[10] = rs_xasprintf("RESTATE_REPLY=%s", reply ? reply : "");
+    env[11] = NULL;
     argv[0] = rs_xstrdup(hook);
     argv[1] = rs_xstrdup(action);
     argv[2] = rs_xstrdup(l->name);
@@ -468,14 +545,22 @@ bool rs_hook_run(const char *hook, const char *action, const struct rs_live *l,
         rs_buf_addf(err, "%s %s %s exited %d", hook, action, l->name, code);
         ok = false;
     }
+    /* Read whether it ran to the end or not: a pause that failed may still
+     * say that its files are not worth copying. */
+    if (reply)
+    {
+        *leave_out = replied_leave_out(reply);
+        free(reply);
+    }
     for (i = 0; i < 3; i++)
     {
         free(argv[i]);
     }
-    for (i = 0; i < 9; i++)
+    for (i = 0; i < 11; i++)
     {
         free(env[i]);
     }
+    rs_buf_free(&settings);
     rs_buf_free(&paths);
     return ok;
 }

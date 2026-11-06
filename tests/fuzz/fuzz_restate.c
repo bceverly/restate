@@ -59,6 +59,15 @@
  *      index, between NULs -- each as ingest is handed one: a pack it takes
  *      must be one check finds whole, and what it refuses must leave nothing
  *      behind
+ *  20  a restate-proxy grant and a token -- a client's name, a grant file and
+ *      a token, between NULs -- as the proxy reads them: a grant accepted is
+ *      what it says (an absolute repository, operations, one or two token
+ *      digests, a label on one line), and a token it admits is a token whose
+ *      digest the grant has
+ *  21  a restate-proxy request's head, and its target routed: a head taken
+ *      ends where its blank line does, inside 8 KiB, and is taken the same
+ *      from no more than itself; a route names a file only by a name a
+ *      repository has, and a session only where an endpoint takes one
  *
  * It is reached two ways:
  *
@@ -85,6 +94,7 @@
 #include "clones.h"
 #include "diff.h"
 #include "glob.h"
+#include "grant.h"
 #include "hooks.h"
 #include "identity.h"
 #include "index.h"
@@ -100,11 +110,13 @@
 #include "pkgdb.h"
 #include "reinstall.h"
 #include "repo.h"
+#include "request.h"
 #include "restore.h"
 #include "rules.h"
 #include "sha256.h"
 #include "sources.h"
 #include "tar.h"
+#include "token.h"
 #include "util.h"
 
 /* Patterns and paths longer than this say nothing a shorter one does not, and
@@ -1067,6 +1079,185 @@ out:
     }
 }
 
+/* A grant for a client, and a token: "CLIENT\0GRANT\0TOKEN". */
+static void fuzz_grant(const char *text, size_t len)
+{
+    const char     *end = text + len;
+    const char     *z1 = memchr(text, '\0', len);
+    const char     *grant = z1 ? z1 + 1 : end;
+    const char     *z2 = z1 ? memchr(grant, '\0', (size_t)(end - grant)) : NULL;
+    const char     *token = z2 ? z2 + 1 : end;
+    size_t          glen = (size_t)((z2 ? z2 : end) - grant);
+    size_t          tlen = (size_t)(end - token);
+    char           *client = rs_xstrndup(text, (size_t)((z1 ? z1 : end) - text));
+    struct rs_grant g;
+    struct rs_buf   err;
+    int64_t         when = 0;
+    bool            ok;
+
+    rs_buf_init(&err);
+    ok = rs_grant_parse(client, grant, glen, &g, &err);
+    if (ok)
+    {
+        size_t i;
+
+        if (!rs_grant_client_valid(g.client) || strcmp(g.client, client) != 0 ||
+            !g.repository || g.repository[0] != '/' || strstr(g.repository, "//") ||
+            strstr(g.repository, "/./") || strstr(g.repository, "/../") ||
+            (g.operations & ~(RS_GRANT_APPEND | RS_GRANT_READ)) != 0 || g.operations == 0 ||
+            g.ntokens < 1 || g.ntokens > RS_GRANT_TOKENS ||
+            (g.label && strlen(g.label) > RS_GRANT_LABEL_MAX))
+        {
+            abort();
+        }
+        for (i = 0; g.label && g.label[i]; i++)
+        {
+            if ((unsigned char)g.label[i] < 0x20)
+            {
+                abort();
+            }
+        }
+        if (rs_grant_admits(&g, token, tlen, 0))
+        {
+            unsigned char d[RS_SHA256_SIZE];
+            bool          found = false;
+
+            if (!rs_token_valid(token, tlen))
+            {
+                abort();
+            }
+            rs_token_digest(token, tlen, d);
+            for (i = 0; i < g.ntokens; i++)
+            {
+                found = found || memcmp(d, g.tokens[i], sizeof(d)) == 0;
+            }
+            if (!found)
+            {
+                abort();
+            }
+        }
+    } else if (err.len == 0)
+    {
+        /* Refused, it says why. */
+        abort();
+    }
+    if (rs_token_valid(token, tlen) &&
+        (tlen != RS_TOKEN_LEN || memcmp(token, RS_TOKEN_PREFIX, 4) != 0))
+    {
+        abort();
+    }
+    if (rs_grant_parse_time(token, tlen, &when) && when < 0)
+    {
+        abort();
+    }
+    rs_grant_free(&g);
+    rs_buf_free(&err);
+    free(client);
+}
+
+/* What a route says must be so, whatever the target was. */
+static void route_holds(const char *target)
+{
+    struct rs_route r;
+    bool            sessioned;
+
+    rs_route_parse(target, &r);
+    sessioned = r.endpoint == RS_EP_SESSION_RENEW || r.endpoint == RS_EP_SESSION_END ||
+                r.endpoint == RS_EP_UPLOAD || r.endpoint == RS_EP_COMMIT;
+    if ((r.endpoint != RS_EP_NONE && r.endpoint != RS_EP_HELLO &&
+         (!r.client || !rs_grant_client_valid(r.client))) ||
+        (r.endpoint == RS_EP_HELLO && r.client) || (sessioned != (r.session[0] != '\0')) ||
+        (r.session[0] && strlen(r.session) != RS_SESSION_LEN))
+    {
+        abort();
+    }
+    if (r.endpoint == RS_EP_FILE || r.endpoint == RS_EP_UPLOAD)
+    {
+        if (!r.name || r.kind == RS_FK_NONE || rs_file_kind_of(r.name) != r.kind ||
+            (r.endpoint == RS_EP_UPLOAD && rs_upload_max(r.kind) == 0))
+        {
+            abort();
+        }
+    } else if (r.kind != RS_FK_NONE)
+    {
+        abort();
+    }
+    if (r.name && (r.name[0] == '/' || strstr(r.name, "..") == r.name ||
+                   strstr(r.name, "/..") || strstr(r.name, "//") || strstr(r.name, "/.")))
+    {
+        abort();
+    }
+    if ((r.endpoint == RS_EP_LIST || r.endpoint == RS_EP_FILE || r.endpoint == RS_EP_UPLOAD ||
+         r.endpoint == RS_EP_COMMIT) != (r.name != NULL))
+    {
+        abort();
+    }
+    rs_route_free(&r);
+}
+
+/* A request's head, and its target -- or the input itself -- routed. */
+static void fuzz_request(const char *text, size_t len)
+{
+    struct rs_request req;
+    const char       *why = NULL;
+    long              rc = rs_request_parse(text, len, &req, &why);
+
+    if (rc > 0)
+    {
+        struct rs_request again;
+        size_t            n = (size_t)rc;
+
+        if (n > len || n > RS_REQUEST_HEAD_MAX || n < 4 ||
+            memcmp(text + n - 4, "\r\n\r\n", 4) != 0 || !req.target ||
+            req.target[0] != '/' || (req.has_length && req.length > (uint64_t)INT64_MAX) ||
+            (req.session[0] && strlen(req.session) != RS_SESSION_LEN) ||
+            (req.has_range && !req.range_bad && !req.range_open &&
+             req.range_last < req.range_first) ||
+            (req.token && req.token_malformed))
+        {
+            abort();
+        }
+        /* The same from the head alone, and nothing yet from less. */
+        if (rs_request_parse(text, n, &again, &why) != rc)
+        {
+            abort();
+        }
+        rs_request_free(&again);
+        if (rs_request_parse(text, n - 1, &again, &why) != 0)
+        {
+            abort();
+        }
+        rs_request_free(&again);
+        route_holds(req.target);
+    } else if (rc == 0)
+    {
+        size_t i;
+
+        if (len >= RS_REQUEST_HEAD_MAX)
+        {
+            abort();
+        }
+        for (i = 0; i + 3 < len; i++)
+        {
+            if (memcmp(text + i, "\r\n\r\n", 4) == 0)
+            {
+                abort();
+            }
+        }
+    } else if ((rc != -400 && rc != -411 && rc != -417 && rc != -431 && rc != -505) || !why ||
+               !*why)
+    {
+        abort();
+    }
+    rs_request_free(&req);
+    {
+        char *target = rs_xstrndup(text, strnlen(text, len));
+
+        route_holds(target);
+        free(target);
+    }
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static void fuzz_index(const char *text, size_t len)
@@ -1773,7 +1964,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 20)
+    switch (data[0] % 22)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -1832,8 +2023,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 18:
         fuzz_storage(text, size - 1);
         break;
-    default:
+    case 19:
         fuzz_ingest(text, size - 1);
+        break;
+    case 20:
+        fuzz_grant(text, size - 1);
+        break;
+    default:
+        fuzz_request(text, size - 1);
         break;
     }
     return 0;
@@ -1968,7 +2165,7 @@ static void mutate(struct rs_buf *b, const unsigned char *other, size_t other_le
         default:  /* change which parser it goes to */
             if (b->len > 0)
             {
-                b->data[0] = (char)rnd(20);
+                b->data[0] = (char)rnd(22);
             }
             break;
         }

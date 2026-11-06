@@ -1303,8 +1303,8 @@ static void visit_kept(struct walk *w, int rootfd)
     }
 }
 
-/* Each deferred group, between its two calls of opts->around. False if the
- * first call said to stop. */
+/* Each deferred group, between its two calls of opts->around, but for one
+ * the first call says to leave out. False if it said to stop. */
 static bool visit_deferred(struct walk *w, int rootfd)
 {
     size_t g;
@@ -1312,17 +1312,20 @@ static bool visit_deferred(struct walk *w, int rootfd)
     for (g = 0; g < w->opts->ndefer && !w->failed; g++)
     {
         const struct rs_scan_group *grp = &w->opts->defer[g];
-        bool                        go = w->opts->around(w->opts->around_ctx, g, true);
+        enum rs_around              said = w->opts->around(w->opts->around_ctx, g, true);
         size_t                      i;
 
         w->deferring = true;
-        for (i = 0; go && i < grp->npaths && !w->failed; i++)
+        for (i = 0; said != RS_AROUND_STOP && i < grp->npaths && !w->failed; i++)
         {
-            visit_path(w, rootfd, grp->paths[i], false);
+            if (said == RS_AROUND_WALK || i + grp->always >= grp->npaths)
+            {
+                visit_path(w, rootfd, grp->paths[i], false);
+            }
         }
         w->deferring = false;
         (void)w->opts->around(w->opts->around_ctx, g, false);
-        if (!go)
+        if (said == RS_AROUND_STOP)
         {
             return false;
         }

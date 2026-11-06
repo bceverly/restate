@@ -63,6 +63,7 @@ enum kind {
     K_PATH,       /* absolute, with no "." or ".." in it */
     K_PATTERN,    /* as a rules file writes one */
     K_NAME,       /* a hook's or a group's */
+    K_SETTING,    /* a hook's: HOOK.KEY=VALUE */
     K_SNAPSHOT    /* NAME, or REPO::NAME */
 };
 
@@ -79,6 +80,7 @@ enum key_id {
     KEY_ONE_FILE_SYSTEM,
     KEY_QUIESCE,
     KEY_QUIESCE_WITH,
+    KEY_HOOK_OPTION,
     KEY_ENCRYPT_TO,
     KEY_SIGN_WITH,
     KEY_DECRYPT_WITH,
@@ -136,6 +138,7 @@ static const struct key {
                               J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_QUIESCE] = { "quiesce", K_BOOL, false, J_CAPTURE },
     [KEY_QUIESCE_WITH] = { "quiesce_with", K_NAME, true, J_CAPTURE },
+    [KEY_HOOK_OPTION] = { "hook_option", K_SETTING, true, J_CAPTURE },
     [KEY_ENCRYPT_TO] = { "encrypt_to", K_PATH, true, J_CAPTURE | J_PRUNE },
     [KEY_SIGN_WITH] = { "sign_with", K_PATH, false, J_CAPTURE | J_SIGN },
     [KEY_DECRYPT_WITH] = { "decrypt_with", K_PATH, true, J_DECRYPTS },
@@ -409,6 +412,8 @@ static bool value_ok(enum kind kind, const char *v)
         return printable(v);
     case K_NAME:
         return name_ok(v);
+    case K_SETTING:
+        return rs_hook_setting_ok(v);
     case K_SNAPSHOT:
         return snapshot_ok(v);
     case K_COMMAND:
@@ -431,6 +436,9 @@ static const char *kind_words(enum kind kind)
         return "a pattern";
     case K_NAME:
         return "a name of letters, digits, '.', '-' and '_'";
+    case K_SETTING:
+        return "HOOK.KEY=VALUE: a hook's name, a key of lowercase letters, digits and '_', "
+               "and a value";
     case K_SNAPSHOT:
         return "a snapshot's name, or REPO::NAME";
     case K_COMMAND:
@@ -477,6 +485,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_QUIESCE_WITH:
         add(&o->quiesce_with, &o->nquiesce_with, v);
+        break;
+    case KEY_HOOK_OPTION:
+        add(&o->hook_options, &o->nhook_options, v);
         break;
     case KEY_ENCRYPT_TO:
         add(&o->recipients, &o->nrecipients, v);
@@ -962,7 +973,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->plan_only ||
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
                 o->as || o->clones || o->read_all || o->metadata_only || o->record ||
-                o->whole_packs || o->nquiesce_with || o->append_only || o->create || o->json ||
+                o->whole_packs || o->nquiesce_with || o->nhook_options || o->append_only ||
+                o->create || o->json ||
                 o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group ||
                 o->ninclude_mounts;
 

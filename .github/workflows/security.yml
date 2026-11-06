@@ -32,6 +32,11 @@ concurrency:
 permissions:
   contents: read
 
+# restate-proxy's TLS library is installed below, so the proxy passed over
+# for want of it is a broken install, and fails (scripts/tls.sh).
+env:
+  RS_REQUIRE_PROXY: 1
+
 jobs:
   # ==========================================================================
   # hardening-check · gcc -fanalyzer · cppcheck+CERT · scan-build · flawfinder
@@ -54,7 +59,7 @@ jobs:
           set -eux
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential clang clang-tools cppcheck flawfinder \
+            build-essential libssl-dev clang clang-tools cppcheck flawfinder \
             valgrind devscripts llvm
           # Pinned, and the same version scripts/install-dev.sh installs.
           GITLEAKS_VERSION=8.21.2
@@ -68,9 +73,9 @@ jobs:
             -r .github/requirements/semgrep.txt \
             || echo "::warning::semgrep install failed; that scan will skip"
 
-      # The hardening check reads the built binary, so it has to exist.
-      - name: make build
-        run: make build
+      # The hardening check reads the built binaries, so they have to exist.
+      - name: make build proxy
+        run: make build proxy
 
       - name: make security
         env:
@@ -104,7 +109,7 @@ jobs:
       - name: Install clang and the symbolizer
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential clang llvm
+          sudo apt-get install -y -qq --no-install-recommends build-essential libssl-dev clang llvm
 
       - name: make fuzz
         env:

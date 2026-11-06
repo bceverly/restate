@@ -71,14 +71,19 @@ struct around_log {
     const struct rs_index *ix;
     struct rs_buf         *calls;
     bool                   stop;
+    bool                   leave_out_first;
 };
 
-static bool log_around(const void *ctx, size_t group, bool before)
+static enum rs_around log_around(const void *ctx, size_t group, bool before)
 {
     const struct around_log *l = ctx;
 
     rs_buf_addf(l->calls, "%s%zu:%zu ", before ? "b" : "a", group, l->ix->count);
-    return !(before && l->stop);
+    if (before && l->stop)
+    {
+        return RS_AROUND_STOP;
+    }
+    return before && group == 0 && l->leave_out_first ? RS_AROUND_LEAVE_OUT : RS_AROUND_WALK;
 }
 
 static int quiet_scan(const void *arg)
@@ -339,7 +344,7 @@ void test_scan(void)
     {
         const char *const          g0[] = { "/etc/hosts", "/usr", "/etc/missing" };
         const char *const          g1[] = { "/var/cache/blob", "/tmp/junk" };
-        const struct rs_scan_group groups[] = { { g0, 3 }, { g1, 2 } };
+        const struct rs_scan_group groups[] = { { g0, 3, 1 }, { g1, 2, 0 } };
         struct around_log          log;
         struct rs_buf              calls;
         size_t                     before;
@@ -347,6 +352,7 @@ void test_scan(void)
         rs_index_init(&m);
         log.ix = &m;
         log.stop = false;
+        log.leave_out_first = false;
         rs_buf_init(&calls);
         log.calls = &calls;
         o.defer = groups;
@@ -379,6 +385,18 @@ void test_scan(void)
         CHECK(rs_index_find(&m, "/var/cache/blob") != NULL);
         rs_index_free(&m);
         o.all = false;
+
+        /* A group left out: none of its paths recorded but the last, which
+         * it says is always walked; the next group walked. */
+        rs_index_init(&m);
+        rs_buf_reset(&calls);
+        log.leave_out_first = true;
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/etc/hosts") == NULL);
+        CHECK(rs_index_find(&m, "/usr/tool") == NULL);
+        CHECK(strstr(calls.data ? calls.data : "", " a0:") != NULL);
+        CHECK(strstr(calls.data ? calls.data : "", "b1:") != NULL);
+        rs_index_free(&m);
 
         /* Stopped before a group: it is resumed anyway, and nothing after. */
         rs_index_init(&m);

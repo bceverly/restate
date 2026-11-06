@@ -56,9 +56,10 @@ struct rs_jval *rs_result(void);
 /* A path a walk could not read, and why. */
 void rs_result_unreadable(const char *path, const char *reason);
 /* A hook that paused something, and how it went: the times are the
- * clock's, and `resumed` 0 if it never was. */
+ * clock's, and `resumed` 0 if it never was; `left_out` if its paths were not
+ * copied, as its pause asked, its dump being the copy (hooks.h). */
 void rs_result_quiesce(const char *kind, const char *name, time_t paused, time_t resumed,
-                       bool ok, const char *message);
+                       bool ok, bool left_out, const char *message);
 /* How many unreadable paths, and how many hooks that failed, so far. */
 uint64_t rs_result_unreadable_count(void);
 uint64_t rs_result_quiesce_failed(void);

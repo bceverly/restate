@@ -31,3 +31,18 @@
    fun:getgrgid_r*
    ...
 }
+#
+# OpenSSL 3, which restate-proxy and its tests link (never restate itself):
+# its one-time initialization makes locks and the default library context,
+# and frees them in OPENSSL_cleanup, which it registers to run at exit -- all
+# but a lock its own cleanup still needs while it runs, which is left.
+# Reachable, made once per process, and OpenSSL's; only "reachable" is
+# suppressed, and only below OPENSSL_init_crypto.
+{
+   openssl-init-crypto
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:OPENSSL_init_crypto
+   ...
+}

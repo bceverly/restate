@@ -12,6 +12,11 @@
 #                 database -- and then the cluster
 #   resume NAME   start the cluster, then those units, again
 #
+# Or, with stop = never, nothing is stopped at all: pause takes the dump --
+# pg_dumpall's one consistent snapshot, taken with everything running --
+# and tells restate to leave the cluster's files out of the capture, since
+# a copy of them made while it runs is of no use; resume has nothing to do.
+#
 # NAME is a Debian cluster's VERSION-NAME ("18-main"), whose unit is
 # postgresql@18-main; anything else is stopped as the one unit "postgresql".
 # The dump is the copy that survives a move to another major version, which
@@ -23,6 +28,21 @@
 #   dump = always       dump, whatever the size
 #   dump = never        never dump: the files alone
 #   dump_limit = 10G    auto's limit, in bytes or with K, M, G or T
+#   stop = always       (the default) stop the cluster while its files are
+#                       copied, as above
+#   stop = never        never stop it: the dump is taken whatever its size
+#                       (dump_limit does not apply, and dump = never is
+#                       refused, since it would leave nothing of the
+#                       databases at all), written uncompressed as
+#                       pg_dumpall.sql -- restate compresses what it stores,
+#                       and keeps only the parts of a dump that changed since
+#                       the last one, which a gzipped dump has none of -- and
+#                       the cluster's own files are left out of the capture
+#
+# Any of these can be given for one capture instead, as
+# --hook-option postgresql.KEY=VALUE (a job's hook_option), which is read
+# over this file: a job can say stop = never for one server without that
+# server's postgresql.conf saying so.
 #
 # A dump the dump directory has no room for -- the databases' size, as
 # pg_database_size counts it, against what is free there -- is not begun.
@@ -60,14 +80,22 @@ stopped="$state/postgresql-$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
 
 say() { echo "restate hook: postgresql $name: $*" >&2; }
 
-# KEY's value in $conf ("KEY = VALUE", the last one given), else $2.
+# KEY's value: the capture's --hook-option postgresql.KEY=VALUE, the last one
+# given, else $conf's ("KEY = VALUE", the last one given), else $2.
 setting() {
-  v=
-  if [ -r "$conf" ]; then
+  v=$(printf '%s\n' "${RESTATE_SETTINGS:-}" | sed -n "s/^$1=//p" | tail -n 1)
+  if [ -z "$v" ] && [ -r "$conf" ]; then
     v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" |
       sed 's/[[:space:]]*\(#.*\)\{0,1\}$//' | tail -n 1)
   fi
   printf '%s\n' "${v:-$2}"
+}
+
+# Tells restate to leave the cluster's files out of this capture.
+leave_out() {
+  if [ -n "${RESTATE_REPLY:-}" ]; then
+    echo leave-out > "$RESTATE_REPLY"
+  fi
 }
 
 # SIZE (bytes, or a number with K, M, G or T) in bytes; nothing if it is not one.
@@ -97,17 +125,28 @@ pg() {
 # Dump into the dump directory, or say why not. Called as "dump || ...", so
 # set -e does not apply here: every step is checked.
 dump() {
-  out="$RESTATE_DUMP_DIR/pg_dumpall.sql.gz"
+  # Uncompressed where nothing is stopped: see stop = never, above.
+  if [ "$stop" = never ]; then
+    out="$RESTATE_DUMP_DIR/pg_dumpall.sql"
+  else
+    out="$RESTATE_DUMP_DIR/pg_dumpall.sql.gz"
+  fi
   tmp="$out.tmp"
-  # A dump left from an earlier capture is not of this one, and an earlier
-  # hook's uncompressed part is no use to anyone.
-  rm -f "$out" "$tmp" "$RESTATE_DUMP_DIR/pg_dumpall.sql.tmp" \
+  # A dump left from an earlier capture is not of this one, whichever kind
+  # it was, and an earlier hook's part of one is no use to anyone.
+  rm -f "$RESTATE_DUMP_DIR/pg_dumpall.sql.gz" "$RESTATE_DUMP_DIR/pg_dumpall.sql" \
+    "$RESTATE_DUMP_DIR/pg_dumpall.sql.gz.tmp" "$RESTATE_DUMP_DIR/pg_dumpall.sql.tmp" \
     "$RESTATE_DUMP_DIR/pg_dumpall.sql.tmp.gz" || return 1
   mode=$(setting dump auto)
   limit=$(setting dump_limit 10G)
   case "$mode" in
   always | auto) ;;
   never)
+    if [ "$stop" = never ]; then
+      say "dump = never with stop = never would capture nothing of the databases:" \
+        "refused; the cluster's files are left out"
+      return 1
+    fi
     say "dump = never in $conf: no pg_dumpall; the stopped cluster's files are copied"
     return 0
     ;;
@@ -130,7 +169,7 @@ dump() {
     size=
     ;;
   esac
-  if [ -n "$size" ] && [ "$mode" = auto ] && [ "$size" -gt "$max" ]; then
+  if [ -n "$size" ] && [ "$mode" = auto ] && [ "$stop" != never ] && [ "$size" -gt "$max" ]; then
     say "its databases come to $(gib "$size"), more than dump_limit ($limit): no pg_dumpall;" \
       "the stopped cluster's files are copied (dump = always in $conf dumps it anyway)"
     return 0
@@ -151,12 +190,16 @@ dump() {
   trap 'exit 1' HUP INT TERM
   # Through gzip as it is written, so that the dump never needs its own size
   # uncompressed. The shell has no pipefail: each side says how it went.
-  how=$( {
-    {
-      pg pg_dumpall 3>&-
-      echo "pg_dumpall $?" >&3
-    } | gzip -c > "$tmp" 3>&- || echo "gzip failed" >&3
-  } 3>&1)
+  if [ "$stop" = never ]; then
+    if pg pg_dumpall > "$tmp"; then how="pg_dumpall 0"; else how="pg_dumpall $?"; fi
+  else
+    how=$( {
+      {
+        pg pg_dumpall 3>&-
+        echo "pg_dumpall $?" >&3
+      } | gzip -c > "$tmp" 3>&- || echo "gzip failed" >&3
+    } 3>&1)
+  fi
   if [ "$how" != "pg_dumpall 0" ]; then
     rm -f "$tmp"
     say "the pg_dumpall did not finish ($(printf '%s' "$how" | tr '\n' ' ' | sed 's/ $//')):" \
@@ -167,8 +210,32 @@ dump() {
   trap - EXIT HUP INT TERM
 }
 
+stop=$(setting stop always)
+case "$stop" in
+always | never) ;;
+*)
+  say "stop = $stop is not always or never"
+  exit 1
+  ;;
+esac
+
 case "$action" in
 pause)
+  if [ "$stop" = never ]; then
+    # The files are left out whatever happens: copied while the cluster
+    # runs, they are no copy of it, and the capture is incomplete without a
+    # dump to stand in for them.
+    leave_out
+    if [ -z "${RESTATE_DUMP_DIR:-}" ]; then
+      say "stop = never, and no dump directory to dump into: nothing of it is captured"
+      exit 1
+    fi
+    if ! dump; then
+      say "stop = never, and no pg_dumpall: nothing of it is captured"
+      exit 1
+    fi
+    exit 0
+  fi
   failed=
   if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
     dump || failed=1
@@ -188,6 +255,10 @@ pause)
   fi
   ;;
 resume)
+  # Nothing was stopped.
+  if [ "$stop" = never ]; then
+    exit 0
+  fi
   systemctl start "$unit"
   if [ -r "$stopped" ]; then
     while read -r u; do

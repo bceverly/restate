@@ -53,11 +53,11 @@ The order, each a release of its own:
       refer only to packs the repository holds, and its name must be one
       nothing has. The proxy runs this same code for every upload. Fuzzed in
       CI from the first release
-- [ ] **Repository I/O behind a backend interface,** with the local one the
-      only backend: a refactor of `repo.c`'s file operations that changes
-      nothing a repository on a local disk, NFS, SMB, exFAT or FAT sees --
-      `make test-share` and CI's share jobs hold it to that, bit for bit --
-      released on its own before any networking
+- [x] **Repository I/O behind a backend interface** (2.3.0.1), with the local
+      one the only backend: a refactor of `repo.c`'s file operations that
+      changes nothing a repository on a local disk, NFS, SMB, exFAT or FAT
+      sees -- `make test-share` and CI's share jobs hold it to that, bit for
+      bit -- released on its own before any networking
 - [ ] **`restate-proxy`:**
   - HTTP/1.1 under `/v1/<client>/` -- the client in the path must be the
     token's -- with a small fixed set of endpoints: the repository's marker;
@@ -87,9 +87,13 @@ The order, each a release of its own:
     its operations, and up to two token hashes (SHA-256; never a token), so a
     token is rotated by adding the new one before removing the old; an
     optional expiry, so a short-lived read-only grant for one restore can
-    come later with no protocol change. A client is added or removed by
-    writing or removing its one file. Re-read on change or SIGHUP; written by
-    hand, or by the SysManage agent on a storage host it manages
+    come later with no protocol change; and a `label` the proxy ignores, by
+    which a program that writes grants knows its own. A client is added or
+    removed by writing or removing its one file, renamed into place: only
+    `CLIENT.conf` is read, never a dot file. Re-read on change or SIGHUP;
+    written by hand, or by the SysManage agent on a storage host it manages.
+    `restate-proxy --check-grants [--json]` says of each file whether it is
+    good and, if not, why -- what a client refused only ever sees as 401
   - **Tokens:** 32 random bytes, base64url, prefixed `rsp_` so a secret
     scanner knows one; compared in constant time; checked before any byte
     of a request's body is read
@@ -99,8 +103,11 @@ The order, each a release of its own:
     confines itself to that client's repository -- `pledge` and `unveil` on
     OpenBSD, Capsicum on FreeBSD, Landlock and seccomp on Linux -- so a fault
     in the parser still cannot reach another client's; fixed limits on the
-    request line and headers (8 KiB) and on a body (a pack's largest size,
-    and no more); the request parser fuzzed in CI from the first release
+    request line and headers (8 KiB) and on a body (the largest restate
+    writes that file); the request parser fuzzed in CI from the first
+    release
+  - The protocol: [docs/proxy-protocol.md](docs/proxy-protocol.md), a draft
+    until the first release that implements it
 - [ ] **The remote backend in `restate`:** a repository can be
       `https://PROXY/v1/CLIENT`, with a token file (in a job,
       `repository_token_file`, held to what `passphrase_file` is: a regular
@@ -111,7 +118,13 @@ The order, each a release of its own:
       file and never on a command line, and the packs' indexes cached on the
       machine as they are now, so after the first capture only new ones are
       fetched. A library is linked only if a measured capture says the small
-      calls need it
+      calls need it. A proxy whose certificate a site's CA signed is trusted
+      by `repository_ca_file`, without that CA trusted by the whole machine,
+      and its key can be pinned (`repository_pin_sha256`). A session is ended
+      whenever restate stops, `SIGTERM` included; busy (423) and a proxy at
+      its limit of sessions (503) are exit 5; and the result JSON carries
+      the proxy's fixed reason for a failure (`proxy_reason`), for a program
+      to choose its message by
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
 - [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,
