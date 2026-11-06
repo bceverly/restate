@@ -147,7 +147,13 @@ static void addr_text(const struct sockaddr *sa, socklen_t len, char *out, size_
         (void)snprintf(out, size, "?");
         return;
     }
-    (void)snprintf(out, size, sa->sa_family == AF_INET6 ? "[%s]:%s" : "%s:%s", host, port);
+    if (sa->sa_family == AF_INET6)
+    {
+        (void)snprintf(out, size, "[%s]:%s", host, port);
+    } else
+    {
+        (void)snprintf(out, size, "%s:%s", host, port);
+    }
 }
 
 /* Binds every address `spec` names, adding each socket to fds: false, said,

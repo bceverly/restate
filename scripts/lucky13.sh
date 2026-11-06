@@ -166,8 +166,13 @@ section "4. remote file inclusion (CWE-98)"
 # fetches used until its signature has been checked against a pinned key; and
 # --fetch-sources, apt's indexes the way apt fetches them, plain http too,
 # believed only once gpgv has checked their signatures.
-HITS="$(grep_source '\b(dlopen|dlsym|socket|connect|getaddrinfo|curl_)[[:space:]]*\(')"
-no_hits "no dynamic loading and no networking in the source" \
+#
+# restate-proxy is a server, and listens: socket and getaddrinfo are allowed
+# in its listener, proxy/server.c, and nowhere else -- not in restate, not in
+# the code that serves a connection, and never connect or dlopen.
+HITS="$(grep_source '\b(dlopen|dlsym|socket|connect|getaddrinfo|curl_)[[:space:]]*\(' |
+        grep -vE '^[0-9]+:proxy/server\.c: .*\b(socket|getaddrinfo)[[:space:]]*\(' || true)"
+no_hits "no dynamic loading, and no networking but restate-proxy's listener" \
   "dynamic loading or networking found" "$HITS"
 if grep -q '"=https"' src/run.c && grep -q '"--proto-redir"' src/run.c \
    && grep -q '"-q"' src/run.c && ! grep -q 'plain_http = true' src/installer.c; then
@@ -251,9 +256,12 @@ HITS="$(grep_source '\b(setuid|seteuid|setreuid|setresuid|setgid|setegid|setregi
 no_hits "restate never changes identity" "identity changes found" "$HITS"
 # Five programs are run -- gzip, pigz, curl, gpgv and gpg -- from one file, by
 # absolute path, only if root owns them and their directory, with posix_spawn,
-# no shell and a fixed environment. Anything more is a finding.
-HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(')"
-no_hits "no shell, no exec family, and no program found through PATH" \
+# no shell and a fixed environment. Anything more is a finding. The one fork
+# allowed is restate-proxy's listener's, proxy/server.c, which serves each
+# connection in a child of its own and runs nothing.
+HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(' |
+        grep -vE '^[0-9]+:proxy/server\.c: [^(]*\bfork[[:space:]]*\(\)' || true)"
+no_hits "no shell, no exec family, no program found through PATH, and no fork but the proxy's" \
   "a shell, an exec or a PATH lookup is used to run something" "$HITS"
 HITS="$(grep_source '\bposix_spawn[[:space:]]*\(' | grep -v '^[0-9]*:src/run.c: ')"
 no_hits "posix_spawn appears only in src/run.c" "posix_spawn is called outside src/run.c" "$HITS"

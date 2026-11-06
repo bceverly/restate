@@ -385,6 +385,15 @@ struct rs_tls_config *rs_tls_server_config(const char *cert_file, const char *ke
     return c;
 }
 
+/* A certificate is good only where OpenSSL's own check found it so: named
+ * rather than left to a NULL callback, so that it is plain nothing here
+ * accepts one OpenSSL refused. */
+static int verified(int preverify_ok, X509_STORE_CTX *store)
+{
+    (void)store;
+    return preverify_ok;
+}
+
 struct rs_tls_config *rs_tls_client_config(const char *ca_file, struct rs_buf *err)
 {
     struct rs_tls_config *c;
@@ -403,7 +412,7 @@ struct rs_tls_config *rs_tls_client_config(const char *ca_file, struct rs_buf *e
         SSL_CTX_free(ctx);
         return NULL;
     }
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verified);
     c = rs_xcalloc(1, sizeof *c);
     c->ctx = ctx;
     return c;

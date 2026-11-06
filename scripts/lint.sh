@@ -419,7 +419,7 @@ done < <(
     # badge) are not code and carry no header.
     find .github -type f \( -name '*.yml' -o -name '*.yaml' -o -name CODEOWNERS \
                        -o -path '.github/requirements/*' \)
-    printf '%s\n' Makefile .editorconfig .gitignore
+    printf '%s\n' Makefile .editorconfig .gitignore .gitleaksignore
   } | sort
 )
 

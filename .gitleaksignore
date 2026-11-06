@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# gitleaks findings that are not secrets, by fingerprint (COMMIT:FILE:RULE:LINE).
+# Each is a line gitleaks reads as an API key, and is not one.
+#
+# The example grant in docs/proxy-protocol.md, and the one in src/grant.h's
+# comment: token_sha256 lines, made up, which are SHA-256 digests of no token
+# anyone has. A grant holds only a token's digest, never the token, so even a
+# real one would not be a secret: what it grants needs the token.
+dbf899c393cf2218319927b46b21a13f0d10d9a7:docs/proxy-protocol.md:generic-api-key:133
+dbf899c393cf2218319927b46b21a13f0d10d9a7:docs/proxy-protocol.md:generic-api-key:134
+dbf899c393cf2218319927b46b21a13f0d10d9a7:src/grant.h:generic-api-key:12

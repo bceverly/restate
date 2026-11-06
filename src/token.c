@@ -18,6 +18,18 @@
 static const char alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+/* Cleared through a volatile pointer, so that clearing what is not read
+ * again is not optimized away. */
+static void wipe(unsigned char *p, size_t n)
+{
+    volatile unsigned char *v = p;
+
+    while (n-- > 0)
+    {
+        *v++ = 0;
+    }
+}
+
 /* A base64url character's value, or -1. */
 static int value_of(char c)
 {
@@ -105,7 +117,7 @@ bool rs_token_new(char out[RS_TOKEN_SIZE])
     }
     if (got < sizeof(bytes))
     {
-        memset(bytes, 0, sizeof(bytes));
+        wipe(bytes, sizeof(bytes));
         return false;
     }
     memcpy(out, RS_TOKEN_PREFIX, o);
@@ -123,7 +135,7 @@ bool rs_token_new(char out[RS_TOKEN_SIZE])
      * two 0 bits after. */
     out[o++] = alphabet[(acc << (6 - bits)) & 63];
     out[o] = '\0';
-    memset(bytes, 0, sizeof(bytes));
+    wipe(bytes, sizeof(bytes));
     return true;
 }
 
