@@ -45,6 +45,11 @@ pause)
 resume)
   systemctl start "$name"
   ;;
+restored | paths)
+  # Asked of every hook, after a restore and before a walk: nothing to do
+  # for either here, which exit 2 says without a word.
+  exit 2
+  ;;
 *)
   echo "usage: $0 present|pause|resume NAME" >&2
   exit 2

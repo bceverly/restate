@@ -891,6 +891,25 @@ check "its content" test "$(cat repout/etc/hosts)" = changed
 check "with its mode" test "$(file_mode repout/etc/app/key)" = "600"
 check "a symlink" test "$(readlink repout/home/u/link)" = "../../etc/hosts"
 check "and a hard link" test "$(inode repout/var/lib/x/one)" = "$(inode repout/var/lib/x/two)"
+# A repository that cannot be written -- a read-only mount, in a recovery --
+# read with --no-lock, which says what it gives up; and without it, refused.
+# Not as root, whom no mode stops writing.
+if [ "$(id -u)" != 0 ]; then
+  cp -R repo rorepo
+  chmod -R a-w rorepo
+  rm -rf roout
+  mkdir -p roout
+  expect 2 "restore from a repository that cannot be written" -- \
+    "$BIN" restore --allow-unverified --root roout rorepo
+  contains "$ERR" "readers" "the readers lock is what it cannot take"
+  expect 0 "and with --no-lock" -- \
+    "$BIN" restore --allow-unverified --no-lock --root roout --result ro.json rorepo
+  contains "$ERR" "read without its readers lock (--no-lock)" "warns that a prune is not kept out"
+  contains "$ERR" "put back 5 files" "and puts its files back"
+  contains "$(cat ro.json)" "read without its readers lock" "the result says so too"
+  expect 0 "check --no-lock" -- "$BIN" check --no-lock rorepo
+  chmod -R u+w rorepo
+fi
 expect 0 "export a snapshot" -- "$BIN" export repo::20260101T000000Z -o exported.tar
 mkdir -p expout
 expect 0 "restore what was exported" -- "$BIN" restore --allow-unverified --root expout exported.tar
@@ -1819,6 +1838,20 @@ EOF
   wait "$live_pid" 2> /dev/null
   rm -rf /srv/restate-redis /etc/restate /var/lib/restate
 fi
+
+# Every shipped hook is asked "restored" after a restore that puts its dump
+# directory back, and "paths" before a walk: one with nothing to do for
+# either exits 2 and says nothing, rather than print its usage into the
+# middle of the restore's output.
+for hook in "$HERE"/../../hooks/*; do
+  for asked in restored paths; do
+    case "$asked:$(basename "$hook")" in
+    paths:nextcloud | paths:openbao | paths:unifi | restored:nextcloud) continue ;;
+    esac
+    expect 2 "$(basename "$hook") $asked" -- env RESTATE_DUMP_DIR="$WORK/none" sh "$hook" "$asked" x
+    check "$(basename "$hook") $asked says nothing" test -z "$ERR"
+  done
+done
 
 # Owners by name: the image's accounts merged with the system's own.
 me="$(id -un)"

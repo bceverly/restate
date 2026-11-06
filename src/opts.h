@@ -37,6 +37,7 @@ enum {
     OPT_SIGN_WITH,
     OPT_TRUSTED_KEY,
     OPT_ALLOW_UNVERIFIED,
+    OPT_NO_LOCK,
     OPT_KEEP_LAST,
     OPT_KEEP_DAILY,
     OPT_KEEP_WEEKLY,
@@ -103,6 +104,7 @@ struct rs_options {
     const char    **trusted;      /* --trusted-key: public key files */
     size_t          ntrusted;
     bool            allow_unverified;
+    bool            no_lock;        /* --no-lock: read without the readers lock */
     bool            all;
     bool            rules_only;     /* --rules-only */
     bool            baseline_content;

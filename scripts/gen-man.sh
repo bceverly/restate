@@ -1890,7 +1890,17 @@ record locks at all \- a FUSE one, as sshfs's and rclone's are \- is locked
 with
 .BR flock (2)
 alone, which the kernel keeps on the machine that takes it, so it too must
-not have two machines writing at once. An SMB share Linux mounts is locked
+not have two machines writing at once. A repository that cannot be written
+at all \- storage mounted read-only, in a recovery, from a machine the
+storage host does not trust yet \- has no
+.I readers
+file to open, and reading it is refused;
+.B \-\-no\-lock
+(a job's
+.BR no_lock )
+reads it without that lock, with a warning, since a prune run on the
+storage host meanwhile is then not kept out. A capture or prune takes its
+locks whatever it is given. An SMB share Linux mounts is locked
 with the open file description lock alone, which its client takes on the
 server, where every other client sees it.
 A FreeBSD server shows its own programs the locks NFS clients take only with

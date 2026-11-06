@@ -1298,6 +1298,11 @@ static int take(const struct rs_store *st, const char *name, bool shared, bool *
                         ? "another capture or prune is using it; try again when it is done"
                         : "a prune is running on it, or something is reading it while "
                           "prune wants to; try again when it is done");
+    } else if (lock < 0 && shared && errno == EROFS)
+    {
+        /* rs_store_lock has said "Read-only file system" already. */
+        rs_buf_addstr(err, "; to read a repository that cannot be written, as in a recovery "
+                           "from a read-only mount, run with --no-lock");
     }
     return lock;
 }
@@ -1526,6 +1531,13 @@ static bool upgrade(struct rs_repo *r, struct rs_buf *err)
     return ok;
 }
 
+static bool no_readers_lock;
+
+void rs_repo_set_no_lock(bool no_lock)
+{
+    no_readers_lock = no_lock;
+}
+
 struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy,
                              struct rs_buf *err)
 {
@@ -1560,7 +1572,11 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
         r->lock_fd = take(r->st, "lock", false, busy, err);
         ok = r->lock_fd >= 0;
     }
-    if (ok && (lock == RS_REPO_READ || lock == RS_REPO_PRUNE))
+    if (ok && lock == RS_REPO_READ && no_readers_lock)
+    {
+        rs_warn("%s: read without its readers lock (--no-lock): a prune on the storage host "
+                "while this runs is not kept out, and could remove what it is reading", dir);
+    } else if (ok && (lock == RS_REPO_READ || lock == RS_REPO_PRUNE))
     {
         r->readers_fd = take(r->st, "readers", lock != RS_REPO_PRUNE, busy, err);
         ok = r->readers_fd >= 0;

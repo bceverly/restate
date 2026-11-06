@@ -24,6 +24,12 @@ if [ "$1" = present ]; then
   exit 0
 fi
 
+# Nothing to do after a restore, or before a walk: exit 2 says so, quietly,
+# before anything is made.
+case "$1" in
+restored | paths) exit 2 ;;
+esac
+
 state=/run/restate/hooks
 (umask 077 && mkdir -p "$state")
 paused="$state/docker"
@@ -43,6 +49,11 @@ resume)
     docker unpause $(cat "$paused") > /dev/null
   fi
   rm -f "$paused"
+  ;;
+restored | paths)
+  # Asked of every hook, after a restore and before a walk: nothing to do
+  # for either here, which exit 2 says without a word.
+  exit 2
   ;;
 *)
   echo "usage: $0 present|pause|resume NAME" >&2

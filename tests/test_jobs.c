@@ -397,7 +397,7 @@ static void bad_jobs(void)
 
         CHECK(n > 30);
         CHECK_STR(keys[0], "command");
-        CHECK_STR(keys[n - 1], "include_mount");
+        CHECK_STR(keys[n - 1], "no_lock");
     }
 }
 

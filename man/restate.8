@@ -175,6 +175,9 @@ restore, verify, diff, status, list, export: accept an image or snapshot only if
 \-\-allow\-unverified
 restore: restore an image that is unsigned, or not signed by a \-\-trusted\-key, warning of it; by default it is refused
 .TP
+\-\-no\-lock
+restore, check, copy, diff, list: read a repository without taking its readers lock, for one that cannot be written (a read\-only mount, in a recovery); a prune on the storage host meanwhile is then not kept out, as the warning says
+.TP
 \-\-keep\-local\-packages
 capture: keep the .deb and .snap files of installed packages no repository or store has, from apt's and snapd's caches, so a rebuild can install them
 .TP
@@ -2051,7 +2054,17 @@ record locks at all \- a FUSE one, as sshfs's and rclone's are \- is locked
 with
 .BR flock (2)
 alone, which the kernel keeps on the machine that takes it, so it too must
-not have two machines writing at once. An SMB share Linux mounts is locked
+not have two machines writing at once. A repository that cannot be written
+at all \- storage mounted read-only, in a recovery, from a machine the
+storage host does not trust yet \- has no
+.I readers
+file to open, and reading it is refused;
+.B \-\-no\-lock
+(a job's
+.BR no_lock )
+reads it without that lock, with a warning, since a prune run on the
+storage host meanwhile is then not kept out. A capture or prune takes its
+locks whatever it is given. An SMB share Linux mounts is locked
 with the open file description lock alone, which its client takes on the
 server, where every other client sees it.
 A FreeBSD server shows its own programs the locks NFS clients take only with

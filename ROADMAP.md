@@ -59,6 +59,12 @@ The order, each a release of its own:
       sees -- `make test-share` and CI's share jobs hold it to that, bit for
       bit -- released on its own before any networking
 - [ ] **`restate-proxy`:**
+  - [x] **Its own build, the grants, the tokens and the server** (3.0.0.0):
+    `make proxy`, the one target that links a TLS library; `--check-grants`
+    and `--new-token`; `--serve`, a listener and a process per connection,
+    with the request's head, its client and its token checked as the
+    protocol says, and the grants read again on change or SIGHUP. Sessions,
+    reading and uploading are next, each answered 501 until then
   - HTTP/1.1 under `/v1/<client>/` -- the client in the path must be the
     token's -- with a small fixed set of endpoints: the repository's marker;
     the list of packs with sizes and sums; each pack's `.idx`, `.sum` and
@@ -559,6 +565,15 @@ program running it on many machines needs, all of it off unless asked for:
       gpg on a pipe of its own
 - [x] **`restate estimate`:** how much a first capture would keep, by
       directory
+- [x] **Hooks told what one job wants** (3.0.0.0): `--hook-option
+      HOOK.KEY=VALUE` (a job's `hook_option`), read over the hook's own file;
+      a pause that answers `leave-out` has its paths left out of the capture,
+      its dump the copy, and the result says so
+- [x] **A database that is never stopped** (3.0.0.0): the PostgreSQL hook's
+      `stop = never`, an uncompressed `pg_dumpall` and the cluster's files
+      left out
+- [x] **OpenBao** (3.0.0.0): `--quiesce-with openbao`, a raft snapshot with
+      nothing stopped, or file storage stopped, started and unsealed again
 
 ## Then — other systems
 

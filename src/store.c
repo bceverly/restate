@@ -788,8 +788,12 @@ int rs_store_lock(const struct rs_store *st, const char *name, bool shared, bool
     *refused = false;
     if (fd < 0)
     {
-        rs_buf_addf(err, "%s: %s", path, strerror(errno));
+        int saved = errno;
+
+        rs_buf_addf(err, "%s: %s", path, strerror(saved));
         free(path);
+        /* For the caller to say more of: EROFS, for one. */
+        errno = saved;
         return -1;
     }
     if (lock_asking(fd, shared, refused) != 0)

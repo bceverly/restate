@@ -24,6 +24,12 @@ if [ "$1" = present ]; then
   exit 0
 fi
 
+# Nothing to do after a restore, or before a walk: exit 2 says so, quietly,
+# before anything is made.
+case "$1" in
+restored | paths) exit 2 ;;
+esac
+
 action=$1
 name=$2
 state=/run/restate/hooks
@@ -43,6 +49,11 @@ resume)
     lxc start "$name"
     rm -f "$mark"
   fi
+  ;;
+restored | paths)
+  # Asked of every hook, after a restore and before a walk: nothing to do
+  # for either here, which exit 2 says without a word.
+  exit 2
   ;;
 *)
   echo "usage: $0 present|pause|resume NAME" >&2

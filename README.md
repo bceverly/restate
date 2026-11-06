@@ -412,6 +412,11 @@ Options:
       --allow-unverified  restore: restore an image that is unsigned, or not
                           signed by a --trusted-key, warning of it; by default
                           it is refused
+      --no-lock           restore, check, copy, diff, list: read a repository
+                          without taking its readers lock, for one that cannot
+                          be written (a read-only mount, in a recovery); a
+                          prune on the storage host meanwhile is then not kept
+                          out, as the warning says
       --keep-local-packages
                           capture: keep the .deb and .snap files of installed
                           packages no repository or store has, from apt's and
@@ -1575,7 +1580,12 @@ restate du /srv/restate/web01
   rclone's are -- gets `flock(2)` alone, which only the machine taking it
   sees: one writer at a time there. An SMB share Linux mounts gets the open
   file description lock alone, which its client takes on the server as a
-  lock every other client sees.
+  lock every other client sees. A repository that cannot be written at all
+  -- storage mounted read-only for a recovery, from a machine the storage
+  host does not trust yet -- has no `readers` lock to take, and reading it
+  is refused; `--no-lock` (a job's `no_lock = true`) reads it without that
+  lock, with a warning, since a prune on the storage host meanwhile is then
+  not kept out. A capture or prune takes its locks whatever it is given.
 - **Any filesystem will do.** Every name restate writes is letters, digits,
   `.`, `-` and `_`, short, never differing from another only in case and
   never a name Windows reserves, and every file is a plain file with one

@@ -342,6 +342,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->trusted = rs_xreallocarray(o->trusted, o->ntrusted + 1, sizeof(*o->trusted));
             o->trusted[o->ntrusted++] = optarg;
             break;
+        case OPT_NO_LOCK:
+            o->no_lock = true;
+            break;
         case OPT_ALLOW_UNVERIFIED:
             o->allow_unverified = true;
             break;

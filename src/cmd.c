@@ -6543,6 +6543,7 @@ int rs_cmd_run(const struct rs_options *given)
         o = &job.opts;
     }
     rs_image_set_stage_dir(o->tmpdir);
+    rs_repo_set_no_lock(o->no_lock);
     rs_result_begin(rs_command_name(o->command));
     rs_progress_enable(o->progress);
     if (o->progress_file)

@@ -458,6 +458,15 @@ static int  eio_left;
 static int  lock_calls;
 static bool says_nfs;
 
+/* The last warning given, for a test to read. */
+static char *warned;
+
+static void keep_warning(const char *msg)
+{
+    free(warned);
+    warned = rs_xstrdup(msg);
+}
+
 static int refusing_lock(int fd, bool shared)
 {
     (void)fd;
@@ -693,6 +702,21 @@ static void test_made(const char *dir)
         CHECK(unlink(lock) == 0);
         CHECK(rs_repo_open(empty, RS_REPO_READ, &busy, &err) == NULL && !busy);
         rs_buf_reset(&err);
+        /* --no-lock: read without it, warned of; but nothing that writes or
+         * prunes goes without its locks. */
+        rs_repo_set_no_lock(true);
+        warned = NULL;
+        rs_warn_hook = keep_warning;
+        a = rs_repo_open(empty, RS_REPO_READ, &busy, &err);
+        CHECK(a != NULL);
+        rs_repo_close(a);
+        CHECK_CONTAINS(warned ? warned : "", "read without its readers lock (--no-lock)");
+        CHECK(rs_repo_open(empty, RS_REPO_PRUNE, &busy, &err) == NULL);
+        rs_buf_reset(&err);
+        rs_warn_hook = NULL;
+        free(warned);
+        warned = NULL;
+        rs_repo_set_no_lock(false);
         free(lock);
     }
 

@@ -156,6 +156,14 @@ void            rs_repo_set_recipients(struct rs_repo *r, const char *const *rec
 /* What a prune asks, at each point it could stop and leave the repository
  * whole, whether to stop there: NULL, the default, for never. */
 void            rs_repo_set_stop(struct rs_repo *r, bool (*stop)(void));
+/*
+ * --no-lock: whether a repository opened RS_REPO_READ is read without its
+ * readers lock, for one that cannot be written -- a read-only mount in a
+ * recovery, where the lock file cannot be made. Each such open warns that
+ * a prune on the storage host is then not kept out. The other locks are
+ * taken whatever this says: nothing that writes a repository skips them.
+ */
+void            rs_repo_set_no_lock(bool no_lock);
 
 /* The snapshots, oldest first; the caller frees them with rs_repo_free_names. */
 char **rs_repo_snapshots(const struct rs_repo *r, size_t *n);

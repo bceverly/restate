@@ -115,6 +115,7 @@ enum key_id {
     KEY_PACKAGES,
     KEY_OUTPUT,
     KEY_INCLUDE_MOUNT,
+    KEY_NO_LOCK,
     KEY_COUNT
 };
 
@@ -175,6 +176,8 @@ static const struct key {
     [KEY_PACKAGES] = { "packages", K_BOOL, false, J_DIFF | J_RESTORE },
     [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF },
     [KEY_INCLUDE_MOUNT] = { "include_mount", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_STATUS },
+    [KEY_NO_LOCK] = { "no_lock", K_BOOL, false,
+                      J_RESTORE | J_CHECK | J_COPY | J_DIFF | J_LIST | J_SNAPSHOTS | J_STATUS },
 };
 
 const char *const *rs_job_keys(size_t *n)
@@ -506,6 +509,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_ALLOW_UNVERIFIED:
         o->allow_unverified = b;
+        break;
+    case KEY_NO_LOCK:
+        o->no_lock = b;
         break;
     case KEY_APPEND_ONLY:
         o->append_only = b;
@@ -965,6 +971,7 @@ static bool only_reporting(const struct rs_options *o)
     bool said = o->root || o->output || o->nrules_files || o->no_default_rules || o->os ||
                 o->cache || o->mirror || o->target || o->firmware || o->arch || o->nrecipients ||
                 o->sign_with || o->ndecrypt_with || o->ntrusted || o->allow_unverified ||
+                o->no_lock ||
                 o->all || o->rules_only ||
                 o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
                 o->keep_daily || o->keep_weekly || o->keep_monthly || o->keep_yearly ||
