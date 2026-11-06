@@ -158,7 +158,7 @@ void            rs_repo_set_recipients(struct rs_repo *r, const char *const *rec
 void            rs_repo_set_stop(struct rs_repo *r, bool (*stop)(void));
 
 /* The snapshots, oldest first; the caller frees them with rs_repo_free_names. */
-char **rs_repo_snapshots(struct rs_repo *r, size_t *n);
+char **rs_repo_snapshots(const struct rs_repo *r, size_t *n);
 void   rs_repo_free_names(char **names, size_t n);
 
 /* `name`, or the newest snapshot if it is NULL, as a snapshot that exists;

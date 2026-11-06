@@ -2370,7 +2370,7 @@ int rs_cmd_snapshots(const struct rs_options *o)
 OUTPUT_HELD_END
 
 /* What prune dropped and kept, in its result. */
-static void prune_result(const struct rs_options *o, struct rs_repo *r,
+static void prune_result(const struct rs_options *o, const struct rs_repo *r,
                          const struct rs_repo_pruned *p)
 {
     struct rs_jval *res = rs_result();
