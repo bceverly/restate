@@ -25,7 +25,7 @@
 #include "grant.h"
 #include "restate.h"
 #include "serve.h"
-#include "tls.h"
+#include "tlsconn.h"
 #include "util.h"
 
 #define LISTEN_MAX   16

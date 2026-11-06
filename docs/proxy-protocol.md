@@ -1,8 +1,8 @@
 # restate-proxy protocol, version 1
 
-**Status: draft.** `restate-proxy --serve` implements its transport and
-authentication so far (see "Running the proxy"). It was written before the code,
-so that `restate-proxy` and restate's remote backend are built against one
+**Status: draft.** `restate-proxy --serve` implements its transport,
+authentication and reading so far (see "Running the proxy"). It was written
+before the code, so that `restate-proxy` and restate's remote backend are built against one
 description, and so that what SysManage plans as its Phase 25.5 can be
 reviewed against it. Until the first release that implements it, anything
 here can change; after that, version 1 changes only by adding to it.
@@ -330,7 +330,11 @@ how large it is.
 
 - `Range` is one range of bytes, `bytes=FIRST-` or `bytes=FIRST-LAST`:
   a restore reads a pack from the segment `.seek` points to. Anything else --
-  several ranges, a suffix range, a range past the end -- is `416`.
+  several ranges, a suffix range, a range that begins at or past the end --
+  is `416`, with `Content-Range: bytes */SIZE`. A range that ends past the
+  end ends at the end, as HTTP has it. A `206` says what it holds in
+  `Content-Range: bytes FIRST-LAST/SIZE`, and every file is answered with
+  `Accept-Ranges: bytes`.
 - A pack's content (`packs/NAME.tar.gz`) is only for a `read` session:
   `403` in any other.
 - A file that is not there is `404`.
@@ -543,9 +547,10 @@ request (`request peer=... client=... method=... target=... status=...
 reason=...`). A token is never in it.
 
 **Until sessions are implemented**, a request that passes every check
-before one -- its head, its client, its token, its name and its method -- is
-answered `501`, with `Restate-Reason: not-implemented`. This is not part of
-version 1 and goes once sessions are here.
+before its session -- its head, its client, its token, its name and its
+method -- is answered `501`, with `Restate-Reason: not-implemented`. Reading
+(listings and files) is implemented, and answers once there is a session to
+read in. This is not part of version 1 and goes once sessions are here.
 
 ## Not in version 1
 

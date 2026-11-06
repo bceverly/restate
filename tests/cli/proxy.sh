@@ -84,8 +84,27 @@ case "$TOKEN" in
   *) fail "the token file holds a token: $TOKEN" ;;
 esac
 if [ "$(file_mode web01.token)" = 600 ]; then ok; else fail "the token file is 0600: $(file_mode web01.token)"; fi
-DIGEST="$(printf '%s' "$TOKEN" | { sha256sum 2> /dev/null || shasum -a 256; } | cut -d' ' -f1)"
-contains "$OUT" "token_sha256 = $DIGEST" "--new-token prints the token's digest"
+# The digest by a tool of the system's, where it has one: sha256sum (Linux),
+# shasum (macOS), sha256 (FreeBSD, OpenBSD), cksum -a (NetBSD), or openssl.
+# Each prints it differently; the 64 hex digits are taken from what it says.
+sha256_of() {
+  local tool
+  for tool in "sha256sum" "shasum -a 256" "sha256 -q" "cksum -a SHA256" "openssl dgst -sha256"; do
+    # shellcheck disable=SC2086  # each is a command and its options
+    if command -v ${tool%% *} > /dev/null 2>&1 &&
+      printf '%s' "$1" | $tool 2> /dev/null | grep -oE '[0-9a-f]{64}' | head -n 1 | grep .; then
+      return 0
+    fi
+  done
+  return 1
+}
+if DIGEST="$(sha256_of "$TOKEN")"; then
+  contains "$OUT" "token_sha256 = $DIGEST" "--new-token prints the token's digest"
+else
+  # No tool here to check it by: the grants below use the line it printed.
+  DIGEST="$(printf '%s\n' "$OUT" | sed -n 's/^token_sha256 = //p')"
+  printf '  - no SHA-256 tool here to check the digest --new-token printed\n'
+fi
 lacks "$OUT$ERR" "$TOKEN" "--new-token never prints the token"
 expect 2 "--new-token over a file" -- "$BIN" --new-token web01.token
 contains "$ERR" "web01.token" "--new-token over a file says which"

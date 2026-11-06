@@ -22,7 +22,7 @@
 #include "restate.h"
 #include "server.h"
 #include "sha256.h"
-#include "tls.h"
+#include "tlsconn.h"
 #include "token.h"
 #include "util.h"
 

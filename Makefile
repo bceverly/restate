@@ -54,7 +54,7 @@ PROXY_OK     = $(eval PROXY_OK := $$(shell scripts/tls.sh --check && echo yes))$
 # Where the TLS library is missing, the proxy is passed over and said to be
 # -- unless RS_REQUIRE_PROXY is set, as CI sets it, where that is a failure:
 # CI installs the headers, so a skip there is a broken install.
-PROXY_MISSING = $(if $(RS_REQUIRE_PROXY),{ echo "restate-proxy: $(TLS_NAME) is not installed, and RS_REQUIRE_PROXY is set" >&2; exit 1; },printf '  \033[93m-\033[0m restate-proxy passed over: %s is not installed (make install-dev)\n' '$(TLS_NAME)')
+PROXY_MISSING = $(if $(RS_REQUIRE_PROXY),{ echo "restate-proxy: $(TLS_NAME) is not installed; RS_REQUIRE_PROXY is set" >&2; exit 1; },printf '  \033[93m-\033[0m restate-proxy passed over: %s is not installed (make install-dev)\n' '$(TLS_NAME)')
 
 # -----------------------------------------------------------------------------
 # Flags

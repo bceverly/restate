@@ -135,7 +135,7 @@ jobs:
           # Both are undone, so the manpage check below checks something.
           rm -f /etc/dpkg/dpkg.cfg.d/excludes
           apt-get install -y -qq --no-install-recommends \
-            build-essential git ca-certificates man-db
+            build-essential git ca-certificates man-db libssl-dev openssl
           if dpkg-divert --list /usr/bin/man | grep -q man.REAL; then
             rm -f /usr/bin/man
             dpkg-divert --quiet --remove --rename /usr/bin/man
@@ -319,9 +319,27 @@ jobs:
           SETUP: ${{ matrix.setup }}
           PACKAGE: ${{ matrix.package }}
         run: |
+          # The setup is tried again: a rolling distribution's mirror can be
+          # caught publishing a snapshot, its repomd.xml naming files not on
+          # it yet ("not found on medium"), and zypper then skips the whole
+          # repository and finds no package at all. zypper's cache is cleared
+          # between tries, so the next asks afresh, of whichever mirror the
+          # redirector picks then.
           docker run --rm -v "$PWD:/w" -w /w -e SETUP -e PACKAGE "$IMAGE" sh -c '
             set -e
-            $SETUP
+            n=1
+            until $SETUP; do
+              if [ "$n" -ge 5 ]; then
+                echo "the setup failed $n times; the mirror is not serving a whole repository" >&2
+                exit 1
+              fi
+              echo "setup attempt $n failed; trying again in 30s" >&2
+              n=$((n + 1))
+              sleep 30
+              if command -v zypper > /dev/null 2>&1; then
+                zypper --non-interactive clean --all > /dev/null 2>&1 || true
+              fi
+            done
             . /etc/os-release && echo "$PRETTY_NAME"
             make build WERROR=-Werror
             make test-unit test-cli

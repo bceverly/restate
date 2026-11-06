@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Bryan C. Everly
  * SPDX-License-Identifier: BSD-2-Clause
  */
-#include "tls.h"
+#include "tlsconn.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -93,9 +93,11 @@ struct rs_tls_config *rs_tls_server_config(const char *cert_file, const char *ke
     c = rs_xcalloc(1, sizeof *c);
     c->cfg = cfg;
     c->server = tls_server();
+    /* Where a key that is not the certificate's is found, so both are named. */
     if (!c->server || tls_configure(c->server, cfg) != 0)
     {
-        why(err, "TLS", c->server ? tls_error(c->server) : NULL);
+        rs_buf_addf(err, "%s and %s: %s", cert_file, key_file,
+                    c->server && tls_error(c->server) ? tls_error(c->server) : "failed");
         rs_tls_config_free(c);
         return NULL;
     }

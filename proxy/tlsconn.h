@@ -6,7 +6,8 @@
  * TLS for restate-proxy, from the system's TLS library and never written
  * here: OpenSSL 3, or libtls on OpenBSD (scripts/tls.sh says which). This is
  * the whole of what the proxy asks of either, so that nothing else in it
- * names one.
+ * names one. It is tlsconn.h, not tls.h, which is libtls's own: with
+ * -Iproxy, a tls.h here would be the one <tls.h> found.
  *
  * What is fixed rather than configured, as docs/proxy-protocol.md says: TLS
  * 1.2 or newer, and ALPN http/1.1 when the client offers it. A client that
@@ -22,8 +23,8 @@
  * The client half is here for the tests and for a proxy checking itself; the
  * restate program never links this, and reaches a proxy through curl.
  */
-#ifndef RESTATE_TLS_H
-#define RESTATE_TLS_H
+#ifndef RESTATE_TLSCONN_H
+#define RESTATE_TLSCONN_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -73,4 +74,4 @@ const char *rs_tls_alpn(const struct rs_tls *t);
 /* Says so to the peer and frees `t`; the socket is the caller's to close. */
 void rs_tls_close(struct rs_tls *t);
 
-#endif /* RESTATE_TLS_H */
+#endif /* RESTATE_TLSCONN_H */

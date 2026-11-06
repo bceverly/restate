@@ -83,7 +83,7 @@ case "${1:-}" in
     ;;
 --check)
     # Built and linked, not only preprocessed: headers without the library,
-    # or a library too old for the calls proxy/tls.c makes, is the failure
+    # or a library too old for the calls proxy/tlsconn.c makes, is the failure
     # worth finding here rather than halfway through a build.
     dir="$(mktemp -d "${TMPDIR:-/tmp}/restate-tls.XXXXXX")"
     trap 'rm -rf "$dir"' EXIT

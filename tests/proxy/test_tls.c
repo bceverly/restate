@@ -18,7 +18,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "tls.h"
+#include "tlsconn.h"
 #include "util.h"
 
 /* Runs openssl with `args`, quietly: whether it succeeded. */

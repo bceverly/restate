@@ -9,6 +9,7 @@
 #include "test.h"
 
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "grant.h"
 #include "serve.h"
@@ -67,6 +68,33 @@ static void mem_log(void *ctx, const char *line)
     rs_buf_addf(&m->log, "%s\n", line);
 }
 
+/* The sessions there are, for the tests that use them: SID_READ and
+ * SID_LOOK are web01's, SID_OTHER another client's, in `fake_repo`. */
+#define SID_READ  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define SID_LOOK  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define SID_OTHER "cccccccccccccccccccccccccccccccc"
+
+static const char *fake_repo;
+static bool        with_sessions;
+
+static enum rs_proxy_found fake_session(void *ctx, const char *client, const char *id,
+                                        struct rs_proxy_session *s)
+{
+    (void)ctx;
+    s->repository = fake_repo;
+    if (strcmp(id, SID_OTHER) == 0)
+    {
+        return RS_PROXY_NOT_YOURS;
+    }
+    if (strcmp(client, "web01") != 0 ||
+        (strcmp(id, SID_READ) != 0 && strcmp(id, SID_LOOK) != 0))
+    {
+        return RS_PROXY_NO_SESSION;
+    }
+    s->kind = strcmp(id, SID_READ) == 0 ? RS_PROXY_READ : RS_PROXY_LOOK;
+    return RS_PROXY_FOUND;
+}
+
 /* Serves `in` with `grants`, at `now`: what was answered, and the log, in
  * *log (both the caller's to free). */
 static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants, int64_t now,
@@ -94,6 +122,10 @@ static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants
     c.now = now;
     c.log = mem_log;
     c.log_ctx = &m;
+    if (with_sessions)
+    {
+        c.session = fake_session;
+    }
     *served = rs_proxy_serve(&io, &c);
     *log = rs_buf_detach(&m.log);
     return rs_buf_detach(&m.out);
@@ -113,6 +145,194 @@ static int count(const char *hay, const char *needle)
 }
 
 #define GET(target, extra) "GET " target " HTTP/1.1\r\nHost: p\r\n" extra "\r\n"
+#define AUTH "Authorization: Bearer " TOKEN "\r\n"
+#define IN(sid) AUTH "Restate-Session: " sid "\r\n"
+
+/* `what`, asked in session `sid`, of the fake repository: the answer. */
+static char *ask(const struct rs_grant *grant, const char *what, char **log)
+{
+    unsigned served;
+
+    return serve(what, grant, 1, 0, &served, log);
+}
+
+/* The listing in `out`, past its head: "" if it has none. */
+static const char *body_of(const char *out)
+{
+    const char *b = strstr(out, "\r\n\r\n");
+
+    return b ? b + 4 : "";
+}
+
+static void test_reading(const struct rs_grant *grant)
+{
+    char *dir = rs_test_tmpdir();
+    char *out;
+    char *log;
+    char *path;
+
+    /* A repository, with what a listing names and what it does not. */
+    rs_test_write(dir, "restate-repository", "restate-repository 2\n", 0644);
+    rs_test_write(dir, "chunk-key", "k\n", 0644);
+    rs_test_write(dir, "lock", "", 0644);
+    rs_test_write(dir, "readers", "", 0644);
+    rs_test_write(dir, ".hidden", "", 0644);
+    path = rs_xasprintf("%s/packs", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    free(path);
+    path = rs_xasprintf("%s/snapshots", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    free(path);
+    path = rs_xasprintf("%s/snapshots/20261020T030000Z", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    free(path);
+    path = rs_xasprintf("%s/snapshots/.20261020T040000Z.tmp", dir);
+    CHECK(mkdir(path, 0755) == 0);
+    free(path);
+    path = rs_xasprintf("%s/packs/P-1.idx", dir);
+    CHECK(mkdir(path, 0755) == 0);   /* a directory where a file is named */
+    free(path);
+    rs_test_write(dir, "packs/P-0.tar.gz", "0123456789", 0644);
+    rs_test_write(dir, "packs/P-0.idx", "index", 0644);
+    rs_test_write(dir, "packs/P-0.sum", "sum", 0644);
+    rs_test_write(dir, "packs/junk", "", 0644);
+    rs_test_write(dir, "snapshots/20261020T030000Z/info", "info", 0644);
+    rs_test_write(dir, "snapshots/20261020T030000Z/index.json.gz", "ix", 0644);
+    rs_test_write(dir, "snapshots/20261020T030000Z/other", "", 0644);
+    fake_repo = dir;
+    with_sessions = true;
+
+    TEST_CASE("serve: a listing names what the protocol knows, and nothing else");
+    out = ask(grant, GET("/v1/web01/list/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 200 OK\r\n");
+    CHECK(rs_starts_with(body_of(out), "restate-list 1\nf 2 "));
+    CHECK_CONTAINS(body_of(out), " chunk-key\nf 21 ");
+    CHECK_CONTAINS(body_of(out), " restate-repository\n");
+    CHECK(strstr(body_of(out), "lock") == NULL && strstr(body_of(out), "readers") == NULL);
+    CHECK(strstr(body_of(out), "hidden") == NULL && strstr(body_of(out), "packs") == NULL);
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/packs/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(body_of(out), " P-0.idx\n");
+    CHECK_CONTAINS(body_of(out), "f 3 ");
+    CHECK_CONTAINS(body_of(out), "f 10 ");
+    CHECK_CONTAINS(body_of(out), "d 0 ");      /* P-1.idx, a directory where a file is named */
+    CHECK(strstr(body_of(out), "junk") == NULL);
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/snapshots/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(body_of(out), "d 0 ");
+    CHECK_CONTAINS(body_of(out), " 20261020T030000Z\n");
+    CHECK(strstr(body_of(out), "tmp") == NULL);
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/snapshots/20261020T030000Z/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(body_of(out), " info\n");
+    CHECK_CONTAINS(body_of(out), " index.json.gz\n");
+    CHECK(strstr(body_of(out), "other") == NULL);
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/snapshots/20261020T050000Z/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a file, whole, by HEAD, and a pack's content only to a restore");
+    out = ask(grant, GET("/v1/web01/f/packs/P-0.idx", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 200 OK\r\n");
+    CHECK_CONTAINS(out, "Content-Type: application/octet-stream\r\n");
+    CHECK_CONTAINS(out, "Content-Length: 5\r\n");
+    CHECK_CONTAINS(out, "Accept-Ranges: bytes\r\n");
+    CHECK_CONTAINS(out, "Last-Modified: ");
+    CHECK_CONTAINS(out, " GMT\r\n");
+    CHECK_STR(body_of(out), "index");
+    CHECK_CONTAINS(log, "status=200 bytes=5");
+    free(out);
+    free(log);
+    out = ask(grant, "HEAD /v1/web01/f/restate-repository HTTP/1.1\r\nHost: p\r\n" IN(SID_LOOK)
+                     "\r\n", &log);
+    CHECK_CONTAINS(out, "Content-Length: 21\r\n");
+    CHECK_STR(body_of(out), "");
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 403 Forbidden\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: forbidden\r\n");
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ)), &log);
+    CHECK_STR(body_of(out), "0123456789");
+    free(out);
+    free(log);
+    {
+        const char *two = GET("/v1/web01/f/packs/P-9.idx", IN(SID_READ))
+            GET("/v1/web01/f/packs/P-1.idx", IN(SID_READ));
+
+        out = ask(grant, two, &log);
+    }
+    CHECK_INT(count(out, "HTTP/1.1 404 Not Found\r\n"), 2);
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: one range of a file, and none that is not one within it");
+    {
+        const char *three =
+            GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ) "Range: bytes=4-\r\n")
+            GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ) "Range: bytes=1-3\r\n")
+            GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ) "Range: bytes=8-100\r\n");
+
+        out = ask(grant, three, &log);
+    }
+    CHECK_INT(count(out, "HTTP/1.1 206 Partial Content\r\n"), 3);
+    CHECK_CONTAINS(out, "Content-Range: bytes 4-9/10\r\n\r\n456789");
+    CHECK_CONTAINS(out, "Content-Range: bytes 1-3/10\r\n\r\n123");
+    CHECK_CONTAINS(out, "Content-Range: bytes 8-9/10\r\n\r\n89");
+    free(out);
+    free(log);
+    {
+        const char *two =
+            GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ) "Range: bytes=10-\r\n")
+            GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ) "Range: bytes=-3\r\n");
+
+        out = ask(grant, two, &log);
+    }
+    CHECK_INT(count(out, "HTTP/1.1 416 Range Not Satisfiable\r\n"), 2);
+    CHECK_CONTAINS(out, "Content-Range: bytes */10\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: reading needs the client's own session, not ended");
+    out = ask(grant, GET("/v1/web01/list/", AUTH), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/", IN(SID_OTHER)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
+    free(out);
+    free(log);
+    out = ask(grant, GET("/v1/web01/list/", IN("dddddddddddddddddddddddddddddddd")), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    free(out);
+    free(log);
+    /* What sessions do themselves is still to come. */
+    out = ask(grant, "POST /v1/web01/sessions/" SID_READ "/renew HTTP/1.1\r\nHost: p\r\n" AUTH
+                     "\r\n", &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 501 Not Implemented\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a repository that is not there is nothing to list");
+    fake_repo = "/nonexistent/restate-repo";
+    out = ask(grant, GET("/v1/web01/list/", IN(SID_LOOK)), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    free(out);
+    free(log);
+
+    with_sessions = false;
+    fake_repo = NULL;
+    rs_test_rmtree(dir);
+    free(dir);
+}
 
 void test_serve(void)
 {
@@ -165,7 +385,7 @@ void test_serve(void)
             CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
             CHECK_CONTAINS(out, "Restate-Reason: unauthorized\r\n");
             CHECK_CONTAINS(out, "WWW-Authenticate: Bearer\r\n");
-            CHECK_CONTAINS(out, "no good token for this client\n");
+            CHECK_CONTAINS(out, "no good token or session for this client\n");
             CHECK(strstr(log, "rsp_") == NULL);
             free(out);
             free(log);
@@ -282,6 +502,7 @@ void test_serve(void)
         rs_buf_free(&m.out);
     }
 
+    test_reading(&grant);
     rs_grant_free(&grant);
     rs_buf_free(&err);
 }
