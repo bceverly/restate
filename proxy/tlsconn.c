@@ -22,6 +22,7 @@
 struct rs_tls {
 #ifdef RS_TLS_LIBTLS
     struct tls *conn;
+    bool        closed;     /* tls_close done, at the peer's close */
 #else
     SSL        *ssl;
 #endif
@@ -51,9 +52,9 @@ static void why(struct rs_buf *err, const char *what, const char *detail)
 
 static struct tls_config *new_config(struct rs_buf *err)
 {
-    struct tls_config *cfg;
+    struct tls_config *cfg = tls_init() == 0 ? tls_config_new() : NULL;
 
-    if (tls_init() != 0 || (cfg = tls_config_new()) == NULL)
+    if (cfg == NULL)
     {
         rs_buf_addstr(err, "TLS: the library could not start");
         return NULL;
@@ -197,6 +198,26 @@ struct rs_tls *rs_tls_connect(struct rs_tls_config *cfg, int fd, const char *nam
     return handshake(conn, err);
 }
 
+/*
+ * Whether the end tls_read just reported was the peer's close_notify. libtls
+ * reads a socket closed under it as an end too, and says which it was only
+ * at tls_close: "EOF without close notify". So the close is done here, once,
+ * and rs_tls_close does not do it again.
+ */
+static bool peer_closed(struct rs_tls *t)
+{
+    int         rv;
+    const char *e;
+
+    do
+    {
+        rv = tls_close(t->conn);
+    } while (rv == TLS_WANT_POLLIN || rv == TLS_WANT_POLLOUT);
+    t->closed = true;
+    e = rv == 0 ? NULL : tls_error(t->conn);
+    return !(e && strstr(e, "close notify"));
+}
+
 long rs_tls_read(struct rs_tls *t, void *buf, size_t len)
 {
     ssize_t n;
@@ -209,6 +230,10 @@ long rs_tls_read(struct rs_tls *t, void *buf, size_t len)
     {
         n = tls_read(t->conn, buf, len);
     } while (n == TLS_WANT_POLLIN || n == TLS_WANT_POLLOUT);
+    if (n == 0 && !t->closed)
+    {
+        return peer_closed(t) ? 0 : -1;
+    }
     return n < 0 ? -1 : (long)n;
 }
 
@@ -247,7 +272,10 @@ void rs_tls_close(struct rs_tls *t)
     {
         return;
     }
-    (void)tls_close(t->conn);
+    if (!t->closed)
+    {
+        (void)tls_close(t->conn);
+    }
     tls_free(t->conn);
     free(t);
 }

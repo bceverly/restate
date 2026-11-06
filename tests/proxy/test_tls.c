@@ -89,6 +89,9 @@ int test_tls_serve(char **args)
     int                   fd = atoi(args[0]);
     int                   status = 1;
 
+    /* As the proxy does: a close_notify written to a client gone already is
+     * an error of the write, not the end of this process. */
+    (void)signal(SIGPIPE, SIG_IGN);
     rs_buf_init(&err);
     cfg = rs_tls_server_config(args[1], args[2], &err);
     t = cfg ? rs_tls_accept(cfg, fd, &err) : NULL;
