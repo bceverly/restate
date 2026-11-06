@@ -128,6 +128,7 @@ void test_request(void);
 /* tests/proxy/: built only where restate-proxy can be (scripts/tls.sh). */
 void test_tls(void);
 void test_serve(void);
+void test_sessions(void);
 /* The server half of test_tls, as `unittests --tls-serve FD CERT KEY HOW`. */
 int  test_tls_serve(char **args);
 #endif

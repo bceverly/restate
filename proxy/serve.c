@@ -20,6 +20,8 @@
 
 #define HELLO "restate-proxy 1\n"
 #define LIST_HEAD "restate-list 1\n"
+/* The most a session's opening says: "append" and a newline, and room. */
+#define KIND_MAX 16
 /* How much of a file is read at a time to be sent. */
 #define CHUNK ((size_t)64 * 1024)
 
@@ -28,6 +30,7 @@ struct answer {
     int           status;
     const char   *reason;   /* Restate-Reason, or NULL for a success */
     bool          close;    /* the connection ends with it */
+    struct rs_buf headers;  /* any more, each with its CRLF */
     struct rs_buf body;     /* the body, unless it is a file's */
     const char   *type;     /* its Content-Type: text/plain if NULL */
     /* A file's, sent from `fd` (-1 for none). */
@@ -42,12 +45,14 @@ struct answer {
 static void answer_init(struct answer *a)
 {
     memset(a, 0, sizeof(*a));
+    rs_buf_init(&a->headers);
     rs_buf_init(&a->body);
     a->fd = -1;
 }
 
 static void answer_free(struct answer *a)
 {
+    rs_buf_free(&a->headers);
     rs_buf_free(&a->body);
     if (a->fd >= 0)
     {
@@ -62,6 +67,10 @@ static const char *status_text(int status)
     {
     case 200:
         return "OK";
+    case 201:
+        return "Created";
+    case 204:
+        return "No Content";
     case 206:
         return "Partial Content";
     case 400:
@@ -74,16 +83,22 @@ static const char *status_text(int status)
         return "Not Found";
     case 405:
         return "Method Not Allowed";
+    case 409:
+        return "Conflict";
     case 411:
         return "Length Required";
     case 416:
         return "Range Not Satisfiable";
     case 417:
         return "Expectation Failed";
+    case 423:
+        return "Locked";
     case 431:
         return "Request Header Fields Too Large";
     case 501:
         return "Not Implemented";
+    case 503:
+        return "Service Unavailable";
     case 505:
         return "HTTP Version Not Supported";
     default:
@@ -108,7 +123,20 @@ static const char *error_text(int status, const char *reason)
     }
     if (strcmp(reason, "not-implemented") == 0)
     {
-        return "this restate-proxy does not have sessions yet\n";
+        return "this restate-proxy does not take uploads yet\n";
+    }
+    if (strcmp(reason, "repository-version-1") == 0)
+    {
+        return "the repository was made by restate 1.3 or older: one capture on the storage "
+               "host makes it version 2\n";
+    }
+    if (strcmp(reason, "busy") == 0)
+    {
+        return "the repository is busy: another capture, or a prune\n";
+    }
+    if (strcmp(reason, "sessions-full") == 0)
+    {
+        return "the proxy has as many sessions open as it allows; try again later\n";
     }
     if (strcmp(reason, "proxy-failed") == 0)
     {
@@ -173,8 +201,13 @@ static bool respond(const struct rs_proxy_io *io, const struct answer *a, bool h
 
     rs_buf_init(&out);
     rs_buf_addf(&out, "HTTP/1.1 %d %s\r\n", a->status, status_text(a->status));
-    rs_buf_addf(&out, "Content-Type: %s\r\n", a->type ? a->type : "text/plain; charset=utf-8");
-    if (a->fd >= 0)
+    if (a->status != 204)
+    {
+        rs_buf_addf(&out, "Content-Type: %s\r\n",
+                    a->type ? a->type : "text/plain; charset=utf-8");
+    }
+    /* A 204 has no body, and so, as HTTP has it, no Content-Length. */
+    if (a->status != 204 && a->fd >= 0)
     {
         char when[40];
 
@@ -187,7 +220,7 @@ static bool respond(const struct rs_proxy_io *io, const struct answer *a, bool h
             rs_buf_addf(&out, "Content-Range: bytes %" PRIu64 "-%" PRIu64 "/%" PRIu64 "\r\n",
                         a->first, a->first + a->length - 1, a->size);
         }
-    } else
+    } else if (a->status != 204)
     {
         rs_buf_addf(&out, "Content-Length: %zu\r\n", a->body.len);
     }
@@ -195,6 +228,7 @@ static bool respond(const struct rs_proxy_io *io, const struct answer *a, bool h
     {
         rs_buf_addf(&out, "Content-Range: bytes */%" PRIu64 "\r\n", a->size);
     }
+    rs_buf_add(&out, a->headers.data, a->headers.len);
     if (a->reason)
     {
         rs_buf_addf(&out, "Restate-Reason: %s\r\n", a->reason);
@@ -383,12 +417,167 @@ static void file(const struct rs_proxy_session *s, const struct rs_request *req,
 }
 
 /* ------------------------------------------------------------------------ */
+/* Sessions                                                                 */
+/* ------------------------------------------------------------------------ */
+
+bool rs_proxy_kind_of(const char *word, size_t len, enum rs_proxy_kind *kind)
+{
+    static const char *const words[] = { "look", "read", "append" };
+    size_t                   i;
+
+    if (len > 0 && word[len - 1] == '\n')
+    {
+        len--;
+    }
+    for (i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+    {
+        if (len == strlen(words[i]) && memcmp(word, words[i], len) == 0)
+        {
+            *kind = (enum rs_proxy_kind)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *rs_proxy_kind_name(enum rs_proxy_kind kind)
+{
+    switch (kind)
+    {
+    case RS_PROXY_READ:
+        return "read";
+    case RS_PROXY_APPEND:
+        return "append";
+    case RS_PROXY_LOOK:
+    default:
+        return "look";
+    }
+}
+
+/* The reason a status the sessions answer with is given. */
+static const char *reason_of(int status)
+{
+    switch (status)
+    {
+    case 401:
+        return "unauthorized";
+    case 403:
+        return "forbidden";
+    case 404:
+        return "not-found";
+    case 409:
+        return "repository-version-1";
+    case 423:
+        return "busy";
+    case 503:
+        return "sessions-full";
+    default:
+        return "proxy-failed";
+    }
+}
+
+/* Where a request's body is: what of it came after the head, in the
+ * connection's buffer, and then the connection. */
+struct body {
+    const struct rs_proxy_io *io;
+    const char               *buf;
+    size_t                    have;     /* bytes in buf */
+    size_t                    at;       /* the next one of the body there */
+    bool                      read;     /* it was read, whole */
+};
+
+/* The `len` bytes of the body into `out`: false if the connection ended
+ * first. */
+static bool read_body(struct body *b, char *out, size_t len)
+{
+    size_t got = 0;
+
+    while (got < len)
+    {
+        if (b->at < b->have)
+        {
+            size_t n = b->have - b->at < len - got ? b->have - b->at : len - got;
+
+            memcpy(out + got, b->buf + b->at, n);
+            b->at += n;
+            got += n;
+        } else
+        {
+            long n = b->io->read(b->io->ctx, out + got, len - got);
+
+            if (n <= 0)
+            {
+                return false;
+            }
+            got += (size_t)n;
+        }
+    }
+    b->read = true;
+    return true;
+}
+
+/* POST /v1/CLIENT/sessions: its body the kind, read only now that every
+ * check before it has passed -- which is when an Expect: 100-continue is
+ * answered, so that a refused one sends nothing. */
+static void open_session(const struct rs_proxy_conn *c, const struct rs_request *req,
+                         const struct rs_route *route, struct body *b, struct answer *a)
+{
+    enum rs_proxy_kind kind;
+    char               word[KIND_MAX];
+    char               id[RS_SESSION_LEN + 1];
+    unsigned           lease = 0;
+    int                status;
+
+    if (!req->has_length)
+    {
+        fail(a, 411, "bad-request");
+        a->close = true;
+        return;
+    }
+    if (req->length == 0 || req->length > KIND_MAX)
+    {
+        fail(a, 400, "bad-request");
+        a->close = true;
+        return;
+    }
+    if (req->expect_continue &&
+        !b->io->write(b->io->ctx, "HTTP/1.1 100 Continue\r\n\r\n", 25))
+    {
+        fail(a, 400, "bad-request");
+        a->close = true;
+        return;
+    }
+    if (!read_body(b, word, (size_t)req->length))
+    {
+        fail(a, 400, "bad-request");
+        a->close = true;
+        return;
+    }
+    if (!rs_proxy_kind_of(word, (size_t)req->length, &kind))
+    {
+        fail(a, 400, "bad-request");
+        return;
+    }
+    memset(id, 0, sizeof(id));
+    status = c->sessions->open(c->sessions->ctx, route->client, kind, id, &lease);
+    if (status != 201)
+    {
+        fail(a, status, reason_of(status));
+        return;
+    }
+    a->status = 201;
+    rs_buf_addf(&a->headers, "Restate-Session: %s\r\nRestate-Lease: %u\r\n", id, lease);
+    rs_buf_addf(&a->body, "%s\n", id);
+}
+
+/* ------------------------------------------------------------------------ */
 /* A request                                                                */
 /* ------------------------------------------------------------------------ */
 
 /* The answer to a whole head, `req`, by what it asks for. */
 static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
-                   const struct rs_route *route, struct answer *a)
+                   const struct rs_route *route, struct body *b, struct answer *a,
+                   char held[RS_SESSION_LEN + 1])
 {
     struct rs_proxy_session s;
     const struct rs_grant  *g;
@@ -433,9 +622,35 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 405, "bad-request");
         return;
     }
-    if (!c->session || (route->endpoint != RS_EP_LIST && route->endpoint != RS_EP_FILE))
+    if (!c->sessions || route->endpoint == RS_EP_UPLOAD || route->endpoint == RS_EP_COMMIT)
     {
         fail(a, 501, "not-implemented");
+        return;
+    }
+    if (route->endpoint == RS_EP_SESSION_OPEN)
+    {
+        open_session(c, req, route, b, a);
+        return;
+    }
+    if (route->endpoint == RS_EP_SESSION_RENEW || route->endpoint == RS_EP_SESSION_END)
+    {
+        unsigned lease = 0;
+        int      status = route->endpoint == RS_EP_SESSION_RENEW
+                              ? c->sessions->renew(c->sessions->ctx, route->client,
+                                                   route->session, &lease)
+                              : c->sessions->end(c->sessions->ctx, route->client,
+                                                 route->session);
+
+        if (status != 204)
+        {
+            fail(a, status, reason_of(status));
+            return;
+        }
+        a->status = 204;
+        if (route->endpoint == RS_EP_SESSION_RENEW)
+        {
+            rs_buf_addf(&a->headers, "Restate-Lease: %u\r\n", lease);
+        }
         return;
     }
     /* The session: given, the client's own, and not ended. */
@@ -445,9 +660,11 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 401, "unauthorized");
         return;
     }
-    switch (c->session(c->session_ctx, route->client, req->session, &s))
+    switch (c->sessions->find(c->sessions->ctx, route->client, req->session, &s))
     {
     case RS_PROXY_FOUND:
+        /* Held, its lease not running, until it is answered. */
+        memcpy(held, req->session, RS_SESSION_LEN + 1);
         break;
     case RS_PROXY_NOT_YOURS:
         fail(a, 401, "unauthorized");
@@ -536,6 +753,8 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
         struct rs_request req;
         struct rs_route   route;
         struct answer     a;
+        struct body       body;
+        char              held[RS_SESSION_LEN + 1];
         const char       *why = "";
         long              head;
         bool              ok;
@@ -568,14 +787,29 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
             return served + 1;
         }
         rs_route_parse(req.target, &route);
-        decide(c, &req, &route, &a);
-        /* Nothing yet reads a request's body, so one that has a body ends
-         * the connection rather than leave it unread there: an Expect:
-         * 100-continue is never answered 100, and so the body never sent. */
-        a.close = req.close || (req.has_length && req.length > 0) || a.status == 500;
+        body.io = io;
+        body.buf = buf;
+        body.have = have;
+        body.at = (size_t)head;
+        body.read = false;
+        held[0] = '\0';
+        decide(c, &req, &route, &body, &a, held);
+        /* A body that was not read ends the connection rather than be left
+         * there unread: an Expect: 100-continue was not answered 100, and
+         * so it was never sent. */
+        a.close = a.close || req.close || (req.has_length && req.length > 0 && !body.read) ||
+                  a.status == 500;
         log_request(c, &req, &route, &a, NULL);
         served++;
         ok = respond(io, &a, req.method == RS_METHOD_HEAD);
+        if (held[0])
+        {
+            uint64_t sent = req.method == RS_METHOD_HEAD ? 0
+                            : a.fd >= 0                  ? a.length
+                                                         : (uint64_t)a.body.len;
+
+            c->sessions->release(c->sessions->ctx, held, ok ? sent : 0);
+        }
         answer_free(&a);
         rs_route_free(&route);
         rs_request_free(&req);
@@ -583,8 +817,9 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
         {
             return served;
         }
-        /* What came after the head, the start of the next request. */
-        memmove(buf, buf + head, have - (size_t)head);
-        have -= (size_t)head;
+        /* What came after the head and its body, the start of the next
+         * request. */
+        memmove(buf, buf + body.at, have - body.at);
+        have -= body.at;
     }
 }

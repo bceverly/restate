@@ -522,6 +522,7 @@ owner's or root's, that nobody else can read.
 ```
 restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
                       [--grants DIR] [--max-connections N] [--idle-timeout SECONDS]
+                      [--max-sessions N] [--lease SECONDS]
 ```
 
 - `--listen` is `HOST:PORT`, `[ADDRESS]:PORT` for IPv6, or `:PORT` for every
@@ -537,20 +538,28 @@ restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
   they were when it came. Past `--max-connections` (64), a connection is
   closed as it comes. A connection that says nothing for `--idle-timeout`
   seconds (60) is closed.
-- `SIGTERM` or `SIGINT` stops it: it stops listening, ends every connection,
-  and exits 0.
+- The sessions are the listening process's, with the locks they hold: a
+  session outlives the connection that opened it, and a connection's process
+  asks the listener for it. Past `--max-sessions` (64), a session is refused
+  with `503`. One idle for `--lease` seconds (300) is ended, and a request in
+  it afterwards is `404`.
+- `SIGTERM` or `SIGINT` stops it: it stops listening, ends every connection
+  and every session, and exits 0.
 
 Its log is standard error, a line per event in `key=value` form: what it
 listens on, the grants it read (`grants clients=N refused=M`) and each one
-it refused, with why (`grant-refused file=... error="..."`), and each
-request (`request peer=... client=... method=... target=... status=...
-reason=...`). A token is never in it.
+it refused, with why (`grant-refused file=... error="..."`), each request
+(`request peer=... client=... method=... target=... status=... reason=...
+bytes=...`), each session opened (`session-open client=... kind=...`) and
+each ended (`session-end`, as above), and a session it could not open, with
+why (`session-refused client=... error="..."`). A token is never in it, nor
+a session's id.
 
-**Until sessions are implemented**, a request that passes every check
-before its session -- its head, its client, its token, its name and its
-method -- is answered `501`, with `Restate-Reason: not-implemented`. Reading
-(listings and files) is implemented, and answers once there is a session to
-read in. This is not part of version 1 and goes once sessions are here.
+**Until uploads are implemented**, an upload or a commit that passes every
+check before its session is answered `501`, with `Restate-Reason:
+not-implemented`; and so an `append` session ends as `ended`, never `ok`,
+having committed nothing, and its `bytes_in` and `packs` are 0. This is not
+part of version 1 and goes once uploads are here.
 
 ## Not in version 1
 

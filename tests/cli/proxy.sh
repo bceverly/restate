@@ -163,6 +163,17 @@ expect 2 "--serve --idle-timeout with no value" -- "$BIN" --serve --idle-timeout
 if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=localhost \
     -keyout key.pem -out cert.pem > /dev/null 2>&1; then
+  # A repository for the sessions to open: its marker, its lock files, and a
+  # pack's files and a snapshot's.
+  mkdir -p repo/packs repo/snapshots/20261020T030000Z
+  printf 'restate-repository 2\nid 0123456789abcdef0123456789abcdef\n' > repo/restate-repository
+  : > repo/lock
+  : > repo/readers
+  printf 'index' > repo/packs/20261020T030000Z-1-0001.idx
+  printf '0123456789' > repo/packs/20261020T030000Z-1-0001.tar.gz
+  printf 'info' > repo/snapshots/20261020T030000Z/info
+  sed "s|^repository .*|repository   = $WORK/repo|" proxy.d/web01.conf > proxy.d/.web01.tmp
+  mv proxy.d/.web01.tmp proxy.d/web01.conf
   chmod 0644 proxy.d/web01.conf
   SERVER_PID=
 
@@ -195,7 +206,7 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   }
   is() { if [ "$CODE" = "$1" ]; then ok; else fail "$2: $CODE, wanted $1"; fi; }
 
-  start
+  start --max-sessions 4
   if [ -n "$PORT" ]; then ok; else fail "the server says where it listens"; cat server.log; fi
   contains "$(cat server.log)" "grants dir=proxy.d clients=1 refused=0" "it reads the grants"
   ask /v1/
@@ -206,7 +217,7 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   contains "$OUT" "Restate-Reason: unauthorized" "with its reason"
   contains "$OUT" "WWW-Authenticate: Bearer" "and how to authenticate"
   ask -H "Authorization: Bearer $TOKEN" /v1/web01/list/
-  is 501 "a good token, for what sessions are to do"
+  is 401 "a good token, and no session"
   ask -H "Authorization: Bearer $TOKEN" /v1/db01/list/
   is 401 "a good token for another client"
   ask -H "Authorization: Bearer $TOKEN" /v1/web01/lock
@@ -220,18 +231,89 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
 
   # A second client, by SIGHUP; and one gone, seen in the directory.
   expect 0 "a second client's token" -- "$BIN" --new-token db01.token
-  printf 'repository = /srv/restate/db01\noperations = read\n%s\n' "$OUT" > proxy.d/.db01.tmp
+  printf 'repository = %s/repo\noperations = read\n%s\n' "$WORK" "$OUT" > proxy.d/.db01.tmp
   chmod 0644 proxy.d/.db01.tmp
   mv proxy.d/.db01.tmp proxy.d/db01.conf
   kill -HUP "$SERVER_PID"
   sleep 1
   contains "$(cat server.log)" "SIGHUP: reading the grants again" "SIGHUP reads them again"
-  ask -H "Authorization: Bearer $(cat db01.token)" /v1/db01/list/
-  is 501 "the new client is admitted"
+  ask -H "Authorization: Bearer $(cat db01.token)" -d look /v1/db01/sessions
+  is 201 "the new client is admitted"
+  DB01_SESSION="$(printf '%s\n' "$OUT" | tail -n 1)"
   rm proxy.d/db01.conf
   sleep 3
   ask -H "Authorization: Bearer $(cat db01.token)" /v1/db01/list/
   is 401 "and once its grant is gone, refused, with no signal"
+
+  # Sessions: opened, read in, renewed and ended; the repository's real lock
+  # held by an append session; another client's session not this one's.
+  AUTH="Authorization: Bearer $TOKEN"
+  ask -H "$AUTH" -d read /v1/web01/sessions
+  is 201 "a read session"
+  SESSION="$(printf '%s\n' "$OUT" | tail -n 1)"
+  contains "$OUT" "Restate-Session: $SESSION" "its id, in a header too"
+  contains "$OUT" "Restate-Lease: 300" "and its lease"
+  ask -H "$AUTH" -H "Restate-Session: $SESSION" /v1/web01/list/packs/
+  is 200 "a listing in it"
+  contains "$OUT" " 20261020T030000Z-1-0001.idx" "names the pack's files"
+  ask -H "$AUTH" -H "Restate-Session: $SESSION" -r 2-4 /v1/web01/f/packs/20261020T030000Z-1-0001.tar.gz
+  is 206 "a range of a pack"
+  contains "$OUT" "234" "is what it holds"
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$SESSION/renew"
+  is 204 "renewed"
+  ask -H "$AUTH" -H "Restate-Session: $DB01_SESSION" /v1/web01/list/
+  is 401 "another client's session"
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$SESSION/end"
+  is 204 "ended"
+  ask -H "$AUTH" -H "Restate-Session: $SESSION" /v1/web01/list/
+  is 404 "and nothing after it"
+  contains "$(cat server.log)" "session-end client=web01 kind=read" "its end is logged"
+  contains "$(cat server.log)" "result=ok" "as a good one"
+  ask -H "$AUTH" -d append /v1/web01/sessions
+  is 201 "an append session"
+  APPEND="$(printf '%s\n' "$OUT" | tail -n 1)"
+  ask -H "$AUTH" -d append /v1/web01/sessions
+  is 423 "and another while it is open: busy"
+  contains "$OUT" "Restate-Reason: busy" "says so"
+  if command -v flock > /dev/null 2>&1; then
+    if flock -n repo/lock true 2> /dev/null; then
+      fail "a prune on the storage host would find the lock free"
+    else
+      ok
+    fi
+  fi
+  ask -H "$AUTH" -H "Restate-Session: $APPEND" /v1/web01/f/packs/20261020T030000Z-1-0001.tar.gz
+  is 403 "a pack's content, in an append session"
+  ask -H "$AUTH" -d write /v1/web01/sessions
+  is 400 "a kind there is not"
+  stop
+  contains "$(cat server.log)" "session-end client=web01 kind=append" \
+    "the sessions still open end as it stops"
+  if command -v flock > /dev/null 2>&1; then
+    if flock -n repo/lock true 2> /dev/null; then ok; else fail "and their locks with them"; fi
+  fi
+
+  # A lease: idle past it, a session is ended; renewed, it is not.
+  # Every margin a second and a half or more, for a busy machine: renewed
+  # every 2 seconds of a 4-second lease, the one kept is never idle past 2;
+  # the other, never renewed, is idle 5 by the time it is asked for.
+  start --lease 4
+  ask -H "$AUTH" -d look /v1/web01/sessions
+  KEPT="$(printf '%s\n' "$OUT" | tail -n 1)"
+  ask -H "$AUTH" -d look /v1/web01/sessions
+  LAPSED="$(printf '%s\n' "$OUT" | tail -n 1)"
+  sleep 2
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$KEPT/renew"
+  is 204 "renewed inside its lease"
+  sleep 2
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$KEPT/renew"
+  is 204 "and again"
+  sleep 1
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$LAPSED/renew"
+  is 404 "one not renewed is gone"
+  contains "$(cat server.log)" "result=expired" "and logged as expired"
+  ask -X POST -H "$AUTH" "/v1/web01/sessions/$KEPT/end"
+  is 204 "the renewed one is still there to end"
   stop
   if [ "$STOPPED" = 0 ]; then ok; else fail "SIGTERM stops it, exiting 0: $STOPPED"; fi
   contains "$(cat server.log)" "stopped" "and it says so"

@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -25,6 +26,7 @@
 #include "grant.h"
 #include "restate.h"
 #include "serve.h"
+#include "sessions.h"
 #include "tlsconn.h"
 #include "util.h"
 
@@ -292,6 +294,160 @@ static bool grants_changed(const struct grants *gs, const char *dir)
 }
 
 /* ------------------------------------------------------------------------ */
+/* What a connection asks the listener                                      */
+/* ------------------------------------------------------------------------ */
+/*
+ * A connection's process asks the listening one, which holds the sessions,
+ * over a socket pair of its own: a line, and a line in answer.
+ *
+ *   O CLIENT KIND          open        201 ID LEASE, or the status
+ *   F CLIENT ID            find        0 KIND REPOSITORY, 1 (none), 2 (another's)
+ *   R ID BYTES             release     ok
+ *   N CLIENT ID            renew       204 LEASE, or the status
+ *   E CLIENT ID            end         the status
+ *
+ * Every word in them is one the connection's process has checked already:
+ * a client's name, a session id, a kind's word. The repository is last, so
+ * that a blank in its name is still its own.
+ */
+
+#define ASK_MAX 4352    /* a line: a repository's path, and the rest */
+
+/* A connection's side: its end of the pair, and the repository it was last
+ * told of, which a find's answer holds until it is released. */
+struct asker {
+    int  fd;
+    char repository[ASK_MAX];
+};
+
+/* The status at the front of an answer: 500 for one that has none. */
+static int status_of(const char *answer)
+{
+    long v = strtol(answer, NULL, 10);
+
+    return v >= 100 && v <= 599 ? (int)v : 500;
+}
+
+/* `question` asked, and the answer's line into `answer` without its newline:
+ * false if the listener could not be asked. */
+static bool ask(struct asker *k, const char *question, char *answer, size_t size)
+{
+    size_t len = strlen(question);
+    size_t got = 0;
+
+    if (write(k->fd, question, len) != (ssize_t)len)
+    {
+        return false;
+    }
+    while (got + 1 < size)
+    {
+        ssize_t n = read(k->fd, answer + got, 1);
+
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n <= 0)
+        {
+            return false;
+        }
+        if (answer[got] == '\n')
+        {
+            answer[got] = '\0';
+            return true;
+        }
+        got++;
+    }
+    return false;
+}
+
+static int ask_open(void *ctx, const char *client, enum rs_proxy_kind kind, char id[33],
+                    unsigned *lease)
+{
+    char *q = rs_xasprintf("O %s %s\n", client, rs_proxy_kind_name(kind));
+    char  a[128];
+    int   status = 500;
+    bool  ok = ask(ctx, q, a, sizeof(a));
+
+    free(q);
+    if (ok)
+    {
+        status = status_of(a);
+        if (status == 201 && strlen(a) > 4 + RS_SESSION_LEN)
+        {
+            memcpy(id, a + 4, RS_SESSION_LEN);
+            id[RS_SESSION_LEN] = '\0';
+            *lease = (unsigned)strtoul(a + 5 + RS_SESSION_LEN, NULL, 10);
+        } else if (status == 201)
+        {
+            status = 500;
+        }
+    }
+    return status;
+}
+
+static enum rs_proxy_found ask_find(void *ctx, const char *client, const char *id,
+                                    struct rs_proxy_session *s)
+{
+    struct asker *k = ctx;
+    char         *q = rs_xasprintf("F %s %s\n", client, id);
+    bool          ok = ask(k, q, k->repository, sizeof(k->repository));
+    const char   *kind;
+    const char   *repo;
+
+    free(q);
+    if (!ok || k->repository[0] == '1')
+    {
+        return RS_PROXY_NO_SESSION;
+    }
+    if (k->repository[0] == '2')
+    {
+        return RS_PROXY_NOT_YOURS;
+    }
+    kind = strchr(k->repository, ' ');
+    repo = kind ? strchr(kind + 1, ' ') : NULL;
+    if (!repo || !rs_proxy_kind_of(kind + 1, (size_t)(repo - kind - 1), &s->kind))
+    {
+        return RS_PROXY_NO_SESSION;
+    }
+    s->repository = repo + 1;
+    return RS_PROXY_FOUND;
+}
+
+static void ask_release(void *ctx, const char *id, uint64_t bytes_out)
+{
+    char *q = rs_xasprintf("R %s %" PRIu64 "\n", id, bytes_out);
+    char  a[16];
+
+    (void)ask(ctx, q, a, sizeof(a));
+    free(q);
+}
+
+static int ask_renew(void *ctx, const char *client, const char *id, unsigned *lease)
+{
+    char *q = rs_xasprintf("N %s %s\n", client, id);
+    char  a[64];
+    int   status = ask(ctx, q, a, sizeof(a)) ? status_of(a) : 500;
+
+    free(q);
+    if (status == 204)
+    {
+        *lease = (unsigned)strtoul(a + 4, NULL, 10);
+    }
+    return status;
+}
+
+static int ask_end(void *ctx, const char *client, const char *id)
+{
+    char *q = rs_xasprintf("E %s %s\n", client, id);
+    char  a[16];
+    int   status = ask(ctx, q, a, sizeof(a)) ? status_of(a) : 500;
+
+    free(q);
+    return status;
+}
+
+/* ------------------------------------------------------------------------ */
 /* A connection                                                             */
 /* ------------------------------------------------------------------------ */
 
@@ -305,15 +461,18 @@ static bool tls_write(void *ctx, const void *buf, size_t len)
     return rs_tls_write(ctx, buf, len);
 }
 
-/* In the child: the connection `fd` from `peer`, served, and its end. */
-static int serve_child(struct rs_tls_config *tls, int fd, const char *peer,
+/* In the child: the connection `fd` from `peer`, served, asking the
+ * listener on `ipc` for its sessions, and its end. */
+static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *peer,
                        const struct grants *gs, unsigned idle)
 {
-    struct rs_proxy_conn c;
-    struct rs_proxy_io   io;
-    struct timeval       tv;
-    struct rs_buf        err;
-    struct rs_tls       *t;
+    struct rs_proxy_sessions sessions;
+    struct rs_proxy_conn     c;
+    struct rs_proxy_io       io;
+    struct timeval           tv;
+    struct rs_buf            err;
+    struct rs_tls           *t;
+    struct asker            *k = rs_xcalloc(1, sizeof(*k));
 
     tv.tv_sec = (time_t)idle;
     tv.tv_usec = 0;
@@ -325,30 +484,62 @@ static int serve_child(struct rs_tls_config *tls, int fd, const char *peer,
     {
         say("tls-refused peer=%s error=\"%s\"", peer, err.data ? err.data : "");
         rs_buf_free(&err);
+        free(k);
         return 1;
     }
     rs_buf_free(&err);
+    k->fd = ipc;
+    sessions.ctx = k;
+    sessions.open = ask_open;
+    sessions.find = ask_find;
+    sessions.release = ask_release;
+    sessions.renew = ask_renew;
+    sessions.end = ask_end;
     memset(&c, 0, sizeof(c));
     c.grants = gs->g;
     c.ngrants = gs->n;
     c.peer = peer;
     c.log = log_line;
+    c.sessions = &sessions;
     io.ctx = t;
     io.read = tls_read;
     io.write = tls_write;
     (void)rs_proxy_serve(&io, &c);
     rs_tls_close(t);
+    free(k);
     return 0;
 }
 
-/* The children serving connections, by pid. */
-struct children {
-    pid_t   *pid;
-    unsigned n;
-    unsigned max;
+/* The children serving connections, and the session each holds. */
+struct child {
+    pid_t  pid;
+    int    fd;                          /* the listener's end of its pair */
+    char   held[RS_SESSION_LEN + 1];    /* "" if none */
+    char   in[ASK_MAX];
+    size_t nin;
 };
 
-static void reap(struct children *ch)
+struct children {
+    struct child *c;
+    unsigned      n;
+    unsigned      max;
+};
+
+/* Child `i` is gone: what it held is let go, and its place taken. */
+static void forget_child(struct children *ch, unsigned i, struct rs_sessions *s)
+{
+    if (ch->c[i].held[0])
+    {
+        rs_sessions_release(s, ch->c[i].held, 0, (int64_t)time(NULL));
+    }
+    if (ch->c[i].fd >= 0)
+    {
+        (void)close(ch->c[i].fd);
+    }
+    ch->c[i] = ch->c[--ch->n];
+}
+
+static void reap(struct children *ch, struct rs_sessions *s)
 {
     pid_t pid;
     int   status;
@@ -359,23 +550,163 @@ static void reap(struct children *ch)
 
         for (i = 0; i < ch->n; i++)
         {
-            if (ch->pid[i] == pid)
+            if (ch->c[i].pid == pid)
             {
-                ch->pid[i] = ch->pid[--ch->n];
+                forget_child(ch, i, s);
                 break;
             }
         }
     }
 }
 
+/* One question from child `c`, answered into `out`. */
+static void answer_child(struct child *c, char *q, const struct grants *gs,
+                         struct rs_sessions *s, struct rs_buf *out)
+{
+    int64_t now = (int64_t)time(NULL);
+    char   *client = strchr(q, ' ');
+    char   *rest = client ? strchr(client + 1, ' ') : NULL;
+    int     status;
+
+    /* A session past its lease is gone, whether the loop has got to it yet
+     * or not. */
+    (void)rs_sessions_expire(s, now);
+    if (!client || !rest)
+    {
+        rs_buf_addstr(out, "500\n");
+        return;
+    }
+    *rest++ = '\0';
+    client++;
+    if (q[0] == 'O')
+    {
+        const struct rs_grant *g = rs_grants_find(gs->g, gs->n, client);
+        enum rs_proxy_kind     kind;
+        char                   id[RS_SESSION_LEN + 1];
+        struct rs_buf          why;
+
+        if (!g || !rs_proxy_kind_of(rest, strlen(rest), &kind))
+        {
+            rs_buf_addstr(out, g ? "500\n" : "401\n");
+            return;
+        }
+        rs_buf_init(&why);
+        status = rs_sessions_open(s, g, kind, now, id, &why);
+        if (status == 500)
+        {
+            say("session-refused client=%s error=\"%s\"", client, why.data ? why.data : "");
+        }
+        rs_buf_free(&why);
+        if (status == 201)
+        {
+            rs_buf_addf(out, "201 %s %u\n", id, rs_sessions_lease(s));
+        } else
+        {
+            rs_buf_addf(out, "%d\n", status);
+        }
+    } else if (q[0] == 'F')
+    {
+        struct rs_proxy_session found;
+
+        switch (rs_sessions_find(s, client, rest, &found))
+        {
+        case RS_PROXY_FOUND:
+            /* One request at a time on a connection: anything it held
+             * before is let go first. */
+            if (c->held[0])
+            {
+                rs_sessions_release(s, c->held, 0, now);
+            }
+            (void)snprintf(c->held, sizeof(c->held), "%s", rest);
+            rs_buf_addf(out, "0 %s %s\n", rs_proxy_kind_name(found.kind), found.repository);
+            break;
+        case RS_PROXY_NOT_YOURS:
+            rs_buf_addstr(out, "2\n");
+            break;
+        case RS_PROXY_NO_SESSION:
+        default:
+            rs_buf_addstr(out, "1\n");
+            break;
+        }
+    } else if (q[0] == 'R')
+    {
+        /* "R ID BYTES": the id where the client is elsewhere. */
+        rs_sessions_release(s, client, strtoull(rest, NULL, 10), now);
+        if (strcmp(c->held, client) == 0)
+        {
+            c->held[0] = '\0';
+        }
+        rs_buf_addstr(out, "ok\n");
+    } else if (q[0] == 'N')
+    {
+        status = rs_sessions_renew(s, client, rest, now);
+        if (status == 204)
+        {
+            rs_buf_addf(out, "204 %u\n", rs_sessions_lease(s));
+        } else
+        {
+            rs_buf_addf(out, "%d\n", status);
+        }
+    } else if (q[0] == 'E')
+    {
+        rs_buf_addf(out, "%d\n", rs_sessions_end(s, client, rest, now));
+    } else
+    {
+        rs_buf_addstr(out, "500\n");
+    }
+}
+
+/* What child `i` has asked, read and answered: false once it has closed
+ * its end. */
+static bool hear_child(struct children *ch, unsigned i, const struct grants *gs,
+                       struct rs_sessions *s)
+{
+    struct child *c = &ch->c[i];
+    ssize_t       n = read(c->fd, c->in + c->nin, sizeof(c->in) - c->nin - 1);
+    char         *nl;
+
+    if (n < 0 && (errno == EINTR || errno == EAGAIN))
+    {
+        return true;
+    }
+    if (n <= 0)
+    {
+        return false;
+    }
+    c->nin += (size_t)n;
+    c->in[c->nin] = '\0';
+    while ((nl = strchr(c->in, '\n')) != NULL)
+    {
+        struct rs_buf out;
+        size_t        used = (size_t)(nl - c->in) + 1;
+        bool          ok;
+
+        *nl = '\0';
+        rs_buf_init(&out);
+        answer_child(c, c->in, gs, s, &out);
+        ok = write(c->fd, out.data, out.len) == (ssize_t)out.len;
+        rs_buf_free(&out);
+        memmove(c->in, c->in + used, c->nin - used + 1);
+        c->nin -= used;
+        if (!ok)
+        {
+            return false;
+        }
+    }
+    /* A line longer than any question is none. */
+    return c->nin < sizeof(c->in) - 1;
+}
+
 /* Accepts what is waiting on `lfd`, and gives it a child. */
 static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
-                       const struct grants *gs, struct children *ch, unsigned idle)
+                       const struct grants *gs, struct children *ch, struct rs_sessions *s,
+                       unsigned idle)
 {
     struct sockaddr_storage sa;
     socklen_t               len = sizeof(sa);
     char                    peer[NI_MAXHOST + NI_MAXSERV + 4];
     int                     fd;
+    int                     pair[2];
     pid_t                   pid;
 
     memset(&sa, 0, sizeof(sa));
@@ -395,6 +726,12 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
         (void)close(fd);
         return;
     }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+    {
+        say("connection-refused peer=%s why=\"socketpair: %s\"", peer, strerror(errno));
+        (void)close(fd);
+        return;
+    }
     /* Blocking, whatever the listener is: the child reads and writes it in
      * turn, with the socket's own timeouts. */
     (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
@@ -403,17 +740,29 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
     {
         say("connection-refused peer=%s why=\"fork: %s\"", peer, strerror(errno));
         (void)close(fd);
+        (void)close(pair[0]);
+        (void)close(pair[1]);
         return;
     }
     if (pid == 0)
     {
-        size_t i;
-        int    status;
+        size_t   i;
+        unsigned j;
+        int      status;
 
+        /* Nothing of the listener's but the grants: not its sockets, not
+         * the other children's pairs, and not its copies of the sessions'
+         * locks -- closed, not unlocked, which leaves them the listener's. */
         for (i = 0; i < nl; i++)
         {
             (void)close(lfds[i]);
         }
+        for (j = 0; j < ch->n; j++)
+        {
+            (void)close(ch->c[j].fd);
+        }
+        rs_sessions_forget(s);
+        (void)close(pair[0]);
         (void)close(wake[0]);
         (void)close(wake[1]);
         wake[0] = wake[1] = -1;
@@ -421,28 +770,34 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
         (void)signal(SIGTERM, SIG_DFL);
         (void)signal(SIGINT, SIG_DFL);
         (void)signal(SIGCHLD, SIG_DFL);
-        status = serve_child(tls, fd, peer, gs, idle);
+        status = serve_child(tls, fd, pair[1], peer, gs, idle);
         (void)close(fd);
+        (void)close(pair[1]);
         /* exit, not _exit: what a coverage build counts is written then. */
         exit(status);
     }
     (void)close(fd);
-    ch->pid[ch->n++] = pid;
+    (void)close(pair[1]);
+    (void)fcntl(pair[0], F_SETFD, FD_CLOEXEC);
+    memset(&ch->c[ch->n], 0, sizeof(ch->c[ch->n]));
+    ch->c[ch->n].pid = pid;
+    ch->c[ch->n].fd = pair[0];
+    ch->n++;
 }
 
 /* Tells every child to stop, and waits for them, for a while. */
-static void stop_children(struct children *ch)
+static void stop_children(struct children *ch, struct rs_sessions *s)
 {
     unsigned i;
     time_t   until = time(NULL) + STOP_WAIT;
 
     for (i = 0; i < ch->n; i++)
     {
-        (void)kill(ch->pid[i], SIGTERM);
+        (void)kill(ch->c[i].pid, SIGTERM);
     }
     while (ch->n > 0 && time(NULL) < until)
     {
-        reap(ch);
+        reap(ch, s);
         if (ch->n > 0)
         {
             (void)poll(NULL, 0, 100);
@@ -450,11 +805,11 @@ static void stop_children(struct children *ch)
     }
     for (i = 0; i < ch->n; i++)
     {
-        (void)kill(ch->pid[i], SIGKILL);
+        (void)kill(ch->c[i].pid, SIGKILL);
     }
     while (ch->n > 0 && waitpid(-1, NULL, 0) > 0)
     {
-        ch->n--;
+        forget_child(ch, ch->n - 1, s);
     }
 }
 
@@ -474,10 +829,11 @@ int rs_proxy_run(const struct rs_proxy_options *o)
 {
     static const char *const every[] = { ":" RS_PROXY_PORT };
     struct rs_tls_config    *tls;
-    struct pollfd            pfd[LISTEN_MAX + 1];
+    struct pollfd           *pfd;
     struct children          ch;
     struct grants            gs;
     struct rs_buf            err;
+    struct rs_sessions      *sessions;
     const char *const       *listen = o->nlisten ? o->listen : every;
     size_t                   nlisten = o->nlisten ? o->nlisten : 1;
     unsigned                 idle = o->idle_timeout ? o->idle_timeout : RS_PROXY_IDLE_TIMEOUT;
@@ -544,24 +900,36 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     read_grants(&gs, o->grants);
     ch.max = o->max_connections ? o->max_connections : RS_PROXY_MAX_CONNECTIONS;
     ch.n = 0;
-    ch.pid = rs_xcalloc(ch.max, sizeof(*ch.pid));
-    say("started version=%s tls=\"%s\" max_connections=%u", RESTATE_VERSION, rs_tls_library(),
-        ch.max);
+    ch.c = rs_xcalloc(ch.max, sizeof(*ch.c));
+    pfd = rs_xcalloc(LISTEN_MAX + 1 + ch.max, sizeof(*pfd));
+    sessions = rs_sessions_new(o->max_sessions, o->lease, log_line, NULL);
+    say("started version=%s tls=\"%s\" max_connections=%u max_sessions=%u lease=%u",
+        RESTATE_VERSION, rs_tls_library(), ch.max,
+        o->max_sessions ? o->max_sessions : RS_PROXY_MAX_SESSIONS, rs_sessions_lease(sessions));
 
     while (!got_stop)
     {
-        int ready;
+        size_t   np = 0;
+        unsigned nc = ch.n;
+        unsigned j;
+        int      ready;
 
         for (i = 0; i < nl; i++)
         {
-            pfd[i].fd = lfds[i];
-            pfd[i].events = POLLIN;
-            pfd[i].revents = 0;
+            pfd[np].fd = lfds[i];
+            pfd[np].events = POLLIN;
+            pfd[np++].revents = 0;
         }
-        pfd[nl].fd = wake[0];
-        pfd[nl].events = POLLIN;
-        pfd[nl].revents = 0;
-        ready = poll(pfd, (nfds_t)(nl + 1), WATCH_MS);
+        pfd[np].fd = wake[0];
+        pfd[np].events = POLLIN;
+        pfd[np++].revents = 0;
+        for (j = 0; j < nc; j++)
+        {
+            pfd[np].fd = ch.c[j].fd;
+            pfd[np].events = POLLIN;
+            pfd[np++].revents = 0;
+        }
+        ready = poll(pfd, (nfds_t)np, WATCH_MS);
         if (pfd[nl].revents & POLLIN)
         {
             char drain[64];
@@ -570,7 +938,24 @@ int rs_proxy_run(const struct rs_proxy_options *o)
             {
             }
         }
-        reap(&ch);
+        /* The children's questions first, before any is reaped: a child that
+         * asked and then went has its answer, or its hold let go. */
+        for (j = nc; ready > 0 && j-- > 0;)
+        {
+            if ((pfd[nl + 1 + j].revents & (POLLIN | POLLHUP | POLLERR)) &&
+                !hear_child(&ch, j, &gs, sessions))
+            {
+                (void)close(ch.c[j].fd);
+                ch.c[j].fd = -1;
+                if (ch.c[j].held[0])
+                {
+                    rs_sessions_release(sessions, ch.c[j].held, 0, (int64_t)time(NULL));
+                    ch.c[j].held[0] = '\0';
+                }
+            }
+        }
+        reap(&ch, sessions);
+        (void)rs_sessions_expire(sessions, (int64_t)time(NULL));
         if (got_stop)
         {
             break;
@@ -588,18 +973,20 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         {
             if (pfd[i].revents & POLLIN)
             {
-                accept_one(lfds[i], lfds, nl, tls, &gs, &ch, idle);
+                accept_one(lfds[i], lfds, nl, tls, &gs, &ch, sessions, idle);
             }
         }
     }
 
-    say("stopping: %u connection(s) open", ch.n);
+    say("stopping: %u connection(s) and %zu session(s) open", ch.n, rs_sessions_count(sessions));
     for (i = 0; i < nl; i++)
     {
         (void)close(lfds[i]);
     }
-    stop_children(&ch);
-    free(ch.pid);
+    stop_children(&ch, sessions);
+    rs_sessions_free(sessions, (int64_t)time(NULL));
+    free(ch.c);
+    free(pfd);
     rs_grants_free(gs.g, gs.n);
     rs_tls_config_free(tls);
     (void)close(wake[0]);

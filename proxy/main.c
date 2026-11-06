@@ -63,7 +63,8 @@ static void usage(FILE *out)
     (void)fprintf(out,
                   "usage: restate-proxy --serve [--listen HOST:PORT]... [--cert FILE]\n"
                   "                     [--key FILE] [--grants DIR] [--max-connections N]\n"
-                  "                     [--idle-timeout SECONDS]\n"
+                  "                     [--idle-timeout SECONDS] [--max-sessions N]\n"
+                  "                     [--lease SECONDS]\n"
                   "       restate-proxy --check-grants [DIR] [--json]\n"
                   "       restate-proxy --new-token FILE\n"
                   "       restate-proxy --version | --help\n"
@@ -78,6 +79,8 @@ static void usage(FILE *out)
                   "  --max-connections N   connections served at once (64)\n"
                   "  --idle-timeout SECONDS\n"
                   "                        how long a connection may say nothing (60)\n"
+                  "  --max-sessions N      sessions open at once (64)\n"
+                  "  --lease SECONDS       how long a session lasts idle, unrenewed (300)\n"
                   "  --check-grants [DIR]  read every grant in DIR (" GRANTS_DIR ")\n"
                   "                        as the proxy would, and say what is wrong\n"
                   "                        with each; exit 2 if one is not good\n"
@@ -241,8 +244,11 @@ static int serve(int argc, char **argv)
     o.idle_timeout = RS_PROXY_IDLE_TIMEOUT;
     for (i = 2; i < argc; i++)
     {
-        static const char *const names[] = { "--listen", "--cert", "--key", "--grants",
-                                             "--max-connections", "--idle-timeout" };
+        static const char *const names[] = { "--listen",          "--cert",
+                                             "--key",             "--grants",
+                                             "--max-connections", "--idle-timeout",
+                                             "--max-sessions",    "--lease" };
+        static const unsigned    most[] = { 0, 0, 0, 0, 100000u, 86400u, 100000u, 86400u };
         const char              *v = NULL;
         bool                     matched = false;
         size_t                   k;
@@ -277,13 +283,17 @@ static int serve(int argc, char **argv)
         } else if (k == 3)
         {
             o.grants = v;
-        } else if (!number(v, k == 4 ? 100000u : 86400u,
-                           k == 4 ? &o.max_connections : &o.idle_timeout))
+        } else
         {
-            complain("%s: \"%s\" is not a number from 1 to %u", names[k], v,
-                     k == 4 ? 100000u : 86400u);
-            free(listen);
-            return RESTATE_EXIT_TROUBLE;
+            unsigned *into[] = { NULL, NULL, NULL, NULL, &o.max_connections, &o.idle_timeout,
+                                 &o.max_sessions, &o.lease };
+
+            if (!number(v, most[k], into[k]))
+            {
+                complain("%s: \"%s\" is not a number from 1 to %u", names[k], v, most[k]);
+                free(listen);
+                return RESTATE_EXIT_TROUBLE;
+            }
         }
     }
     o.listen = listen;

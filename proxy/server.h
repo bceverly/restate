@@ -15,6 +15,12 @@
  * touches a byte a client sends. Past --max-connections, a connection is
  * closed as it comes.
  *
+ * The sessions are the parent's (sessions.h), with the repositories' locks
+ * they hold: a session outlives the connection that opened it. A child asks
+ * for them over a socket pair of its own, a line at a time, with words it
+ * has checked already. Past --max-sessions, a session is refused (503); one
+ * idle for --lease seconds is ended.
+ *
  * SIGTERM and SIGINT stop it: it stops listening, tells each child to stop,
  * waits for them, and exits 0.
  *
@@ -42,6 +48,8 @@ struct rs_proxy_options {
     const char        *grants;
     unsigned           max_connections;
     unsigned           idle_timeout;    /* seconds a connection may say nothing */
+    unsigned           max_sessions;    /* 0: RS_PROXY_MAX_SESSIONS */
+    unsigned           lease;           /* seconds; 0: RS_PROXY_LEASE */
 };
 
 /* Runs the server until it is told to stop: the exit status. */

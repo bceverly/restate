@@ -95,6 +95,48 @@ static enum rs_proxy_found fake_session(void *ctx, const char *client, const cha
     return RS_PROXY_FOUND;
 }
 
+/* What the fake was last asked, and what it answers open with. */
+static int      open_answer = 201;
+static char     last_kind[16];
+static uint64_t released;
+
+static int fake_open(void *ctx, const char *client, enum rs_proxy_kind kind, char id[33],
+                     unsigned *lease)
+{
+    (void)ctx;
+    (void)client;
+    (void)snprintf(last_kind, sizeof(last_kind), "%s", rs_proxy_kind_name(kind));
+    memcpy(id, SID_READ, sizeof(SID_READ));
+    *lease = 300;
+    return open_answer;
+}
+
+static void fake_release(void *ctx, const char *id, uint64_t bytes_out)
+{
+    (void)ctx;
+    (void)id;
+    released += bytes_out;
+}
+
+static int fake_renew(void *ctx, const char *client, const char *id, unsigned *lease)
+{
+    (void)ctx;
+    (void)client;
+    *lease = 300;
+    return strcmp(id, SID_READ) == 0 ? 204 : strcmp(id, SID_OTHER) == 0 ? 401 : 404;
+}
+
+static int fake_end(void *ctx, const char *client, const char *id)
+{
+    unsigned lease;
+
+    return fake_renew(ctx, client, id, &lease);
+}
+
+static const struct rs_proxy_sessions fake_sessions = {
+    NULL, fake_open, fake_session, fake_release, fake_renew, fake_end,
+};
+
 /* Serves `in` with `grants`, at `now`: what was answered, and the log, in
  * *log (both the caller's to free). */
 static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants, int64_t now,
@@ -124,7 +166,7 @@ static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants
     c.log_ctx = &m;
     if (with_sessions)
     {
-        c.session = fake_session;
+        c.sessions = &fake_sessions;
     }
     *served = rs_proxy_serve(&io, &c);
     *log = rs_buf_detach(&m.log);
@@ -314,10 +356,104 @@ static void test_reading(const struct rs_grant *grant)
     CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
     free(out);
     free(log);
-    /* What sessions do themselves is still to come. */
-    out = ask(grant, "POST /v1/web01/sessions/" SID_READ "/renew HTTP/1.1\r\nHost: p\r\n" AUTH
-                     "\r\n", &log);
+    /* An upload is still to come. */
+    out = ask(grant, "PUT /v1/web01/sessions/" SID_READ "/files/packs/P-0.idx HTTP/1.1\r\n"
+                     "Host: p\r\n" AUTH "Content-Length: 0\r\n\r\n", &log);
     CHECK_CONTAINS(out, "HTTP/1.1 501 Not Implemented\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a session opened, its kind read from the body once all else is checked");
+    {
+        const char *opened = "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+                             "Expect: 100-continue\r\nContent-Length: 7\r\n\r\nappend\n"
+                             GET("/v1/", "");
+
+        out = ask(grant, opened, &log);
+    }
+    CHECK_STR(last_kind, "append");
+    CHECK_CONTAINS(out, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\n");
+    CHECK_CONTAINS(out, "Restate-Session: " SID_READ "\r\nRestate-Lease: 300\r\n");
+    CHECK_CONTAINS(out, "\r\n\r\n" SID_READ "\n");
+    /* The body read, the connection goes on to the next request. */
+    CHECK_CONTAINS(out, "restate-proxy 1\n");
+    free(out);
+    free(log);
+    {
+        static const struct {
+            int         answer;
+            const char *says;
+        } refused[] = {
+            { 403, "Restate-Reason: forbidden" },  { 409, "Restate-Reason: repository-version-1" },
+            { 423, "Restate-Reason: busy" },       { 503, "Restate-Reason: sessions-full" },
+            { 500, "Restate-Reason: proxy-failed" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
+        {
+            open_answer = refused[i].answer;
+            out = ask(grant, "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+                             "Content-Length: 4\r\n\r\nread", &log);
+            CHECK_CONTAINS(out, refused[i].says);
+            free(out);
+            free(log);
+        }
+        open_answer = 201;
+    }
+    /* A refusal before the body is read sends no 100, and ends the
+     * connection rather than read what it would not have asked for. */
+    out = ask(grant, "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n"
+                     "Expect: 100-continue\r\nContent-Length: 4\r\n\r\nread", &log);
+    CHECK(strstr(out, "100 Continue") == NULL);
+    CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
+    CHECK_CONTAINS(out, "Connection: close\r\n");
+    free(out);
+    free(log);
+    {
+        static const char *const bad[] = {
+            "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH "\r\n",
+            "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH "Content-Length: 0\r\n\r\n",
+            "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+            "Content-Length: 40\r\n\r\nappendappendappendappendappendappendappen",
+            "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+            "Content-Length: 5\r\n\r\nwrite",
+            "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+            "Content-Length: 6\r\n\r\nap",
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        {
+            out = ask(grant, bad[i], &log);
+            CHECK(strstr(out, "HTTP/1.1 4") != NULL);
+            CHECK_CONTAINS(out, "Restate-Reason: bad-request");
+            free(out);
+            free(log);
+        }
+    }
+
+    TEST_CASE("serve: renewed and ended, with no body, and the lease said");
+    out = ask(grant, "POST /v1/web01/sessions/" SID_READ "/renew HTTP/1.1\r\nHost: p\r\n" AUTH
+                     "Content-Length: 0\r\n\r\n"
+                     "POST /v1/web01/sessions/" SID_READ "/end HTTP/1.1\r\nHost: p\r\n" AUTH
+                     "\r\n"
+                     "POST /v1/web01/sessions/" SID_OTHER "/end HTTP/1.1\r\nHost: p\r\n" AUTH
+                     "\r\n"
+                     "POST /v1/web01/sessions/dddddddddddddddddddddddddddddddd/renew HTTP/1.1\r\n"
+                     "Host: p\r\n" AUTH "\r\n", &log);
+    CHECK_INT(count(out, "HTTP/1.1 204 No Content\r\n"), 2);
+    CHECK_CONTAINS(out, "HTTP/1.1 204 No Content\r\nRestate-Lease: 300\r\n\r\n");
+    CHECK(strstr(out, "204 No Content\r\nContent-Length") == NULL);
+    CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
+    CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a request in a session is let go once it is answered, with what it sent");
+    released = 0;
+    out = ask(grant, GET("/v1/web01/f/packs/P-0.tar.gz", IN(SID_READ)), &log);
+    CHECK_INT((long long)released, 10);
     free(out);
     free(log);
 

@@ -278,6 +278,7 @@ int main(int argc, char **argv)
 #ifdef RS_WITH_PROXY
     test_tls();
     test_serve();
+    test_sessions();
 #endif
     test_cmd();
 
