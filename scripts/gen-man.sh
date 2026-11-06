@@ -836,7 +836,8 @@ with the phases
 .BR walk ,
 .BR write ,
 .BR check ,
-.B copy
+.BR copy ,
+.B ingest
 and
 .BR read ;
 .B hook
@@ -1738,14 +1739,15 @@ an imported cv25519 key \- the default kind \- reliably (GnuPG T8094, fixed in
 before it starts, and says so if it cannot. An RSA encryption key has
 neither problem.
 .PP
-One capture, prune or repack runs on a repository at a time, and one
+One capture, prune, repack or ingest runs on a repository at a time, and one
 .B capture \-\-quiesce
 on a machine at a time; one that finds the lock taken does nothing, and exits
 with status 5 (see
 .B STORAGE
 for a repository on a file server). With
 .BR \-\-syslog ,
-capture, prune, repack, protect, check and copy put one line in the system log as they end \- the command,
+capture, prune, repack, protect, check, copy and ingest put one line in the system log as they end \-
+the command,
 .BR status= ,
 .BR exit= ,
 .B seconds=
@@ -2017,6 +2019,37 @@ copies a snapshot, and the packs it needs that
 lacks, to another repository \- made, as the first is, if it is not there
 \- every file as it is: an encrypted repository's copy is encrypted, and no
 key is needed. A copy kept elsewhere is one a fire does not reach.
+.B ingest
+.I REPO PATH ...
+puts packs and snapshots written elsewhere into a repository, refusing any
+that is not valid: what the planned restate-proxy runs on every upload, so a machine
+that only adds to its repository adds only what is whole. A
+.I PATH
+is a pack's content,
+.IR NAME .tar.gz,
+with its
+.BR .sum ,
+.B .idx
+and any
+.B .seek
+beside it, or a snapshot's directory. A pack must be what its
+.B .sum
+says and, where the repository is not encrypted, what its
+.B .idx
+says, chunk by chunk; encrypted, the storage has no key, so the
+.B .sum
+is all there is to go by, and the rest must be encrypted. A snapshot may hold
+only what a snapshot does, and name in its pack list only packs the repository
+has. Each is copied in under a name nothing reads, checked as it is there \-
+so what is checked is what goes in \- and renamed into place, a pack's
+.B .idx
+last, so it counts whole or not at all. Packs go in before snapshots, so a
+snapshot can need the packs given with it; the first refused stops the run,
+with status 2, and what went in before it stays. The same pack or snapshot
+already there is nothing to do, and a different one under its name is
+refused. What
+.I PATH
+names is left as it is.
 .B du
 .I REPO
 says what a repository holds and, from the pack lists, what each snapshot

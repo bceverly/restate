@@ -9,6 +9,121 @@ restate is meant to turn "back up the whole disk" into "record what makes this
 machine different from a fresh install, and replay it". This is the order the
 pieces arrive in.
 
+## Next — restate-proxy: repositories over HTTPS, NFS still supported
+
+The next thing worked on (Bryan, 2026-11-05). Every machine backing up to a
+file server mounts it today, so every machine reaches the storage network,
+append-only rests on the share's permissions and each OS's quirks, an export
+names a client address that NAT hides, and a machine off the site cannot
+mount at all. `restate-proxy` is a second way in: one authenticated,
+append-only HTTPS service on the storage host, the same for a machine on the
+LAN and one outside it (through the firewall as plain TCP, so TLS ends on the
+storage host). SysManage plans it as its Phase 25.5; nothing here needs
+SysManage.
+
+What is decided:
+
+- **A separate, optional binary in this project,** its own package, never
+  started by default; someone using restate on local storage or over NFS
+  never installs it
+- **NFS stays, permanently:** no NFS, SMB or local-repository code is
+  removed or changed in behavior; a repository is reached either way and can
+  be switched back and forth, staying where it is on disk -- only the
+  transport changes
+- **HTTPS only,** and restores go through it as captures do
+- **One implementation of the format:** the proxy links restate's own
+  repository, index and hash code. TLS from OpenSSL or LibreSSL, never
+  written here, behind a small wrapper (libtls on OpenBSD, OpenSSL 3
+  elsewhere); only `restate-proxy` links it, and `restate` stays free of
+  linked libraries, reaching the proxy by running `curl`
+- **Append-only by protocol:** no delete, rename or overwrite, and no DELETE
+  method at all. Prune, repack, check, protect, seal and copy stay local
+  jobs on the storage host, unchanged
+- **Clients known by token, never by address,** each given one repository
+
+The order, each a release of its own:
+
+- [ ] **`restate ingest REPO PATH...`:** checks a pack (with its `.idx`,
+      `.sum` and `.seek`) or a snapshot directory against a repository and
+      copies it in atomically -- checked once it is inside, so what is
+      checked is what goes in, and what PATH names left as it is -- refusing
+      anything invalid: a pack must match its `.sum`, and its `.idx` must
+      match its content where the repository is not encrypted (where it is,
+      the storage has no key, so `.sum` is all it can check); a snapshot may
+      refer only to packs the repository holds, and its name must be one
+      nothing has. The proxy runs this same code for every upload. Fuzzed in
+      CI from the first release
+- [ ] **Repository I/O behind a backend interface,** with the local one the
+      only backend: a refactor of `repo.c`'s file operations that changes
+      nothing a repository on a local disk, NFS, SMB, exFAT or FAT sees --
+      `make test-share` and CI's share jobs hold it to that, bit for bit --
+      released on its own before any networking
+- [ ] **`restate-proxy`:**
+  - HTTP/1.1 under `/v1/<client>/` -- the client in the path must be the
+    token's -- with a small fixed set of endpoints: the repository's marker;
+    the list of packs with sizes and sums; each pack's `.idx`, `.sum` and
+    `.seek`, and the pack itself with `Range`, since a restore reads only
+    the stretch `.seek` points to; the snapshots, and the files in one;
+    sessions; uploads into a session's staging; a commit, which is `ingest`
+  - **Operations:** `append` lists, reads metadata (every `.idx`, which an
+    incremental capture needs to store nothing twice, and the snapshots'
+    indexes, to pass over what has not changed) and uploads; `read` reads
+    as well what a restore needs, the packs' content
+  - **Sessions and locks:** opening a session takes the repository's real
+    locks in the proxy -- `lock` for a capture, `readers` for a restore, the
+    `flock(2)` and open file description locks a prune on the storage host
+    takes -- so a capture against a prune is still "busy" and a restore's
+    packs are not pruned under it; the client renews the lease while it
+    runs, and a client that dies loses it within minutes. Busy is HTTP 423,
+    which the client gives as exit 5, so the existing retry applies. A
+    session ends by a request of its own, not a DELETE; what a dead session
+    left in staging the proxy removes itself
+  - **Signing at capture:** `capture --sign-with` signs a snapshot as it is
+    uploaded; `restate sign` on a snapshot already there would change it, and
+    through the proxy is refused, as it is once `protect` has run
+  - **The allow list:** a file per client in `/etc/restate/proxy.d/`, named
+    for it (`web01.conf`), in restate's own `key = value` format as job files
+    are and read the same strict way: the one repository the client may use,
+    its operations, and up to two token hashes (SHA-256; never a token), so a
+    token is rotated by adding the new one before removing the old; an
+    optional expiry, so a short-lived read-only grant for one restore can
+    come later with no protocol change. A client is added or removed by
+    writing or removing its one file. Re-read on change or SIGHUP; written by
+    hand, or by the SysManage agent on a storage host it manages
+  - **Tokens:** 32 random bytes, base64url, prefixed `rsp_` so a secret
+    scanner knows one; compared in constant time; checked before any byte
+    of a request's body is read
+  - **Hardened for the internet:** runs as an unprivileged user that owns
+    the repositories, never root; a parent that accepts and reads the allow
+    list, and a process per connection that, once the token is checked,
+    confines itself to that client's repository -- `pledge` and `unveil` on
+    OpenBSD, Capsicum on FreeBSD, Landlock and seccomp on Linux -- so a fault
+    in the parser still cannot reach another client's; fixed limits on the
+    request line and headers (8 KiB) and on a body (a pack's largest size,
+    and no more); the request parser fuzzed in CI from the first release
+- [ ] **The remote backend in `restate`:** a repository can be
+      `https://PROXY/v1/CLIENT`, with a token file (in a job,
+      `repository_token_file`, held to what `passphrase_file` is: a regular
+      file, yours or root's, that nobody else can read); capture, snapshots,
+      list, diff, status, plan and restore work against it as against a
+      local path. HTTPS by running `curl`, as `installer fetch` does: many
+      files to one process and one connection, the token given on a netrc
+      file and never on a command line, and the packs' indexes cached on the
+      machine as they are now, so after the first capture only new ones are
+      fetched. A library is linked only if a measured capture says the small
+      calls need it
+- [ ] **Limits:** per client, the number of sessions at once, bandwidth by
+      hour of day, and a quota hook a multi-tenant host can answer
+- [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,
+      for every platform restate ships for, with a service for each init
+      system (systemd, rc.d, rcctl) installed but not enabled
+- [ ] **Documented:** choosing NFS or the proxy for a repository, the allow
+      list, certificates (Let's Encrypt for a public name, or a site's own
+      CA), and a route from outside through a firewall, with pfSense's
+      HAProxy routing by SNI in TCP mode as the worked example; the README's
+      "restate opens no network connection of its own" said again for a
+      remote repository, where `curl` does
+
 ## Done — 0.1
 
 - [x] The classification rules: ephemeral, expendable, baseline, state; built-in
@@ -51,7 +166,7 @@ running 26.04 would differ from its installer in nearly every file. Instead:
   or installed by hand), it keeps the `.deb`; if even that is gone, the files.
   A capture says plainly what a restore could not reproduce exactly.
 
-## Next — the package baseline (Ubuntu first)
+## Then — the package baseline (Ubuntu first)
 
 What the first full restore -- this laptop, rebuilt into a VM from its image,
 2026-10-06 -- showed this stage has to do. Of 234 packages installed by hand,

@@ -54,6 +54,11 @@
  *      .sum, a snapshot's pack list and a check's record, between NULs --
  *      each, accepted, holding what it says: lowercase digests, names in
  *      order and each once
+ *  19  a pack and a snapshot ingested whole into a repository of their own
+ *      -- flags, an .idx, the chunks, a .seek, a .sum, a pack list and an
+ *      index, between NULs -- each as ingest is handed one: a pack it takes
+ *      must be one check finds whole, and what it refuses must leave nothing
+ *      behind
  *
  * It is reached two ways:
  *
@@ -65,10 +70,13 @@
  * and they do the judging. The round-trip checks below abort() on their own
  * when an invariant fails, which both engines treat as a crash.
  */
+#include <dirent.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -722,6 +730,341 @@ static void fuzz_repo(const char *text, size_t len)
     free(kept);
     free(names);
     free(copy);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 19: ingest                                                                */
+/* ------------------------------------------------------------------------- */
+
+/* The CRC-32 gzip ends with (ISO 3309, reflected, 0xEDB88320). */
+static uint32_t crc32_of(const unsigned char *p, size_t n)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    size_t   i;
+    int      k;
+
+    for (i = 0; i < n; i++)
+    {
+        c ^= p[i];
+        for (k = 0; k < 8; k++)
+        {
+            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        }
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+static void put_le32(struct rs_buf *b, uint32_t v)
+{
+    unsigned char le[4];
+
+    le[0] = (unsigned char)(v & 0xff);
+    le[1] = (unsigned char)(v >> 8 & 0xff);
+    le[2] = (unsigned char)(v >> 16 & 0xff);
+    le[3] = (unsigned char)(v >> 24 & 0xff);
+    rs_buf_add(b, le, 4);
+}
+
+/* `data` as a gzip file, in stored blocks: what gzip -d reads back exactly,
+ * made in-process, so no compressor runs for each input. */
+static void gzip_stored(const unsigned char *data, size_t n, struct rs_buf *out)
+{
+    static const unsigned char head[10] = { 0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3 };
+    size_t                     at = 0;
+
+    rs_buf_add(out, head, sizeof(head));
+    do
+    {
+        size_t        len = n - at > 65535 ? 65535 : n - at;
+        unsigned char block[5];
+
+        block[0] = at + len == n ? 1 : 0;
+        block[1] = (unsigned char)(len & 0xff);
+        block[2] = (unsigned char)(len >> 8);
+        block[3] = (unsigned char)(~len & 0xff);
+        block[4] = (unsigned char)(~len >> 8 & 0xff);
+        rs_buf_add(out, block, sizeof(block));
+        rs_buf_add(out, data + at, len);
+        at += len;
+    } while (at < n);
+    put_le32(out, crc32_of(data, n));
+    put_le32(out, (uint32_t)n);
+}
+
+static bool tar_to_buf(void *ctx, const void *data, size_t n)
+{
+    rs_buf_add(ctx, data, n);
+    return true;
+}
+
+static void put_file(const char *dir, const char *name, const void *data, size_t n)
+{
+    char *path = rs_xasprintf("%s/%s", dir, name);
+    FILE *fp = fopen(path, "wb");
+
+    if (fp)
+    {
+        (void)fwrite(data, 1, n, fp);
+        (void)fclose(fp);
+    }
+    free(path);
+}
+
+/* Removes `path` and everything under it, following no symlink. */
+static void remove_tree(const char *path) /* NOLINT(misc-no-recursion) */
+{
+    struct stat    st;
+    DIR           *d;
+    struct dirent *e;
+
+    if (lstat(path, &st) != 0)
+    {
+        return;
+    }
+    if (!S_ISDIR(st.st_mode))
+    {
+        (void)unlink(path);
+        return;
+    }
+    d = opendir(path);
+    while (d && (e = readdir(d)) != NULL)
+    {
+        char *sub;
+
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+        {
+            continue;
+        }
+        sub = rs_xasprintf("%s/%s", path, e->d_name);
+        remove_tree(sub);
+        free(sub);
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    (void)rmdir(path);
+}
+
+/* How many entries `dir` holds. */
+static size_t entries_in(const char *dir)
+{
+    DIR                 *d = opendir(dir);
+    const struct dirent *e;
+    size_t               n = 0;
+
+    while (d && (e = readdir(d)) != NULL)
+    {
+        n += strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0;
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    return n;
+}
+
+/*
+ * Flags (part 0): 'i' puts a correct .idx line for each chunk ahead of part
+ * 1, 's' uses part 4 as the .sum where it would otherwise be the content's
+ * own, 'p' gives the snapshot a pack list naming the pack ahead of part 5,
+ * and 'n' ingests the snapshot too. Chunks (part 2) are the members 1, 2 ...,
+ * split on byte 1. A .seek is written only where part 3 has something in it.
+ */
+static void fuzz_ingest(const char *text, size_t len)
+{
+    static const char       pack[] = "20260101T000000Z-1-0001";
+    char                   *parts[7];
+    size_t                  lens[7];
+    const char             *p = text;
+    const char             *end = text + len;
+    char                    tmpl[] = "/tmp/restate-fuzz.XXXXXX";
+    char                   *repo;
+    char                   *stage;
+    char                   *snap;
+    char                   *file;
+    struct rs_buf           idx;
+    struct rs_buf           tarb;
+    struct rs_buf           gz;
+    struct rs_buf           b;
+    struct rs_buf           err;
+    struct rs_tar_writer    tw;
+    struct rs_repo         *r;
+    struct rs_repo_ingested got;
+    char                    hex[RS_SHA256_HEX_SIZE];
+    uint64_t                member = 0;
+    size_t                  i;
+    bool                    busy = false;
+    bool                    ok;
+
+    for (i = 0; i < 7; i++)
+    {
+        const char *nul = p < end ? memchr(p, '\0', (size_t)(end - p)) : NULL;
+        size_t      n = p < end ? (nul ? (size_t)(nul - p) : (size_t)(end - p)) : 0;
+
+        parts[i] = rs_xstrndup(p, n);
+        lens[i] = n;
+        p += n + (nul ? 1 : 0);
+    }
+    if (!mkdtemp(tmpl))
+    {
+        goto out;
+    }
+    repo = rs_xasprintf("%s/repo", tmpl);
+    stage = rs_xasprintf("%s/stage", tmpl);
+    rs_buf_init(&err);
+    rs_buf_init(&idx);
+    rs_buf_init(&tarb);
+    rs_buf_init(&gz);
+    rs_buf_init(&b);
+    (void)mkdir(stage, 0700);
+
+    /* The pack: its chunks as a tar stream, gzipped, and an .idx for it. */
+    rs_tar_writer_init(&tw, tar_to_buf, &tarb);
+    if (strchr(parts[0], 'i'))
+    {
+        rs_buf_addstr(&idx, "restate-pack 2\n");
+    }
+    for (p = parts[2]; lens[2] > 0 && p <= parts[2] + lens[2];)
+    {
+        const char          *cut = memchr(p, '\1', (size_t)(parts[2] + lens[2] - p));
+        size_t               n = cut ? (size_t)(cut - p) : (size_t)(parts[2] + lens[2] - p);
+        char                 name[32];
+        struct rs_tar_member m;
+
+        (void)snprintf(name, sizeof(name), "%" PRIu64, ++member);
+        memset(&m, 0, sizeof(m));
+        m.name = name;
+        m.typeflag = '0';
+        m.mode = 0600;
+        m.size = n;
+        (void)rs_tar_header(&tw, &m);
+        (void)rs_tar_data(&tw, p, n);
+        (void)rs_tar_pad(&tw);
+        if (strchr(parts[0], 'i'))
+        {
+            rs_sha256_hex(p, n, hex);
+            rs_buf_addf(&idx, "%" PRIu64 " %s %zu\n", member, hex, n);
+        }
+        if (!cut || member >= 64)
+        {
+            break;
+        }
+        p = cut + 1;
+    }
+    (void)rs_tar_finish(&tw);
+    rs_buf_add(&idx, parts[1], lens[1]);
+    gzip_stored((const unsigned char *)(tarb.data ? tarb.data : ""), tarb.len, &gz);
+    file = rs_xasprintf("%s.tar.gz", pack);
+    put_file(stage, file, gz.data, gz.len);
+    free(file);
+    file = rs_xasprintf("%s.idx", pack);
+    put_file(stage, file, idx.data ? idx.data : "", idx.len);
+    free(file);
+    if (lens[3] > 0)
+    {
+        file = rs_xasprintf("%s.seek", pack);
+        put_file(stage, file, parts[3], lens[3]);
+        free(file);
+    }
+    if (strchr(parts[0], 's'))
+    {
+        rs_buf_add(&b, parts[4], lens[4]);
+    } else
+    {
+        rs_sha256_hex(gz.data, gz.len, hex);
+        rs_buf_addf(&b, "restate-sum 1\nsha256 %s\nsize %zu\n", hex, gz.len);
+    }
+    file = rs_xasprintf("%s.sum", pack);
+    put_file(stage, file, b.data ? b.data : "", b.len);
+    free(file);
+
+    /* The snapshot: its pack list, its index gzipped, a kit and a summary. */
+    snap = rs_xasprintf("%s/20260101T000000Z", stage);
+    (void)mkdir(snap, 0700);
+    rs_buf_reset(&b);
+    if (strchr(parts[0], 'p'))
+    {
+        rs_buf_addf(&b, "restate-packs 1\n%s\n", pack);
+    }
+    rs_buf_add(&b, parts[5], lens[5]);
+    put_file(snap, "packs", b.data ? b.data : "", b.len);
+    rs_buf_reset(&gz);
+    gzip_stored((const unsigned char *)parts[6], lens[6], &gz);
+    put_file(snap, "index.json.gz", gz.data, gz.len);
+    put_file(snap, "kit", "", 0);
+    put_file(snap, "info", "{}\n", 3);
+
+    rs_quiet = true;
+    memset(&got, 0, sizeof(got));
+    if (!rs_repo_init(repo, false, &err) || !(r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err)))
+    {
+        goto clean;
+    }
+    file = rs_xasprintf("%s/%s.tar.gz", stage, pack);
+    ok = rs_repo_ingest(r, file, &got, &err);
+    free(file);
+    file = rs_xasprintf("%s/packs", repo);
+    if (!ok && entries_in(file) != 0)
+    {
+        /* Refused, and something of it left in the repository. */
+        abort();
+    }
+    free(file);
+    rs_repo_close(r);
+    if (ok)
+    {
+        /* Taken: so check, reading it through, must find it whole. */
+        struct rs_repo_checked c;
+
+        memset(&c, 0, sizeof(c));
+        r = rs_repo_open(repo, RS_REPO_READ, &busy, &err);
+        if (!r || !rs_repo_check(r, NULL, &c, &err) || c.packs_bad != 0)
+        {
+            abort();
+        }
+        rs_repo_checked_free(&c);
+        rs_repo_close(r);
+    }
+    if (strchr(parts[0], 'n') && (r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err)) != NULL)
+    {
+        size_t n;
+        char **names;
+
+        ok = rs_repo_ingest(r, snap, &got, &err);
+        file = rs_xasprintf("%s/snapshots", repo);
+        if (!ok && entries_in(file) != 0)
+        {
+            abort();
+        }
+        free(file);
+        names = rs_repo_snapshots(r, &n);
+        if (ok != (n == 1))
+        {
+            /* Taken, and not a snapshot the repository lists; or not taken
+             * and listed. */
+            abort();
+        }
+        rs_repo_free_names(names, n);
+        rs_repo_close(r);
+    }
+
+clean:
+    rs_quiet = false;
+    remove_tree(tmpl);
+    free(snap);
+    free(repo);
+    free(stage);
+    rs_buf_free(&err);
+    rs_buf_free(&idx);
+    rs_buf_free(&tarb);
+    rs_buf_free(&gz);
+    rs_buf_free(&b);
+out:
+    for (i = 0; i < 7; i++)
+    {
+        free(parts[i]);
+    }
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -1430,7 +1773,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
     text = (const char *)(data + 1);
-    switch (data[0] % 19)
+    switch (data[0] % 20)
     {
     case 0:
         fuzz_index(text, size - 1);
@@ -1486,8 +1829,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 17:
         fuzz_jobs(text, size - 1);
         break;
-    default:
+    case 18:
         fuzz_storage(text, size - 1);
+        break;
+    default:
+        fuzz_ingest(text, size - 1);
         break;
     }
     return 0;
@@ -1622,7 +1968,7 @@ static void mutate(struct rs_buf *b, const unsigned char *other, size_t other_le
         default:  /* change which parser it goes to */
             if (b->len > 0)
             {
-                b->data[0] = (char)rnd(19);
+                b->data[0] = (char)rnd(20);
             }
             break;
         }

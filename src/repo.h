@@ -431,6 +431,41 @@ bool rs_repo_copy(struct rs_repo *r, const char *name, const char *dest,
 void rs_repo_copied_free(struct rs_repo_copied *c);
 
 /* ------------------------------------------------------------------------- */
+/* Ingesting                                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* What rs_repo_ingest did, added to across calls. */
+struct rs_repo_ingested {
+    size_t   packs_added;
+    size_t   packs_there;      /* the same pack was there already */
+    size_t   snapshots_added;
+    size_t   snapshots_there;  /* the same snapshot was there already */
+    uint64_t bytes;            /* copied in */
+};
+
+/*
+ * Puts one pack or snapshot written elsewhere into `r`, opened with
+ * RS_REPO_WRITE, refusing anything that is not valid. `path` is a pack's
+ * content, NAME.tar.gz, with its .sum and .idx (and any .seek) beside it,
+ * or a snapshot's directory, NAME. Each is copied in under a name nothing
+ * reads, checked there -- so what is checked is what goes in -- and renamed
+ * into place, the pack's .idx last, so it counts all at once or not at all:
+ *
+ * - a pack's content is what its .sum says; in a repository that is not
+ *   encrypted, its .idx and .seek can be read and its content is what its
+ *   .idx says (encrypted, the storage has no key: the .sum is all there is,
+ *   and the rest must be encrypted);
+ * - a snapshot holds its index, kit, summary and pack list (and perhaps a
+ *   signature), nothing else; every pack its list names is in `r`; and its
+ *   index can be read, where `r` is not encrypted.
+ *
+ * The same pack or snapshot already there is nothing to do; a different one
+ * under its name is refused. What `path` names is left as it is.
+ */
+bool rs_repo_ingest(struct rs_repo *r, const char *path, struct rs_repo_ingested *out,
+                    struct rs_buf *err);
+
+/* ------------------------------------------------------------------------- */
 /* Checking                                                                  */
 /* ------------------------------------------------------------------------- */
 

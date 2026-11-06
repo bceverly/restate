@@ -1923,6 +1923,36 @@ howmany() { find "$1" -name "*$2" | wc -l | tr -d ' '; }
 check "every pack has a .seek" test "$(howmany prepo/packs .seek)" -eq "$(howmany prepo/packs .idx)"
 check "and its copy has it too" test "$(howmany poff/packs .seek)" -eq "$(howmany poff/packs .idx)"
 
+# ingest: packs and snapshots written elsewhere, checked as they go in. The
+# snapshots given first, to be taken after every pack all the same.
+expect 0 "init a repository to ingest into" -- "$BIN" init -q pin
+expect 0 "ingest a repository's snapshots and packs" -- \
+  "$BIN" ingest --syslog --result in.json pin prepo/snapshots/* prepo/packs/*.tar.gz
+contains "$ERR" "ingested into pin: $(howmany prepo/packs .idx) packs" "says what went in"
+contains "$(cat in.json)" '"snapshots_added": '"$(find prepo/snapshots -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" \
+  "its result counts the snapshots"
+check "and leaves what it was given as it was" test "$(howmany prepo/packs .idx)" -gt 0
+expect 0 "check what was ingested" -- "$BIN" check -q pin
+expect 0 "ingest the same again" -- "$BIN" ingest pin prepo/snapshots/* prepo/packs/*.tar.gz
+contains "$ERR" "0 packs (0 bytes) and 0 snapshots" "adds nothing"
+mkdir -p pstage
+for pack in prepo/packs/*.tar.gz; do
+  stem=${pack%.tar.gz}
+  cp "$stem.tar.gz" "$stem.sum" "$stem.idx" pstage/
+  printf x | dd of="pstage/${stem##*/}.tar.gz" bs=1 seek=200 conv=notrunc 2> /dev/null
+  bad="pstage/${stem##*/}.tar.gz"
+  break
+done
+expect 0 "init another to ingest into" -- "$BIN" init -q pin2
+expect 2 "ingest a pack not what its .sum says" -- "$BIN" ingest pin2 "$bad"
+contains "$ERR" "it is not what its .sum says" "is refused, saying why"
+check "and leaves nothing in the repository" test "$(find pin2/packs -mindepth 1 | wc -l)" -eq 0
+expect 2 "ingest a snapshot without its packs" -- "$BIN" ingest pin2 prepo/snapshots/*
+contains "$ERR" "has not got" "is refused"
+expect 2 "ingest what is neither" -- "$BIN" ingest pin2 prepo/packs
+contains "$ERR" "not a file a snapshot has" "is refused"
+expect 2 "ingest with nothing to ingest" -- "$BIN" ingest pin2
+
 # repack: packs as an older restate wrote them, with no .seek.
 cp -R prepo pold
 rm -f pold/packs/*.seek

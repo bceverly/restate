@@ -77,9 +77,8 @@ RS_OPT(OPT_CREATE, "create",        no_argument,       NULL,
        "(its parent must be), or an empty one -- as restate init would, encrypted with "
        "--encrypt-to; one with anything else in it is refused, and nothing is written")
 RS_OPT(OPT_SYSLOG, "syslog",        no_argument,       NULL,
-       "capture, prune, repack, check, copy: say how the run ended in the system log too, "
-       "as one "
-       "line of key=value pairs a monitoring system can match on")
+       "capture, prune, repack, check, copy, ingest: say how the run ended in the system "
+       "log too, as one line of key=value pairs a monitoring system can match on")
 RS_OPT(OPT_RESULT, "result",        required_argument, "FILE",
        "when the command ends, write how it ended and what it did into FILE as one JSON "
        "object, replaced atomically (see RESULTS)")

@@ -1296,6 +1296,82 @@ static size_t count(const char *pattern)
     return n;
 }
 
+/* How many entries directly in `dir` match the find(1) pattern `name`. */
+static size_t entries(const char *dir, const char *name)
+{
+    char  *cmd = rs_xasprintf("find '%s' -mindepth 1 -maxdepth 1 -name '%s' 2> /dev/null | wc -l",
+                              dir, name);
+    FILE  *fp = popen(cmd, "r");
+    size_t n = 0;
+
+    if (fp)
+    {
+        if (fscanf(fp, "%zu", &n) != 1)
+        {
+            n = 0;
+        }
+        (void)pclose(fp);
+    }
+    free(cmd);
+    return n;
+}
+
+/* The `k`th pack in `repo`, by name, without .tar.gz; NULL if there are fewer. */
+static char *nth_pack(const char *repo, size_t k)
+{
+    char  *cmd = rs_xasprintf("cd '%s/packs' && ls *.tar.gz 2> /dev/null", repo);
+    FILE  *fp = popen(cmd, "r");
+    char   line[512];
+    char  *name = NULL;
+    size_t i = 0;
+
+    while (fp && fgets(line, sizeof(line), fp))
+    {
+        line[strcspn(line, "\n")] = '\0';
+        if (i++ == k && strlen(line) > 7)
+        {
+            name = rs_xstrndup(line, strlen(line) - 7);
+        }
+    }
+    if (fp)
+    {
+        (void)pclose(fp);
+    }
+    free(cmd);
+    return name;
+}
+
+/* rs_repo_ingest into `repo`, opened for it, of `path`: whether it went in,
+ * and what was said if it did not into *why. */
+static bool ingest_one(const char *repo, const char *path, struct rs_repo_ingested *got,
+                       char **why)
+{
+    struct rs_repo *r;
+    struct rs_buf   err;
+    bool            busy = false;
+    bool            ok;
+
+    rs_buf_init(&err);
+    r = rs_repo_open(repo, RS_REPO_WRITE, &busy, &err);
+    ok = r && rs_repo_ingest(r, path, got, &err);
+    free(*why);
+    *why = rs_xstrdup(err.data ? err.data : "");
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    return ok;
+}
+
+/* `cmd` run as one command, its output thrown away: grouped, so the last
+ * redirection in it is still its own. */
+static int shell_quietly(const char *cmd)
+{
+    char *group = rs_xasprintf("{ %s; }", cmd);
+    int   rc = quiet_system(group);
+
+    free(group);
+    return rc;
+}
+
 /* The chunking key this machine's cache holds for the one repository in it. */
 static char *cached_key(const char *cache)
 {
@@ -2030,6 +2106,70 @@ static void test_encrypted(const char *dir)
         CHECK_INT(c.snapshots_bad, 0);
         CHECK(c.chunks > 0);
         rs_repo_close(r);
+    }
+
+    TEST_CASE("repo: ingest into an encrypted repository, and what it refuses there");
+    {
+        char                   *plain = rs_xasprintf("%s/eplain", dir);
+        char                   *enc2 = rs_xasprintf("%s/erepo2", dir);
+        char                   *why = NULL;
+        char                   *pk;
+        char                   *path;
+        struct rs_repo_ingested got;
+        struct rs_repo_checked  c;
+        size_t                  i;
+
+        memset(&got, 0, sizeof(got));
+        CHECK(rs_repo_init(plain, false, &err));
+        CHECK(rs_repo_init(enc2, true, &err));
+        pk = nth_pack(repo, 0);
+        CHECK(pk != NULL);
+        path = rs_xasprintf("%s/packs/%s.tar.gz", repo, pk ? pk : "none");
+        CHECK(!ingest_one(plain, path, &got, &why));
+        CHECK_CONTAINS(why, "it is encrypted");
+        free(path);
+        free(pk);
+        for (i = 0; (pk = nth_pack(repo, i)) != NULL; i++)
+        {
+            path = rs_xasprintf("%s/packs/%s.tar.gz", repo, pk);
+            CHECK(ingest_one(enc2, path, &got, &why));
+            free(path);
+            free(pk);
+        }
+        path = rs_xasprintf("%s/snapshots/%s", repo, third);
+        CHECK(!ingest_one(plain, path, &got, &why));
+        CHECK(ingest_one(enc2, path, &got, &why));
+        CHECK_INT(got.snapshots_added, 1);
+        free(path);
+        r = rs_repo_open(enc2, RS_REPO_READ, &busy, &err);
+        CHECK(r && rs_repo_check(r, NULL, &c, &err));
+        CHECK_INT(c.packs_bad, 0);
+        CHECK_INT(c.snapshots_bad, 0);
+        CHECK_INT(c.missing, 0);
+        rs_repo_close(r);
+        /* A .seek beside an encrypted pack is not one restate would write. */
+        pk = nth_pack(repo, 0);
+        path = rs_xasprintf("%s/estage", dir);
+        cmd = rs_xasprintf("mkdir -p '%s' && cd '%s/packs' && cp %s.tar.gz %s.sum %s.idx '%s'/ && "
+                           "echo x > '%s/%s.seek'", path, repo, pk, pk, pk, path, path, pk);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        cmd = rs_xasprintf("%s/%s.tar.gz", path, pk);
+        CHECK(!ingest_one(plain, cmd, &got, &why));
+        {
+            char *enc3 = rs_xasprintf("%s/erepo3", dir);
+
+            CHECK(rs_repo_init(enc3, true, &err));
+            CHECK(!ingest_one(enc3, cmd, &got, &why));
+            CHECK_CONTAINS(why, "an encrypted pack has none");
+            free(enc3);
+        }
+        free(cmd);
+        free(path);
+        free(pk);
+        free(why);
+        free(plain);
+        free(enc2);
     }
 
 out:
@@ -3674,6 +3814,243 @@ static bool flags_settable(const char *dir)
     return ok;
 }
 
+static void test_ingest(const char *dir)
+{
+    char                   *a = rs_xasprintf("%s/ingest-a", dir);
+    char                   *b = rs_xasprintf("%s/ingest-b", dir);
+    char                   *tree = rs_xasprintf("%s/ingest-tree", dir);
+    char                   *stage = rs_xasprintf("%s/ingest-stage", dir);
+    char                   *name = NULL;
+    char                   *p0 = NULL;
+    char                   *p1 = NULL;
+    char                   *why = NULL;
+    char                   *path;
+    char                   *cmd;
+    size_t                  i;
+    struct rs_repo         *r;
+    struct rs_repo_ingested got;
+    struct rs_repo_checked  c;
+    struct rs_scan_stats    st;
+    struct rs_buf           err;
+    char                   *errs = NULL;
+    char                   *snaps = NULL;
+    char                   *packs = NULL;
+    bool                    busy;
+
+    rs_buf_init(&err);
+    CHECK(rs_repo_init(a, false, &err));
+    CHECK(rs_repo_init(b, false, &err));
+    put(tree, "etc/conf", "conf\n", 0644);
+    big_file(tree, "big", 3 * 1024 * 1024, 21);
+    r = rs_repo_open(a, RS_REPO_WRITE, &busy, &err);
+    rs_repo_set_pack_size(1024 * 1024);
+    CHECK(r && snap(r, tree, "2026-05-01T00:00:00.000000000Z", NULL, &st, &name));
+    rs_repo_close(r);
+    p0 = nth_pack(a, 0);
+    p1 = nth_pack(a, 1);
+    CHECK(p0 && p1 && name);
+    if (!p0 || !p1 || !name)
+    {
+        goto out;
+    }
+    memset(&got, 0, sizeof(got));
+
+    TEST_CASE("repo: ingest refuses a snapshot before the packs it needs");
+    path = rs_xasprintf("%s/snapshots/%s", a, name);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "which");
+    CHECK_CONTAINS(why, "has not got");
+    snaps = rs_xasprintf("%s/snapshots", b);
+    CHECK_INT(entries(snaps, "*"), 0);
+
+    TEST_CASE("repo: ingest takes the packs, then the snapshot, and the copy is whole");
+    for (i = 0;; i++)
+    {
+        char *pk = nth_pack(a, i);
+        char *pp;
+
+        if (!pk)
+        {
+            break;
+        }
+        pp = rs_xasprintf("%s/packs/%s.tar.gz", a, pk);
+        CHECK(ingest_one(b, pp, &got, &why));
+        free(pp);
+        free(pk);
+    }
+    CHECK(ingest_one(b, path, &got, &why));
+    CHECK_INT(got.snapshots_added, 1);
+    CHECK(got.packs_added >= 2 && got.bytes > 0);
+    CHECK_INT(got.packs_there + got.snapshots_there, 0);
+    storage_check(b, false, NULL, &c, &errs);
+    CHECK_INT(c.packs_bad, 0);
+    CHECK_INT(c.snapshots, 1);
+    CHECK_INT(c.snapshots_bad, 0);
+    CHECK_INT(c.missing, 0);
+    rs_repo_checked_free(&c);
+    free(errs);
+    errs = NULL;
+    packs = rs_xasprintf("%s/packs", b);
+    CHECK_INT(entries(packs, ".*"), 0);
+    CHECK_INT(entries(snaps, ".*"), 0);
+
+    TEST_CASE("repo: ingest of what is there already, the same, is nothing to do");
+    memset(&got, 0, sizeof(got));
+    CHECK(ingest_one(b, path, &got, &why));
+    free(path);
+    path = rs_xasprintf("%s/packs/%s.tar.gz/", a, p0);
+    CHECK(!ingest_one(b, path, &got, &why));
+    free(path);
+    path = rs_xasprintf("%s/packs/%s.tar.gz", a, p0);
+    CHECK(ingest_one(b, path, &got, &why));
+    CHECK_INT(got.snapshots_there, 1);
+    CHECK_INT(got.packs_there, 1);
+    CHECK_INT(got.packs_added + got.snapshots_added, 0);
+    free(path);
+
+    TEST_CASE("repo: ingest refuses a pack not what its .sum says, or its .idx");
+    (void)mkdir(stage, 0755);
+    /* p0 by name, with p1's .sum: not the pack a has under that name. */
+    cmd = rs_xasprintf("rm -rf '%s'/* && cd '%s/packs' && cp %s.tar.gz %s.idx '%s'/ && "
+                       "cp %s.sum '%s/%s.sum'", stage, a, p0, p0, stage, p1, stage, p0);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    path = rs_xasprintf("%s/%s.tar.gz", stage, p0);
+    CHECK(!ingest_one(a, path, &got, &why));
+    CHECK_CONTAINS(why, "there already, and not the same pack");
+    /* Its own .sum, and its content changed: a repository without it
+     * refuses it. */
+    cmd = rs_xasprintf("cp '%s/packs/%s.sum' '%s'/ && "
+                       "printf x | dd of='%s/%s.tar.gz' bs=1 seek=100 conv=notrunc", a, p0,
+                       stage, stage, p0);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    {
+        char *c2 = rs_xasprintf("%s/ingest-c", dir);
+        char *c2packs = rs_xasprintf("%s/packs", c2);
+
+        CHECK(rs_repo_init(c2, false, &err));
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "it is not what its .sum says");
+        CHECK_INT(entries(c2packs, "*"), 0);
+        /* p0's content and .sum, with p1's .idx. */
+        cmd = rs_xasprintf("rm -rf '%s'/* && cd '%s/packs' && cp %s.tar.gz %s.sum '%s'/ && "
+                           "cp %s.idx '%s/%s.idx'", stage, a, p0, p0, stage, p1, stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, p0);
+        CHECK_INT(entries(c2packs, "*"), 0);
+
+        TEST_CASE("repo: ingest refuses a pack without its .idx, or a .seek or .idx not one");
+        cmd = rs_xasprintf("rm '%s/%s.idx'", stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "not there; a pack comes with its .sum and .idx");
+        cmd = rs_xasprintf("cp '%s/packs/%s.idx' '%s'/ && echo nonsense > '%s/%s.seek'", a, p0,
+                           stage, stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "not a .seek restate wrote");
+        cmd = rs_xasprintf("rm '%s/%s.seek' && echo nonsense > '%s/%s.idx'", stage, p0, stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "not a pack index restate wrote");
+        cmd = rs_xasprintf("echo nonsense > '%s/%s.sum'", stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "not a .sum restate wrote");
+        cmd = rs_xasprintf("rm '%s/%s.sum' && mkdir '%s/%s.sum'", stage, p0, stage, p0);
+        CHECK(shell_quietly(cmd) == 0);
+        free(cmd);
+        CHECK(!ingest_one(c2, path, &got, &why));
+        CHECK_CONTAINS(why, "not a regular file");
+        free(c2packs);
+        free(c2);
+    }
+    free(path);
+
+    TEST_CASE("repo: ingest refuses what is neither a pack nor a snapshot");
+    path = rs_xasprintf("%s/packs/%s.idx", a, p0);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "neither a pack");
+    free(path);
+    path = rs_xasprintf("%s/nothing.tar.gz", stage);
+    CHECK(!ingest_one(b, path, &got, &why));
+    free(path);
+    cmd = rs_xasprintf("rm -rf '%s'/* && touch '%s/.hidden.tar.gz'", stage, stage);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    path = rs_xasprintf("%s/.hidden.tar.gz", stage);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "not a name restate gives a pack");
+    free(path);
+
+    TEST_CASE("repo: ingest refuses a snapshot with more in it, less, or not its own");
+    cmd = rs_xasprintf("rm -rf '%s'/* && cp -R '%s/snapshots/%s' '%s/20260601T000000Z' && "
+                       "touch '%s/20260601T000000Z/extra'", stage, a, name, stage, stage);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    path = rs_xasprintf("%s/20260601T000000Z", stage);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "not a file a snapshot has");
+    cmd = rs_xasprintf("rm '%s/extra' '%s/kit'", path, path);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "kit: not there");
+    cmd = rs_xasprintf("ln -s info '%s/kit'", path);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "kit: not a regular file");
+    cmd = rs_xasprintf("rm '%s/kit' && cp '%s/snapshots/%s/kit' '%s'/ && "
+                       "echo nonsense > '%s/index.json.gz'", path, a, name, path, path);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "not an index restate wrote");
+    cmd = rs_xasprintf("echo nonsense > '%s/packs'", path);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "not a pack list restate wrote");
+    CHECK_INT(entries(snaps, ".*"), 0);
+    CHECK_INT(entries(snaps, "20260601T000000Z"), 0);
+    free(path);
+    cmd = rs_xasprintf("rm -rf '%s'/* && cp -R '%s/snapshots/%s' '%s/%s' && "
+                       "printf x >> '%s/%s/index.json.gz'", stage, a, name, stage, name, stage,
+                       name);
+    CHECK(shell_quietly(cmd) == 0);
+    free(cmd);
+    path = rs_xasprintf("%s/%s", stage, name);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "there already, and not the same snapshot");
+    free(path);
+    path = rs_xasprintf("%s/.odd", stage);
+    (void)mkdir(path, 0755);
+    CHECK(!ingest_one(b, path, &got, &why));
+    CHECK_CONTAINS(why, "not a name restate gives a snapshot");
+    free(path);
+
+out:
+    rs_buf_free(&err);
+    free(snaps);
+    free(packs);
+    free(why);
+    free(name);
+    free(p0);
+    free(p1);
+    free(a);
+    free(b);
+    free(tree);
+    free(stage);
+}
+
 void test_repo(void)
 {
     char *dir = rs_test_tmpdir();
@@ -3700,6 +4077,7 @@ void test_repo(void)
     test_storage(dir);
     test_stopped(dir);
     test_encrypted(dir);
+    test_ingest(dir);
     rs_test_rmtree(dir);
     free(dir);
 }

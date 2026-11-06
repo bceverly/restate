@@ -103,6 +103,12 @@ fresh=0
   seed job 17 '# nightly\ncommand = capture\nrepository = /mnt/nas/r\nquiesce = true\nquiesce_with = unifi\nencrypt_to = /etc/restate/k.asc\nresult = /var/lib/restate/n.json\nreport_group = adm\n'
   seed job-restore 17 'command = restore\nsnapshot = /r::20261020T030000Z\nrestore_root = /var/tmp/x\ninclude = /home/bob\ndry_run = yes\n'
   seed storage 18 'restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 42\n\0restate-packs 1\n20261020T030000Z-1-0001\n20261020T030000Z-1-0002\n\0restate-record 1\npacks/a.idx 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 10\nsnapshots/x/kit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0\n\0restate-seek 1\n1 0\n9 100\n20 230\n'
+  # ingest: flags, an .idx, the chunks (split on byte 1), a .seek, a .sum, a
+  # pack list and an index, between NULs; see fuzz_ingest.
+  seed ingest 19 'ipn\0\0hello\0001world\0\0\0\0{"format": "restate-index", "version": 1, "entries": []}'
+  seed ingest-seek 19 'ip\0\0a\0001b\0restate-seek 1\n1 0\n\0\0\0'
+  seed ingest-sum 19 's\0restate-pack 2\n\0x\0\0restate-sum 1\nsha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nsize 3\n\0\0'
+  seed ingest-noidx 19 'pn\0\0x\0\0\0\0'
   seed sha256sums 8 '1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-26.04-live-server-amd64.iso\n2222222222222222222222222222222222222222222222222222222222222222 *ubuntu-26.04.1-live-server-amd64.iso\r\n3333333333333333333333333333333333333333333333333333333333333333  ubuntu-26.04.2-desktop-amd64.iso\n'
   # A LUKS2 header: magic, version 2, an 8 KiB header size, the binary
   # header padded to 4 KiB, then the JSON area padded to the 8 KiB it claims.

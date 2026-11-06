@@ -133,6 +133,7 @@ static const char *json_phase(const char *phase)
     static const char *const names[][2] = {
         { "counting", "count" }, { "walking", "walk" },  { "writing", "write" },
         { "checking", "check" }, { "reading", "read" },  { "copying", "copy" },
+        { "ingesting", "ingest" },
     };
     size_t i;
 

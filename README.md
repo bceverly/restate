@@ -317,6 +317,15 @@ Commands:
                           there -- exactly as they are: an encrypted
                           repository's copy is encrypted, and nothing is
                           decrypted
+  ingest REPO PATH...     put packs and snapshots written elsewhere into the
+                          repository REPO, refusing any that is not valid: a
+                          pack (NAME.tar.gz, its .sum, .idx and any .seek
+                          beside it) must be what its .sum says -- and, where
+                          REPO is not encrypted, what its .idx says -- and a
+                          snapshot's directory may name only packs REPO has;
+                          each is checked as copied in and goes in whole or not
+                          at all, packs before snapshots, and PATH is left as
+                          it is
   du REPO                 say how much a repository holds, what each snapshot
                           needs of it, adds to it and would free if it were
                           dropped, and which keys an encrypted one's files are
@@ -427,9 +436,9 @@ Options:
                           an empty one -- as restate init would, encrypted with
                           --encrypt-to; one with anything else in it is
                           refused, and nothing is written
-      --syslog            capture, prune, repack, check, copy: say how the run
-                          ended in the system log too, as one line of key=value
-                          pairs a monitoring system can match on
+      --syslog            capture, prune, repack, check, copy, ingest: say how
+                          the run ended in the system log too, as one line of
+                          key=value pairs a monitoring system can match on
       --result=FILE       when the command ends, write how it ended and what it
                           did into FILE as one JSON object, replaced atomically
                           (see RESULTS)
@@ -600,7 +609,7 @@ into a file: a line at each change of phase and every two seconds between.
 {"phase": "walk", "paths": 8123, "read_bytes": 1048576, "new_bytes": 4096, "total_bytes": 9437184, "hook": null, "at": "2026-10-20T03:00:02Z"}
 ```
 
-The phases are `count`, `walk`, `write`, `check`, `copy` and `read`; `hook`
+The phases are `count`, `walk`, `write`, `check`, `copy`, `ingest` and `read`; `hook`
 while a hook pauses something, which it names; and `finish` at the end.
 `read_bytes` is what has been read of the files themselves, never what
 restate writes or reads back of its own. `total_bytes` is `null` where there
@@ -1372,7 +1381,31 @@ restate: the repository is whole
 30 5 1 * *   root  restate check --read-all --syslog /var/backups/web01
 ```
 
-**Run from cron.** One capture, prune or repack runs on a repository at a time (`protect`
+**`ingest`** puts packs and snapshots written elsewhere into a repository,
+refusing any that is not valid -- the check the planned restate-proxy (see
+the [roadmap](ROADMAP.md)) runs on every upload, so that a machine that only
+adds to its repository adds only what is whole. Each `PATH` is a pack's content, `NAME.tar.gz`, with its `.sum`, `.idx`
+and any `.seek` beside it, or a snapshot's directory:
+
+```console
+$ restate ingest /srv/restate/web01 /var/spool/up/*.tar.gz /var/spool/up/20261105T030000Z
+restate: ingested into /srv/restate/web01: 3 packs (2.9 MiB) and 1 snapshots; 0 packs and 0 snapshots were there already
+```
+
+A pack must be what its `.sum` says and, where the repository is not
+encrypted, what its `.idx` says, chunk by chunk; encrypted, the storage has
+no key, so the `.sum` is all there is to go by, and the rest must be
+encrypted. A snapshot may hold only what a snapshot does, and name in its
+pack list only packs the repository has. Each is copied in under a name
+nothing reads, checked there -- so what is checked is what goes in, whatever
+becomes of the file it came from -- and renamed into place, a pack's `.idx`
+last, so it counts whole or not at all. Packs go in before snapshots, so a
+snapshot can need the packs given with it; the first refused stops the run
+with status 2, and what went in before it stays. The same pack or snapshot
+already there is nothing to do, and a different one under its name is
+refused. What `PATH` names is left as it is.
+
+**Run from cron.** One capture, prune, repack or ingest runs on a repository at a time (`protect`
 takes no lock: it changes only what is finished), and
 one `--quiesce` capture on a machine at a time: another that finds the lock
 taken does nothing and exits with status 5, a reason to try later rather than

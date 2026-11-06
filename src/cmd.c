@@ -3085,6 +3085,85 @@ int rs_cmd_copy(const struct rs_options *o)
     return status;
 }
 
+/* Whether `path` names a directory: a snapshot, which ingest takes after
+ * every pack, so it can need the packs given with it. */
+static bool is_dir(const char *path)
+{
+    struct stat st;
+
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+int rs_cmd_ingest(const struct rs_options *o)
+{
+    struct rs_repo_ingested got;
+    struct rs_repo         *r;
+    struct rs_buf           err;
+    struct rs_jval         *res;
+    time_t                  began = time(NULL);
+    const char             *dir = o->args[0];
+    bool                    busy = false;
+    bool                    ok;
+    int                     status;
+    int                     pass;
+    size_t                  i;
+
+    memset(&got, 0, sizeof(got));
+    rs_buf_init(&err);
+    r = rs_repo_open(dir, RS_REPO_WRITE, &busy, &err);
+    ok = r != NULL;
+    if (ok)
+    {
+        rs_progress_phase("ingesting", 0);
+    }
+    /* The packs, then the snapshots; the first refused stops it, and what
+     * went in before it stays. */
+    for (pass = 0; ok && pass < 2; pass++)
+    {
+        for (i = 1; ok && i < o->nargs; i++)
+        {
+            if (is_dir(o->args[i]) == (pass == 1))
+            {
+                ok = rs_repo_ingest(r, o->args[i], &got, &err);
+            }
+        }
+    }
+    if (r)
+    {
+        rs_progress_done();
+    }
+    status = ok ? RESTATE_EXIT_OK : busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    if (!ok)
+    {
+        rs_error("ingest: %s", err.data);
+    } else if (!o->quiet)
+    {
+        struct rs_buf size;
+
+        rs_buf_init(&size);
+        human_size(&size, got.bytes);
+        (void)fflush(stdout);
+        (void)fprintf(stderr, "restate: ingested into %s: %zu packs (%s) and %zu snapshots; %zu "
+                      "packs and %zu snapshots were there already\n", dir, got.packs_added,
+                      size.data, got.snapshots_added, got.packs_there, got.snapshots_there);
+        rs_buf_free(&size);
+    }
+    res = rs_jobj_add(rs_result(), "ingest");
+    rs_jval_set_object(res);
+    rs_jobj_str(res, "repository", dir);
+    rs_jobj_u64(res, "packs_added", got.packs_added);
+    rs_jobj_u64(res, "packs_there", got.packs_there);
+    rs_jobj_u64(res, "snapshots_added", got.snapshots_added);
+    rs_jobj_u64(res, "snapshots_there", got.snapshots_there);
+    rs_jobj_u64(res, "bytes", got.bytes);
+    log_outcome(o, status, began,
+                "repository=%s packs_added=%zu snapshots_added=%zu bytes=%" PRIu64, dir,
+                got.packs_added, got.snapshots_added, got.bytes);
+    rs_repo_close(r);
+    rs_buf_free(&err);
+    return status;
+}
+
 /* The keys du's repository is encrypted to, and what of it each is needed
  * for: in `doc` and, a line a key, in `text`. */
 static void du_keys(struct rs_jval *doc, struct rs_buf *text, const struct rs_repo_keys *keys)
@@ -6282,6 +6361,8 @@ static int dispatch(const struct rs_options *o)
         return rs_cmd_list(o);
     case CMD_COPY:
         return rs_cmd_copy(o);
+    case CMD_INGEST:
+        return rs_cmd_ingest(o);
     case CMD_DU:
         return rs_cmd_du(o);
     case CMD_ESTIMATE:

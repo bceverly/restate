@@ -37,6 +37,7 @@ int rs_cmd_export(const struct rs_options *o);
 int rs_cmd_status(const struct rs_options *o);
 int rs_cmd_list(const struct rs_options *o);
 int rs_cmd_copy(const struct rs_options *o);
+int rs_cmd_ingest(const struct rs_options *o);
 int rs_cmd_du(const struct rs_options *o);
 int rs_cmd_estimate(const struct rs_options *o);
 int rs_cmd_features(const struct rs_options *o);
