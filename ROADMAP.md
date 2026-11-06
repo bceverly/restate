@@ -43,9 +43,9 @@ What is decided:
 
 The order, each a release of its own:
 
-- [ ] **`restate ingest REPO PATH...`:** checks a pack (with its `.idx`,
-      `.sum` and `.seek`) or a snapshot directory against a repository and
-      copies it in atomically -- checked once it is inside, so what is
+- [x] **`restate ingest REPO PATH...`** (2.3.0.0): checks a pack (with its
+      `.idx`, `.sum` and `.seek`) or a snapshot directory against a repository
+      and copies it in atomically -- checked once it is inside, so what is
       checked is what goes in, and what PATH names left as it is -- refusing
       anything invalid: a pack must match its `.sum`, and its `.idx` must
       match its content where the repository is not encrypted (where it is,
