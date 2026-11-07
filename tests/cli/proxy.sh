@@ -203,7 +203,9 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     set -- "${@:1:$(($# - 1))}"
     OUT="$(curl -s -i --cacert cert.pem --resolve "localhost:$PORT:127.0.0.1" "$@" \
       "https://localhost:$PORT$path" 2> /dev/null | tr -d '\r')"
-    CODE="$(printf '%s\n' "$OUT" | sed -n '1s/^HTTP\/1\.1 \([0-9]*\).*/\1/p')"
+    # The final answer's status: a curl that sent Expect: 100-continue (an
+    # older one does for any body past 1 KiB) shows the 100 before it.
+    CODE="$(printf '%s\n' "$OUT" | sed -n '/^HTTP\/1\.1 1[0-9][0-9]/d; s/^HTTP\/1\.1 \([0-9]*\).*/\1/p' | head -n 1)"
   }
   is() { if [ "$CODE" = "$1" ]; then ok; else fail "$2: $CODE, wanted $1"; fi; }
 

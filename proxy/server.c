@@ -772,6 +772,56 @@ static bool bind_client(void *ctx, const struct rs_grant *g)
 
 /* In the child: the connection `fd` from `peer`, served, asking the
  * listener on `ipc` for its sessions, and its end. */
+/* How long a closing connection's unread input is read and thrown away. */
+#define LINGER_MS 2000
+
+/* Ends connection `fd` the way a web server must when it answered before
+ * reading what the client sent (a 413, a 403 to an upload): its own side is
+ * shut, and what keeps arriving is read and dropped for a moment. Closed
+ * with that input unread, the socket would answer with a reset, and a reset
+ * can reach the client before the answer it has not read yet, which is
+ * then lost. */
+static void linger_close(int fd)
+{
+    struct timespec start;
+    char            junk[16384];
+
+    if (shutdown(fd, SHUT_WR) != 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+    {
+        return;
+    }
+    for (;;)
+    {
+        struct timespec now;
+        struct pollfd   pfd;
+        long long       spent;
+        ssize_t         n;
+
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        {
+            return;
+        }
+        spent = (long long)(now.tv_sec - start.tv_sec) * 1000 +
+                (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (spent >= LINGER_MS)
+        {
+            return;
+        }
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        if (poll(&pfd, 1, (int)(LINGER_MS - spent)) <= 0)
+        {
+            return;
+        }
+        n = read(fd, junk, sizeof(junk)); /* Flawfinder: ignore */
+        if (n <= 0)
+        {
+            return;
+        }
+    }
+}
+
 static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *peer,
                        const struct grants *gs, const struct rs_proxy_options *o)
 {
@@ -829,6 +879,7 @@ static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *p
     io.write = tls_write;
     (void)rs_proxy_serve(&io, &c);
     rs_tls_close(t);
+    linger_close(fd);
     if (b.fd >= 0)
     {
         (void)close(b.fd);

@@ -94,7 +94,10 @@ bool rs_confine(enum rs_confine_role role, const char *repository, const char *s
     {
         return false;
     }
-    if (committer && rs_gzip_path() && !unveiled(rs_gzip_path(), "rx", why))
+    /* The kernel finds a program's run-time linker by path as it starts it,
+     * under the unveil still in force then; gzip is linked dynamically. */
+    if (committer && rs_gzip_path() &&
+        (!unveiled(rs_gzip_path(), "rx", why) || !unveiled("/usr/libexec/ld.so", "r", why)))
     {
         return false;
     }

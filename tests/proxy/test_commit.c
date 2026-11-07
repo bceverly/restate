@@ -455,6 +455,8 @@ int test_confine_run(char **args)
 #ifdef __OpenBSD__
     try_run = role != RS_CONFINE_CONNECTION;
 #endif
+    rs_buf_free(&why);
+    rs_buf_init(&why);
     if (try_run && pipe(p) == 0)
     {
         struct rs_gzip gz;
@@ -467,9 +469,11 @@ int test_confine_run(char **args)
             (void)rs_gzip_finish(&gz, true, &why);
         }
     }
+    /* With why gzip did not start, for a failure to say. */
     (void)printf("confine=ok read-repo=%s write-repo=%s write-staging=%s read-other=%s "
-                 "run=%s\n",
-                 yes(read_repo), yes(write_repo), yes(write_staging), yes(read_other), yes(run));
+                 "run=%s%s%s\n",
+                 yes(read_repo), yes(write_repo), yes(write_staging), yes(read_other), yes(run),
+                 !run && why.data ? " run-why=" : "", !run && why.data ? why.data : "");
     rs_buf_free(&why);
     rs_store_free(repo);
     rs_store_free(staging);
