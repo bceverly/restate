@@ -9,6 +9,10 @@
 #include <string.h>
 
 #ifdef RS_TLS_LIBTLS
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <tls.h>
 #else
 #include <openssl/err.h>
@@ -22,6 +26,7 @@
 struct rs_tls {
 #ifdef RS_TLS_LIBTLS
     struct tls *conn;
+    int         fd;         /* its socket */
     bool        closed;     /* tls_close done, at the peer's close */
 #else
     SSL        *ssl;
@@ -139,17 +144,65 @@ void rs_tls_config_free(struct rs_tls_config *cfg)
     free(cfg);
 }
 
+/* Milliseconds on a clock that only goes forward. */
+static long long now_ms(void)
+{
+    struct timespec ts;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/*
+ * Whether libtls's TLS_WANT_POLLIN or TLS_WANT_POLLOUT, `r`, from a call on
+ * socket `fd` begun at `since` (now_ms), is to be tried again: once the
+ * socket is ready, within what is left of its own timeout (SO_RCVTIMEO,
+ * SO_SNDTIMEO). The socket is blocking, so a "want" mostly comes of that
+ * timeout having run out in the call -- the peer having said nothing for
+ * that long -- which is then an error, not a reason to wait again: or an
+ * idle connection would be tried forever. Waited for with poll(2), not told
+ * by errno, which not every libtls leaves as the read left it.
+ */
+static bool again(int fd, long r, long long since)
+{
+    struct pollfd  p;
+    struct timeval tv;
+    socklen_t      len = sizeof(tv);
+    long long      left = -1;
+
+    if (r != TLS_WANT_POLLIN && r != TLS_WANT_POLLOUT)
+    {
+        return false;
+    }
+    memset(&tv, 0, sizeof(tv));
+    if (getsockopt(fd, SOL_SOCKET, r == TLS_WANT_POLLIN ? SO_RCVTIMEO : SO_SNDTIMEO, &tv,
+                   &len) == 0 &&
+        (tv.tv_sec > 0 || tv.tv_usec > 0))
+    {
+        left = (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000 - (now_ms() - since);
+        if (left <= 0)
+        {
+            return false;
+        }
+    }
+    p.fd = fd;
+    p.events = r == TLS_WANT_POLLIN ? POLLIN : POLLOUT;
+    p.revents = 0;
+    return poll(&p, 1, left > INT_MAX ? INT_MAX : (int)left) > 0;
+}
+
 /* The handshake on `conn`, which is freed if it fails. */
-static struct rs_tls *handshake(struct tls *conn, struct rs_buf *err)
+static struct rs_tls *handshake(struct tls *conn, int fd, struct rs_buf *err)
 {
     struct rs_tls *t;
     const char    *alpn;
     int            r;
+    long long      since = now_ms();
 
     do
     {
         r = tls_handshake(conn);
-    } while (r == TLS_WANT_POLLIN || r == TLS_WANT_POLLOUT);
+    } while (again(fd, r, since));
     if (r != 0)
     {
         why(err, "TLS handshake", tls_error(conn));
@@ -158,6 +211,7 @@ static struct rs_tls *handshake(struct tls *conn, struct rs_buf *err)
     }
     t = rs_xcalloc(1, sizeof *t);
     t->conn = conn;
+    t->fd = fd;
     alpn = tls_conn_alpn_selected(conn);
     if (alpn && strcmp(alpn, ALPN_NAME) == 0)
     {
@@ -175,7 +229,7 @@ struct rs_tls *rs_tls_accept(struct rs_tls_config *cfg, int fd, struct rs_buf *e
         why(err, "TLS", cfg->server ? tls_error(cfg->server) : "not a server's configuration");
         return NULL;
     }
-    return handshake(conn, err);
+    return handshake(conn, fd, err);
 }
 
 struct rs_tls *rs_tls_connect(struct rs_tls_config *cfg, int fd, const char *name,
@@ -195,7 +249,7 @@ struct rs_tls *rs_tls_connect(struct rs_tls_config *cfg, int fd, const char *nam
         tls_free(conn);
         return NULL;
     }
-    return handshake(conn, err);
+    return handshake(conn, fd, err);
 }
 
 /*
@@ -208,28 +262,35 @@ static bool peer_closed(struct rs_tls *t)
 {
     int         rv;
     const char *e;
+    long long   since = now_ms();
 
     do
     {
         rv = tls_close(t->conn);
-    } while (rv == TLS_WANT_POLLIN || rv == TLS_WANT_POLLOUT);
+    } while (again(t->fd, rv, since));
     t->closed = true;
+    if (rv == TLS_WANT_POLLIN || rv == TLS_WANT_POLLOUT)
+    {
+        return false;
+    }
     e = rv == 0 ? NULL : tls_error(t->conn);
     return !(e && strstr(e, "close notify"));
 }
 
 long rs_tls_read(struct rs_tls *t, void *buf, size_t len)
 {
-    ssize_t n;
+    ssize_t   n;
+    long long since;
 
     if (len > LONG_MAX)
     {
         len = LONG_MAX;
     }
+    since = now_ms();
     do
     {
         n = tls_read(t->conn, buf, len);
-    } while (n == TLS_WANT_POLLIN || n == TLS_WANT_POLLOUT);
+    } while (again(t->fd, n, since));
     if (n == 0 && !t->closed)
     {
         return peer_closed(t) ? 0 : -1;
@@ -243,9 +304,10 @@ bool rs_tls_write(struct rs_tls *t, const void *buf, size_t len)
 
     while (len > 0)
     {
-        ssize_t n = tls_write(t->conn, p, len);
+        long long since = now_ms();
+        ssize_t   n = tls_write(t->conn, p, len);
 
-        if (n == TLS_WANT_POLLIN || n == TLS_WANT_POLLOUT)
+        if (again(t->fd, n, since))
         {
             continue;
         }

@@ -4,10 +4,12 @@
  */
 #include "util.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 bool rs_quiet = false;
 
@@ -312,4 +314,44 @@ void rs_shell_word(struct rs_buf *b, const char *word)
         }
     }
     rs_buf_addc(b, '\'');
+}
+
+static const char *tmpfile_dir;
+
+void rs_set_tmpfile_dir(const char *dir)
+{
+    tmpfile_dir = dir;
+}
+
+FILE *rs_tmpfile(void)
+{
+    char *path;
+    int   fd;
+    FILE *fp;
+
+    if (!tmpfile_dir)
+    {
+        return tmpfile();
+    }
+    path = rs_xasprintf("%s/.restate-tmp.XXXXXX", tmpfile_dir);
+    fd = mkstemp(path);
+    if (fd < 0)
+    {
+        int saved = errno;
+
+        free(path);
+        errno = saved;
+        return NULL;
+    }
+    (void)unlink(path);
+    free(path);
+    fp = fdopen(fd, "w+b");
+    if (!fp)
+    {
+        int saved = errno;
+
+        (void)close(fd);
+        errno = saved;
+    }
+    return fp;
 }

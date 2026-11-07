@@ -1423,9 +1423,9 @@ restate: the repository is whole
 ```
 
 **`ingest`** puts packs and snapshots written elsewhere into a repository,
-refusing any that is not valid -- the check the planned restate-proxy (see
-the [roadmap](ROADMAP.md)) runs on every upload, so that a machine that only
-adds to its repository adds only what is whole. Each `PATH` is a pack's content, `NAME.tar.gz`, with its `.sum`, `.idx`
+refusing any that is not valid -- the check restate-proxy
+([its protocol](docs/proxy-protocol.md)) runs on every upload's commit, so
+that a machine that only adds to its repository adds only what is whole. Each `PATH` is a pack's content, `NAME.tar.gz`, with its `.sum`, `.idx`
 and any `.seek` beside it, or a snapshot's directory:
 
 ```console

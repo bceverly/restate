@@ -8,8 +8,10 @@
  */
 #include "test.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "grant.h"
 #include "serve.h"
@@ -70,9 +72,11 @@ static void mem_log(void *ctx, const char *line)
 
 /* The sessions there are, for the tests that use them: SID_READ and
  * SID_LOOK are web01's, SID_OTHER another client's, in `fake_repo`. */
-#define SID_READ  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-#define SID_LOOK  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-#define SID_OTHER "cccccccccccccccccccccccccccccccc"
+#define SID_READ   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define SID_LOOK   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define SID_OTHER  "cccccccccccccccccccccccccccccccc"
+#define SID_APPEND "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+#define SID_GONE   "ffffffffffffffffffffffffffffffff"   /* an append session with no staging */
 
 static const char *fake_repo;
 static bool        with_sessions;
@@ -87,11 +91,14 @@ static enum rs_proxy_found fake_session(void *ctx, const char *client, const cha
         return RS_PROXY_NOT_YOURS;
     }
     if (strcmp(client, "web01") != 0 ||
-        (strcmp(id, SID_READ) != 0 && strcmp(id, SID_LOOK) != 0))
+        (strcmp(id, SID_READ) != 0 && strcmp(id, SID_LOOK) != 0 &&
+         strcmp(id, SID_APPEND) != 0 && strcmp(id, SID_GONE) != 0))
     {
         return RS_PROXY_NO_SESSION;
     }
-    s->kind = strcmp(id, SID_READ) == 0 ? RS_PROXY_READ : RS_PROXY_LOOK;
+    s->kind = strcmp(id, SID_READ) == 0   ? RS_PROXY_READ
+              : strcmp(id, SID_LOOK) == 0 ? RS_PROXY_LOOK
+                                          : RS_PROXY_APPEND;
     return RS_PROXY_FOUND;
 }
 
@@ -111,11 +118,21 @@ static int fake_open(void *ctx, const char *client, enum rs_proxy_kind kind, cha
     return open_answer;
 }
 
-static void fake_release(void *ctx, const char *id, uint64_t bytes_out)
+static uint64_t released_in;
+static char     last_committed[64];
+
+static void fake_release(void *ctx, const char *id, uint64_t bytes_out, uint64_t bytes_in)
 {
     (void)ctx;
     (void)id;
     released += bytes_out;
+    released_in += bytes_in;
+}
+
+static void fake_committed(void *ctx, const char *id, const char *name)
+{
+    (void)ctx;
+    (void)snprintf(last_committed, sizeof(last_committed), "%s %s", id, name);
 }
 
 static int fake_renew(void *ctx, const char *client, const char *id, unsigned *lease)
@@ -134,8 +151,40 @@ static int fake_end(void *ctx, const char *client, const char *id)
 }
 
 static const struct rs_proxy_sessions fake_sessions = {
-    NULL, fake_open, fake_session, fake_release, fake_renew, fake_end,
+    NULL, fake_open, fake_session, fake_release, fake_committed, fake_renew, fake_end,
 };
+
+/* Where uploads go, and how a commit and a binding are answered, for the
+ * tests that set them. */
+static const char *fake_staging;
+static uint64_t    fake_max_staging;
+static bool        fake_commits;
+static int         commit_answer = 201;
+static bool        bind_answer = true;
+static unsigned    binds;
+
+static void fake_commit(void *ctx, const char *repository, const char *staging, const char *name,
+                        struct rs_proxy_committed *out)
+{
+    (void)ctx;
+    (void)repository;
+    (void)staging;
+    out->status = commit_answer;
+    out->pack_added = commit_answer == 201 && strncmp(name, "packs/", 6) == 0;
+    out->snapshot_added = commit_answer == 201 && strncmp(name, "snapshots/", 10) == 0;
+    out->reason = commit_answer == 422 ? "invalid" : commit_answer >= 400 ? "proxy-failed" : NULL;
+    rs_buf_addstr(&out->message, commit_answer == 422 ? "packs/P-0.tar.gz: it is not what its .sum "
+                                                        "says"
+                                                      : "the disk went away");
+}
+
+static bool fake_bind(void *ctx, const struct rs_grant *g)
+{
+    (void)ctx;
+    (void)g;
+    binds++;
+    return bind_answer;
+}
 
 /* Serves `in` with `grants`, at `now`: what was answered, and the log, in
  * *log (both the caller's to free). */
@@ -168,6 +217,13 @@ static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants
     {
         c.sessions = &fake_sessions;
     }
+    c.staging = fake_staging;
+    c.max_staging = fake_max_staging;
+    c.bind = fake_bind;
+    if (fake_commits)
+    {
+        c.commit = fake_commit;
+    }
     *served = rs_proxy_serve(&io, &c);
     *log = rs_buf_detach(&m.log);
     return rs_buf_detach(&m.out);
@@ -191,11 +247,13 @@ static int count(const char *hay, const char *needle)
 #define IN(sid) AUTH "Restate-Session: " sid "\r\n"
 
 /* `what`, asked in session `sid`, of the fake repository: the answer. */
+static size_t ngrants_asked = 1;
+
 static char *ask(const struct rs_grant *grant, const char *what, char **log)
 {
     unsigned served;
 
-    return serve(what, grant, 1, 0, &served, log);
+    return serve(what, grant, ngrants_asked, 0, &served, log);
 }
 
 /* The listing in `out`, past its head: "" if it has none. */
@@ -470,6 +528,212 @@ static void test_reading(const struct rs_grant *grant)
     free(dir);
 }
 
+#define PUT(sid, name, extra, body)                                                     \
+    "PUT /v1/web01/sessions/" sid "/files/" name " HTTP/1.1\r\nHost: p\r\n" AUTH extra \
+    "\r\n" body
+#define COMMIT(sid, name, extra)                                                         \
+    "POST /v1/web01/sessions/" sid "/commit/" name " HTTP/1.1\r\nHost: p\r\n" AUTH extra \
+    "\r\n"
+
+static void test_writing(const struct rs_grant *grants)
+{
+    char *dir = rs_test_tmpdir();
+    char *session = rs_xasprintf("%s/web01/" SID_APPEND, dir);
+    char *cmd = rs_xasprintf("mkdir -p '%s'", session);
+    char *out;
+    char *log;
+    char *got;
+    char *path;
+
+    CHECK_INT(system(cmd), 0);
+    free(cmd);
+    fake_repo = dir;
+    fake_staging = dir;
+    with_sessions = true;
+
+    TEST_CASE("serve: an upload, into the session's staging, whole, once all else is checked");
+    released_in = 0;
+    out = ask(grants, PUT(SID_APPEND, "packs/P-0.sum", "Expect: 100-continue\r\n"
+                          "Content-Length: 3\r\n", "abc") GET("/v1/", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\n");
+    CHECK_CONTAINS(out, "restate-proxy 1\n");
+    CHECK_CONTAINS(log, "status=201 bytes_in=3");
+    CHECK_INT((long long)released_in, 3);
+    path = rs_xasprintf("%s/packs/P-0.sum", session);
+    got = rs_test_slurp(path);
+    CHECK_STR(got ? got : "", "abc");
+    free(got);
+    free(out);
+    free(log);
+    /* Sent again, it replaces what was there: an upload that failed partway. */
+    out = ask(grants, PUT(SID_APPEND, "packs/P-0.sum", "Content-Length: 4\r\n", "abcd"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    got = rs_test_slurp(path);
+    CHECK_STR(got ? got : "", "abcd");
+    free(got);
+    free(path);
+    free(out);
+    free(log);
+    out = ask(grants, PUT(SID_APPEND, "snapshots/S1/index.json.gz", "Content-Length: 2\r\n", "ix"),
+              &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    path = rs_xasprintf("%s/snapshots/S1/index.json.gz", session);
+    CHECK(access(path, F_OK) == 0);
+    free(path);
+    free(out);
+    free(log);
+    out = ask(grants, PUT(SID_APPEND, "chunk-key", "Content-Length: 1\r\n", "k"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: an upload refused before a byte of it is read, and never told 100");
+    {
+        static const struct {
+            const char *in;
+            const char *says;
+        } refused[] = {
+            { PUT(SID_READ, "packs/P-0.sum", "Expect: 100-continue\r\nContent-Length: 3\r\n",
+                  "abc"),
+              "403 Forbidden" },
+            { PUT(SID_APPEND, "packs/P-0.sum", "Expect: 100-continue\r\nContent-Length: 5000\r\n",
+                  "abc"),
+              "413 Content Too Large" },
+            { PUT(SID_APPEND, "packs/P-0.sum", "Expect: 100-continue\r\n", ""),
+              "411 Length Required" },
+            { PUT(SID_APPEND, "snapshots/S1/index.json.gz",
+                  "Expect: 100-continue\r\nContent-Length: 3000000000\r\n", ""),
+              "413 Content Too Large" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
+        {
+            out = ask(grants, refused[i].in, &log);
+            CHECK_CONTAINS(out, refused[i].says);
+            CHECK(strstr(out, "100 Continue") == NULL);
+            free(out);
+            free(log);
+        }
+    }
+    out = ask(grants, PUT(SID_APPEND, "packs/P-0.sum", "Content-Length: 5000\r\n", "abc"), &log);
+    CHECK_CONTAINS(out, "Restate-Reason: too-large\r\n");
+    CHECK_CONTAINS(out, "Connection: close\r\n");
+    free(out);
+    free(log);
+    fake_max_staging = 10;
+    out = ask(grants, PUT(SID_APPEND, "packs/P-1.idx", "Content-Length: 20\r\n",
+                          "01234567890123456789"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 507 Insufficient Storage\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: storage-full\r\n");
+    free(out);
+    free(log);
+    /* What it replaces is not counted against it. */
+    out = ask(grants, PUT(SID_APPEND, "packs/P-0.sum", "Content-Length: 4\r\n", "wxyz"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    free(out);
+    free(log);
+    fake_max_staging = 0;
+
+    TEST_CASE("serve: an upload cut short keeps nothing, and ends the connection");
+    out = ask(grants, PUT(SID_APPEND, "packs/P-2.idx", "Content-Length: 10\r\n", "0123"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 400 Bad Request\r\n");
+    path = rs_xasprintf("%s/packs/P-2.idx", session);
+    CHECK(access(path, F_OK) != 0);
+    free(path);
+    path = rs_xasprintf("%s/packs/.P-2.idx.up", session);
+    CHECK(access(path, F_OK) != 0);
+    free(path);
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: an upload whose session has no staging is the proxy's failure");
+    out = ask(grants, PUT(SID_GONE, "packs/P-0.sum", "Content-Length: 1\r\n", "a"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
+    CHECK_CONTAINS(log, "upload-failed client=web01 error=\"the session's staging is not there\"");
+    free(out);
+    free(log);
+    /* A file in the way of a directory an upload needs. */
+    rs_test_write(session, "snapshots/S2", "", 0600);
+    out = ask(grants, PUT(SID_APPEND, "snapshots/S2/kit", "Content-Length: 1\r\n", "a"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a commit, its outcome said, and the session told of what it put there");
+    fake_commits = true;
+    last_committed[0] = '\0';
+    out = ask(grants, COMMIT(SID_APPEND, "packs/P-0", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    CHECK_STR(last_committed, SID_APPEND " packs/P-0");
+    free(out);
+    free(log);
+    commit_answer = 200;
+    last_committed[0] = '\0';
+    out = ask(grants, COMMIT(SID_APPEND, "snapshots/S1", "Content-Length: 0\r\n"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 200 OK\r\n");
+    CHECK_STR(last_committed, "");
+    free(out);
+    free(log);
+    commit_answer = 422;
+    out = ask(grants, COMMIT(SID_APPEND, "packs/P-0", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 422 Unprocessable Content\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: invalid\r\n");
+    CHECK_CONTAINS(out, "\r\n\r\npacks/P-0.tar.gz: it is not what its .sum says\n");
+    free(out);
+    free(log);
+    commit_answer = 500;
+    out = ask(grants, COMMIT(SID_APPEND, "packs/P-0", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
+    CHECK_CONTAINS(out, "the proxy failed; its log says why\n");
+    CHECK_CONTAINS(log, "commit-failed client=web01 name=packs/P-0 error=\"the disk went away\"");
+    free(out);
+    free(log);
+    commit_answer = 201;
+    out = ask(grants, COMMIT(SID_READ, "packs/P-0", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 403 Forbidden\r\n");
+    free(out);
+    free(log);
+    out = ask(grants, COMMIT(SID_APPEND, "packs/P-0", "Content-Length: 2\r\n") "ab", &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 400 Bad Request\r\n");
+    free(out);
+    free(log);
+    fake_commits = false;
+    /* The real one, which finds nothing uploaded by that name. */
+    out = ask(grants, COMMIT(SID_APPEND, "packs/P-9", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 422 Unprocessable Content\r\n");
+    CHECK_CONTAINS(out, "packs/P-9.tar.gz: not uploaded in this session\n");
+    free(out);
+    free(log);
+
+    TEST_CASE("serve: a connection is bound to its first good client, and no other's");
+    binds = 0;
+    out = ask(grants,
+              GET("/v1/web01/list/", IN(SID_LOOK)) GET("/v1/web01/list/", IN(SID_LOOK))
+                  GET("/v1/db01/list/", "Authorization: Bearer " OTHER "\r\n"),
+              &log);
+    CHECK_INT(binds, 1);
+    CHECK_INT(count(out, "HTTP/1.1 200 OK\r\n"), 2);
+    CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
+    free(out);
+    free(log);
+    bind_answer = false;
+    out = ask(grants, GET("/v1/web01/list/", IN(SID_LOOK)) GET("/v1/", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
+    CHECK_CONTAINS(out, "Connection: close\r\n");
+    CHECK(strstr(out, "restate-proxy 1") == NULL);
+    free(out);
+    free(log);
+    bind_answer = true;
+
+    with_sessions = false;
+    fake_staging = NULL;
+    fake_repo = NULL;
+    rs_test_rmtree(dir);
+    free(session);
+    free(dir);
+}
+
 void test_serve(void)
 {
     struct rs_grant grant;
@@ -639,6 +903,20 @@ void test_serve(void)
     }
 
     test_reading(&grant);
+    {
+        struct rs_grant both[2];
+
+        both[0] = grant;
+        memset(&both[1], 0, sizeof(both[1]));
+        rs_sha256_hex(OTHER, strlen(OTHER), hex);
+        text = rs_xasprintf("repository = /srv/d\noperations = read\ntoken_sha256 = %s\n", hex);
+        CHECK(rs_grant_parse("db01", text, strlen(text), &both[1], &err));
+        free(text);
+        ngrants_asked = 2;
+        test_writing(both);
+        ngrants_asked = 1;
+        rs_grant_free(&both[1]);
+    }
     rs_grant_free(&grant);
     rs_buf_free(&err);
 }

@@ -222,6 +222,11 @@ int main(int argc, char **argv)
         free(self);
         return test_tls_serve(argv + 2);
     }
+    if (argc == 6 && strcmp(argv[1], "--confine-test") == 0)
+    {
+        free(self);
+        return test_confine_run(argv + 2);
+    }
 #endif
     rs_test_argv0 = self;
     report_fd = dup(STDERR_FILENO);
@@ -279,6 +284,8 @@ int main(int argc, char **argv)
     test_tls();
     test_serve();
     test_sessions();
+    test_commit();
+    test_confine();
 #endif
     test_cmd();
 

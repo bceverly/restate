@@ -114,7 +114,11 @@ enum rs_repo_lock {
     /* As RS_REPO_WRITE, for capture --append-only: refused where adding a
      * snapshot would mean changing a file already there (making a version 1
      * repository version 2). A capture otherwise only ever adds files. */
-    RS_REPO_APPEND
+    RS_REPO_APPEND,
+    /* As RS_REPO_APPEND, with no lock taken: for a process whose lock
+     * another holds for it, all the while it has the repository open --
+     * restate-proxy's, whose listener holds a capture's session's lock. */
+    RS_REPO_HELD
 };
 
 struct rs_repo;
@@ -449,6 +453,11 @@ struct rs_repo_ingested {
     size_t   snapshots_added;
     size_t   snapshots_there;  /* the same snapshot was there already */
     uint64_t bytes;            /* copied in */
+    /* Why the last call failed, where it is not that what it was given is
+     * not valid: a different pack or snapshot has the name, or writing into
+     * the repository failed, as this errno says (ENOSPC, say). */
+    bool     taken;
+    int      sys_errno;
 };
 
 /*
@@ -472,6 +481,25 @@ struct rs_repo_ingested {
  */
 bool rs_repo_ingest(struct rs_repo *r, const char *path, struct rs_repo_ingested *out,
                     struct rs_buf *err);
+
+/*
+ * The chunk key at `path`, written elsewhere, put in place in `r` as `name`
+ * ("chunk-key" or "chunk-key.NAME") unless something of that name is there
+ * already, which is kept: *placed says which. Refused unless `r` is
+ * encrypted and it is a file encrypted as a chunk key is, no larger than
+ * restate writes one; out->sys_errno as for rs_repo_ingest.
+ */
+bool rs_repo_ingest_chunk_key(struct rs_repo *r, const char *path, const char *name, bool *placed,
+                              struct rs_repo_ingested *out, struct rs_buf *err);
+
+/*
+ * The pack `name` taken out of `r` again: its .idx first, so that nothing
+ * counts it from then on, and then its other files. For what put it there
+ * and then did not finish -- restate-proxy, ending a capture's session that
+ * committed packs and no snapshot -- as a local capture that fails takes out
+ * the packs it wrote.
+ */
+bool rs_repo_remove_pack(struct rs_repo *r, const char *name, struct rs_buf *err);
 
 /* ------------------------------------------------------------------------- */
 /* Checking                                                                  */

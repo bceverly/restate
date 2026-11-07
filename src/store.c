@@ -38,6 +38,211 @@ struct rs_store {
     char *dir;
 };
 
+/* ------------------------------------------------------------------------- */
+/* Directories reached only through descriptors                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * rs_store_confine's directories: each a path, and a descriptor open on it.
+ * Every path this file opens, makes, renames or removes that is at or below
+ * one of them is reached through its descriptor (openat(2) and the rest),
+ * and every other path as it is: with none of them -- every program but
+ * restate-proxy's connection process -- exactly what it always was.
+ */
+struct root {
+    char  *dir;
+    size_t len;
+    int    fd;
+};
+
+static struct root *roots;
+static size_t       nroots;
+
+/* The descriptor `path` is reached through, and its name from there, into
+ * *rel: AT_FDCWD and the path itself, where it is in none of the roots. */
+static int reach(const char *path, const char **rel)
+{
+    size_t i;
+
+    for (i = 0; i < nroots; i++)
+    {
+        const char *rest = path + roots[i].len;
+
+        if (strncmp(path, roots[i].dir, roots[i].len) == 0 && (*rest == '/' || *rest == '\0'))
+        {
+            while (*rest == '/')
+            {
+                rest++;
+            }
+            *rel = *rest ? rest : ".";
+            return roots[i].fd;
+        }
+    }
+    *rel = path;
+    return AT_FDCWD;
+}
+
+bool rs_store_confine(const char *const *dirs, size_t n, struct rs_buf *err)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        size_t len = strlen(dirs[i]);
+        int    fd = open(dirs[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+        if (fd < 0)
+        {
+            rs_buf_addf(err, "%s: %s", dirs[i], strerror(errno));
+            return false;
+        }
+        while (len > 1 && dirs[i][len - 1] == '/')
+        {
+            len--;
+        }
+        roots = rs_xreallocarray(roots, nroots + 1, sizeof(*roots));
+        roots[nroots].dir = rs_xstrndup(dirs[i], len);
+        roots[nroots].len = len;
+        roots[nroots].fd = fd;
+        nroots++;
+    }
+    return true;
+}
+
+void rs_store_unconfine(void)
+{
+    while (nroots > 0)
+    {
+        nroots--;
+        (void)close(roots[nroots].fd);
+        free(roots[nroots].dir);
+    }
+    free(roots);
+    roots = NULL;
+}
+
+static int p_open(const char *path, int flags, mode_t mode)
+{
+    const char *rel;
+    int         fd = reach(path, &rel);
+
+    return openat(fd, rel, flags, mode);
+}
+
+static int p_lstat(const char *path, struct stat *st)
+{
+    const char *rel;
+    int         fd = reach(path, &rel);
+
+    return fstatat(fd, rel, st, AT_SYMLINK_NOFOLLOW);
+}
+
+static DIR *p_opendir(const char *path)
+{
+    int  fd = p_open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    DIR *d;
+
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    d = fdopendir(fd);
+    if (!d)
+    {
+        int saved = errno;
+
+        (void)close(fd);
+        errno = saved;
+    }
+    return d;
+}
+
+static int p_unlink(const char *path)
+{
+    const char *rel;
+    int         fd = reach(path, &rel);
+
+    return unlinkat(fd, rel, 0);
+}
+
+static int p_rmdir(const char *path)
+{
+    const char *rel;
+    int         fd = reach(path, &rel);
+
+    return unlinkat(fd, rel, AT_REMOVEDIR);
+}
+
+static int p_mkdir(const char *path, mode_t mode)
+{
+    const char *rel;
+    int         fd = reach(path, &rel);
+
+    return mkdirat(fd, rel, mode);
+}
+
+static int p_rename(const char *from, const char *to)
+{
+    const char *ra;
+    const char *rb;
+    int         a = reach(from, &ra);
+    int         b = reach(to, &rb);
+
+    return renameat(a, ra, b, rb);
+}
+
+static int p_link(const char *from, const char *to)
+{
+    const char *ra;
+    const char *rb;
+    int         a = reach(from, &ra);
+    int         b = reach(to, &rb);
+
+    return linkat(a, ra, b, rb, 0);
+}
+
+/* mkdtemp(3), for `path` ending in "XXXXXX": through a root's descriptor,
+ * where it is in one, as mkdtemp itself cannot be. */
+static char *p_mkdtemp(char *path)
+{
+    static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    static unsigned   counter;
+    const char       *rel;
+    size_t            len = strlen(path);
+    unsigned          tries;
+
+    if (reach(path, &rel) == AT_FDCWD)
+    {
+        return mkdtemp(path);
+    }
+    if (len < 6 || strcmp(path + len - 6, "XXXXXX") != 0)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+    for (tries = 0; tries < 100; tries++)
+    {
+        unsigned long v = (unsigned long)getpid() * 2654435761UL + (unsigned long)time(NULL) +
+                          (unsigned long)counter++ * 40503UL;
+        size_t        i;
+
+        for (i = 0; i < 6; i++)
+        {
+            path[len - 6 + i] = digits[v % 36];
+            v /= 36;
+        }
+        if (p_mkdir(path, 0700) == 0)
+        {
+            return path;
+        }
+        if (errno != EEXIST)
+        {
+            return NULL;
+        }
+    }
+    errno = EEXIST;
+    return NULL;
+}
+
 struct rs_store *rs_store_local(const char *dir)
 {
     struct rs_store *st = rs_xcalloc(1, sizeof(*st));
@@ -87,7 +292,7 @@ int rs_store_stat(const struct rs_store *st, const char *name, struct rs_store_s
 {
     char       *path = rs_store_path(st, name);
     struct stat s;
-    int         rc = lstat(path, &s);
+    int         rc = p_lstat(path, &s);
     int         saved = errno;
 
     free(path);
@@ -119,7 +324,7 @@ char **rs_store_list(const struct rs_store *st, const char *name, rs_store_keep 
                      size_t *n)
 {
     char                *path = rs_store_path(st, name);
-    DIR                 *d = opendir(path);
+    DIR                 *d = p_opendir(path);
     int                  saved = errno;
     const struct dirent *de;
     char               **names = NULL;
@@ -168,7 +373,7 @@ bool rs_store_keep_all(const struct rs_store *st, const char *dir, const char *n
 int rs_store_open(const struct rs_store *st, const char *name)
 {
     char *path = rs_store_path(st, name);
-    int   fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int   fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
     int   saved = errno;
 
     free(path);
@@ -194,7 +399,7 @@ int rs_store_open_at(const struct rs_store *st, const char *name, uint64_t offse
 ssize_t rs_store_peek(const struct rs_store *st, const char *name, void *buf, size_t max)
 {
     char   *path = rs_store_path(st, name);
-    int     fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int     fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
     ssize_t got = -1;
     int     saved;
 
@@ -216,7 +421,7 @@ bool rs_store_read(const struct rs_store *st, const char *name, size_t max, stru
                    struct rs_buf *err)
 {
     char *path = rs_store_path(st, name);
-    int   fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int   fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
     char  chunk[65536];
     bool  ok = true;
 
@@ -350,7 +555,7 @@ static bool adopt(int fd, const char *path)
 /* The same for a directory just made, `path`. */
 static void adopt_dir(const char *path)
 {
-    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = p_open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
 
     (void)adopt(fd, path);
     if (fd >= 0)
@@ -381,7 +586,7 @@ void rs_store_set_refusing_creates(bool refuse)
  */
 static int create_new(const char *path)
 {
-    int         fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int         fd = p_open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat st;
 
     if (fd >= 0 && refusing_creates)
@@ -394,7 +599,7 @@ static int create_new(const char *path)
     {
         return fd;
     }
-    fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    fd = p_open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0);
     if (fd >= 0 &&
         (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 0 || st.st_nlink != 1))
     {
@@ -445,7 +650,7 @@ bool rs_store_write_new(const struct rs_store *st, const char *name, const void 
     if (!ok)
     {
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
-        (void)unlink(path);
+        (void)p_unlink(path);
     }
     free(path);
     return ok;
@@ -492,12 +697,12 @@ bool rs_store_replace(const struct rs_store *st, const char *name, const void *d
     /* Where protect made it and its directory immutable, root replaces it
      * all the same: a snapshot's list of packs, a pack's .sum. */
     (void)rs_fsflags_thaw(dir, &thawed);
-    (void)unlink(tmp_path);
+    (void)p_unlink(tmp_path);
     ok = rs_store_write_new(st, tmp, data, len, err);
     if (ok && rs_fsflags_rename(tmp_path, path) != 0)
     {
         rs_buf_addf(err, "%s: %s", path, strerror(errno));
-        (void)unlink(tmp_path);
+        (void)p_unlink(tmp_path);
         ok = false;
     }
     rs_fsflags_refreeze(&thawed);
@@ -512,7 +717,7 @@ int rs_store_rename(const struct rs_store *st, const char *from, const char *to,
 {
     char *a = rs_store_path(st, from);
     char *b = rs_store_path(st, to);
-    int   rc = thawed ? rs_fsflags_rename(a, b) : rename(a, b);
+    int   rc = thawed ? rs_fsflags_rename(a, b) : p_rename(a, b);
     int   saved = errno;
 
     free(a);
@@ -531,7 +736,7 @@ int rs_store_place_new(const struct rs_store *st, const char *from, const char *
     char *path = rs_store_path(st, to);
     int   rc = 1;
 
-    if (link(tmp, path) != 0)
+    if (p_link(tmp, path) != 0)
     {
         rc = errno == EEXIST ? 0 : -1;
         if (rc < 0 && (errno == EPERM || errno == EOPNOTSUPP || errno == ENOSYS ||
@@ -546,11 +751,11 @@ int rs_store_place_new(const struct rs_store *st, const char *from, const char *
             {
                 (void)close(fd);
                 rc = 1;
-                if (rename(tmp, path) != 0)
+                if (p_rename(tmp, path) != 0)
                 {
                     int saved = errno;
 
-                    (void)unlink(path);
+                    (void)p_unlink(path);
                     errno = saved;
                     rc = -1;
                 }
@@ -570,7 +775,7 @@ int rs_store_place_new(const struct rs_store *st, const char *from, const char *
 int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
 {
     char *path = rs_store_path(st, name);
-    int   rc = thawed ? rs_fsflags_unlink(path) : unlink(path);
+    int   rc = thawed ? rs_fsflags_unlink(path) : p_unlink(path);
     int   saved = errno;
 
     free(path);
@@ -581,7 +786,7 @@ int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
 int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed)
 {
     char *path = rs_store_path(st, name);
-    int   rc = thawed ? rs_fsflags_rmdir(path) : rmdir(path);
+    int   rc = thawed ? rs_fsflags_rmdir(path) : p_rmdir(path);
     int   saved = errno;
 
     free(path);
@@ -592,7 +797,7 @@ int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed
 int rs_store_make_dir(const struct rs_store *st, const char *name, unsigned mode, bool there_ok)
 {
     char *path = rs_store_path(st, name);
-    int   rc = mkdir(path, (mode_t)mode);
+    int   rc = p_mkdir(path, (mode_t)mode);
     int   saved = errno;
 
     if (rc != 0 && saved == EEXIST && there_ok)
@@ -616,7 +821,7 @@ char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
     char  *name = NULL;
 
     free(at);
-    if (mkdtemp(path))
+    if (p_mkdtemp(path))
     {
         adopt_dir(path);
         name = rs_xstrdup(path + skip);
@@ -633,7 +838,7 @@ char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
 void rs_store_sync_dir(const struct rs_store *st, const char *name)
 {
     char *path = rs_store_path(st, name);
-    int   fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int   fd = p_open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
 
     if (fd >= 0)
     {
@@ -783,7 +988,7 @@ int rs_store_lock(const struct rs_store *st, const char *name, bool shared, bool
                   bool *refused, struct rs_buf *err)
 {
     char *path = rs_store_path(st, name);
-    int   fd = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    int   fd = p_open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0);
 
     *refused = false;
     if (fd < 0)

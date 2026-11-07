@@ -43,6 +43,17 @@ struct rs_store *rs_store_at(const char *where);
 struct rs_store *rs_store_local(const char *dir);
 void rs_store_free(struct rs_store *st);
 
+/*
+ * From now on, every path at or below one of `dirs` -- each opened now -- is
+ * reached through a descriptor open on it, with openat(2) and the rest, and
+ * not by its path: for a process about to enter FreeBSD's capability mode,
+ * where a path is nothing and a descriptor is all there is. Paths elsewhere
+ * are reached as they always are. False, saying why, if one of `dirs`
+ * cannot be opened. rs_store_unconfine forgets them, for the tests.
+ */
+bool rs_store_confine(const char *const *dirs, size_t n, struct rs_buf *err);
+void rs_store_unconfine(void);
+
 /* Where the store is, for messages: the directory, for a local one. */
 const char *rs_store_where(const struct rs_store *st);
 /* Where `name` is, for messages: "DIR/NAME" -- or "DIR", for "", which names

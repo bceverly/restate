@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #include "restate.h"
 
@@ -75,5 +76,15 @@ bool rs_starts_with(const char *s, const char *prefix);
  * installer to run, from names that came from a captured tree.
  */
 void rs_shell_word(struct rs_buf *b, const char *word);
+
+/*
+ * A temporary file, as tmpfile(3) makes one -- open for reading and
+ * writing, its name already removed -- but in the directory
+ * rs_set_tmpfile_dir named, where it named one: for a process that may write
+ * only where it was confined to (restate-proxy's committer), as tmpfile(3)
+ * itself always writes in /tmp. NULL, errno set, if it could not be made.
+ */
+void  rs_set_tmpfile_dir(const char *dir);
+FILE *rs_tmpfile(void);
 
 #endif /* RESTATE_UTIL_H */

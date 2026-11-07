@@ -129,6 +129,11 @@ void test_request(void);
 void test_tls(void);
 void test_serve(void);
 void test_sessions(void);
+void test_commit(void);
+void test_confine(void);
+/* The confined half of test_confine, as `unittests --confine-test ROLE REPO
+ * STAGING OTHER`. */
+int  test_confine_run(char **args);
 /* The server half of test_tls, as `unittests --tls-serve FD CERT KEY HOW`. */
 int  test_tls_serve(char **args);
 #endif

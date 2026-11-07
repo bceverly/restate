@@ -1560,7 +1560,7 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
         ok = false;
     }
     rs_buf_free(&text);
-    if (ok && lock == RS_REPO_APPEND && r->version == 1)
+    if (ok && (lock == RS_REPO_APPEND || lock == RS_REPO_HELD) && r->version == 1)
     {
         rs_buf_addf(err, "%s: made by restate 1.3 or older, and adding to it would change its "
                     "marker, which --append-only does not; capture into it once without "
@@ -2241,7 +2241,7 @@ static bool parse_index(const struct rs_buf *gz, const char *label, struct rs_in
      * taken are the bytes that are read. */
     rs_sha256_hex(gz->data ? gz->data : "", gz->len, ix->part_sha256);
     rs_buf_init(&text);
-    tmp = tmpfile();
+    tmp = rs_tmpfile();
     ok = tmp && (gz->len == 0 || fwrite(gz->data ? gz->data : "", 1, gz->len, tmp) == gz->len) &&
          fflush(tmp) == 0 && lseek(fileno(tmp), 0, SEEK_SET) == 0;
     if (!ok)
@@ -3615,7 +3615,7 @@ static char *index_text(const struct rs_index *ix, size_t *len)
 /* `len` bytes, gzip'd, into `out`. */
 static bool gzip_bytes(const char *text, size_t len, struct rs_buf *out, struct rs_buf *err)
 {
-    FILE          *tmp = tmpfile();
+    FILE          *tmp = rs_tmpfile();
     struct rs_gzip gz;
     bool           ok;
 
@@ -4609,7 +4609,7 @@ static bool unseal(struct rs_repo_stream *s, uint32_t pack)
         return false;
     }
     memset(&tee, 0, sizeof(tee));
-    tee.to = tmpfile();
+    tee.to = rs_tmpfile();
     if (!tee.to)
     {
         s->unsealed_off = true;
@@ -5097,7 +5097,7 @@ static bool spool(struct rs_repo_stream *s)
 {
     unsigned char chunk[65536];
 
-    s->spool = tmpfile();
+    s->spool = rs_tmpfile();
     if (!s->spool)
     {
         rs_buf_addf(&s->err, "a temporary file: %s", strerror(errno));
@@ -6995,6 +6995,10 @@ static char *beside(const char *to)
                  : rs_xasprintf(".%s.%ld.tmp", to, (long)getpid());
 }
 
+/* The errno of the last stage_copy that failed once it had its source
+ * open: writing where it copies to, as a disk that is full fails. */
+static int copy_errno;
+
 /* The file `from` in `src`, byte for byte, as the new file `tmp` in `dst`,
  * synced. How many bytes into *bytes. */
 static bool stage_copy(const struct rs_store *src, const char *from, const struct rs_store *dst,
@@ -7046,6 +7050,7 @@ static bool stage_copy(const struct rs_store *src, const char *from, const struc
         (void)rs_store_remove(dst, tmp, false);
         free(a);
         free(b);
+        copy_errno = saved;
     }
     return ok;
 }
@@ -7068,6 +7073,7 @@ static bool copy_file(const struct rs_store *src, const char *from, const struct
         (void)rs_store_remove(dst, tmp, false);
         free(a);
         free(b);
+        copy_errno = saved;
         ok = false;
     }
     free(tmp);
@@ -8513,6 +8519,7 @@ static bool ingest_pack(struct rs_repo *r, const char *from, const char *name,
         } else
         {
             rs_buf_addf(err, "%s/packs/%s: there already, and not the same pack", r->dir, name);
+            out->taken = true;
             ok = false;
         }
         rs_buf_free(&text);
@@ -8536,6 +8543,10 @@ static bool ingest_pack(struct rs_repo *r, const char *from, const char *name,
         stage[i] = beside(final[i]);
         ok = stage_copy(src_st, src[i], r->st, stage[i], &bytes, err);
         staged = i + 1;
+        if (!ok)
+        {
+            out->sys_errno = copy_errno;
+        }
     }
     ok = ok && pack_staged_ok(r, name, stage, err);
     for (i = 0; ok && i < INGEST_EXT; i++)
@@ -8546,6 +8557,7 @@ static bool ingest_pack(struct rs_repo *r, const char *from, const char *name,
         }
         if (rs_store_rename(r->st, stage[i], final[i], false) != 0)
         {
+            out->sys_errno = errno;
             renamed_failed(r->st, final[i], err);
             ok = false;
         } else
@@ -8758,6 +8770,7 @@ static bool ingest_snapshot(struct rs_repo *r, const char *from, const char *nam
         {
             rs_buf_addf(err, "%s" RS_REPO_SEP "%s: there already, and not the same snapshot",
                         r->dir, name);
+            out->taken = true;
         }
         rs_buf_free(&ignore);
         free(there);
@@ -8769,6 +8782,10 @@ static bool ingest_snapshot(struct rs_repo *r, const char *from, const char *nam
     tmp = temp_dir(r->st, name, err);
     made = tmp != NULL;
     ok = made;
+    if (!made)
+    {
+        out->sys_errno = errno;
+    }
     for (i = 0; ok && i < SNAPSHOT_FILES; i++)
     {
         char *to = rs_xasprintf("%s/%s", tmp, snapshot_files[i]);
@@ -8776,6 +8793,10 @@ static bool ingest_snapshot(struct rs_repo *r, const char *from, const char *nam
         if (i < SNAPSHOT_NEEDS || rs_store_is_file(src, snapshot_files[i]))
         {
             ok = copy_file(src, snapshot_files[i], r->st, to, &bytes, err);
+            if (!ok)
+            {
+                out->sys_errno = copy_errno;
+            }
         }
         free(to);
     }
@@ -8785,6 +8806,7 @@ static bool ingest_snapshot(struct rs_repo *r, const char *from, const char *nam
         rs_store_sync_dir(r->st, tmp);
         if (rs_store_rename(r->st, tmp, final, false) != 0)
         {
+            out->sys_errno = errno;
             renamed_failed(r->st, final, err);
             ok = false;
         }
@@ -8816,6 +8838,9 @@ bool rs_repo_ingest(struct rs_repo *r, const char *path, struct rs_repo_ingested
     int                  saved = errno;
     bool                 ok;
 
+    out->taken = false;
+    out->sys_errno = 0;
+    copy_errno = 0;
     /* The last component, trailing slashes aside: path[base] to path[len]. */
     while (len > 1 && path[len - 1] == '/')
     {
@@ -8857,4 +8882,121 @@ bool rs_repo_ingest(struct rs_repo *r, const char *path, struct rs_repo_ingested
     rs_buf_addf(err, "%s: neither a pack (NAME.tar.gz, with its .sum and .idx beside it) nor a "
                      "snapshot's directory", path);
     return false;
+}
+
+/* Whether `name` is one a chunk key has: "chunk-key", or "chunk-key." and
+ * a name. */
+static bool chunk_key_name(const char *name)
+{
+    size_t len = strlen(RS_REPO_CHUNK_KEY);
+
+    return strncmp(name, RS_REPO_CHUNK_KEY, len) == 0 &&
+           (name[len] == '\0' || (name[len] == '.' && rs_repo_name_valid(name + len + 1)));
+}
+
+bool rs_repo_ingest_chunk_key(struct rs_repo *r, const char *path, const char *name, bool *placed,
+                              struct rs_repo_ingested *out, struct rs_buf *err)
+{
+    struct rs_store     *files = rs_store_local("");
+    struct rs_store_stat st;
+    char                *tmp;
+    uint64_t             bytes = 0;
+    int                  rc;
+    bool                 ok;
+
+    *placed = false;
+    out->taken = false;
+    out->sys_errno = 0;
+    copy_errno = 0;
+    if (!chunk_key_name(name))
+    {
+        rs_buf_addf(err, "%s: not a name a chunk key has", name);
+        rs_store_free(files);
+        return false;
+    }
+    if (!r->encrypted)
+    {
+        rs_buf_addf(err, "%s: a repository that is not encrypted has no chunk key", r->dir);
+        rs_store_free(files);
+        return false;
+    }
+    if (rs_store_stat(files, path, &st) != 0)
+    {
+        rs_buf_addf(err, "%s: %s", name, strerror(errno));
+        rs_store_free(files);
+        return false;
+    }
+    if (st.kind != RS_STORE_FILE)
+    {
+        rs_buf_addf(err, "%s: not a regular file", name);
+        rs_store_free(files);
+        return false;
+    }
+    if (st.size > 4096 || sealed_file(files, path) != 1)
+    {
+        rs_buf_addf(err, "%s: not a chunk key restate wrote", name);
+        rs_store_free(files);
+        return false;
+    }
+    /* Copied in beside where it goes, and then put there only if nothing is:
+     * two captures that each made one keep the first. */
+    tmp = rs_xasprintf("packs/.%s.%ld.in", RS_REPO_CHUNK_KEY, (long)getpid());
+    ok = stage_copy(files, path, r->st, tmp, &bytes, err);
+    rs_store_free(files);
+    if (!ok)
+    {
+        out->sys_errno = copy_errno;
+        free(tmp);
+        return false;
+    }
+    rc = rs_store_place_new(r->st, tmp, name);
+    if (rc < 0)
+    {
+        out->sys_errno = errno;
+        renamed_failed(r->st, name, err);
+    }
+    (void)rs_store_remove(r->st, tmp, false);
+    free(tmp);
+    *placed = rc == 1;
+    if (rc == 1)
+    {
+        out->bytes += bytes;
+    }
+    return rc >= 0;
+}
+
+bool rs_repo_remove_pack(struct rs_repo *r, const char *name, struct rs_buf *err)
+{
+    static const char *const order[] = { "idx", "tar.gz", "sum", "seek" };
+    size_t                   i;
+    bool                     ok = true;
+
+    if (!rs_repo_name_valid(name))
+    {
+        rs_buf_addf(err, "%s: not a name restate gives a pack", name);
+        return false;
+    }
+    for (i = 0; i < sizeof(order) / sizeof(order[0]); i++)
+    {
+        char *file = rs_xasprintf("packs/%s.%s", name, order[i]);
+
+        if (rs_store_remove(r->st, file, false) != 0 && errno != ENOENT)
+        {
+            char *where = rs_store_path(r->st, file);
+
+            rs_buf_addf(err, "%s%s: %s", err->len ? "; " : "", where, strerror(errno));
+            free(where);
+            ok = false;
+        }
+        free(file);
+        /* Without its .idx, nothing counts the rest: they are what an
+         * interrupted capture leaves, which prune clears. */
+        if (!ok && i == 0)
+        {
+            break;
+        }
+    }
+    rs_store_sync_dir(r->st, "packs");
+    list_packs(r);
+    return ok;
 }

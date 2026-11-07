@@ -439,6 +439,7 @@ machines may make one at once.
 | `422` | not what restate writes: the body says what is wrong                   |
 | `423` | the repository is busy: another capture, or a prune                    |
 | `431` | request line and headers over 8 KiB                                    |
+| `501` | an upload or a commit to a proxy with no staging it can use            |
 | `505` | an HTTP version other than 1.1                                         |
 | `503` | the proxy is at its limit of sessions; try again later                 |
 | `507` | the session's staging, or the disk, is full                            |
@@ -468,6 +469,7 @@ Restate-Reason: repository-version-1
 | `storage-full`           | `507` | the session's staging, or the disk, is full        | 2             |
 | `bad-request`            | `400`, `405`, `411`, `416`, `417`, `431`, `505` | not a request this protocol has | 2 |
 | `proxy-failed`           | `500` | the proxy failed; its log says why                 | 2             |
+| `not-implemented`        | `501` | the proxy takes no uploads: it has no staging      | 2             |
 
 A `name-taken` on committing a snapshot is not an error the client shows:
 it tries the next name. restate's result JSON for a run against a proxy
@@ -523,6 +525,7 @@ owner's or root's, that nobody else can read.
 restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
                       [--grants DIR] [--max-connections N] [--idle-timeout SECONDS]
                       [--max-sessions N] [--lease SECONDS]
+                      [--staging DIR] [--max-staging MIB]
 ```
 
 - `--listen` is `HOST:PORT`, `[ADDRESS]:PORT` for IPv6, or `:PORT` for every
@@ -543,6 +546,14 @@ restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
   asks the listener for it. Past `--max-sessions` (64), a session is refused
   with `503`. One idle for `--lease` seconds (300) is ended, and a request in
   it afterwards is `404`.
+- `--staging` is where an append session's uploads wait to be committed
+  (`/var/lib/restate-proxy/staging`), a directory of `CLIENT/ID` for each
+  session. It is made if it is not there (its parent has to be), and has to
+  be the proxy's user's alone (mode `0700`); otherwise nothing can be
+  uploaded, which the log says as the proxy starts, and an upload is `501`.
+  What sessions before a start left there is removed as it starts. One
+  session's staging holds at most `--max-staging` MiB (4096), past which an
+  upload is `507`.
 - `SIGTERM` or `SIGINT` stops it: it stops listening, ends every connection
   and every session, and exits 0.
 
@@ -551,15 +562,37 @@ listens on, the grants it read (`grants clients=N refused=M`) and each one
 it refused, with why (`grant-refused file=... error="..."`), each request
 (`request peer=... client=... method=... target=... status=... reason=...
 bytes=...`), each session opened (`session-open client=... kind=...`) and
-each ended (`session-end`, as above), and a session it could not open, with
-why (`session-refused client=... error="..."`). A token is never in it, nor
-a session's id.
+each ended (`session-end`, as above), a session it could not open, with
+why (`session-refused client=... error="..."`), and a commit or an upload
+that failed on its side, not the client's (`commit-failed client=...
+name=... error="..."`, `upload-failed`). A token is never in it, nor a
+session's id. It starts with a line of what it is: `started version=...
+tls="..." confinement="..."`.
 
-**Until uploads are implemented**, an upload or a commit that passes every
-check before its session is answered `501`, with `Restate-Reason:
-not-implemented`; and so an `append` session ends as `ended`, never `ok`,
-having committed nothing, and its `bytes_in` and `packs` are 0. This is not
-part of version 1 and goes once uploads are here.
+### Confinement
+
+A connection is one client's from its first good token: a request for any
+other client on it afterwards is `401`. From then on two processes serve
+it, each confined as tightly as what it does allows, so that a fault in the
+parser, or in what reads an upload, cannot reach another client's
+repository:
+
+- **the connection's** -- TLS, the requests, reading, uploads -- reads the
+  client's repository and writes its staging, runs no program and makes no
+  socket;
+- **the committer** -- the commits, which are `restate ingest`'s code --
+  reads the staging, writes the repository, and runs gzip, which reads what
+  a pack holds; it too makes no socket.
+
+| System  | How                                                                     |
+|---------|-------------------------------------------------------------------------|
+| OpenBSD | `unveil(2)` the repository, the staging and, for the committer, gzip; `pledge(2)` `stdio rpath wpath cpath`, and `fattr proc exec` for the committer |
+| Linux   | Landlock (kernel 5.13 or later): the same, with the system's programs and libraries (`/usr`, `/lib`...) read and run by the committer only; no TCP bind or connect; from Landlock's ABI 6, no signal or abstract socket outside. And a seccomp filter refusing sockets, `ptrace`, mounts, modules, BPF, namespaces, `io_uring` and the like, and, for the connection's process, running a program |
+| FreeBSD | Capsicum: the connection's process enters capability mode, reaching the repository and its staging through descriptors alone. The committer is not confined: a program cannot be run in capability mode |
+
+Elsewhere, and on a Linux kernel without Landlock, what cannot be is not, and
+the `confinement` the proxy says it has as it starts says so (`none`, or
+`seccomp` alone).
 
 ## Not in version 1
 

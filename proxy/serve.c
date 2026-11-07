@@ -40,6 +40,7 @@ struct answer {
     uint64_t      size;
     bool          partial;  /* 206, with Content-Range */
     int64_t       mtime;
+    uint64_t      bytes_in; /* of an upload's body, taken into staging */
 };
 
 static void answer_init(struct answer *a)
@@ -87,10 +88,14 @@ static const char *status_text(int status)
         return "Conflict";
     case 411:
         return "Length Required";
+    case 413:
+        return "Content Too Large";
     case 416:
         return "Range Not Satisfiable";
     case 417:
         return "Expectation Failed";
+    case 422:
+        return "Unprocessable Content";
     case 423:
         return "Locked";
     case 431:
@@ -101,6 +106,8 @@ static const char *status_text(int status)
         return "Service Unavailable";
     case 505:
         return "HTTP Version Not Supported";
+    case 507:
+        return "Insufficient Storage";
     default:
         return "Internal Server Error";
     }
@@ -123,7 +130,23 @@ static const char *error_text(int status, const char *reason)
     }
     if (strcmp(reason, "not-implemented") == 0)
     {
-        return "this restate-proxy does not take uploads yet\n";
+        return "this restate-proxy takes no uploads: it was started without staging\n";
+    }
+    if (strcmp(reason, "too-large") == 0)
+    {
+        return "larger than restate writes that file\n";
+    }
+    if (strcmp(reason, "storage-full") == 0)
+    {
+        return "the session's staging, or the disk, is full\n";
+    }
+    if (strcmp(reason, "name-taken") == 0)
+    {
+        return "a different pack or snapshot of that name is there\n";
+    }
+    if (strcmp(reason, "invalid") == 0)
+    {
+        return "not what restate writes\n";
     }
     if (strcmp(reason, "repository-version-1") == 0)
     {
@@ -486,6 +509,24 @@ struct body {
     bool                      read;     /* it was read, whole */
 };
 
+/* Up to `len` bytes of the body into `out`: what of it the buffer holds,
+ * else what the connection gives. How many, or 0 if the connection ended. */
+static size_t read_some(struct body *b, char *out, size_t len)
+{
+    long n;
+
+    if (b->at < b->have)
+    {
+        size_t k = b->have - b->at < len ? b->have - b->at : len;
+
+        memcpy(out, b->buf + b->at, k);
+        b->at += k;
+        return k;
+    }
+    n = b->io->read(b->io->ctx, out, len);
+    return n > 0 ? (size_t)n : 0;
+}
+
 /* The `len` bytes of the body into `out`: false if the connection ended
  * first. */
 static bool read_body(struct body *b, char *out, size_t len)
@@ -571,16 +612,327 @@ static void open_session(const struct rs_proxy_conn *c, const struct rs_request 
 }
 
 /* ------------------------------------------------------------------------ */
+/* Writing                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/* Where session `id` of `client` has its uploads. */
+static char *session_staging(const struct rs_proxy_conn *c, const char *client, const char *id)
+{
+    return rs_xasprintf("%s/%s/%s", c->staging, client, id);
+}
+
+/* A directory to look in, and how many levels below it to go. */
+struct to_walk {
+    char *dir;
+    int   depth;
+};
+
+/* The bytes the files in `st` hold, to `depth` levels below its top: as
+ * deep as staging goes, snapshots/NAME/FILE. */
+static uint64_t staged_bytes(const struct rs_store *st, int depth)
+{
+    struct to_walk *walk = rs_xmalloc(sizeof(*walk));
+    size_t          nwalk = 1;
+    uint64_t        total = 0;
+
+    walk[0].dir = rs_xstrdup("");
+    walk[0].depth = depth;
+    while (nwalk > 0)
+    {
+        struct to_walk at = walk[--nwalk];
+        size_t         n = 0;
+        size_t         i;
+        char         **names = rs_store_list(st, at.dir, rs_store_keep_all, NULL, &n);
+
+        for (i = 0; names && i < n; i++)
+        {
+            char                *full = full_name(at.dir, names[i]);
+            struct rs_store_stat is;
+            /* One gone since it was listed counts for nothing. */
+            bool                 there = rs_store_stat(st, full, &is) == 0;
+
+            if (there && is.kind == RS_STORE_FILE)
+            {
+                total += is.size;
+            } else if (there && is.kind == RS_STORE_DIR && at.depth > 0)
+            {
+                walk = rs_xreallocarray(walk, nwalk + 1, sizeof(*walk));
+                walk[nwalk].dir = full;
+                walk[nwalk++].depth = at.depth - 1;
+                full = NULL;
+            }
+            free(full);
+            free(names[i]);
+        }
+        free(names);
+        free(at.dir);
+    }
+    free(walk);
+    return total;
+}
+
+/* The directories an upload of `name` goes into, made: "packs", or
+ * "snapshots" and the snapshot's own. False, errno set, if one could not be. */
+static bool make_dirs_for(const struct rs_store *st, const char *name)
+{
+    const char *slash = strrchr(name, '/');
+    const char *p;
+
+    for (p = name; slash && (p = strchr(p, '/')) != NULL && p <= slash; p++)
+    {
+        char *dir = rs_xstrndup(name, (size_t)(p - name));
+        int   rc = rs_store_make_dir(st, dir, 0700, true);
+
+        free(dir);
+        if (rc != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Whether errno `e` is a full disk, or a full quota. */
+static bool full(int e)
+{
+#ifdef EDQUOT
+    if (e == EDQUOT)
+    {
+        return true;
+    }
+#endif
+    return e == ENOSPC;
+}
+
+/*
+ * PUT /v1/CLIENT/sessions/ID/files/NAME: the body, written into the
+ * session's staging as NAME, beside it first and renamed into place once it
+ * is whole, so that a name there is a whole upload or the one before it.
+ * Everything that refuses it is said before a byte of the body is read.
+ */
+static void upload(const struct rs_proxy_conn *c, const struct rs_request *req,
+                   const struct rs_route *route, const struct rs_proxy_session *s,
+                   struct body *b, struct answer *a)
+{
+    struct rs_store     *st;
+    struct rs_store_stat is;
+    char                *dir;
+    char                *tmp;
+    char                *buf;
+    const char          *slash;
+    uint64_t             max = c->max_staging ? c->max_staging : RS_PROXY_MAX_STAGING;
+    uint64_t             used;
+    uint64_t             left;
+    int                  fd;
+    int                  failure = 0;
+
+    if (s->kind != RS_PROXY_APPEND)
+    {
+        fail(a, 403, "forbidden");
+        return;
+    }
+    if (!req->has_length)
+    {
+        fail(a, 411, "bad-request");
+        return;
+    }
+    if (req->length > rs_upload_max(route->kind))
+    {
+        fail(a, 413, "too-large");
+        return;
+    }
+    dir = session_staging(c, route->client, route->session[0] ? route->session : req->session);
+    st = rs_store_local(dir);
+    if (rs_store_stat(st, "", &is) != 0 || is.kind != RS_STORE_DIR)
+    {
+        if (c->log)
+        {
+            char *line = rs_xasprintf("upload-failed client=%s error=\"the session's staging "
+                                      "is not there\"", route->client);
+
+            c->log(c->log_ctx, line);
+            free(line);
+        }
+        rs_store_free(st);
+        free(dir);
+        fail(a, 500, "proxy-failed");
+        return;
+    }
+    /* What staging holds, but the file this one replaces, and this one. */
+    used = staged_bytes(st, 2);
+    if (rs_store_stat(st, route->name, &is) == 0 && is.kind == RS_STORE_FILE)
+    {
+        used -= is.size < used ? is.size : used;
+    }
+    if (used > max || req->length > max - used)
+    {
+        rs_store_free(st);
+        free(dir);
+        fail(a, 507, "storage-full");
+        return;
+    }
+    if (!make_dirs_for(st, route->name))
+    {
+        int e = errno;
+
+        rs_store_free(st);
+        free(dir);
+        fail(a, full(e) ? 507 : 500, full(e) ? "storage-full" : "proxy-failed");
+        return;
+    }
+    if (req->expect_continue &&
+        !b->io->write(b->io->ctx, "HTTP/1.1 100 Continue\r\n\r\n", 25))
+    {
+        rs_store_free(st);
+        free(dir);
+        fail(a, 400, "bad-request");
+        a->close = true;
+        return;
+    }
+    slash = strrchr(route->name, '/');
+    tmp = slash ? rs_xasprintf("%.*s/.%s.up", (int)(slash - route->name), route->name, slash + 1)
+                : rs_xasprintf(".%s.up", route->name);
+    (void)rs_store_remove(st, tmp, false);
+    fd = rs_store_create(st, tmp);
+    if (fd < 0)
+    {
+        failure = errno;
+    }
+    buf = rs_xmalloc(CHUNK);
+    for (left = req->length; fd >= 0 && left > 0;)
+    {
+        size_t got = read_some(b, buf, left < (uint64_t)CHUNK ? (size_t)left : CHUNK);
+        size_t done = 0;
+
+        if (got == 0)
+        {
+            /* Cut short: nothing of it is kept, and there is no one to
+             * answer. */
+            break;
+        }
+        while (done < got)
+        {
+            ssize_t w = write(fd, buf + done, got - done);
+
+            if (w < 0 && errno == EINTR)
+            {
+                continue;
+            }
+            if (w <= 0)
+            {
+                failure = errno ? errno : EIO;
+                break;
+            }
+            done += (size_t)w;
+        }
+        if (failure)
+        {
+            break;
+        }
+        left -= got;
+    }
+    free(buf);
+    if (fd >= 0 && close(fd) != 0 && !failure)
+    {
+        failure = errno;
+    }
+    if (left == 0 && !failure && rs_store_rename(st, tmp, route->name, false) != 0)
+    {
+        failure = errno;
+    }
+    if (left > 0 || failure)
+    {
+        (void)rs_store_remove(st, tmp, false);
+        rs_store_free(st);
+        free(tmp);
+        free(dir);
+        /* What is left of the body is not read: the connection ends. */
+        if (left > 0 && !failure && fd >= 0)
+        {
+            fail(a, 400, "bad-request");
+        } else
+        {
+            fail(a, full(failure) ? 507 : 500, full(failure) ? "storage-full" : "proxy-failed");
+        }
+        a->close = true;
+        return;
+    }
+    b->read = true;
+    rs_store_free(st);
+    free(tmp);
+    free(dir);
+    a->status = 201;
+    a->bytes_in = req->length;
+}
+
+/* POST /v1/CLIENT/sessions/ID/commit/NAME: what staging holds for NAME,
+ * into the repository. */
+static void commit(const struct rs_proxy_conn *c, const struct rs_request *req,
+                   const struct rs_route *route, const struct rs_proxy_session *s,
+                   struct answer *a)
+{
+    struct rs_proxy_committed out;
+    char                     *dir;
+
+    if (s->kind != RS_PROXY_APPEND)
+    {
+        fail(a, 403, "forbidden");
+        return;
+    }
+    if (req->has_length && req->length > 0)
+    {
+        fail(a, 400, "bad-request");
+        return;
+    }
+    dir = session_staging(c, route->client, route->session);
+    rs_proxy_committed_init(&out);
+    if (c->commit)
+    {
+        c->commit(c->commit_ctx, s->repository, dir, route->name, &out);
+    } else
+    {
+        rs_proxy_commit(s->repository, dir, route->name, &out);
+    }
+    free(dir);
+    if (out.status == 200 || out.status == 201)
+    {
+        a->status = out.status;
+        if (out.pack_added || out.snapshot_added)
+        {
+            c->sessions->committed(c->sessions->ctx, route->session, route->name);
+        }
+    } else
+    {
+        fail(a, out.status, out.reason ? out.reason : "proxy-failed");
+        if ((out.status == 422 || out.status == 409) && out.message.len > 0)
+        {
+            rs_buf_reset(&a->body);
+            rs_buf_addf(&a->body, "%s\n", out.message.data);
+        } else if (c->log)
+        {
+            char *line = rs_xasprintf("commit-failed client=%s name=%s error=\"%s\"",
+                                      route->client, route->name,
+                                      out.message.data ? out.message.data : "");
+
+            c->log(c->log_ctx, line);
+            free(line);
+        }
+    }
+    rs_proxy_committed_free(&out);
+}
+
+/* ------------------------------------------------------------------------ */
 /* A request                                                                */
 /* ------------------------------------------------------------------------ */
 
 /* The answer to a whole head, `req`, by what it asks for. */
 static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
                    const struct rs_route *route, struct body *b, struct answer *a,
-                   char held[RS_SESSION_LEN + 1])
+                   char held[RS_SESSION_LEN + 1], char **bound)
 {
     struct rs_proxy_session s;
     const struct rs_grant  *g;
+    const char             *sid;
     int64_t                 now = c->now ? c->now : (int64_t)time(NULL);
 
     if (route->endpoint == RS_EP_HELLO)
@@ -612,6 +964,22 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 401, "unauthorized");
         return;
     }
+    /* The connection is this client's from its first good token on: bound
+     * to it, and no other's. */
+    if (!*bound)
+    {
+        if (c->bind && !c->bind(c->bind_ctx, g))
+        {
+            fail(a, 500, "proxy-failed");
+            a->close = true;
+            return;
+        }
+        *bound = rs_xstrdup(route->client);
+    } else if (strcmp(*bound, route->client) != 0)
+    {
+        fail(a, 401, "unauthorized");
+        return;
+    }
     if (route->endpoint == RS_EP_NONE)
     {
         fail(a, 404, "not-found");
@@ -622,7 +990,8 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 405, "bad-request");
         return;
     }
-    if (!c->sessions || route->endpoint == RS_EP_UPLOAD || route->endpoint == RS_EP_COMMIT)
+    if (!c->sessions ||
+        ((route->endpoint == RS_EP_UPLOAD || route->endpoint == RS_EP_COMMIT) && !c->staging))
     {
         fail(a, 501, "not-implemented");
         return;
@@ -653,18 +1022,20 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         }
         return;
     }
-    /* The session: given, the client's own, and not ended. */
+    /* The session: given, the client's own, and not ended -- in the path,
+     * for an upload and a commit, and in its header for the rest. */
     memset(&s, 0, sizeof(s));
-    if (req->session[0] == '\0')
+    sid = route->session[0] ? route->session : req->session;
+    if (sid[0] == '\0')
     {
         fail(a, 401, "unauthorized");
         return;
     }
-    switch (c->sessions->find(c->sessions->ctx, route->client, req->session, &s))
+    switch (c->sessions->find(c->sessions->ctx, route->client, sid, &s))
     {
     case RS_PROXY_FOUND:
         /* Held, its lease not running, until it is answered. */
-        memcpy(held, req->session, RS_SESSION_LEN + 1);
+        memcpy(held, sid, RS_SESSION_LEN + 1);
         break;
     case RS_PROXY_NOT_YOURS:
         fail(a, 401, "unauthorized");
@@ -674,12 +1045,21 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 404, "not-found");
         return;
     }
-    if (route->endpoint == RS_EP_LIST)
+    switch (route->endpoint)
     {
+    case RS_EP_LIST:
         list(&s, route->name, a);
-    } else
-    {
+        break;
+    case RS_EP_UPLOAD:
+        upload(c, req, route, &s, b, a);
+        break;
+    case RS_EP_COMMIT:
+        commit(c, req, route, &s, a);
+        break;
+    case RS_EP_FILE:
+    default:
         file(&s, req, route->name, route->kind, a);
+        break;
     }
 }
 
@@ -733,6 +1113,10 @@ static void log_request(const struct rs_proxy_conn *c, const struct rs_request *
     {
         rs_buf_addf(&line, " bytes=%" PRIu64, a->length);
     }
+    if (a->bytes_in > 0)
+    {
+        rs_buf_addf(&line, " bytes_in=%" PRIu64, a->bytes_in);
+    }
     if (why && *why)
     {
         /* A fixed phrase of the parser's: quoted, as it has blanks. */
@@ -747,6 +1131,7 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
     char     buf[RS_REQUEST_HEAD_MAX];
     size_t   have = 0;
     unsigned served = 0;
+    char    *bound = NULL;
 
     for (;;)
     {
@@ -768,6 +1153,7 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
             {
                 /* Closed, cut or idle: between requests that is the end of
                  * it, and in the middle of one there is no one to answer. */
+                free(bound);
                 return served;
             }
             have += (size_t)n;
@@ -784,6 +1170,7 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
             (void)respond(io, &a, false);
             answer_free(&a);
             rs_request_free(&req);
+            free(bound);
             return served + 1;
         }
         rs_route_parse(req.target, &route);
@@ -793,7 +1180,7 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
         body.at = (size_t)head;
         body.read = false;
         held[0] = '\0';
-        decide(c, &req, &route, &body, &a, held);
+        decide(c, &req, &route, &body, &a, held, &bound);
         /* A body that was not read ends the connection rather than be left
          * there unread: an Expect: 100-continue was not answered 100, and
          * so it was never sent. */
@@ -808,13 +1195,14 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
                             : a.fd >= 0                  ? a.length
                                                          : (uint64_t)a.body.len;
 
-            c->sessions->release(c->sessions->ctx, held, ok ? sent : 0);
+            c->sessions->release(c->sessions->ctx, held, ok ? sent : 0, a.bytes_in);
         }
         answer_free(&a);
         rs_route_free(&route);
         rs_request_free(&req);
         if (!ok || a.close)
         {
+            free(bound);
             return served;
         }
         /* What came after the head and its body, the start of the next

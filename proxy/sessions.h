@@ -17,9 +17,16 @@
  * lease starts again from then. One idle past its lease is ended, as one its
  * client ends is, and a request in it afterwards finds nothing.
  *
+ * An append session has a staging directory of its own, STAGING/CLIENT/ID,
+ * made as it opens, where its uploads go until they are committed. A
+ * session ends as a run does: its staging removed, and, if it committed
+ * packs and no snapshot -- a capture that failed or was stopped -- those
+ * packs taken out of the repository again.
+ *
  * Each session that ends is a line of the log, in key=value form:
  *
- *   session-end client=web01 kind=read seconds=812 bytes_in=0 bytes_out=1048576 packs=0 result=ok
+ *   session-end client=web01 kind=append seconds=812 bytes_in=2254857216 bytes_out=1048576
+ *               packs=68 snapshot=20261020T030000Z result=ok
  */
 #ifndef RESTATE_SESSIONS_H
 #define RESTATE_SESSIONS_H
@@ -37,9 +44,10 @@
 
 struct rs_sessions;
 
-/* A table of at most `max` sessions, each leased for `lease` seconds; each
- * line for the log given to `log`. */
-struct rs_sessions *rs_sessions_new(unsigned max, unsigned lease,
+/* A table of at most `max` sessions, each leased for `lease` seconds, an
+ * append session's uploads in `staging` (NULL: none); each line for the log
+ * given to `log`. */
+struct rs_sessions *rs_sessions_new(unsigned max, unsigned lease, const char *staging,
                                     void (*log)(void *ctx, const char *line), void *log_ctx);
 /* Ends every session, as the proxy stopping does, and frees the table. */
 void rs_sessions_free(struct rs_sessions *s, int64_t now);
@@ -67,8 +75,20 @@ int rs_sessions_open(struct rs_sessions *s, const struct rs_grant *g, enum rs_pr
 enum rs_proxy_found rs_sessions_find(struct rs_sessions *s, const char *client, const char *id,
                                      struct rs_proxy_session *out);
 /* The request that rs_sessions_find held `id` for is answered, having sent
- * `bytes_out`: its lease starts again at `now`. */
-void rs_sessions_release(struct rs_sessions *s, const char *id, uint64_t bytes_out, int64_t now);
+ * `bytes_out` and taken in `bytes_in`: its lease starts again at `now`. */
+void rs_sessions_release(struct rs_sessions *s, const char *id, uint64_t bytes_out,
+                         uint64_t bytes_in, int64_t now);
+
+/* Whether `id` is an append session of `client`'s: what a commit is in. */
+bool rs_sessions_appending(struct rs_sessions *s, const char *client, const char *id);
+
+/* A commit in append session `id` put "packs/NAME" or "snapshots/NAME",
+ * `name`, into its repository. */
+void rs_sessions_committed(struct rs_sessions *s, const char *id, const char *name);
+
+/* The staging of every session in `staging` removed, as the proxy starts:
+ * none of them is open. How many; what could not be, into `why`. */
+size_t rs_sessions_clean_staging(const char *staging, struct rs_buf *why);
 
 /* `client`'s session `id` renewed, or ended: 204, 404 for none, 401 for
  * another client's. */

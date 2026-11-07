@@ -64,7 +64,7 @@ static void usage(FILE *out)
                   "usage: restate-proxy --serve [--listen HOST:PORT]... [--cert FILE]\n"
                   "                     [--key FILE] [--grants DIR] [--max-connections N]\n"
                   "                     [--idle-timeout SECONDS] [--max-sessions N]\n"
-                  "                     [--lease SECONDS]\n"
+                  "                     [--lease SECONDS] [--staging DIR] [--max-staging MIB]\n"
                   "       restate-proxy --check-grants [DIR] [--json]\n"
                   "       restate-proxy --new-token FILE\n"
                   "       restate-proxy --version | --help\n"
@@ -81,6 +81,9 @@ static void usage(FILE *out)
                   "                        how long a connection may say nothing (60)\n"
                   "  --max-sessions N      sessions open at once (64)\n"
                   "  --lease SECONDS       how long a session lasts idle, unrenewed (300)\n"
+                  "  --staging DIR         where uploads wait to be committed\n"
+                  "                        (" RS_PROXY_STAGING ")\n"
+                  "  --max-staging MIB     the most one session's staging may hold (4096)\n"
                   "  --check-grants [DIR]  read every grant in DIR (" GRANTS_DIR ")\n"
                   "                        as the proxy would, and say what is wrong\n"
                   "                        with each; exit 2 if one is not good\n"
@@ -247,8 +250,10 @@ static int serve(int argc, char **argv)
         static const char *const names[] = { "--listen",          "--cert",
                                              "--key",             "--grants",
                                              "--max-connections", "--idle-timeout",
-                                             "--max-sessions",    "--lease" };
-        static const unsigned    most[] = { 0, 0, 0, 0, 100000u, 86400u, 100000u, 86400u };
+                                             "--max-sessions",    "--lease",
+                                             "--staging",         "--max-staging" };
+        static const unsigned    most[] = { 0, 0, 0, 0, 100000u, 86400u, 100000u, 86400u, 0,
+                                            1048576u };
         const char              *v = NULL;
         bool                     matched = false;
         size_t                   k;
@@ -283,6 +288,20 @@ static int serve(int argc, char **argv)
         } else if (k == 3)
         {
             o.grants = v;
+        } else if (k == 8)
+        {
+            o.staging = v;
+        } else if (k == 9)
+        {
+            unsigned mib = 0;
+
+            if (!number(v, most[k], &mib))
+            {
+                complain("%s: \"%s\" is not a number from 1 to %u", names[k], v, most[k]);
+                free(listen);
+                return RESTATE_EXIT_TROUBLE;
+            }
+            o.max_staging = (uint64_t)mib * 1024 * 1024;
         } else
         {
             unsigned *into[] = { NULL, NULL, NULL, NULL, &o.max_connections, &o.idle_timeout,

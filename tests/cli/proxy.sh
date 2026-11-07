@@ -178,11 +178,12 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   SERVER_PID=
 
   # start [OPTION...]: the server, on a port of the system's choosing, whose
-  # number is left in $PORT; its log is server.log.
+  # number is left in $PORT; its log is server.log. Its staging is its own,
+  # never a proxy's installed on this machine, unless told otherwise.
   start() {
     : > server.log
-    "$BIN" --serve --listen 127.0.0.1:0 --cert cert.pem --key key.pem --grants proxy.d "$@" \
-      2> server.log &
+    "$BIN" --serve --listen 127.0.0.1:0 --cert cert.pem --key key.pem --grants proxy.d \
+      --staging "$WORK/staging" "$@" 2> server.log &
     SERVER_PID=$!
     PORT=
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -317,6 +318,146 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   stop
   if [ "$STOPPED" = 0 ]; then ok; else fail "SIGTERM stops it, exiting 0: $STOPPED"; fi
   contains "$(cat server.log)" "stopped" "and it says so"
+
+  # Uploads and commits: a capture made by restate, its files sent through
+  # the proxy into another repository, committed, and that repository then
+  # checked by restate itself -- whole, and with nothing of the sessions'
+  # staging left. restate is the program beside this one, of the same build.
+  RESTATE="$(dirname "$BIN")/$(basename "$BIN" | sed 's/restate-proxy/restate/')"
+  if [ -x "$RESTATE" ] && "$RESTATE" init src > /dev/null 2>&1 &&
+    "$RESTATE" init dst > /dev/null 2>&1; then
+    mkdir -p tree/etc tree2/etc
+    printf 'one\n' > tree/etc/one.conf
+    printf 'two\n' > tree/etc/two.conf
+    printf 'other\n' > tree2/etc/other.conf
+    expect 0 "a capture to send" -- "$RESTATE" capture -r tree --os=linux -q -o src
+    SNAP=
+    for d in src/snapshots/*; do
+      [ -z "$SNAP" ] && SNAP="$(basename "$d")"
+    done
+    expect 0 "the capture's client's token" -- "$BIN" --new-token up01.token
+    printf 'repository = %s/dst\noperations = read, append\n%s\n' "$WORK" "$OUT" \
+      > proxy.d/.up01.tmp
+    chmod 0644 proxy.d/.up01.tmp
+    mv proxy.d/.up01.tmp proxy.d/up01.conf
+    UP="Authorization: Bearer $(cat up01.token)"
+    # What a session before this start left, which the start clears; and
+    # what is not a session's, which it leaves.
+    mkdir -p staging/up01/0123456789abcdef0123456789abcdef/packs staging/up01/keep
+    chmod -R 0700 staging
+    printf 'x' > staging/up01/0123456789abcdef0123456789abcdef/packs/.P.up
+    start --staging staging --max-staging 1
+    contains "$(cat server.log)" "removed=1" "what earlier sessions left in staging is removed"
+    if [ ! -e staging/up01/0123456789abcdef0123456789abcdef ] && [ -d staging/up01/keep ]; then
+      ok
+    else
+      fail "only a session's staging is removed"
+    fi
+    contains "$(cat server.log)" "confinement=\"" "it says how it confines"
+
+    ask -H "$UP" -d append /v1/up01/sessions
+    is 201 "an append session to send a capture in"
+    CAP="$(printf '%s\n' "$OUT" | tail -n 1)"
+    if [ -d "staging/up01/$CAP" ]; then ok; else fail "its staging is made"; fi
+    for idx in src/packs/*.idx; do
+      pack="$(basename "$idx" .idx)"
+      for ext in tar.gz sum idx seek; do
+        [ -f "src/packs/$pack.$ext" ] || continue
+        ask -H "$UP" -T "src/packs/$pack.$ext" "/v1/up01/sessions/$CAP/files/packs/$pack.$ext"
+        is 201 "the upload of a pack's $ext"
+      done
+      ask -X POST -H "$UP" "/v1/up01/sessions/$CAP/commit/packs/$pack"
+      is 201 "the commit of a pack"
+      # Sent again, as when a commit's answer was lost: there already.
+      for ext in tar.gz sum idx; do
+        ask -H "$UP" -T "src/packs/$pack.$ext" "/v1/up01/sessions/$CAP/files/packs/$pack.$ext"
+      done
+      ask -X POST -H "$UP" "/v1/up01/sessions/$CAP/commit/packs/$pack"
+      is 200 "the same pack committed again"
+    done
+    for f in index.json.gz index.sig kit info packs; do
+      [ -f "src/snapshots/$SNAP/$f" ] || continue
+      ask -H "$UP" -T "src/snapshots/$SNAP/$f" "/v1/up01/sessions/$CAP/files/snapshots/$SNAP/$f"
+      is 201 "the upload of the snapshot's $f"
+    done
+    ask -X POST -H "$UP" "/v1/up01/sessions/$CAP/commit/snapshots/$SNAP"
+    is 201 "the commit of the snapshot, last"
+    [ "$CODE" = 201 ] || printf '%s\n' "$OUT" | tail -n 2 | sed 's/^/        /'
+    ask -X POST -H "$UP" "/v1/up01/sessions/$CAP/commit/snapshots/NOTHING"
+    is 422 "a snapshot not uploaded"
+    contains "$OUT" "Restate-Reason: invalid" "is not one"
+    lacks "$OUT" "$WORK" "and what is said of it names no path of the host's"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$CAP/end"
+    is 204 "the capture's session ended"
+    contains "$(cat server.log)" "snapshot=$SNAP result=ok" "logged as a capture that finished"
+    contains "$(cat server.log)" "kind=append seconds=" "with what it took"
+    lacks "$(sed -n '/session-end client=up01/p' server.log)" "bytes_in=0 " "and what it sent"
+    if [ ! -e "staging/up01/$CAP" ]; then ok; else fail "its staging is gone with it"; fi
+    expect 0 "the repository it went into is whole" -- "$RESTATE" check dst
+    expect 0 "and has the snapshot" -- "$RESTATE" snapshots dst
+    contains "$OUT" "$SNAP" "by its name"
+
+    # A capture that dies before its snapshot: what it committed is taken
+    # out again as its session ends, as a local capture's packs are.
+    expect 0 "a second capture" -- "$RESTATE" capture -r tree2 --os=linux -q -o src
+    NEW=
+    for idx in src/packs/*.idx; do
+      pack="$(basename "$idx" .idx)"
+      [ -e "dst/packs/$pack.idx" ] || NEW="$pack"
+    done
+    ask -H "$UP" -d append /v1/up01/sessions
+    DIES="$(printf '%s\n' "$OUT" | tail -n 1)"
+    for ext in tar.gz sum idx seek; do
+      [ -f "src/packs/$NEW.$ext" ] || continue
+      ask -H "$UP" -T "src/packs/$NEW.$ext" "/v1/up01/sessions/$DIES/files/packs/$NEW.$ext"
+    done
+    ask -X POST -H "$UP" "/v1/up01/sessions/$DIES/commit/packs/$NEW"
+    is 201 "a pack of a capture that will not finish"
+    if [ -e "dst/packs/$NEW.idx" ]; then ok; else fail "is in the repository while it runs"; fi
+    ask -X POST -H "$UP" "/v1/up01/sessions/$DIES/end"
+    is 204 "and its session ended with no snapshot"
+    if [ ! -e "dst/packs/$NEW.idx" ] && [ ! -e "dst/packs/$NEW.tar.gz" ]; then
+      ok
+    else
+      fail "takes the pack it committed out again"
+    fi
+    contains "$(cat server.log)" "packs=1 result=ended" "logged as ended, with its pack"
+    expect 0 "the repository is still whole" -- "$RESTATE" check dst
+
+    # Refused: past a file's size, past the session's staging, in a session
+    # that only reads, and anything after a connection is another client's.
+    ask -H "$UP" -d append /v1/up01/sessions
+    REF="$(printf '%s\n' "$OUT" | tail -n 1)"
+    head -c 5000 /dev/zero > big.sum
+    ask -H "$UP" -T big.sum "/v1/up01/sessions/$REF/files/packs/P-1.sum"
+    is 413 "a .sum larger than restate writes one"
+    contains "$OUT" "Restate-Reason: too-large" "says so"
+    head -c 2000000 /dev/zero > big.idx
+    ask -H "$UP" -T big.idx "/v1/up01/sessions/$REF/files/packs/P-1.idx"
+    is 507 "more than --max-staging"
+    contains "$OUT" "Restate-Reason: storage-full" "says so"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$REF/end"
+    ask -H "$UP" -d read /v1/up01/sessions
+    RD="$(printf '%s\n' "$OUT" | tail -n 1)"
+    ask -H "$UP" -T tree/etc/one.conf "/v1/up01/sessions/$RD/files/packs/P-1.sum"
+    is 403 "an upload in a read session"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$RD/end"
+    OUT="$(curl -s --cacert cert.pem --resolve "localhost:$PORT:127.0.0.1" \
+      -H "$UP" "https://localhost:$PORT/v1/up01/list/" \
+      --next -s --cacert cert.pem --resolve "localhost:$PORT:127.0.0.1" -o /dev/null \
+      -w 'second=%{http_code} connects=%{num_connects}' -H "Authorization: Bearer $TOKEN" \
+      -d look "https://localhost:$PORT/v1/web01/sessions" 2> /dev/null)"
+    # Only where curl kept the one connection for both, as it does.
+    case "$OUT" in
+      *"connects=0"*) contains "$OUT" "second=401" "a connection bound to one client is no other's" ;;
+      *) printf '  - curl made a second connection; the binding was not tried\n' ;;
+    esac
+    lacks "$(cat server.log)" "confine-failed" "every connection was confined"
+    lacks "$(cat server.log)" "commit-failed" "and no commit failed"
+    stop
+  else
+    printf '  - uploads not run: restate is not beside %s\n' "$BIN"
+  fi
 
   # A connection that says nothing: refused past --max-connections, and
   # dropped after --idle-timeout.

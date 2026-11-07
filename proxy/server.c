@@ -23,7 +23,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "commit.h"
+#include "confine.h"
 #include "grant.h"
+#include "repo.h"
 #include "restate.h"
 #include "serve.h"
 #include "sessions.h"
@@ -302,7 +305,10 @@ static bool grants_changed(const struct grants *gs, const char *dir)
  *
  *   O CLIENT KIND          open        201 ID LEASE, or the status
  *   F CLIENT ID            find        0 KIND REPOSITORY, 1 (none), 2 (another's)
- *   R ID BYTES             release     ok
+ *   R ID OUT IN            release     ok
+ *   C ID NAME              committed   ok
+ *   H CLIENT ID            holds       0 if this child holds append session ID of
+ *                                      CLIENT's, 1 if not -- the committer's question
  *   N CLIENT ID            renew       204 LEASE, or the status
  *   E CLIENT ID            end         the status
  *
@@ -414,9 +420,18 @@ static enum rs_proxy_found ask_find(void *ctx, const char *client, const char *i
     return RS_PROXY_FOUND;
 }
 
-static void ask_release(void *ctx, const char *id, uint64_t bytes_out)
+static void ask_release(void *ctx, const char *id, uint64_t bytes_out, uint64_t bytes_in)
 {
-    char *q = rs_xasprintf("R %s %" PRIu64 "\n", id, bytes_out);
+    char *q = rs_xasprintf("R %s %" PRIu64 " %" PRIu64 "\n", id, bytes_out, bytes_in);
+    char  a[16];
+
+    (void)ask(ctx, q, a, sizeof(a));
+    free(q);
+}
+
+static void ask_committed(void *ctx, const char *id, const char *name)
+{
+    char *q = rs_xasprintf("C %s %s\n", id, name);
     char  a[16];
 
     (void)ask(ctx, q, a, sizeof(a));
@@ -461,18 +476,314 @@ static bool tls_write(void *ctx, const void *buf, size_t len)
     return rs_tls_write(ctx, buf, len);
 }
 
+/*
+ * The committer: a process of the connection's own, made when the connection
+ * is bound to a client whose grant allows append, that does its commits
+ * (commit.h) -- the one that writes the repository and runs gzip, so that
+ * the connection's process need do neither. It is told only a commit's name
+ * and its session's id, each checked again here, and works out the
+ * repository and the staging from what it was made for, never from what it
+ * is told. Nor does it take the connection's word that the session is one:
+ * before each commit it asks the listener, on the connection's own pair,
+ * whether this connection holds an append session of that id for its
+ * client -- so that nothing is ever committed without the session's lock
+ * held, by a connection whose process a fault has taken over:
+ *
+ *   ID NAME                 STATUS ADDED BYTES REASON MESSAGE
+ *
+ * ADDED is "p" for a pack the commit put there, "s" for a snapshot, "-" for
+ * neither; REASON "-" for none; MESSAGE the rest of the line.
+ */
+
+/* Whether `name` is what a commit names. */
+static bool commit_name_ok(const char *name)
+{
+    if (strncmp(name, "packs/", 6) == 0)
+    {
+        return rs_repo_name_valid(name + 6);
+    }
+    if (strncmp(name, "snapshots/", 10) == 0)
+    {
+        return rs_repo_name_valid(name + 10);
+    }
+    return strcmp(name, "chunk-key") == 0 ||
+           (strncmp(name, "chunk-key.", 10) == 0 && rs_repo_name_valid(name + 10));
+}
+
+static bool session_id_ok(const char *id)
+{
+    return strlen(id) == RS_SESSION_LEN && strspn(id, "0123456789abcdef") == RS_SESSION_LEN;
+}
+
+/* A line from `fd`, without its newline: false at the end, or past `size`. */
+static bool read_line(int fd, char *line, size_t size)
+{
+    size_t got = 0;
+
+    while (got + 1 < size)
+    {
+        ssize_t n = read(fd, line + got, 1);
+
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (n <= 0)
+        {
+            return false;
+        }
+        if (line[got] == '\n')
+        {
+            line[got] = '\0';
+            return true;
+        }
+        got++;
+    }
+    return false;
+}
+
+/* Whether the listener, on `ipc`, says this connection holds append session
+ * `id` of `client`'s. */
+static bool listener_says_held(int ipc, const char *client, const char *id)
+{
+    char *q = rs_xasprintf("H %s %s\n", client, id);
+    char  a[16];
+    bool  ok = write(ipc, q, strlen(q)) == (ssize_t)strlen(q) && read_line(ipc, a, sizeof(a)) &&
+              strcmp(a, "0") == 0;
+
+    free(q);
+    return ok;
+}
+
+/* The committer's life: its questions on `fd`, answered, until it closes. */
+static int committer(int fd, int ipc, const struct rs_grant *g, const char *staging)
+{
+    const char *repository = g->repository;
+
+    char          line[ASK_MAX];
+    struct rs_buf why;
+
+    /* What a commit reads through gzip it writes to a file first (an
+     * index), which is made in the client's staging: it may write nowhere
+     * else. */
+    rs_set_tmpfile_dir(staging);
+    rs_buf_init(&why);
+    if (!rs_confine(RS_CONFINE_COMMITTER, repository, staging, &why))
+    {
+        say("confine-failed role=committer error=\"%s\"", why.data ? why.data : "");
+        rs_buf_free(&why);
+        return 1;
+    }
+    rs_buf_free(&why);
+    while (read_line(fd, line, sizeof(line)))
+    {
+        struct rs_proxy_committed out;
+        struct rs_buf             answer;
+        char                     *name = strchr(line, ' ');
+        size_t                    i;
+
+        rs_proxy_committed_init(&out);
+        if (name)
+        {
+            *name++ = '\0';
+        }
+        if (!name || !session_id_ok(line) || !commit_name_ok(name))
+        {
+            out.status = 500;
+            out.reason = "proxy-failed";
+            rs_buf_addstr(&out.message, "the committer was asked something it does not do");
+        } else if (!listener_says_held(ipc, g->client, line))
+        {
+            out.status = 403;
+            out.reason = "forbidden";
+            rs_buf_addstr(&out.message, "not in an append session this connection holds");
+        } else
+        {
+            char *dir = rs_xasprintf("%s/%s", staging, line);
+
+            rs_proxy_commit(repository, dir, name, &out);
+            free(dir);
+        }
+        for (i = 0; out.message.data && i < out.message.len; i++)
+        {
+            if (out.message.data[i] == '\n')
+            {
+                out.message.data[i] = ' ';
+            }
+        }
+        rs_buf_init(&answer);
+        rs_buf_addf(&answer, "%d %s %" PRIu64 " %s %s\n", out.status,
+                    out.pack_added ? "p" : out.snapshot_added ? "s" : "-", out.bytes,
+                    out.reason ? out.reason : "-", out.message.data ? out.message.data : "");
+        if (write(fd, answer.data, answer.len) != (ssize_t)answer.len)
+        {
+            rs_buf_free(&answer);
+            rs_proxy_committed_free(&out);
+            break;
+        }
+        rs_buf_free(&answer);
+        rs_proxy_committed_free(&out);
+    }
+    return 0;
+}
+
+/* What a connection's process holds of its binding. */
+struct binding {
+    int         conn_fd;        /* the connection, which the committer closes */
+    int         ipc_fd;         /* the listener's pair, likewise */
+    const char *staging;        /* the proxy's: STAGING */
+    char       *client_staging; /* STAGING/CLIENT, once bound */
+    pid_t       committer;
+    int         fd;             /* the committer's end, -1 while there is none */
+};
+
+/* The reason a committer's answer gave, as the protocol has it: one of the
+ * fixed words, never what the line said otherwise. */
+static const char *known_reason(const char *word)
+{
+    static const char *const reasons[] = { "name-taken", "invalid", "storage-full",
+                                           "forbidden", "proxy-failed" };
+    size_t                   i;
+
+    for (i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++)
+    {
+        if (strcmp(word, reasons[i]) == 0)
+        {
+            return reasons[i];
+        }
+    }
+    return NULL;
+}
+
+/* rs_proxy_conn.commit: asked of the committer. */
+static void ask_commit(void *ctx, const char *repository, const char *staging, const char *name,
+                       struct rs_proxy_committed *out)
+{
+    struct binding *b = ctx;
+    const char     *slash = strrchr(staging, '/');
+    char           *q;
+    char            a[ASK_MAX];
+    char           *p;
+    char           *added;
+    char           *bytes;
+    char           *reason;
+
+    (void)repository;
+    out->status = 500;
+    out->reason = "proxy-failed";
+    if (b->fd < 0 || !slash)
+    {
+        rs_buf_addstr(&out->message, "there is no committer");
+        return;
+    }
+    q = rs_xasprintf("%s %s\n", slash + 1, name);
+    if (write(b->fd, q, strlen(q)) != (ssize_t)strlen(q) || !read_line(b->fd, a, sizeof(a)))
+    {
+        free(q);
+        rs_buf_addstr(&out->message, "the committer did not answer");
+        return;
+    }
+    free(q);
+    added = strchr(a, ' ');
+    bytes = added ? strchr(added + 1, ' ') : NULL;
+    reason = bytes ? strchr(bytes + 1, ' ') : NULL;
+    p = reason ? strchr(reason + 1, ' ') : NULL;
+    if (!p)
+    {
+        rs_buf_addstr(&out->message, "the committer's answer was not one");
+        return;
+    }
+    *added++ = '\0';
+    *bytes++ = '\0';
+    *reason++ = '\0';
+    *p++ = '\0';
+    out->status = (int)strtol(a, NULL, 10);
+    out->pack_added = out->status == 201 && strcmp(added, "p") == 0;
+    out->snapshot_added = out->status == 201 && strcmp(added, "s") == 0;
+    out->bytes = strtoull(bytes, NULL, 10);
+    out->reason = known_reason(reason);
+    if (out->status != 200 && out->status != 201 && !out->reason)
+    {
+        out->status = 500;
+        out->reason = "proxy-failed";
+    }
+    rs_buf_addstr(&out->message, p);
+}
+
+/* rs_proxy_conn.bind: the connection bound to the client of grant `g`. Its
+ * staging is made, its committer started, and then this process confined
+ * to the client's repository and its staging. */
+static bool bind_client(void *ctx, const struct rs_grant *g)
+{
+    struct binding *b = ctx;
+    struct rs_buf   why;
+    int             pair[2];
+    bool            ok;
+
+    if (b->staging && (g->operations & RS_GRANT_APPEND) != 0)
+    {
+        b->client_staging = rs_xasprintf("%s/%s", b->staging, g->client);
+        if (mkdir(b->client_staging, 0700) != 0 && errno != EEXIST)
+        {
+            say("bind-failed client=%s error=\"%s: %s\"", g->client, b->client_staging,
+                strerror(errno));
+            return false;
+        }
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+        {
+            say("bind-failed client=%s error=\"socketpair: %s\"", g->client, strerror(errno));
+            return false;
+        }
+        (void)fflush(NULL);
+        b->committer = fork();
+        if (b->committer < 0)
+        {
+            say("bind-failed client=%s error=\"fork: %s\"", g->client, strerror(errno));
+            (void)close(pair[0]);
+            (void)close(pair[1]);
+            return false;
+        }
+        if (b->committer == 0)
+        {
+            int status;
+
+            /* Nothing of the connection's but the listener's pair, to ask
+             * it whether a commit is in a session: not its socket. */
+            (void)close(b->conn_fd);
+            (void)close(pair[0]);
+            status = committer(pair[1], b->ipc_fd, g, b->client_staging);
+            (void)close(pair[1]);
+            (void)close(b->ipc_fd);
+            exit(status);
+        }
+        (void)close(pair[1]);
+        b->fd = pair[0];
+    }
+    rs_buf_init(&why);
+    ok = rs_confine(RS_CONFINE_CONNECTION, g->repository, b->client_staging, &why);
+    if (!ok)
+    {
+        say("confine-failed client=%s role=connection error=\"%s\"", g->client,
+            why.data ? why.data : "");
+    }
+    rs_buf_free(&why);
+    return ok;
+}
+
 /* In the child: the connection `fd` from `peer`, served, asking the
  * listener on `ipc` for its sessions, and its end. */
 static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *peer,
-                       const struct grants *gs, unsigned idle)
+                       const struct grants *gs, const struct rs_proxy_options *o)
 {
     struct rs_proxy_sessions sessions;
     struct rs_proxy_conn     c;
     struct rs_proxy_io       io;
+    struct binding           b;
     struct timeval           tv;
     struct rs_buf            err;
     struct rs_tls           *t;
     struct asker            *k = rs_xcalloc(1, sizeof(*k));
+    unsigned                 idle = o->idle_timeout ? o->idle_timeout : RS_PROXY_IDLE_TIMEOUT;
 
     tv.tv_sec = (time_t)idle;
     tv.tv_usec = 0;
@@ -493,19 +804,37 @@ static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *p
     sessions.open = ask_open;
     sessions.find = ask_find;
     sessions.release = ask_release;
+    sessions.committed = ask_committed;
     sessions.renew = ask_renew;
     sessions.end = ask_end;
+    memset(&b, 0, sizeof(b));
+    b.conn_fd = fd;
+    b.ipc_fd = ipc;
+    b.staging = o->staging;
+    b.fd = -1;
     memset(&c, 0, sizeof(c));
     c.grants = gs->g;
     c.ngrants = gs->n;
     c.peer = peer;
     c.log = log_line;
     c.sessions = &sessions;
+    c.staging = o->staging;
+    c.max_staging = o->max_staging;
+    c.bind = bind_client;
+    c.bind_ctx = &b;
+    c.commit = ask_commit;
+    c.commit_ctx = &b;
     io.ctx = t;
     io.read = tls_read;
     io.write = tls_write;
     (void)rs_proxy_serve(&io, &c);
     rs_tls_close(t);
+    if (b.fd >= 0)
+    {
+        (void)close(b.fd);
+        (void)waitpid(b.committer, NULL, 0);
+    }
+    free(b.client_staging);
     free(k);
     return 0;
 }
@@ -530,7 +859,7 @@ static void forget_child(struct children *ch, unsigned i, struct rs_sessions *s)
 {
     if (ch->c[i].held[0])
     {
-        rs_sessions_release(s, ch->c[i].held, 0, (int64_t)time(NULL));
+        rs_sessions_release(s, ch->c[i].held, 0, 0, (int64_t)time(NULL));
     }
     if (ch->c[i].fd >= 0)
     {
@@ -615,7 +944,7 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
              * before is let go first. */
             if (c->held[0])
             {
-                rs_sessions_release(s, c->held, 0, now);
+                rs_sessions_release(s, c->held, 0, 0, now);
             }
             (void)snprintf(c->held, sizeof(c->held), "%s", rest);
             rs_buf_addf(out, "0 %s %s\n", rs_proxy_kind_name(found.kind), found.repository);
@@ -630,11 +959,30 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
         }
     } else if (q[0] == 'R')
     {
-        /* "R ID BYTES": the id where the client is elsewhere. */
-        rs_sessions_release(s, client, strtoull(rest, NULL, 10), now);
+        /* "R ID OUT IN": the id where the client is elsewhere. */
+        const char *in = strchr(rest, ' ');
+        uint64_t    bytes_in = in ? strtoull(in + 1, NULL, 10) : 0;
+
+        rs_sessions_release(s, client, strtoull(rest, NULL, 10), bytes_in, now);
         if (strcmp(c->held, client) == 0)
         {
             c->held[0] = '\0';
+        }
+        rs_buf_addstr(out, "ok\n");
+    } else if (q[0] == 'H')
+    {
+        /* The committer's, before each commit: asked of the listener's own
+         * table, not of the connection, whose word it does not take. */
+        bool held = strcmp(c->held, rest) == 0 && rs_sessions_appending(s, client, rest);
+
+        rs_buf_addstr(out, held ? "0\n" : "1\n");
+    } else if (q[0] == 'C')
+    {
+        /* "C ID NAME": only the session this child holds, as it is the one
+         * its commit was in. */
+        if (strcmp(c->held, client) == 0)
+        {
+            rs_sessions_committed(s, client, rest);
         }
         rs_buf_addstr(out, "ok\n");
     } else if (q[0] == 'N')
@@ -700,7 +1048,7 @@ static bool hear_child(struct children *ch, unsigned i, const struct grants *gs,
 /* Accepts what is waiting on `lfd`, and gives it a child. */
 static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
                        const struct grants *gs, struct children *ch, struct rs_sessions *s,
-                       unsigned idle)
+                       const struct rs_proxy_options *o)
 {
     struct sockaddr_storage sa;
     socklen_t               len = sizeof(sa);
@@ -770,7 +1118,7 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
         (void)signal(SIGTERM, SIG_DFL);
         (void)signal(SIGINT, SIG_DFL);
         (void)signal(SIGCHLD, SIG_DFL);
-        status = serve_child(tls, fd, pair[1], peer, gs, idle);
+        status = serve_child(tls, fd, pair[1], peer, gs, o);
         (void)close(fd);
         (void)close(pair[1]);
         /* exit, not _exit: what a coverage build counts is written then. */
@@ -825,9 +1173,52 @@ static void handle(int sig)
     (void)sigaction(sig, &sa, NULL);
 }
 
+/*
+ * The staging directory, made if it is not there (its parent has to be) and
+ * only its owner's, and emptied of what sessions before this start left:
+ * its path as it really is, for the confinement's sake, or NULL -- said --
+ * if it cannot be had, and then nothing can be uploaded.
+ */
+static char *staging_dir(const char *dir)
+{
+    struct rs_buf why;
+    struct stat   st;
+    char         *real;
+    size_t        removed;
+
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+    {
+        say("staging dir=%s error=\"%s\"; nothing can be uploaded", dir, strerror(errno));
+        return NULL;
+    }
+    /* NULL: the path is allocated, as long as it is. */
+    real = realpath(dir, NULL); /* Flawfinder: ignore */
+    if (!real || stat(real, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        say("staging dir=%s error=\"not a directory\"; nothing can be uploaded", dir);
+        free(real);
+        return NULL;
+    }
+    if (st.st_uid != geteuid() || (st.st_mode & 077) != 0)
+    {
+        say("staging dir=%s error=\"not this user's alone (it is mode %03o)\"; nothing can be "
+            "uploaded", real, (unsigned)(st.st_mode & 0777));
+        free(real);
+        return NULL;
+    }
+    rs_buf_init(&why);
+    removed = rs_sessions_clean_staging(real, &why);
+    say("staging dir=%s removed=%zu%s%s%s", real, removed, why.len ? " error=\"" : "",
+        why.len ? why.data : "", why.len ? "\"" : "");
+    rs_buf_free(&why);
+    return real;
+}
+
 int rs_proxy_run(const struct rs_proxy_options *o)
 {
     static const char *const every[] = { ":" RS_PROXY_PORT };
+    struct rs_proxy_options  opts = *o;
+    char                    *staging;
     struct rs_tls_config    *tls;
     struct pollfd           *pfd;
     struct children          ch;
@@ -836,7 +1227,6 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     struct rs_sessions      *sessions;
     const char *const       *listen = o->nlisten ? o->listen : every;
     size_t                   nlisten = o->nlisten ? o->nlisten : 1;
-    unsigned                 idle = o->idle_timeout ? o->idle_timeout : RS_PROXY_IDLE_TIMEOUT;
     int                      lfds[LISTEN_MAX];
     size_t                   nl = 0;
     size_t                   i;
@@ -898,13 +1288,15 @@ int rs_proxy_run(const struct rs_proxy_options *o)
 
     memset(&gs, 0, sizeof(gs));
     read_grants(&gs, o->grants);
+    staging = staging_dir(o->staging ? o->staging : RS_PROXY_STAGING);
+    opts.staging = staging;
     ch.max = o->max_connections ? o->max_connections : RS_PROXY_MAX_CONNECTIONS;
     ch.n = 0;
     ch.c = rs_xcalloc(ch.max, sizeof(*ch.c));
     pfd = rs_xcalloc(LISTEN_MAX + 1 + ch.max, sizeof(*pfd));
-    sessions = rs_sessions_new(o->max_sessions, o->lease, log_line, NULL);
-    say("started version=%s tls=\"%s\" max_connections=%u max_sessions=%u lease=%u",
-        RESTATE_VERSION, rs_tls_library(), ch.max,
+    sessions = rs_sessions_new(o->max_sessions, o->lease, staging, log_line, NULL);
+    say("started version=%s tls=\"%s\" confinement=\"%s\" max_connections=%u max_sessions=%u "
+        "lease=%u", RESTATE_VERSION, rs_tls_library(), rs_confine_how(), ch.max,
         o->max_sessions ? o->max_sessions : RS_PROXY_MAX_SESSIONS, rs_sessions_lease(sessions));
 
     while (!got_stop)
@@ -949,7 +1341,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
                 ch.c[j].fd = -1;
                 if (ch.c[j].held[0])
                 {
-                    rs_sessions_release(sessions, ch.c[j].held, 0, (int64_t)time(NULL));
+                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, (int64_t)time(NULL));
                     ch.c[j].held[0] = '\0';
                 }
             }
@@ -973,7 +1365,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         {
             if (pfd[i].revents & POLLIN)
             {
-                accept_one(lfds[i], lfds, nl, tls, &gs, &ch, sessions, idle);
+                accept_one(lfds[i], lfds, nl, tls, &gs, &ch, sessions, &opts);
             }
         }
     }
@@ -989,6 +1381,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     free(pfd);
     rs_grants_free(gs.g, gs.n);
     rs_tls_config_free(tls);
+    free(staging);
     (void)close(wake[0]);
     (void)close(wake[1]);
     wake[0] = wake[1] = -1;

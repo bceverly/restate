@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "grant.h"
 #include "sessions.h"
@@ -38,6 +39,12 @@ static char *make_repo(const char *dir, const char *name, int version)
                   0644);
     rs_test_write(repo, "lock", "", 0644);
     rs_test_write(repo, "readers", "", 0644);
+    {
+        char *packs = rs_xasprintf("%s/packs", repo);
+
+        CHECK(mkdir(packs, 0755) == 0);
+        free(packs);
+    }
     return repo;
 }
 
@@ -63,6 +70,7 @@ void test_sessions(void)
     char                   *repo = make_repo(dir, "r", 2);
     char                   *old = make_repo(dir, "old", 1);
     char                   *none = rs_xasprintf("%s/none", dir);
+    char                   *staging = rs_xasprintf("%s/staging", dir);
     struct rs_grant         rw;
     struct rs_grant         ro;
     struct rs_grant         other;
@@ -82,7 +90,8 @@ void test_sessions(void)
     grant_of("web03", none, "read", &missing);
     rs_buf_init(&logged);
     rs_buf_init(&why);
-    s = rs_sessions_new(3, 10, keep_line, NULL);
+    CHECK(mkdir(staging, 0700) == 0);
+    s = rs_sessions_new(3, 10, staging, keep_line, NULL);
 
     TEST_CASE("sessions: the kinds there are, by their words");
     {
@@ -138,8 +147,8 @@ void test_sessions(void)
     CHECK_CONTAINS(logged.data, "session-end client=ro kind=read seconds=4000");
     CHECK_CONTAINS(logged.data, "result=expired");
     CHECK_INT(rs_sessions_find(s, "ro", b, &found), RS_PROXY_NO_SESSION);
-    rs_sessions_release(s, a, 1234, 5000);
-    rs_sessions_release(s, "dddddddddddddddddddddddddddddddd", 1, 5000);
+    rs_sessions_release(s, a, 1234, 0, 5000);
+    rs_sessions_release(s, "dddddddddddddddddddddddddddddddd", 1, 0, 5000);
     /* Let go, its lease starts again from then. */
     CHECK_INT((long long)rs_sessions_expire(s, 5009), 0);
     CHECK_INT(rs_sessions_renew(s, "web01", a, 5008), 204);
@@ -162,7 +171,7 @@ void test_sessions(void)
 
     TEST_CASE("sessions: ended as the proxy stops; forgotten by a process forked from it");
     {
-        struct rs_sessions *t = rs_sessions_new(0, 0, NULL, NULL);
+        struct rs_sessions *t = rs_sessions_new(0, 0, NULL, NULL, NULL);
 
         CHECK_INT((long long)rs_sessions_lease(t), RS_PROXY_LEASE);
         CHECK_INT(rs_sessions_open(t, &ro, RS_PROXY_READ, 1, b, &why), 201);
@@ -175,6 +184,108 @@ void test_sessions(void)
     CHECK_CONTAINS(logged.data, "result=ended");
     rs_sessions_free(NULL, 0);
 
+    TEST_CASE("sessions: an append session's staging, made as it opens and gone as it ends");
+    s = rs_sessions_new(4, 10, staging, keep_line, NULL);
+    rs_buf_reset(&logged);
+    CHECK_INT(rs_sessions_open(s, &rw, RS_PROXY_APPEND, 100, a, &why), 201);
+    {
+        char *made = rs_xasprintf("%s/web01/%s", staging, a);
+        char *p;
+
+        CHECK(access(made, F_OK) == 0);
+        /* An upload, and two packs its commits put there: one taken out
+         * again, as the session ends with no snapshot, and one not. */
+        rs_test_write(made, "upload", "x", 0600);
+        rs_test_write(repo, "packs/P-1.tar.gz", "content", 0644);
+        rs_test_write(repo, "packs/P-1.sum", "sum", 0644);
+        rs_test_write(repo, "packs/P-1.idx", "idx", 0644);
+        rs_test_write(repo, "packs/P-2.idx", "idx", 0644);
+        CHECK(rs_sessions_appending(s, "web01", a));
+        CHECK(!rs_sessions_appending(s, "ro", a));
+        CHECK(!rs_sessions_appending(s, "web01", "dddddddddddddddddddddddddddddddd"));
+        CHECK_INT(rs_sessions_find(s, "web01", a, &found), RS_PROXY_FOUND);
+        rs_sessions_committed(s, a, "packs/P-1");
+        rs_sessions_committed(s, a, "packs/../x");
+        rs_sessions_committed(s, "dddddddddddddddddddddddddddddddd", "packs/P-2");
+        rs_sessions_release(s, a, 10, 4096, 101);
+        CHECK_INT(rs_sessions_end(s, "web01", a, 102), 204);
+        CHECK_CONTAINS(logged.data, "kind=append seconds=2 bytes_in=4096 bytes_out=10 packs=1 "
+                                    "result=ended");
+        CHECK(access(made, F_OK) != 0);
+        p = rs_xasprintf("%s/packs/P-1.idx", repo);
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        p = rs_xasprintf("%s/packs/P-1.tar.gz", repo);
+        CHECK(access(p, F_OK) != 0);
+        free(p);
+        p = rs_xasprintf("%s/packs/P-2.idx", repo);
+        CHECK(access(p, F_OK) == 0);
+        free(p);
+        free(made);
+    }
+
+    TEST_CASE("sessions: one that committed its snapshot keeps its packs, and ends as ok");
+    rs_buf_reset(&logged);
+    CHECK_INT(rs_sessions_open(s, &rw, RS_PROXY_APPEND, 200, a, &why), 201);
+    CHECK_INT(rs_sessions_find(s, "web01", a, &found), RS_PROXY_FOUND);
+    rs_sessions_committed(s, a, "packs/P-2");
+    rs_sessions_committed(s, a, "snapshots/20261020T030000Z");
+    rs_sessions_release(s, a, 0, 0, 200);
+    /* A read session hears of no commits. */
+    CHECK_INT(rs_sessions_open(s, &ro, RS_PROXY_READ, 200, b, &why), 201);
+    rs_sessions_committed(s, b, "packs/P-2");
+    CHECK_INT(rs_sessions_end(s, "ro", b, 201), 204);
+    CHECK_CONTAINS(logged.data, "kind=read seconds=1 bytes_in=0 bytes_out=0 packs=0 result=ok");
+    rs_sessions_free(s, 260);
+    CHECK_CONTAINS(logged.data, "kind=append seconds=60 bytes_in=0 bytes_out=0 packs=1 "
+                                "snapshot=20261020T030000Z result=ok");
+    {
+        char *p = rs_xasprintf("%s/packs/P-2.idx", repo);
+
+        CHECK(access(p, F_OK) == 0);
+        free(p);
+    }
+
+    TEST_CASE("sessions: staging that cannot be made refuses the session");
+    {
+        char               *file = rs_xasprintf("%s/afile", dir);
+        struct rs_sessions *t;
+
+        rs_test_write(dir, "afile", "", 0644);
+        t = rs_sessions_new(2, 10, file, NULL, NULL);
+        rs_buf_reset(&why);
+        CHECK_INT(rs_sessions_open(t, &rw, RS_PROXY_APPEND, 1, a, &why), 500);
+        CHECK_CONTAINS(why.data, "afile/web01");
+        /* Its lock was let go with it. */
+        CHECK_INT(rs_sessions_open(t, &other, RS_PROXY_LOOK, 1, a, &why), 201);
+        rs_sessions_free(t, 2);
+        free(file);
+    }
+
+    TEST_CASE("sessions: what sessions before a start left in staging, removed");
+    {
+        struct rs_buf left;
+        char         *deep = rs_xasprintf("%s/web01/%s/snapshots/S", staging,
+                                          "0123456789abcdef0123456789abcdef");
+        char         *cmd = rs_xasprintf("mkdir -p '%s' '%s/web01/keep' '%s/not..a-client'", deep,
+                                         staging, staging);
+
+        CHECK_INT(system(cmd), 0);
+        free(cmd);
+        rs_test_write(deep, "index.json.gz", "x", 0600);
+        rs_test_write(staging, "web01/0123456789abcdef0123456789abcdef/packs.up", "x", 0600);
+        rs_buf_init(&left);
+        CHECK_INT((long long)rs_sessions_clean_staging(staging, &left), 1);
+        CHECK_STR(left.data ? left.data : "", "");
+        CHECK(access(deep, F_OK) != 0);
+        cmd = rs_xasprintf("%s/web01/keep", staging);
+        CHECK(access(cmd, F_OK) == 0);
+        free(cmd);
+        CHECK_INT((long long)rs_sessions_clean_staging("/nonexistent/staging", &left), 0);
+        rs_buf_free(&left);
+        free(deep);
+    }
+
     rs_grant_free(&rw);
     rs_grant_free(&ro);
     rs_grant_free(&other);
@@ -186,5 +297,6 @@ void test_sessions(void)
     free(repo);
     free(old);
     free(none);
+    free(staging);
     free(dir);
 }

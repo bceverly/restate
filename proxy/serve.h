@@ -12,12 +12,17 @@
  * -- the head, the client, the token against the client's grant, the name,
  * the method -- and then sessions opened, renewed and ended, and, in one,
  * what reads: a directory's listing, and a file, whole or a range of it, or
- * only what HEAD says of one. Uploads and commits are answered 501
- * (not-implemented) until they are here.
+ * only what HEAD says of one; and, in an append session, uploads into its
+ * staging and commits from there into the repository (commit.h).
  *
  * The sessions themselves are the caller's (rs_proxy_conn.sessions): each
  * of those requests asks them, by its client and id. Without them, every
  * request that needs a session is answered 501.
+ *
+ * A connection is one client's: the first request whose token is good for a
+ * client binds the connection to it (rs_proxy_conn.bind, where the process
+ * confines itself to that client's repository), and a request for any other
+ * client on it afterwards is 401.
  *
  * The connection is reached through `rs_proxy_io`, not TLS itself, so that
  * the tests can serve one from memory.
@@ -29,6 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "commit.h"
 #include "grant.h"
 
 struct rs_proxy_io {
@@ -77,7 +83,11 @@ struct rs_proxy_sessions {
     /* The session `id` of `client`, into *s, held until release. */
     enum rs_proxy_found (*find)(void *ctx, const char *client, const char *id,
                                 struct rs_proxy_session *s);
-    void                (*release)(void *ctx, const char *id, uint64_t bytes_out);
+    void                (*release)(void *ctx, const char *id, uint64_t bytes_out,
+                                   uint64_t bytes_in);
+    /* A commit in `id` put something there that was not: the pack
+     * "packs/NAME" or the snapshot "snapshots/NAME", by `name`. */
+    void                (*committed)(void *ctx, const char *id, const char *name);
     int                 (*renew)(void *ctx, const char *client, const char *id, unsigned *lease);
     int                 (*end)(void *ctx, const char *client, const char *id);
 };
@@ -93,7 +103,24 @@ struct rs_proxy_conn {
     void                  *log_ctx;
     /* NULL where there are none: 501 for whatever needs one. */
     const struct rs_proxy_sessions *sessions;
+    /* Where an append session's uploads go, STAGING/CLIENT/ID, which the
+     * sessions make; NULL: uploads are 501. */
+    const char            *staging;
+    uint64_t               max_staging;  /* bytes one session's staging may hold; 0: the default */
+    /* The connection bound to the client of grant `g`, at its first good
+     * token: false, and the request is 500 and the connection ended, if it
+     * could not be. NULL binds it to nothing. */
+    bool                   (*bind)(void *ctx, const struct rs_grant *g);
+    void                  *bind_ctx;
+    /* A commit, as rs_proxy_commit does it -- which it is, if NULL. */
+    void                   (*commit)(void *ctx, const char *repository, const char *staging,
+                                     const char *name, struct rs_proxy_committed *out);
+    void                  *commit_ctx;
 };
+
+/* How much one session's staging may hold, unless told otherwise: what one
+ * capture's last commit, its snapshot, can need at the most. */
+#define RS_PROXY_MAX_STAGING ((uint64_t)4 * 1024 * 1024 * 1024)
 
 /* Serves `io` as `c` says: the number of requests answered. */
 unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn *c);

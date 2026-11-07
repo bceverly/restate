@@ -59,6 +59,9 @@ PROXY_OBJ_DIR="$COV_DIR/obj-proxy"
 # -O0: an optimized build merges and reorders lines, and the resulting report
 # blames coverage on lines that no longer exist as written.
 CFLAGS_ALL=(-std=c11 -O0 -g --coverage -fprofile-abs-path -Wall -Wextra)
+# restate-proxy's confined processes write their counts here as they exit
+# too: a coverage build's confinement lets them (proxy/confine.c).
+CFLAGS_ALL+=("-DRS_COVERAGE_DIR=\"$PWD/$COV_DIR\"")
 
 printf '\n\033[1mCoverage\033[0m \033[2m(gate: %s%% overall, %s%% every file)\033[0m\n' \
        "$COVERAGE_MIN" "$COVERAGE_FILE_MIN"

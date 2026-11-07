@@ -21,6 +21,12 @@
  * has checked already. Past --max-sessions, a session is refused (503); one
  * idle for --lease seconds is ended.
  *
+ * A connection is one client's from its first good token: then its
+ * process starts a committer of its own and both confine themselves to
+ * that client's repository and staging (confine.h). An append session's
+ * uploads go into STAGING/CLIENT/ID, which --staging names; what earlier
+ * sessions left there is removed as the proxy starts.
+ *
  * SIGTERM and SIGINT stop it: it stops listening, tells each child to stop,
  * waits for them, and exits 0.
  *
@@ -32,6 +38,7 @@
 #define RESTATE_SERVER_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define RS_PROXY_PORT             "8443"
 #define RS_PROXY_GRANTS           "/etc/restate/proxy.d"
@@ -39,6 +46,7 @@
 #define RS_PROXY_KEY              "/etc/restate/proxy.key"
 #define RS_PROXY_MAX_CONNECTIONS  64u
 #define RS_PROXY_IDLE_TIMEOUT     60u
+#define RS_PROXY_STAGING          "/var/lib/restate-proxy/staging"
 
 struct rs_proxy_options {
     const char *const *listen;      /* HOST:PORT, [V6]:PORT or :PORT, each */
@@ -50,6 +58,8 @@ struct rs_proxy_options {
     unsigned           idle_timeout;    /* seconds a connection may say nothing */
     unsigned           max_sessions;    /* 0: RS_PROXY_MAX_SESSIONS */
     unsigned           lease;           /* seconds; 0: RS_PROXY_LEASE */
+    const char        *staging;         /* NULL: RS_PROXY_STAGING */
+    uint64_t           max_staging;     /* bytes; 0: RS_PROXY_MAX_STAGING */
 };
 
 /* Runs the server until it is told to stop: the exit status. */
