@@ -23,6 +23,7 @@
 #endif
 
 #include "gzip.h"
+#include "run.h"
 #include "store.h"
 
 #ifndef O_CLOEXEC
@@ -59,7 +60,8 @@ static void warm(void)
     tzset();
     (void)gmtime_r(&now, &tm);
     (void)localtime_r(&now, &tm);
-    (void)rs_gzip_path();
+    /* Checked while its directory can still be seen. */
+    rs_program_pin(RS_PROG_GZIP);
 }
 
 #if defined(__OpenBSD__)

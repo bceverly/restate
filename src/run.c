@@ -61,10 +61,11 @@ struct program {
     const char *const *paths;
     size_t             npaths;
     const char *const *env;
+    const char        *pinned; /* rs_program_pin's choice, checked then */
 };
 
 #define PROGRAM(n, list, env) \
-    { n, list, sizeof(list) / sizeof((list)[0]), list, sizeof(list) / sizeof((list)[0]), env }
+    { n, list, sizeof(list) / sizeof((list)[0]), list, sizeof(list) / sizeof((list)[0]), env, NULL }
 
 static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("gzip", gzip_paths, no_env),
@@ -88,6 +89,7 @@ const char *rs_program_name(enum rs_program p)
 
 void rs_program_set_paths(enum rs_program p, const char *const *list, size_t n)
 {
+    programs[p].pinned = NULL;
     if (list)
     {
         programs[p].paths = list;
@@ -133,6 +135,10 @@ const char *rs_program_path(enum rs_program p)
 {
     size_t i;
 
+    if (programs[p].pinned)
+    {
+        return programs[p].pinned;
+    }
     for (i = 0; i < programs[p].npaths; i++)
     {
         if (usable(programs[p].paths[i]))
@@ -141,6 +147,12 @@ const char *rs_program_path(enum rs_program p)
         }
     }
     return NULL;
+}
+
+void rs_program_pin(enum rs_program p)
+{
+    programs[p].pinned = NULL;
+    programs[p].pinned = rs_program_path(p);
 }
 
 /* Starts `path` with the descriptors given and `envp`; posix_spawn's code. */
@@ -218,7 +230,11 @@ bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int 
     }
     envp[nenv] = NULL;
 
-    for (i = 0; i < prog->npaths; i++)
+    if (prog->pinned)
+    {
+        rc = spawn_one(prog->pinned, argv, envp, in_fd, out_fd, err_fd, pid);
+    }
+    for (i = 0; !prog->pinned && i < prog->npaths; i++)
     {
         if (!usable(prog->paths[i]))
         {

@@ -68,6 +68,12 @@ const char *rs_program_path(enum rs_program p);
  */
 void rs_program_set_paths(enum rs_program p, const char *const *list, size_t n);
 
+/* Checks `p`'s paths now, as rs_program_path does, and from then on uses the
+ * one found without checking again (until rs_program_set_paths). For a
+ * process about to be confined: unveil leaves it the program but not the
+ * directory holding it, which the check needs to see. */
+void rs_program_pin(enum rs_program p);
+
 /*
  * Starts the program with `in_fd`, `out_fd` and `err_fd` as its standard
  * input, output and error; -1 leaves that one as restate's own. A path that is

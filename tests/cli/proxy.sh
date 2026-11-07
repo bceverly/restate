@@ -430,11 +430,11 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     # that only reads, and anything after a connection is another client's.
     ask -H "$UP" -d append /v1/up01/sessions
     REF="$(printf '%s\n' "$OUT" | tail -n 1)"
-    head -c 5000 /dev/zero > big.sum
+    dd if=/dev/zero of=big.sum bs=5000 count=1 2> /dev/null
     ask -H "$UP" -T big.sum "/v1/up01/sessions/$REF/files/packs/P-1.sum"
     is 413 "a .sum larger than restate writes one"
     contains "$OUT" "Restate-Reason: too-large" "says so"
-    head -c 2000000 /dev/zero > big.idx
+    dd if=/dev/zero of=big.idx bs=1000 count=2000 2> /dev/null
     ask -H "$UP" -T big.idx "/v1/up01/sessions/$REF/files/packs/P-1.idx"
     is 507 "more than --max-staging"
     contains "$OUT" "Restate-Reason: storage-full" "says so"
