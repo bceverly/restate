@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,6 +113,36 @@ bool rs_gzip_decompress(int in_fd, struct rs_gzip *gz, struct rs_buf *err)
     return true;
 }
 
+/*
+ * Stops gzip `pid` and reaps it. SIGTERM is sent again until it is gone, not
+ * once: NetBSD 10 drops a signal that reaches a child posix_spawn has not yet
+ * finished starting, and gzip, never told, would wait for its input forever,
+ * and its caller for it. After a few seconds of that, SIGKILL.
+ */
+static bool stop(pid_t pid, struct rs_buf *err)
+{
+    int tries;
+
+    for (tries = 0;; tries++)
+    {
+        int   status;
+        pid_t r;
+
+        (void)kill(pid, tries < 100 ? SIGTERM : SIGKILL);
+        r = waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+        {
+            return true;
+        }
+        if (r < 0 && errno != EINTR)
+        {
+            rs_buf_addf(err, "waiting for gzip: %s", strerror(errno));
+            return false;
+        }
+        (void)poll(NULL, 0, 20);
+    }
+}
+
 bool rs_gzip_finish(struct rs_gzip *gz, bool abandon, struct rs_buf *err)
 {
     int status = 0;
@@ -123,7 +154,7 @@ bool rs_gzip_finish(struct rs_gzip *gz, bool abandon, struct rs_buf *err)
     }
     if (abandon)
     {
-        (void)kill(gz->pid, SIGTERM);
+        return stop(gz->pid, err);
     }
     while (waitpid(gz->pid, &status, 0) < 0)
     {
@@ -132,10 +163,6 @@ bool rs_gzip_finish(struct rs_gzip *gz, bool abandon, struct rs_buf *err)
             rs_buf_addf(err, "waiting for gzip: %s", strerror(errno));
             return false;
         }
-    }
-    if (abandon)
-    {
-        return true;
     }
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     {

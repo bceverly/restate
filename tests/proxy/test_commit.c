@@ -10,6 +10,7 @@
 #include "test.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -461,6 +462,10 @@ int test_confine_run(char **args)
     {
         struct rs_gzip gz;
 
+        /* Neither end is gzip's to keep: with the writing end its own, its
+         * input would never end. */
+        (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(p[1], F_SETFD, FD_CLOEXEC);
         run = rs_gzip_decompress(p[0], &gz, &why);
         (void)close(p[1]);
         (void)close(p[0]);
@@ -483,7 +488,9 @@ int test_confine_run(char **args)
 }
 
 /* What `unittests --confine-test ROLE ...` said, run in a process of its
- * own: its line, the caller's to free. */
+ * own: its line, the caller's to free. The line that starts "confine=", not
+ * whatever a program it ran wrote first (gzip complains of an input that
+ * ends before it starts), else the first. */
 static char *confined(const char *role, const char *repo, const char *staging, const char *other)
 {
     char *cmd = rs_xasprintf("'%s' --confine-test %s '%s' '%s' '%s' 2>&1", rs_test_argv0, role,
@@ -495,9 +502,18 @@ static char *confined(const char *role, const char *repo, const char *staging, c
     fp = popen(cmd, "r");
     if (fp)
     {
-        if (!fgets(line, sizeof(line), fp))
+        char next[1024];
+
+        while (fgets(next, sizeof(next), fp))
         {
-            line[0] = '\0';
+            if (!line[0] || strncmp(next, "confine=", 8) == 0)
+            {
+                (void)snprintf(line, sizeof(line), "%s", next);
+            }
+            if (strncmp(next, "confine=", 8) == 0)
+            {
+                break;
+            }
         }
         (void)pclose(fp);
     }
