@@ -41,11 +41,34 @@ info() { printf '  \033[96m→\033[0m %s\n' "$*"; }
 ok()   { printf '  \033[92m✓\033[0m %s\n' "$*"; }
 die()  { printf '  \033[91m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
+# A package manager's command, tried again when it fails: a mirror partway
+# through a sync serves an empty or half-written repomd.xml ("Document is
+# empty") or a repository with packages missing, and the next try, with the
+# metadata cleared, asks afresh of whichever mirror the redirector picks then.
+# Five tries, 30 seconds apart, as CI's own setup does. A failure that is not
+# the mirror's fails all five, a couple of minutes later than it would have.
+pm() {
+  pm_n=1
+  until "$@"; do
+    if [ "$pm_n" -ge 5 ]; then
+      echo "$1 failed $pm_n times: $*" >&2
+      return 1
+    fi
+    echo "$1 attempt $pm_n failed; clearing its metadata and trying again in 30s" >&2
+    pm_n=$((pm_n + 1))
+    sleep 30
+    case "$1" in
+      dnf) dnf clean metadata > /dev/null 2>&1 || true ;;
+      zypper) zypper --non-interactive clean --all > /dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
 if [ "$DEPS" = yes ]; then
   if command -v dnf > /dev/null 2>&1; then
-    dnf install -y -q rpm-build 'dnf-command(builddep)'
+    pm dnf install -y -q rpm-build 'dnf-command(builddep)'
   else
-    zypper --non-interactive -q install -y rpm-build
+    pm zypper --non-interactive -q install -y rpm-build
   fi
 fi
 command -v rpmbuild > /dev/null 2>&1 || die "rpmbuild is not installed (dnf install rpm-build, zypper install rpm-build)"
@@ -68,10 +91,10 @@ sed -e "s|@VERSION@|$VERSION|g" -e "s|@DATE@|$(LC_ALL=C date -u '+%a %b %d %Y')|
 
 if [ "$DEPS" = yes ]; then
   if command -v dnf > /dev/null 2>&1; then
-    dnf builddep -y -q "$TOP/SPECS/restate.spec"
+    pm dnf builddep -y -q "$TOP/SPECS/restate.spec"
   else
     # shellcheck disable=SC2046
-    zypper --non-interactive -q install -y $(rpmspec -q --buildrequires "$TOP/SPECS/restate.spec")
+    pm zypper --non-interactive -q install -y $(rpmspec -q --buildrequires "$TOP/SPECS/restate.spec")
   fi
 fi
 if [ "$MODE" = source ]; then

@@ -105,4 +105,4 @@ RS_CMD(CMD_RUN,      "run",      "JOBFILE",    1,  1,
        "with its options -- from a file only its owner can change (see JOBS)")
 RS_CMD(CMD_FEATURES, "features", "",           0,  0,
        "list what this restate can do: its commands, options, job keys, result schema and "
-       "the hooks here, for a program to check before it asks for any of them")
+       "the hooks whose service is on this host, for a program to check before it asks for any of them")

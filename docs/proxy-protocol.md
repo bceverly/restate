@@ -1,11 +1,13 @@
 # restate-proxy protocol, version 1
 
-**Status: draft.** `restate-proxy --serve` implements its transport,
-authentication and reading so far (see "Running the proxy"). It was written
-before the code, so that `restate-proxy` and restate's remote backend are built against one
-description, and so that what SysManage plans as its Phase 25.5 can be
-reviewed against it. Until the first release that implements it, anything
-here can change; after that, version 1 changes only by adding to it.
+**Status: draft.** `restate-proxy --serve` implements all of it: the
+transport, authentication, sessions and their locks, reading and writing
+(see "Running the proxy"). restate's remote backend, the client side, is
+next. This was written before the code, so that `restate-proxy` and the
+remote backend are built against one description, and so that what
+SysManage plans as its Phase 25.5 can be reviewed against it. Until the
+first release in which restate itself uses it, anything here can change;
+after that, version 1 changes only by adding to it.
 
 ## What it is for
 
@@ -107,8 +109,13 @@ to be the token's client.
   right token learns nothing -- not even whether `CLIENT` exists.
 - A good token asking for what its grant does not allow is `403`.
 
-The client gives its token to curl on a netrc file (`--netrc-file`), never
-on a command line, where `ps` would show it.
+The client gives its token to curl in a config file of its own (`-K`),
+as a `header = "Authorization: Bearer ..."` line, made `0600` in a
+directory only it can reach, and never on a command line, where `ps` would
+show it. Not a netrc file: curl sends what one holds as `Basic`, and the
+proxy takes only `Bearer`. It reads each answer's status and
+`Restate-Reason` from the headers curl writes to a file (`-D`), which every
+curl it runs on can do.
 
 ## Grants
 
@@ -508,7 +515,7 @@ whole machine:
 
 | Job key                  | Command line              | curl                     |
 |--------------------------|---------------------------|--------------------------|
-| `repository_token_file`  | `--repository-token-file` | a netrc file             |
+| `repository_token_file`  | `--repository-token-file` | a `-K` config file       |
 | `repository_ca_file`     | `--repository-ca-file`    | `--cacert`               |
 | `repository_pin_sha256`  | `--repository-pin-sha256` | `--pinnedpubkey sha256//...` |
 

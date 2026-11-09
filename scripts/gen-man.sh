@@ -2590,13 +2590,23 @@ gained since schema 1 began
 .RB ( result_members ,
 such as
 .BR capture.cache ),
-the hooks here and the programs it can use \- for a
-program to ask before it asks for any of them. A hook that answers
-.B absent
-to
+the hooks that apply here and the programs it can use \- for a
+program to ask before it asks for any of them. The hooks listed are not
+every one installed, but those whose service is on this host: each is run as
 .I HOOK
 .B present
-is not listed, so a host lists only what it has.
+with the environment every hook gets (see SECURITY CONSIDERATIONS), and one
+that answers
+.B absent
+is left out. So the OpenBao hook is not listed where no OpenBao server is
+installed, nor where the only
+.B bao
+is in a user's own directory, which that
+.B PATH
+does not search. Whether a hook is installed is whether its file is in
+.I /etc/restate/hooks.d
+or
+.IR libexec/restate/hooks .
 .PP
 The result and the progress file are their owner's alone, as everything
 restate writes is;

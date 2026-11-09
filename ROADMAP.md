@@ -58,13 +58,15 @@ The order, each a release of its own:
       changes nothing a repository on a local disk, NFS, SMB, exFAT or FAT
       sees -- `make test-share` and CI's share jobs hold it to that, bit for
       bit -- released on its own before any networking
-- [ ] **`restate-proxy`:**
+- [x] **`restate-proxy`** (3.0.0.0 to 3.0.0.7), all of what follows but
+  signing at capture, which is the remote backend's, below:
   - [x] **Its own build, the grants, the tokens and the server** (3.0.0.0):
     `make proxy`, the one target that links a TLS library; `--check-grants`
     and `--new-token`; `--serve`, a listener and a process per connection,
     with the request's head, its client and its token checked as the
-    protocol says, and the grants read again on change or SIGHUP. Sessions,
-    reading and uploading are next, each answered 501 until then
+    protocol says, and the grants read again on change or SIGHUP
+  - [x] **Sessions, reading, uploads and commits**, and each connection
+    confined to its client's repository once its token is checked
   - HTTP/1.1 under `/v1/<client>/` -- the client in the path must be the
     token's -- with a small fixed set of endpoints: the repository's marker;
     the list of packs with sizes and sums; each pack's `.idx`, `.sum` and
@@ -120,8 +122,10 @@ The order, each a release of its own:
       file, yours or root's, that nobody else can read); capture, snapshots,
       list, diff, status, plan and restore work against it as against a
       local path. HTTPS by running `curl`, as `installer fetch` does: many
-      files to one process and one connection, the token given on a netrc
-      file and never on a command line, and the packs' indexes cached on the
+      files to one process and one connection, the token given in a
+      curl config file (`-K`, as a Bearer header; a netrc file would send
+      it as Basic) and never on a command line, each answer's status and
+      `Restate-Reason` read from the headers curl writes (`-D`), and the packs' indexes cached on the
       machine as they are now, so after the first capture only new ones are
       fetched. A library is linked only if a measured capture says the small
       calls need it. A proxy whose certificate a site's CA signed is trusted
@@ -131,6 +135,38 @@ The order, each a release of its own:
       its limit of sessions (503) are exit 5; and the result JSON carries
       the proxy's fixed reason for a failure (`proxy_reason`), for a program
       to choose its message by
+  - [x] **What has to change (2026-11-08):** `src/remote.c`, a second kind
+    of store, behind the interface in `store.h`, picked by `rs_store_at`
+    for `https://`. What else treats the repository as a path:
+    - `rs_repo_ref` and jobs' own `REPO::NAME` (`jobs.c`) find the last
+      `::`, which a proxy at an IPv6 address (`https://[::1]:8443/...`)
+      has: a URL's `::` inside `[...]` is not the separator
+    - `repository` in a job is `K_PATH`, an absolute path: a URL needs a
+      kind of its own (`https://HOST[:PORT]/v1/CLIENT`, nothing more)
+    - `rs_repo_open` reads the marker before it takes a lock, and through
+      the proxy nothing is read outside a session: the store is given the
+      kind of session (`look`, `read`, `append`) when it is made, opens it
+      before the marker, and `take()` is then what the session holds.
+      `RS_REPO_WRITE` is `append` there: a capture through the proxy is
+      always `--append-only`, which differs only in refusing a version 1
+      repository, as the proxy's `409` does
+    - capture asks `rs_repo_is` and `rs_repo_dir_encrypted` of its output
+      up to five times before it opens it, each a session through the
+      proxy: for a URL, `rs_repo_is` is true without asking, and whether it
+      is encrypted is checked once it is open
+    - `rs_repo_init` and `rs_repo_protect` reach the directory by `open()`:
+      refused for a URL, as `--create`, prune, repack, check, protect,
+      seal, copy into it and `sign` are
+    - the cache (`cache_dir`) is only an encrypted repository's today; a
+      remote one has it whether encrypted or not, so only new `.idx` files
+      are fetched
+    - ending the session cannot be done from a signal handler (curl is no
+      async-signal-safe call): the child that renews the lease ends it, when
+      the pipe from restate closes -- which it does however restate ends,
+      `SIGKILL` included
+    - a capture that fails removes its packs; through the proxy, ending the
+      session does that, so the store's remove of a committed pack is a
+      no-op for an `append` session, not a refusal
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
 - [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,

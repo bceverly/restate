@@ -32,6 +32,29 @@ for f in "$DIR"/restate-*.rpm; do
 done
 test -f "$RPM"
 
+# A package manager's command, tried again when it fails: a mirror partway
+# through a sync serves an empty or half-written repomd.xml ("Document is
+# empty") or a repository with packages missing, and the next try, with the
+# metadata cleared, asks afresh of whichever mirror the redirector picks then.
+# Five tries, 30 seconds apart, as CI's own setup does. A failure that is not
+# the mirror's fails all five, a couple of minutes later than it would have.
+pm() {
+  pm_n=1
+  until "$@"; do
+    if [ "$pm_n" -ge 5 ]; then
+      echo "$1 failed $pm_n times: $*" >&2
+      return 1
+    fi
+    echo "$1 attempt $pm_n failed; clearing its metadata and trying again in 30s" >&2
+    pm_n=$((pm_n + 1))
+    sleep 30
+    case "$1" in
+      dnf) dnf clean metadata > /dev/null 2>&1 || true ;;
+      zypper) zypper --non-interactive clean --all > /dev/null 2>&1 || true ;;
+    esac
+  done
+}
+
 # The package manager, as installing from COPR or OBS would use it: it
 # resolves what the package depends on. The package itself is not signed --
 # the release's checksums and attestation vouch for it -- and COPR and OBS
@@ -41,8 +64,8 @@ if command -v dnf > /dev/null 2>&1; then
   sed -i '/^tsflags=nodocs/d' /etc/dnf/dnf.conf 2> /dev/null || true
   # man-db to look the manual up as a user would; find and cmp for the
   # checks below. Nothing restate itself needs: the install has to bring that.
-  dnf install -y -q man-db findutils diffutils
-  dnf install -y -q "$RPM"
+  pm dnf install -y -q man-db findutils diffutils
+  pm dnf install -y -q "$RPM"
   remove() { dnf remove -y -q restate; }
 elif command -v zypper > /dev/null 2>&1; then
   # Leap says so in zypp.conf; Tumbleweed in a drop-in under /usr/etc, which
@@ -52,8 +75,8 @@ elif command -v zypper > /dev/null 2>&1; then
     mkdir -p /etc/zypp/zypp.conf.d
     printf '[main]\nrpm.install.excludedocs = no\n' > /etc/zypp/zypp.conf.d/excludedocs.conf
   fi
-  zypper --non-interactive install -y man findutils diffutils
-  zypper --non-interactive install -y --allow-unsigned-rpm "$RPM"
+  pm zypper --non-interactive install -y man findutils diffutils
+  pm zypper --non-interactive install -y --allow-unsigned-rpm "$RPM"
   remove() { zypper --non-interactive remove -y restate; }
 else
   echo "neither dnf nor zypper" >&2

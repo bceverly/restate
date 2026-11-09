@@ -1811,9 +1811,13 @@ for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `list`, `du`,
 can do -- commands, options, job keys, the commands a job can be and the keys
 each takes (`job_command_keys`), schemas,
 what results have gained since schema 1 began (`result_members`, such as
-`capture.cache`), the hooks here (each hook is
-asked `HOOK present NAME`, and one that answers `absent` is left out, so a
-host lists only what it has) -- for a program to ask before it asks. The result and progress files are their
+`capture.cache`), the hooks whose service is on this host -- not every hook
+installed: each is asked `HOOK present NAME` with the system `PATH` every hook
+gets, and one that answers `absent` is left out, so OpenBao's hook is missing
+where no OpenBao server is installed, or where the only `bao` is in a user's
+own directory. Whether a hook is installed is whether its file is in
+`/etc/restate/hooks.d` or `libexec/restate/hooks` -- for a program to ask
+before it asks. The result and progress files are their
 owner's alone unless `--report-group GROUP` makes them that group's to read
 too. A later restate adds to all of this, and changes what something means
 only with a new schema number.
