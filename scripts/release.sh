@@ -8,6 +8,8 @@
 #   make release                      bump the last digit of the highest tag
 #   make release VERSION=1.2.3.4      set an explicit version
 #   make release VERSION=v1.2.3.4     the same thing; the "v" is optional
+#   make force-release [VERSION=...]  the same, without step 3 or the pre-push
+#                                     hook: nothing is tested here
 #
 # Versions are four-part and tags carry a lowercase "v", e.g. v1.2.3.4. With no
 # version tags in the repository at all, the first release is whatever VERSION
@@ -24,6 +26,13 @@
 #      failure leaves nothing committed.
 #   4. Commits and pushes that change.
 #   5. Creates an annotated tag and pushes the tag.
+#
+# A forced release (RESTATE_FORCE_RELEASE=1, which `make force-release` sets)
+# skips `make check` and pushes past the pre-push hook. It keeps everything
+# else: the version checks, a clean tree, the rebuild and the manpage. And the
+# Release workflow still waits for CI and the security scan to pass on the
+# commit before it publishes anything, so what goes untested here is tested
+# there -- a failure there leaves the tag pushed and nothing published.
 #
 # Pushing the tag is what triggers the release build, so the confirmation in
 # step 1 is the point of no return — answer "n" and nothing is released (VERSION
@@ -101,6 +110,12 @@ fi
 VERSION_ARG="${VERSION:-}"
 unset VERSION MAKEFLAGS MAKEOVERRIDES
 
+FORCE=""
+if [ "${RESTATE_FORCE_RELEASE:-0}" = "1" ]; then
+  FORCE=1
+  warn "Forced: make check is not run, and the pre-push hook is passed over."
+fi
+
 EXPLICIT="$VERSION_ARG"
 
 if [ -n "$EXPLICIT" ]; then
@@ -166,7 +181,7 @@ fi
 # Confirm
 # ---------------------------------------------------------------------------
 printf '\n'
-printf '  Release as \033[1;96m%s\033[0m? [y/N] ' "$TAG"
+printf '  Release as \033[1;96m%s\033[0m%s? [y/N] ' "$TAG" "${FORCE:+, untested here}"
 read -r REPLY
 case "$REPLY" in
   y | Y | yes | YES | Yes) ;;
@@ -250,9 +265,15 @@ git remote get-url origin > /dev/null 2>&1 \
 # or pushed, so a failure leaves nothing done. Each records what it passed on:
 # the commit below is exactly those files, so the pre-push hook lets it
 # through without running anything.
-bold "Checking"
-make --no-print-directory check < /dev/null \
-  || die "make check failed; nothing was committed or pushed."
+if [ -n "$FORCE" ]; then
+  warn "Not checking: forced. CI checks the commit before the Release workflow publishes it."
+  # The pre-push hook would refuse what make check has not passed.
+  export RESTATE_SKIP_HOOK=1
+else
+  bold "Checking"
+  make --no-print-directory check < /dev/null \
+    || die "make check failed; nothing was committed or pushed."
+fi
 
 git add VERSION man/restate.8 README.md || die "Could not stage the version files."
 

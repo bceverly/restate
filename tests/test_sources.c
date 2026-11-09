@@ -197,12 +197,14 @@ static void online(const char *dir, const char *home)
     char          *lists = rs_xasprintf("%s/online/var/lib/apt/lists", dir);
     char          *web = rs_xasprintf("%s/web", dir);
     char          *pidfile = rs_xasprintf("%s/web.pid", dir);
-    char          *base = rs_xasprintf("http://127.0.0.1:%d", 40000 + (int)(getpid() % 20000));
-    char          *good = rs_xasprintf("%s/good", base);
-    char          *moved = rs_xasprintf("%s/moved", base);
-    char          *gone = rs_xasprintf("%s/gone", base);
-    char          *legacy = rs_xasprintf("%s/legacy", base);
+    char          *weblog = rs_xasprintf("%s/web.log", dir);
+    char          *base = NULL;
+    char          *good = NULL;
+    char          *moved = NULL;
+    char          *gone = NULL;
+    char          *legacy = NULL;
     char          *cmd;
+    int            port = 0;
     char          *name;
     struct rs_jval p;
     bool           checked = false;
@@ -214,6 +216,43 @@ static void online(const char *dir, const char *home)
         goto done;
     }
     TEST_CASE("sources: as each repository serves it now");
+    /* The server first, on a port it is given: one chosen here could be one
+     * a connection on this machine has already. Its "port N" line says which,
+     * for at most ten seconds. */
+    mkdirs(dir, "web");
+    cmd = rs_xasprintf("cd '%s' && { python3 -u -m http.server 0 --bind 127.0.0.1 > '%s' "
+                       "2>&1 & echo $! > '%s'; }", web, weblog, pidfile);
+    CHECK(system(cmd) == 0);
+    free(cmd);
+    for (tries = 0; tries < 100 && port == 0; tries++)
+    {
+        char           *said = rs_test_slurp(weblog);
+        const char     *at = strstr(said, " port ");
+        struct timespec nap = { 0, 100L * 1000 * 1000 };
+
+        if (at)
+        {
+            port = atoi(at + 6);
+        }
+        free(said);
+        if (port == 0)
+        {
+            (void)nanosleep(&nap, NULL);
+        }
+    }
+    CHECK(port > 0);
+    if (port == 0)
+    {
+        cmd = rs_xasprintf("kill \"$(cat '%s')\"", pidfile);
+        (void)quiet(cmd);
+        free(cmd);
+        goto done;
+    }
+    base = rs_xasprintf("http://127.0.0.1:%d", port);
+    good = rs_xasprintf("%s/good", base);
+    moved = rs_xasprintf("%s/moved", base);
+    gone = rs_xasprintf("%s/gone", base);
+    legacy = rs_xasprintf("%s/legacy", base);
     mkdirs(dir, "online/var/lib/apt/lists");
     mkdirs(dir, "online/var/lib/dpkg");
     mkdirs(dir, "online/etc/apt/sources.list.d");
@@ -254,10 +293,6 @@ static void online(const char *dir, const char *home)
                        "Signed-By: /usr/share/keyrings/a.gpg\n", good, moved, gone, legacy);
     rs_test_write(root, "etc/apt/sources.list.d/online.sources", cmd, 0644);
     free(cmd);
-    cmd = rs_xasprintf("cd '%s' && { python3 -m http.server %s --bind 127.0.0.1 > /dev/null "
-                       "2>&1 & echo $! > '%s'; }", web, strrchr(base, ':') + 1, pidfile);
-    CHECK(system(cmd) == 0);
-    free(cmd);
     /* Until it answers, for at most ten seconds. */
     cmd = rs_xasprintf("curl -s -o /dev/null --fail '%s/good/dists/stable/InRelease'", base);
     for (tries = 0; tries < 100 && quiet(cmd) != 0; tries++)
@@ -292,6 +327,7 @@ done:
     free(lists);
     free(web);
     free(pidfile);
+    free(weblog);
     free(base);
     free(good);
     free(moved);

@@ -2333,6 +2333,7 @@ Run `make` with no arguments for the full list.
 | `make rpm` | this distribution's RPM and source RPM, into `dist/`: Fedora, RHEL and its rebuilds, openSUSE |
 | `make apk` | this Alpine release's packages, into `dist/`, as root in a throwaway container |
 | `make release` | bump the version, tag and push: `make release VERSION=1.2.3.4` |
+| `make force-release` | the same without `make check` or the pre-push hook; CI still gates the publish |
 | `make install-dev` | the development tools and the git hooks |
 | `make man` | regenerate the manpage and the README's Usage block |
 | `make show-man` | read the manpage from the tree, without installing anything |
@@ -2343,6 +2344,7 @@ Run `make` with no arguments for the full list.
 ```bash
 make release                    # bump the last component of the newest tag
 make release VERSION=0.2.0.0    # or choose
+make force-release              # either, without make check here first
 ```
 
 It confirms, writes `VERSION`, rebuilds so the binary and manpage agree,
@@ -2350,7 +2352,9 @@ commits, pushes, tags and pushes the tag. The tag starts the Release workflow,
 which waits for CI, Security and CodeQL to pass on that exact commit, builds
 the source tarball with `git archive`, builds and tests *from the tarball* on a
 clean runner, and publishes a GitHub release with SHA-256 checksums and a
-signed SLSA build-provenance attestation:
+signed SLSA build-provenance attestation. `make force-release` does all of
+this but `make check`, and pushes past the pre-push hook; the workflow's wait
+for CI is what still stands between it and a published release:
 
 ```bash
 sha256sum -c SHA256SUMS

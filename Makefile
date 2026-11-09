@@ -411,6 +411,12 @@ deb-clean: ## Remove what the package builds left behind
 release: ## Bump the version, tag it and push (make release VERSION=1.2.3.4)
 	@scripts/release.sh
 
+# make release without make check, and past the pre-push hook; the Release
+# workflow still waits for CI to pass on the commit before it publishes.
+.PHONY: force-release
+force-release: ## make release, testing nothing here first (make force-release VERSION=1.2.3.4)
+	@RESTATE_FORCE_RELEASE=1 scripts/release.sh
+
 ##@ Setup
 
 .PHONY: install-dev
