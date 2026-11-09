@@ -155,6 +155,10 @@ static void other_jobs(void)
     CHECK(parse(&job, "command = copy\nrepository = /r\ncopy_to = /offsite\n", &why));
     free(why);
     CHECK_STR(job.opts.args[0], "/r");
+    CHECK(parse(&job, "command = copy\nrepository = /r\n"
+                      "copy_to = https://proxy.example:8443/v1/web01\n", &why));
+    free(why);
+    CHECK_STR(job.opts.args[1], "https://proxy.example:8443/v1/web01");
     CHECK(parse(&job, "command = restore\nsnapshot = /r::20261020T030000Z\n"
                       "restore_root = /var/tmp/restore\ninclude = /home/bob\ninclude = /etc\n"
                       "exclude = /etc/fstab\ndry_run = true\ncheck_first = yes\n"

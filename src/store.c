@@ -40,13 +40,14 @@ struct rs_store {
     struct rs_remote *remote;   /* NULL for a local store */
 };
 
-/* What a remote store refuses, for now: anything that writes. */
+/* What a remote store refuses outside an append session, and always what
+ * would change what is there already: anything that writes. */
 static bool refused_write(const struct rs_store *st, struct rs_buf *err)
 {
     if (err)
     {
-        rs_buf_addf(err, "%s: writing to a repository behind restate-proxy is not supported "
-                    "yet", st->dir);
+        rs_buf_addf(err, "%s: written to through restate-proxy only by a capture or a copy into "
+                    "it", st->dir);
     }
     errno = EROFS;
     return false;
@@ -57,6 +58,60 @@ static int refused(const struct rs_store *st)
 {
     (void)refused_write(st, NULL);
     return -1;
+}
+
+/* A remote store's stage, in an append session (remote.h); NULL otherwise. */
+static struct rs_store *stage_of(const struct rs_store *st)
+{
+    return st->remote ? rs_remote_stage(st->remote) : NULL;
+}
+
+/* Where `name` is in the directory, or at the URL, the store is. */
+static char *plain_path(const struct rs_store *st, const char *name)
+{
+    if (!*st->dir)
+    {
+        return rs_xstrdup(*name ? name : ".");
+    }
+    return *name ? rs_xasprintf("%s/%s", st->dir, name) : rs_xstrdup(st->dir);
+}
+
+/* The stage, where `name` is in it: what a capture made and has not sent on
+ * is read from there, as it would be from the repository's own directory. */
+static const struct rs_store *staged(const struct rs_store *st, const char *name)
+{
+    const struct rs_store *sg = stage_of(st);
+    struct stat            s;
+    char                  *path;
+    bool                   in;
+
+    if (!sg || !*name)
+    {
+        return NULL;
+    }
+    path = plain_path(sg, name);
+    in = lstat(path, &s) == 0;
+    free(path);
+    return in ? sg : NULL;
+}
+
+/* `name`, just put in place in the stage, sent on: 0, or -1 with errno. */
+static int placed(const struct rs_store *st, const char *name)
+{
+    return rs_remote_placed(st->remote, name);
+}
+
+/* What the proxy, or curl, said of the write that failed, into `err`. */
+static void say_placed_failed(const struct rs_store *st, struct rs_buf *err)
+{
+    const char *said = rs_remote_said(st->remote);
+    int         saved = errno;
+
+    if (err)
+    {
+        rs_buf_addstr(err, said ? said : strerror(saved));
+    }
+    errno = saved;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -323,16 +378,19 @@ const char *rs_store_where(const struct rs_store *st)
 
 char *rs_store_path(const struct rs_store *st, const char *name)
 {
-    if (!*st->dir)
-    {
-        return rs_xstrdup(*name ? name : ".");
-    }
-    return *name ? rs_xasprintf("%s/%s", st->dir, name) : rs_xstrdup(st->dir);
+    const struct rs_store *sg = staged(st, name);
+
+    return plain_path(sg ? sg : st, name);
 }
 
 const char *rs_store_local_dir(const struct rs_store *st)
 {
     return st->remote ? NULL : st->dir;
+}
+
+const char *rs_store_said(const struct rs_store *st)
+{
+    return st->remote ? rs_remote_said(st->remote) : NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -361,6 +419,12 @@ static int local_stat(const struct rs_store *st, const char *name, struct rs_sto
 
 int rs_store_stat(const struct rs_store *st, const char *name, struct rs_store_stat *out)
 {
+    const struct rs_store *sg = staged(st, name);
+
+    if (sg)
+    {
+        return local_stat(sg, name, out);
+    }
     if (st->remote)
     {
         return rs_remote_stat(st->remote, name, out);
@@ -453,6 +517,12 @@ static int local_open(const struct rs_store *st, const char *name)
 
 int rs_store_open(const struct rs_store *st, const char *name)
 {
+    const struct rs_store *sg = staged(st, name);
+
+    if (sg)
+    {
+        return local_open(sg, name);
+    }
     if (st->remote)
     {
         return rs_remote_open_at(st->remote, name, 0);
@@ -477,6 +547,12 @@ static int local_open_at(const struct rs_store *st, const char *name, uint64_t o
 
 int rs_store_open_at(const struct rs_store *st, const char *name, uint64_t offset)
 {
+    const struct rs_store *sg = staged(st, name);
+
+    if (sg)
+    {
+        return local_open_at(sg, name, offset);
+    }
     if (st->remote)
     {
         return rs_remote_open_at(st->remote, name, offset);
@@ -507,6 +583,12 @@ static ssize_t local_peek(const struct rs_store *st, const char *name, void *buf
 
 ssize_t rs_store_peek(const struct rs_store *st, const char *name, void *buf, size_t max)
 {
+    const struct rs_store *sg = staged(st, name);
+
+    if (sg)
+    {
+        return local_peek(sg, name, buf, max);
+    }
     if (st->remote)
     {
         return rs_remote_peek(st->remote, name, buf, max);
@@ -564,6 +646,12 @@ static bool local_read(const struct rs_store *st, const char *name, size_t max, 
 bool rs_store_read(const struct rs_store *st, const char *name, size_t max, struct rs_buf *out,
                    struct rs_buf *err)
 {
+    const struct rs_store *sg = staged(st, name);
+
+    if (sg)
+    {
+        return local_read(sg, name, max, out, err);
+    }
     if (st->remote)
     {
         return rs_remote_read(st->remote, name, max, out, err);
@@ -739,7 +827,9 @@ int rs_store_create(const struct rs_store *st, const char *name)
 {
     if (st->remote)
     {
-        return refused(st);
+        const struct rs_store *sg = stage_of(st);
+
+        return sg ? local_create(sg, name) : refused(st);
     }
     return local_create(st, name);
 }
@@ -777,7 +867,22 @@ bool rs_store_write_new(const struct rs_store *st, const char *name, const void 
 {
     if (st->remote)
     {
-        return refused_write(st, err);
+        const struct rs_store *sg = stage_of(st);
+
+        if (!sg)
+        {
+            return refused_write(st, err);
+        }
+        if (!local_write_new(sg, name, data, len, err))
+        {
+            return false;
+        }
+        if (placed(st, name) != 0)
+        {
+            say_placed_failed(st, err);
+            return false;
+        }
+        return true;
     }
     return local_write_new(st, name, data, len, err);
 }
@@ -854,7 +959,24 @@ bool rs_store_replace(const struct rs_store *st, const char *name, const void *d
 {
     if (st->remote)
     {
-        return refused_write(st, err);
+        /* Only what is made here and not sent on yet -- a pack's .sum, before
+         * its .idx: what is in the repository is never replaced. */
+        const struct rs_store *sg = stage_of(st);
+
+        if (!sg)
+        {
+            return refused_write(st, err);
+        }
+        if (!local_replace(sg, name, data, len, err))
+        {
+            return false;
+        }
+        if (placed(st, name) != 0)
+        {
+            say_placed_failed(st, err);
+            return false;
+        }
+        return true;
     }
     return local_replace(st, name, data, len, err);
 }
@@ -876,7 +998,18 @@ int rs_store_rename(const struct rs_store *st, const char *from, const char *to,
 {
     if (st->remote)
     {
-        return refused(st);
+        const struct rs_store *sg = stage_of(st);
+
+        if (!sg)
+        {
+            return refused(st);
+        }
+        rs_remote_unsay(st->remote);
+        if (local_rename(sg, from, to, false) != 0)
+        {
+            return -1;
+        }
+        return placed(st, to);
     }
     return local_rename(st, from, to, thawed);
 }
@@ -931,7 +1064,7 @@ int rs_store_place_new(const struct rs_store *st, const char *from, const char *
 {
     if (st->remote)
     {
-        return refused(st);
+        return stage_of(st) ? rs_remote_place_new(st->remote, from, to) : refused(st);
     }
     return local_place_new(st, from, to);
 }
@@ -951,7 +1084,12 @@ int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
 {
     if (st->remote)
     {
-        return refused(st);
+        /* What is made here and not sent on; what is in the repository is
+         * never removed through the proxy -- a failed capture's packs go with
+         * its session. */
+        const struct rs_store *sg = stage_of(st);
+
+        return sg ? local_remove(sg, name, false) : refused(st);
     }
     return local_remove(st, name, thawed);
 }
@@ -971,7 +1109,9 @@ int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed
 {
     if (st->remote)
     {
-        return refused(st);
+        const struct rs_store *sg = stage_of(st);
+
+        return sg ? local_remove_dir(sg, name, false) : refused(st);
     }
     return local_remove_dir(st, name, thawed);
 }
@@ -1030,8 +1170,14 @@ char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
 {
     if (st->remote)
     {
-        (void)refused(st);
-        return NULL;
+        const struct rs_store *sg = stage_of(st);
+
+        if (!sg)
+        {
+            (void)refused(st);
+            return NULL;
+        }
+        return local_make_temp_dir(sg, prefix);
     }
     return local_make_temp_dir(st, prefix);
 }

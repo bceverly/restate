@@ -22,8 +22,12 @@
  *
  * There are two kinds: the local one, which these functions are, and a
  * repository behind restate-proxy (remote.h), https://HOST[:PORT]/v1/CLIENT,
- * which they hand on to. Through the proxy a store only reads, so far: what
- * would write is refused, with EROFS.
+ * which they hand on to. Through the proxy, what a capture writes is made on
+ * this machine first, in its append session's stage, and sent on as it is put
+ * in place: a pack with its .idx, a snapshot with its directory (remote.h).
+ * A remove or a replace is of what is in the stage alone; what is in the
+ * repository already is never changed, and anything but an append session's
+ * writing is refused, with EROFS.
  */
 #ifndef RESTATE_STORE_H
 #define RESTATE_STORE_H
@@ -79,8 +83,13 @@ void rs_store_prefetch(const struct rs_store *st, const char *const *names, size
 /* Where the store is, for messages: the directory, for a local one. */
 const char *rs_store_where(const struct rs_store *st);
 /* Where `name` is, for messages: "DIR/NAME" -- or "DIR", for "", which names
- * the top itself wherever a name is asked for. Freed by the caller. */
+ * the top itself wherever a name is asked for -- and, for one in a remote
+ * store's stage, the file there, which a program run on it can open. Freed
+ * by the caller. */
 char *rs_store_path(const struct rs_store *st, const char *name);
+/* What a remote store's proxy, or curl, said of the last write it could not
+ * send on; NULL for a local store, or if none failed. */
+const char *rs_store_said(const struct rs_store *st);
 /* The directory a local store is, for what only a directory can do (protect's
  * flags and ACLs); NULL for a store that is not one. */
 const char *rs_store_local_dir(const struct rs_store *st);

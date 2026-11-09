@@ -1,13 +1,13 @@
 # restate-proxy protocol, version 1
 
-**Status: draft.** `restate-proxy --serve` implements all of it: the
-transport, authentication, sessions and their locks, reading and writing
-(see "Running the proxy"). restate's remote backend, the client side, is
-next. This was written before the code, so that `restate-proxy` and the
-remote backend are built against one description, and so that what
-SysManage plans as its Phase 25.5 can be reviewed against it. Until the
-first release in which restate itself uses it, anything here can change;
-after that, version 1 changes only by adding to it.
+**Status: version 1, in use.** `restate-proxy --serve` implements all of it:
+the transport, authentication, sessions and their locks, reading and
+writing (see "Running the proxy"). restate reads a repository through it
+from 3.1.0.0, and captures and copies into one from 3.2.0.0 ("How restate
+uses it"). It was written before the code, so that `restate-proxy` and the
+remote backend were built against one description, and so that what
+SysManage plans as its Phase 25.5 could be reviewed against it. Now that
+restate uses it, version 1 changes only by adding to it.
 
 ## What it is for
 
@@ -496,17 +496,20 @@ operations becomes:
 | stat, is a file           | its directory's `GET /list/DIR/`, fetched once a session |
 | list                      | `GET /list/DIR/`                                         |
 | read, peek, open          | `GET /f/NAME`; open at an offset is `Range`              |
-| create, write             | a file on this machine, until it is put in place         |
-| rename into place         | upload it; for a pack's `.idx`, then commit the pack; for a snapshot's directory, commit the snapshot |
+| create, write             | a file in the session's stage on this machine, laid out as the repository is, and read from there until it is sent |
+| rename into place         | a pack's content, `.sum` and `.seek`: nothing yet; its `.idx`: all four uploaded and the pack committed, in one curl. A snapshot's directory: its files uploaded and the snapshot committed. A chunk key: uploaded and committed. Then taken out of the stage |
 | place new (a chunk key)   | upload it, then commit it                                |
-| replace (a pack's `.sum`) | upload it again, if its pack is not committed; otherwise refused |
-| remove                    | of what is not committed yet, nothing to send; otherwise refused |
+| replace (a pack's `.sum`) | in the stage, before its pack is sent; nothing in the repository is replaced |
+| remove                    | in the stage; nothing in the repository is removed -- a failed capture's packs go with its session |
 | lock, unlock              | the session's own locks; unlock is ending it             |
 
 Everything that would remove, replace or rename something already in the
 repository -- prune, repack, sign on a snapshot already there, protect --
 is refused against a proxy, and run on the storage host.
-`capture --sign-with` signs the index before it is uploaded, on the client.
+`capture --sign-with` signs the index before it is uploaded, on the client,
+where it is staged. A snapshot whose name turns out to be taken as it is
+committed (`409 name-taken`) is made again under the next name -- its index
+and summary name it -- and sent again.
 
 The client trusts the proxy's certificate as curl does, from the system's
 certificate authorities, unless it is told otherwise -- for a proxy whose

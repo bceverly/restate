@@ -2048,6 +2048,8 @@ else; how it does is docs/proxy\-protocol.md, in restate's source.
 .PP
 .RS
 .nf
+restate capture \-\-repository\-token\-file /etc/restate/web01.token \e
+    \-o https://backup.example:8443/v1/web01
 restate snapshots \-\-repository\-token\-file /etc/restate/web01.token \e
     https://backup.example:8443/v1/web01
 restate restore \-\-repository\-token\-file /etc/restate/web01.token \e
@@ -2065,10 +2067,24 @@ What reads a repository works through a proxy as it does on a directory:
 .BR restore ,
 and
 .B copy
-out of it into a repository here. A capture through one is not supported
-yet. What changes what a repository holds already \- prune, repack,
-protect, sign of a snapshot already there, init, ingest \- is refused, and
-run on the storage host, as it always has been.
+out of it into a repository here. So does what adds to one:
+.BR capture ,
+which through a proxy is always
+.BR \-\-append\-only ,
+and
+.B copy
+into it. A capture makes each pack on this machine first, in the run's own
+directory under
+.B TMPDIR
+\- which needs room for one pack, up to 64 MiB, and for the snapshot's
+index \- and sends it once it is whole, the snapshot last, with
+.B capture \-\-sign\-with
+signing its index here before it is sent. One that fails, or is stopped,
+leaves nothing in the repository: the proxy takes out the packs it sent as
+its session ends, as a capture on the storage host takes out its own.
+What changes what a repository holds already \- prune, repack, protect,
+sign of a snapshot already there, init, ingest \- is refused, and run on the
+storage host, as it always has been.
 .PP
 restate opens no connection itself: it runs curl, given everything it is
 to ask on a file in a directory of the run's own, 0700, so that the token
@@ -2103,7 +2119,8 @@ however it ends \-
 .B SIGKILL
 included \- so the next run does not find the repository busy. A proxy with
 the repository busy, or with as many sessions open as it allows, is exit 5,
-busy, for a job to try again, as a busy share is; and a run that failed on
+busy, for a job to try again, as a busy share is \- a capture already
+running there among them; and a run that failed on
 what the proxy refused says the proxy's word for it in its result,
 .B proxy_reason
 (see RESULTS). What is read of a repository through a proxy is kept in this
@@ -2622,7 +2639,8 @@ diff: the whole diff, as JSON, readable by
 as the result is.
 .TP
 .B copy_to
-copy: where to.
+copy: where to \- a repository's directory, or a repository behind
+restate\-proxy.
 .TP
 .B group
 protect: the group the machines that write to the repository are in.

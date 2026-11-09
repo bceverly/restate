@@ -172,10 +172,21 @@ static void to_hex(const unsigned char d[32], char hex[RS_SHA256_HEX_SIZE])
 /* Why `to` could not be renamed into, as errno says, into `err`. */
 static void renamed_failed(const struct rs_store *st, const char *to, struct rs_buf *err)
 {
-    char *path = rs_store_path(st, to);
+    int         saved = errno;
+    const char *said = rs_store_said(st);
+    char       *path;
 
-    rs_buf_addf(err, "%s: %s", path, strerror(errno));
+    /* Through restate-proxy, what it said of what was sent on. */
+    if (said)
+    {
+        rs_buf_addstr(err, said);
+        errno = saved;
+        return;
+    }
+    path = rs_store_path(st, to);
+    rs_buf_addf(err, "%s: %s", path, strerror(saved));
     free(path);
+    errno = saved;
 }
 
 /* The digest and size of the file `name` as it is stored. */
@@ -3948,6 +3959,7 @@ bool rs_repo_writer_finish(struct rs_repo_writer *w, const struct rs_index *ix,
     char *path;
     bool  ok = true;
     int   k;
+    int   attempt;
 
     memset(out, 0, sizeof(*out));
     if (w->pk.open)
@@ -3959,89 +3971,116 @@ bool rs_repo_writer_finish(struct rs_repo_writer *w, const struct rs_index *ix,
             w->made[w->nmade++] = done;
         }
     }
-    /* Two captures in one second are told apart by a number after the time. */
-    for (k = 1; ok && k < 1000 && !name; k++)
+    for (attempt = 0;; attempt++)
     {
-        struct rs_store_stat st;
-        char                *candidate = k == 1 ? rs_xstrdup(base)
-                                                : rs_xasprintf("%s-%d", base, k);
+        size_t mark = err->len;
 
-        free(final);
-        final = rs_xasprintf("snapshots/%s", candidate);
-        if (rs_store_stat(w->r->st, final, &st) != 0 && errno == ENOENT)
+        /* Two captures in one second are told apart by a number after the time. */
+        for (k = 1; ok && k < 1000 && !name; k++)
         {
-            name = candidate;
-        } else
-        {
-            free(candidate);
+            struct rs_store_stat st;
+            char                *candidate = k == 1 ? rs_xstrdup(base)
+                                                    : rs_xasprintf("%s-%d", base, k);
+
+            free(final);
+            final = rs_xasprintf("snapshots/%s", candidate);
+            if (rs_store_stat(w->r->st, final, &st) != 0 && errno == ENOENT)
+            {
+                name = candidate;
+            } else
+            {
+                free(candidate);
+            }
         }
-    }
-    if (ok && !name)
-    {
-        rs_buf_addf(err, "%s: no free name for the snapshot", w->r->dir);
-        ok = false;
-    }
-    if (ok)
-    {
-        tmp = temp_dir(w->r->st, name, err);
-        ok = tmp != NULL;
-    }
-    if (ok)
-    {
-        path = rs_xasprintf("%s/index.json.gz", tmp);
-        ok = write_index(w->r, path, name, ix, err);
-        if (ok && sign_with)
+        if (ok && !name)
         {
-            struct rs_buf sig;
-            char         *sigpath = rs_xasprintf("%s/index.sig", tmp);
-
-            /* gpg signs the file as it is stored, where it is. */
-            char *where = rs_store_path(w->r->st, path);
-
-            rs_buf_init(&sig);
-            ok = rs_pgp_sign(sign_with, where, &sig, &out->signer, err) &&
-                 rs_store_write_new(w->r->st, sigpath, sig.data, sig.len, err);
-            rs_buf_free(&sig);
-            free(sigpath);
-            free(where);
-        }
-        free(path);
-    }
-    if (ok)
-    {
-        path = rs_xasprintf("%s/kit", tmp);
-        ok = write_kit(path, w, err);
-        free(path);
-    }
-    if (ok)
-    {
-        path = rs_xasprintf("%s/info", tmp);
-        ok = write_info(path, ix, name, w, err);
-        free(path);
-    }
-    if (ok)
-    {
-        /* Which packs it needs, for whatever cannot read its index: the
-         * packs this capture wrote, and those before it that hold content
-         * it uses. */
-        size_t len = 0;
-        char  *text;
-
-        mark_index(w->r, ix, w->used);
-        text = pack_list_text(w->r, w->used, w->made, w->nmade, &len);
-        path = rs_xasprintf("%s/packs", tmp);
-        ok = rs_store_write_new(w->r->st, path, text, len, err);
-        free(path);
-        free(text);
-    }
-    if (ok)
-    {
-        rs_store_sync_dir(w->r->st, tmp);
-        if (rs_store_rename(w->r->st, tmp, final, false) != 0)
-        {
-            renamed_failed(w->r->st, final, err);
+            rs_buf_addf(err, "%s: no free name for the snapshot", w->r->dir);
             ok = false;
         }
+        if (ok)
+        {
+            tmp = temp_dir(w->r->st, name, err);
+            ok = tmp != NULL;
+        }
+        if (ok)
+        {
+            path = rs_xasprintf("%s/index.json.gz", tmp);
+            ok = write_index(w->r, path, name, ix, err);
+            if (ok && sign_with)
+            {
+                struct rs_buf sig;
+                char         *sigpath = rs_xasprintf("%s/index.sig", tmp);
+
+                /* gpg signs the file as it is stored, where it is. */
+                char *where = rs_store_path(w->r->st, path);
+
+                rs_buf_init(&sig);
+                ok = rs_pgp_sign(sign_with, where, &sig, &out->signer, err) &&
+                     rs_store_write_new(w->r->st, sigpath, sig.data, sig.len, err);
+                rs_buf_free(&sig);
+                free(sigpath);
+                free(where);
+            }
+            free(path);
+        }
+        if (ok)
+        {
+            path = rs_xasprintf("%s/kit", tmp);
+            ok = write_kit(path, w, err);
+            free(path);
+        }
+        if (ok)
+        {
+            path = rs_xasprintf("%s/info", tmp);
+            ok = write_info(path, ix, name, w, err);
+            free(path);
+        }
+        if (ok)
+        {
+            /* Which packs it needs, for whatever cannot read its index: the
+             * packs this capture wrote, and those before it that hold content
+             * it uses. */
+            size_t len = 0;
+            char  *text;
+
+            mark_index(w->r, ix, w->used);
+            text = pack_list_text(w->r, w->used, w->made, w->nmade, &len);
+            path = rs_xasprintf("%s/packs", tmp);
+            ok = rs_store_write_new(w->r->st, path, text, len, err);
+            free(path);
+            free(text);
+        }
+        if (ok)
+        {
+            rs_store_sync_dir(w->r->st, tmp);
+            if (rs_store_rename(w->r->st, tmp, final, false) != 0)
+            {
+                int e = errno;
+
+                renamed_failed(w->r->st, final, err);
+                ok = false;
+                /* Taken between looking and putting it in place, which only
+                 * a repository behind restate-proxy can say, its lock
+                 * notwithstanding (the storage host's own ingest): made
+                 * again under the next name, which says it in its index. */
+                if (e == EEXIST && attempt < 3)
+                {
+                    err->len = mark;
+                    if (err->data)
+                    {
+                        err->data[mark] = '\0';
+                    }
+                    (void)remove_snapshot_dir(w->r->st, tmp);
+                    free(tmp);
+                    tmp = NULL;
+                    free(name);
+                    name = NULL;
+                    ok = true;
+                    continue;
+                }
+            }
+        }
+        break;
     }
     if (ok)
     {
@@ -7150,11 +7189,12 @@ static bool copy_file(const struct rs_store *src, const char *from, const struct
 
     if (ok && rs_store_rename(dst, tmp, to, false) != 0)
     {
-        int   saved = errno;
-        char *a = rs_store_path(src, from);
-        char *b = rs_store_path(dst, to);
+        int         saved = errno;
+        const char *said = rs_store_said(dst);
+        char       *a = rs_store_path(src, from);
+        char       *b = rs_store_path(dst, to);
 
-        rs_buf_addf(err, "copying %s to %s: %s", a, b, strerror(saved));
+        rs_buf_addf(err, "copying %s to %s: %s", a, b, said ? said : strerror(saved));
         (void)rs_store_remove(dst, tmp, false);
         free(a);
         free(b);

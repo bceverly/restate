@@ -164,7 +164,7 @@ static const struct key {
     [KEY_READ_ALL] = { "read_all", K_BOOL, false, J_CHECK },
     [KEY_METADATA_ONLY] = { "metadata_only", K_BOOL, false, J_CHECK },
     [KEY_RECORD] = { "record", K_PATH, false, J_CHECK | J_PRUNE | J_REPACK },
-    [KEY_COPY_TO] = { "copy_to", K_PATH, false, J_COPY },
+    [KEY_COPY_TO] = { "copy_to", K_REPOSITORY, false, J_COPY },
     [KEY_INCLUDE] = { "include", K_PATTERN, true, J_RESTORE },
     [KEY_EXCLUDE] = { "exclude", K_PATTERN, true, J_RESTORE },
     [KEY_DRY_RUN] = { "dry_run", K_BOOL, false, J_RESTORE | J_PRUNE | J_REPACK },

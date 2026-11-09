@@ -15,6 +15,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "run.h"
@@ -67,6 +68,8 @@ struct rs_remote {
     size_t               nlists;
     struct fetched      *got;
     size_t               ngot;
+    struct rs_store     *stage;     /* an append session's writes, here, until sent */
+    struct rs_buf        said;      /* why the last write sent on failed */
 };
 
 /* One request in a batch, and what came of it. */
@@ -74,14 +77,16 @@ struct req {
     const char             *method;   /* NULL for GET, else "POST" */
     char                   *target;   /* after the client's URL: "/f/packs/NAME.idx" */
     const char             *data;     /* a POST's body */
-    bool                    session;  /* sent in the session */
-    bool                    ranged;
+    char                   *upload;   /* a PUT's: the file sent */
+    const char             *name;     /* what it is, for a message */
     uint64_t                first;
     uint64_t                last;     /* UINT64_MAX for to the end */
     char                   *hdr;      /* where curl writes the headers */
     char                   *out;      /* and the body */
-    bool                    answered; /* a status line came back */
     struct rs_remote_answer ans;
+    bool                    session;  /* sent in the session */
+    bool                    ranged;
+    bool                    answered; /* a status line came back */
 };
 
 static const char         *token_file;
@@ -340,7 +345,7 @@ bool rs_remote_parse_headers(const char *text, size_t len, struct rs_remote_answ
             }
         } else if (header_is(p, n, "Restate-Reason", &v, &vlen))
         {
-            if (token_like(v, vlen, sizeof(out->reason) - 1, false))
+            if (vlen < sizeof(out->reason) && token_like(v, vlen, sizeof(out->reason) - 1, false))
             {
                 memcpy(out->reason, v, vlen);
                 out->reason[vlen] = '\0';
@@ -484,6 +489,7 @@ struct rs_remote *rs_remote_new(const char *url)
     }
     rm->url = rs_xstrndup(url, len);
     rm->renew_fd = -1;
+    rs_buf_init(&rm->said);
     return rm;
 }
 
@@ -719,6 +725,7 @@ static void req_free(struct req *q, bool keep_out)
     free(q->hdr);
     free(q->out);
     free(q->target);
+    free(q->upload);
 }
 
 /* The requests asked of curl in one run, over one connection; each one's
@@ -786,6 +793,9 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
         {
             conf(&b, "request", q[i].method);
             conf(&b, "data-binary", q[i].data ? q[i].data : "");
+        } else if (q[i].upload)
+        {
+            conf(&b, "upload-file", q[i].upload);
         }
     }
     rm->seq++;
@@ -914,32 +924,83 @@ void rs_remote_end(struct rs_remote *rm)
     }
 }
 
-/* Its directory and what is in it removed: the files curl wrote. */
-static void remove_tmp(struct rs_remote *rm)
+/* What is in the directory `path` removed -- its files, and the directories
+ * in it that are empty -- and then it, if it is empty now. A link is removed,
+ * never followed. */
+static void empty_out(const char *path)
 {
-    DIR                 *d;
+    DIR                 *d = opendir(path);
     const struct dirent *de;
 
-    if (!rm->tmp)
-    {
-        return;
-    }
-    d = opendir(rm->tmp);
     while (d && (de = readdir(d)) != NULL)
     {
         if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
         {
-            char *path = rs_xasprintf("%s/%s", rm->tmp, de->d_name);
+            char       *child = rs_xasprintf("%s/%s", path, de->d_name);
+            struct stat st;
 
-            (void)unlink(path);
-            free(path);
+            if (lstat(child, &st) == 0)
+            {
+                (void)(S_ISDIR(st.st_mode) ? rmdir(child) : unlink(child));
+            }
+            free(child);
         }
     }
     if (d)
     {
         (void)closedir(d);
     }
-    (void)rmdir(rm->tmp);
+    (void)rmdir(path);
+}
+
+/* Its directory and what is in it removed: the files curl wrote, and the
+ * stage's. */
+static void remove_tmp(const struct rs_remote *rm)
+{
+    static const char *const stage_dirs[] = { "stage/packs", "stage/snapshots", "stage" };
+    char                    *snaps;
+    DIR                     *d;
+    const struct dirent     *de;
+    size_t                   i;
+    int                      saved = errno;
+
+    if (!rm->tmp)
+    {
+        return;
+    }
+    /* From the bottom up, as the stage is laid out: a snapshot's directory
+     * being made, then the stage's own, then this one. */
+    snaps = rs_xasprintf("%s/stage/snapshots", rm->tmp);
+    d = opendir(snaps);
+    while (d && (de = readdir(d)) != NULL)
+    {
+        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
+        {
+            char       *child = rs_xasprintf("%s/%s", snaps, de->d_name);
+            struct stat st;
+
+            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
+            {
+                empty_out(child);
+            }
+            free(child);
+        }
+    }
+    if (d)
+    {
+        (void)closedir(d);
+    }
+    free(snaps);
+    for (i = 0; i < sizeof(stage_dirs) / sizeof(stage_dirs[0]); i++)
+    {
+        char *path = rs_xasprintf("%s/%s", rm->tmp, stage_dirs[i]);
+
+        empty_out(path);
+        free(path);
+    }
+    empty_out(rm->tmp);
+    /* What failed before it was cleared up is what is said of it. */
+    errno = saved;
 }
 
 /*
@@ -1045,6 +1106,8 @@ static void forget_fetched(struct rs_remote *rm)
 static void stop_session(struct rs_remote *rm)
 {
     forget_fetched(rm);
+    rs_store_free(rm->stage);
+    rm->stage = NULL;
     if (rm->renewer > 0)
     {
         int status;
@@ -1063,6 +1126,32 @@ static void stop_session(struct rs_remote *rm)
     remove_tmp(rm);
     free(rm->tmp);
     rm->tmp = NULL;
+}
+
+/* An append session's stage: where what a capture writes is made, laid out
+ * as the repository is, until it is sent. */
+static bool make_stage(struct rs_remote *rm, struct rs_buf *err)
+{
+    static const char *const dirs[] = { "", "/packs", "/snapshots" };
+    char                    *stage = rs_xasprintf("%s/stage", rm->tmp);
+    size_t                   i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+    {
+        char *path = rs_xasprintf("%s%s", stage, dirs[i]);
+
+        if (mkdir(path, 0700) != 0)
+        {
+            rs_buf_addf(err, "%s: %s", path, strerror(errno));
+            free(path);
+            free(stage);
+            return false;
+        }
+        free(path);
+    }
+    rm->stage = rs_store_local(stage);
+    free(stage);
+    return true;
 }
 
 bool rs_remote_begin(struct rs_remote *rm, enum rs_remote_kind kind, bool *busy,
@@ -1104,6 +1193,12 @@ bool rs_remote_begin(struct rs_remote *rm, enum rs_remote_kind kind, bool *busy,
         rm->kind = kind;
         rm->lease = q->ans.lease ? q->ans.lease : 300;
         start_renewer(rm);
+        if (kind == RS_REMOTE_APPEND && !make_stage(rm, err))
+        {
+            req_free(q, false);
+            stop_session(rm);
+            return false;
+        }
     } else
     {
         char *what;
@@ -1151,6 +1246,7 @@ void rs_remote_free(struct rs_remote *rm)
         free(rm->lists[i]);
     }
     free(rm->lists);
+    rs_buf_free(&rm->said);
     memset(rm->token, 0, sizeof(rm->token));
     free(rm->url);
     free(rm);
@@ -1528,4 +1624,391 @@ void rs_remote_prefetch(struct rs_remote *rm, const char *const *names, size_t n
         done += count;
     }
     rs_buf_free(&err);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Writing                                                                   */
+/* ------------------------------------------------------------------------- */
+
+struct rs_store *rs_remote_stage(const struct rs_remote *rm)
+{
+    return rm->stage;
+}
+
+const char *rs_remote_said(const struct rs_remote *rm)
+{
+    return rm->said.len ? rm->said.data : NULL;
+}
+
+void rs_remote_unsay(struct rs_remote *rm)
+{
+    rs_buf_reset(&rm->said);
+}
+
+/* Why a write of `name` was not sent on, into rm->said; errno set to `e`. */
+static void say_refused(struct rs_remote *rm, int e, const char *name, const char *why)
+{
+    rs_buf_reset(&rm->said);
+    rs_buf_addf(&rm->said, "%s/%s: %s", rm->url, name, why);
+    errno = e;
+}
+
+static bool ends_with(const char *s, const char *tail)
+{
+    size_t a = strlen(s);
+    size_t b = strlen(tail);
+
+    return a > b && strcmp(s + a - b, tail) == 0;
+}
+
+/* Whether `name` is one being made, not one put in place: a component of it
+ * begins with '.', as everything restate writes beside its name does. */
+static bool being_made(const char *name)
+{
+    return name[0] == '.' || strstr(name, "/.") != NULL;
+}
+
+/* `name` in the cached listing of `dir`, as a commit has just put it there,
+ * so that what is asked of the repository next sees it: nothing, where `dir`
+ * has not been listed, since its listing will be fetched with it in. */
+static void add_entry(struct rs_remote *rm, const char *dir, const char *name,
+                      enum rs_store_kind kind, uint64_t size)
+{
+    struct listing *l = NULL;
+    size_t          i;
+
+    for (i = 0; !l && i < rm->nlists; i++)
+    {
+        if (strcmp(rm->lists[i]->dir, dir) == 0)
+        {
+            l = rm->lists[i];
+        }
+    }
+    if (!l)
+    {
+        return;
+    }
+    l->gone = false;
+    for (i = 0; i < l->n; i++)
+    {
+        if (strcmp(l->entries[i].name, name) == 0)
+        {
+            break;
+        }
+    }
+    if (i == l->n)
+    {
+        l->entries = rs_xreallocarray(l->entries, l->n + 1, sizeof(*l->entries));
+        l->entries[l->n].name = rs_xstrdup(name);
+        l->n++;
+    }
+    l->entries[i].st.kind = kind;
+    l->entries[i].st.size = size;
+    l->entries[i].st.mtime = (int64_t)time(NULL);
+}
+
+/* The stage's file `name` removed. */
+static int unlink_staged(const struct rs_remote *rm, const char *name)
+{
+    char *path = rs_store_path(rm->stage, name);
+    int   rc = unlink(path);
+
+    free(path);
+    return rc;
+}
+
+/* The size of `name` in the stage, or -1 if it is not there as a file. */
+static int64_t staged_size(const struct rs_remote *rm, const char *name)
+{
+    struct rs_store_stat st;
+
+    return rs_store_stat(rm->stage, name, &st) == 0 && st.kind == RS_STORE_FILE
+               ? (int64_t)st.size : -1;
+}
+
+/* A request to upload the stage's `from` as `name`. */
+static void req_upload(struct rs_remote *rm, struct req *q, const char *from, const char *name)
+{
+    char *target = rs_xasprintf("/sessions/%s/files/%s", rm->session, name);
+
+    req_init(rm, q, target);
+    free(target);
+    q->upload = rs_store_path(rm->stage, from);
+    q->name = name;
+    q->session = false;
+}
+
+/* A request to commit `name`. */
+static void req_commit(struct rs_remote *rm, struct req *q, const char *name)
+{
+    char *target = rs_xasprintf("/sessions/%s/commit/%s", rm->session, name);
+
+    req_init(rm, q, target);
+    free(target);
+    q->method = "POST";
+    q->name = name;
+    q->session = false;
+}
+
+/*
+ * The uploads q[0..n-2] and then the commit q[n-1], in one curl: the
+ * commit's status -- 200 or 201, or 409 for a name taken, where `taken_ok` --
+ * or -1, with rm->said saying what failed first and errno set. Every request
+ * is freed.
+ */
+static int send_batch(struct rs_remote *rm, struct req *q, size_t n, bool taken_ok)
+{
+    struct rs_buf err;
+    int           status = -1;
+    size_t        i;
+
+    rs_buf_init(&err);
+    rs_buf_reset(&rm->said);
+    if (!run_batch(rm, q, n, &err))
+    {
+        errno = EIO;
+    } else
+    {
+        for (i = 0; i + 1 < n && q[i].answered && q[i].ans.status == 201; i++)
+        {
+        }
+        if (i + 1 == n && q[i].answered &&
+            (q[i].ans.status == 200 || q[i].ans.status == 201 ||
+             (taken_ok && q[i].ans.status == 409 &&
+              strcmp(q[i].ans.reason, "name-taken") == 0)))
+        {
+            status = q[i].ans.status;
+        } else
+        {
+            char *what = rs_xasprintf("%s/%s", rm->url, q[i].name);
+
+            say_failed(rm, &q[i], what, &err);
+            free(what);
+            if (q[i].answered && (q[i].ans.status == 423 || q[i].ans.status == 503))
+            {
+                was_busy = true;
+            }
+        }
+    }
+    if (status < 0)
+    {
+        int saved = errno;
+
+        rs_buf_addstr(&rm->said, err.data ? err.data : "");
+        errno = saved;
+    }
+    for (i = 0; i < n; i++)
+    {
+        req_free(&q[i], false);
+    }
+    rs_buf_free(&err);
+    return status;
+}
+
+/* Pack `stem`, its .idx just put in place in the stage: its files sent, then
+ * committed, and taken out of the stage. */
+static int send_pack(struct rs_remote *rm, const char *stem)
+{
+    static const char *const ext[] = { "tar.gz", "sum", "seek", "idx" };
+    char                    *names[4];
+    int64_t                  sizes[4];
+    struct req               q[5];
+    char                    *pack = rs_xasprintf("packs/%s", stem);
+    size_t                   n = 0;
+    size_t                   i;
+    int                      status;
+
+    for (i = 0; i < 4; i++)
+    {
+        names[i] = rs_xasprintf("packs/%s.%s", stem, ext[i]);
+        sizes[i] = staged_size(rm, names[i]);
+    }
+    for (i = 0; i < 4; i++)
+    {
+        if (sizes[i] < 0 && i != 2)
+        {
+            say_refused(rm, ENOENT, names[i], "not made here, so not sent");
+            break;
+        }
+    }
+    status = i < 4 ? -1 : 0;
+    for (i = 0; status == 0 && i < 4; i++)
+    {
+        if (sizes[i] >= 0)
+        {
+            req_upload(rm, &q[n++], names[i], names[i]);
+        }
+    }
+    if (status == 0)
+    {
+        req_commit(rm, &q[n++], pack);
+        status = send_batch(rm, q, n, false);
+    }
+    for (i = 0; i < 4; i++)
+    {
+        if (status > 0 && sizes[i] >= 0)
+        {
+            add_entry(rm, "packs", names[i] + 6, RS_STORE_FILE, (uint64_t)sizes[i]);
+            (void)unlink_staged(rm, names[i]);
+        }
+        free(names[i]);
+    }
+    free(pack);
+    return status > 0 ? 0 : -1;
+}
+
+/* The files a snapshot's directory has, in the order they are sent. */
+static const char *const snapshot_files[] = { "index.json.gz", "index.sig", "kit", "info",
+                                              "packs" };
+#define NSNAPSHOT_FILES (sizeof(snapshot_files) / sizeof(snapshot_files[0]))
+
+/* The stage's directory `dir`, and the files a snapshot's has in it, gone. */
+static void unstage_snapshot(const struct rs_remote *rm, const char *dir)
+{
+    size_t i;
+
+    for (i = 0; i < NSNAPSHOT_FILES; i++)
+    {
+        char *file = rs_xasprintf("%s/%s", dir, snapshot_files[i]);
+
+        (void)unlink_staged(rm, file);
+        free(file);
+    }
+    {
+        char *path = rs_store_path(rm->stage, dir);
+
+        (void)rmdir(path);
+        free(path);
+    }
+}
+
+/* Snapshot `name`, its directory just put in place in the stage: its files
+ * sent, then committed. A name another snapshot has is EEXIST -- and noted
+ * as taken, so that the next one tried is another. Either way, its directory
+ * is taken out of the stage, which nothing else would now. */
+static int send_snapshot(struct rs_remote *rm, const char *name)
+{
+    char       *dir = rs_xasprintf("snapshots/%s", name);
+    char       *files[NSNAPSHOT_FILES];
+    struct req  q[NSNAPSHOT_FILES + 1];
+    size_t      n = 0;
+    size_t      i;
+    int         status;
+
+    for (i = 0; i < NSNAPSHOT_FILES; i++)
+    {
+        files[i] = rs_xasprintf("%s/%s", dir, snapshot_files[i]);
+        if (staged_size(rm, files[i]) >= 0)
+        {
+            req_upload(rm, &q[n++], files[i], files[i]);
+        }
+    }
+    req_commit(rm, &q[n++], dir);
+    status = send_batch(rm, q, n, true);
+    if (status == 200 || status == 201 || status == 409)
+    {
+        add_entry(rm, "snapshots", name, RS_STORE_DIR, 0);
+    }
+    if (status == 409)
+    {
+        say_refused(rm, EEXIST, dir, "another snapshot has that name");
+    }
+    {
+        int saved = errno;
+
+        unstage_snapshot(rm, dir);
+        errno = saved;
+    }
+    for (i = 0; i < NSNAPSHOT_FILES; i++)
+    {
+        free(files[i]);
+    }
+    free(dir);
+    return status == 200 || status == 201 ? 0 : -1;
+}
+
+static bool is_chunk_key(const char *name)
+{
+    return strcmp(name, "chunk-key") == 0 ||
+           (strncmp(name, "chunk-key.", 10) == 0 && name[10] && !strchr(name, '/'));
+}
+
+/* The stage's `from` sent as the chunk key `to`, and committed: 1 if it was
+ * put there, 0 if something was there already, which is kept; -1 if it could
+ * not be. */
+static int send_key(struct rs_remote *rm, const char *from, const char *to)
+{
+    struct req q[2];
+    int64_t    size = staged_size(rm, from);
+    int        status;
+
+    if (size < 0)
+    {
+        say_refused(rm, ENOENT, from, "not made here, so not sent");
+        return -1;
+    }
+    req_upload(rm, &q[0], from, to);
+    req_commit(rm, &q[1], to);
+    status = send_batch(rm, q, 2, false);
+    if (status > 0)
+    {
+        add_entry(rm, "", to, RS_STORE_FILE, (uint64_t)size);
+    }
+    return status == 201 ? 1 : status == 200 ? 0 : -1;
+}
+
+int rs_remote_placed(struct rs_remote *rm, const char *name)
+{
+    rs_buf_reset(&rm->said);
+    if (!rm->stage)
+    {
+        say_refused(rm, EROFS, name, "written only in an append session");
+        return -1;
+    }
+    if (being_made(name))
+    {
+        return 0;
+    }
+    if (strncmp(name, "packs/", 6) == 0 && !strchr(name + 6, '/'))
+    {
+        if (ends_with(name, ".idx"))
+        {
+            char *stem = rs_xstrndup(name + 6, strlen(name + 6) - 4);
+            int   rc = send_pack(rm, stem);
+
+            free(stem);
+            return rc;
+        }
+        if (ends_with(name, ".tar.gz") || ends_with(name, ".sum") || ends_with(name, ".seek"))
+        {
+            /* Sent with its .idx, which is what makes it count. */
+            return 0;
+        }
+    }
+    if (strncmp(name, "snapshots/", 10) == 0 && name[10] && !strchr(name + 10, '/'))
+    {
+        return send_snapshot(rm, name + 10);
+    }
+    if (is_chunk_key(name))
+    {
+        int rc = send_key(rm, name, name);
+
+        (void)unlink_staged(rm, name);
+        return rc < 0 ? -1 : 0;
+    }
+    say_refused(rm, EROFS, name, "not something restate puts in a repository through "
+                "restate-proxy");
+    return -1;
+}
+
+int rs_remote_place_new(struct rs_remote *rm, const char *from, const char *to)
+{
+    rs_buf_reset(&rm->said);
+    if (!rm->stage || !is_chunk_key(to))
+    {
+        say_refused(rm, EROFS, to, "not something restate puts in a repository through "
+                    "restate-proxy");
+        return -1;
+    }
+    return send_key(rm, from, to);
 }

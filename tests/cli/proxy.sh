@@ -65,6 +65,17 @@ file_mode() {
   stat -c '%a' "$1" 2> /dev/null || stat -f '%Lp' "$1"
 }
 
+# Whether restate will run a program: where it looks, root's, and writable by
+# no one else (see run.c).
+usable() {
+  for d in /usr/bin /usr/local/bin /bin; do
+    if [ -n "$(find -L "$d/$1" -prune -type f -user 0 ! -perm -020 ! -perm -002 2> /dev/null)" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 expect 0 "--version" -- "$BIN" --version
 contains "$OUT" "restate-proxy " "--version names the program"
@@ -458,6 +469,27 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     lacks "$(cat server.log)" "commit-failed" "and no commit failed"
     stop
 
+    # An encrypted repository for a capture through the proxy to sign and
+    # encrypt into, where gpg is one restate will run: a key to sign with and
+    # one to encrypt to, in a GnuPG home of the test's own, and a grant.
+    ENC=
+    if usable gpg && usable gpgconf && mkdir -m 700 gnupg; then
+      gk() { GNUPGHOME="$WORK/gnupg" gpg --batch --quiet --pinentry-mode loopback --passphrase '' "$@"; }
+      gk --quick-gen-key 'restate test <signer@example.invalid>' ed25519 sign never 2> /dev/null
+      gk --quick-gen-key 'restate test <enc@example.invalid>' default default never 2> /dev/null
+      gk --export-secret-keys --armor signer@example.invalid > signer.sec 2> /dev/null
+      gk --export signer@example.invalid > signer.pub 2> /dev/null
+      gk --export enc@example.invalid > enc.pub 2> /dev/null
+      if [ -s signer.sec ] && [ -s enc.pub ] && "$RESTATE" init -q --encrypt-to enc.pub edst; then
+        expect 0 "the encrypted repository's client's token" -- "$BIN" --new-token en01.token
+        printf 'repository = %s/edst\noperations = read, append\n%s\n' "$WORK" "$OUT" \
+          > proxy.d/.en01.tmp
+        chmod 0644 proxy.d/.en01.tmp
+        mv proxy.d/.en01.tmp proxy.d/en01.conf
+        ENC=1
+      fi
+    fi
+
     # restate itself through the proxy: what reads a repository, with the
     # client's token on a file and the proxy's certificate trusted by
     # --repository-ca-file. Its own files for curl go in a TMPDIR of the
@@ -491,10 +523,76 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
       fail "what was read is cached"
     fi
 
-    # What changes a repository is the storage host's.
-    expect 2 "capture through the proxy, for now" -- \
-      "${RUN[@]}" capture -r tree --os=linux -q "${ON[@]}" -o "$URL"
-    contains "$ERR" "not supported yet" "says so"
+    # A capture through the proxy: made here, sent a pack at a time and
+    # committed, and its snapshot last -- then found whole by restate on the
+    # storage host, and read back through the proxy.
+    mkdir -p tree3/etc
+    printf 'three\n' > tree3/etc/three.conf
+    head -c 300000 /dev/urandom > tree3/etc/big.bin
+    expect 0 "features says a capture can go through the proxy" -- "$RESTATE" features --json
+    contains "$OUT" '"remote_capture": true' "says so"
+    expect 0 "capture through the proxy" -- \
+      "${RUN[@]}" capture -r tree3 --os=linux --result "$WORK/c.json" "${ON[@]}" -o "$URL"
+    contains "$ERR" "restate: snapshot $URL::" "names the snapshot it made"
+    contains "$(cat c.json)" "\"snapshot\": \"$URL::" "and so does its result"
+    left "capture"
+    SNAP3="$(sed -n 's/.*"snapshot": "[^"]*::\([^"]*\)".*/\1/p' c.json)"
+    if [ -n "$SNAP3" ] && [ -d "dst/snapshots/$SNAP3" ]; then ok; else fail "it is there: $SNAP3"; fi
+    expect 0 "the storage host finds it whole" -- "$RESTATE" check dst
+    contains "$ERR" "the repository is whole" "every pack and snapshot"
+    rm -rf rout3 && mkdir rout3
+    expect 0 "restore what was captured through it" -- \
+      "${RUN[@]}" restore -q --allow-unverified --root rout3 "${ON[@]}" "$URL::$SNAP3"
+    if cmp -s tree3/etc/big.bin rout3/etc/big.bin; then ok; else fail "its files come back"; fi
+    PACKS="$(find dst/packs -name '*.idx' | wc -l)"
+    expect 0 "capture the same again through the proxy" -- \
+      "${RUN[@]}" capture -r tree3 --os=linux "${ON[@]}" -o "$URL"
+    contains "$ERR" "0 bytes new to the repository" "stores nothing twice"
+    if [ "$(find dst/packs -name '*.idx' | wc -l)" = "$PACKS" ]; then ok; else fail "and adds no pack"; fi
+    left "a capture with nothing new"
+    if [ -z "$(find staging -type f 2> /dev/null)" ]; then ok; else fail "the proxy's staging is left empty"; fi
+
+    # A copy into it, as a capture is made: packs, then the snapshot.
+    SRC2=
+    for d in src/snapshots/*; do SRC2="$(basename "$d")"; done
+    expect 0 "copy into the proxy" -- "${RUN[@]}" copy "${ON[@]}" "src::$SRC2" "$URL"
+    if [ -d "dst/snapshots/$SRC2" ]; then ok; else fail "the copy is there"; fi
+    expect 0 "and still whole" -- "$RESTATE" check dst
+    left "copy into the proxy"
+
+    # Busy: another append session holds its lock, so exit 5, for a job to
+    # try again.
+    ask -H "$UP" -d append /v1/up01/sessions
+    HOLD="$(printf '%s\n' "$OUT" | tail -n 1)"
+    expect 5 "a capture while another holds the lock" -- \
+      "${RUN[@]}" capture -q -r tree3 --os=linux "${ON[@]}" -o "$URL"
+    contains "$ERR" "423 busy" "says so"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$HOLD/end"
+    left "a capture that was busy"
+
+    if [ -n "$ENC" ]; then
+      EURL="https://localhost:$PORT/v1/en01"
+      EON=(--repository-token-file "$WORK/en01.token" --repository-ca-file "$WORK/cert.pem")
+      expect 0 "capture --encrypt-to --sign-with through the proxy" -- \
+        "${RUN[@]}" capture -q -r tree3 --os=linux --encrypt-to enc.pub --sign-with signer.sec \
+        "${EON[@]}" -o "$EURL"
+      if [ -f edst/chunk-key ]; then ok; else fail "its chunking key is put there"; fi
+      if [ -n "$(find edst/snapshots -name index.sig)" ]; then ok; else fail "its index is signed"; fi
+      printf 'more\n' > tree3/etc/more.conf
+      expect 0 "and again, with something new" -- \
+        "${RUN[@]}" capture -q -r tree3 --os=linux --encrypt-to enc.pub "${EON[@]}" -o "$EURL"
+      expect 0 "the encrypted repository is whole on the storage host" -- \
+        "$RESTATE" check --metadata-only edst
+      expect 0 "its signature holds, read through the proxy" -- \
+        "${RUN[@]}" snapshots --json --trusted-key signer.pub "${EON[@]}" "$EURL"
+      contains "$OUT" '"trusted": true' "by the key that signed it"
+      left "an encrypted capture"
+      GNUPGHOME="$WORK/gnupg" gpgconf --kill gpg-agent 2> /dev/null || true
+    else
+      printf '  - encrypted captures through the proxy not run: they need gpg\n'
+    fi
+
+    # What changes what a repository holds is the storage host's.
     expect 2 "prune through the proxy" -- "${RUN[@]}" prune --keep-last 1 "${ON[@]}" "$URL"
     contains "$ERR" "run on the storage host" "is the storage host's"
     expect 2 "sign through the proxy" -- \

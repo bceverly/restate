@@ -177,13 +177,16 @@ The order, each a release of its own:
     directory's listing, fetched once; every pack's `.idx` fetched in one
     curl, and cached whether or not the repository is encrypted; 423 and
     503 are exit 5, and a failed run's result carries `proxy_reason`;
-    capture refused for now, and prune, repack, protect, sign, init and
-    ingest always. restate-proxy's log no longer names a session's id
-  - [ ] **Capture through the proxy** (3.2.0.0): uploads into the session's
-    staging and commits -- each pack once its `.idx` is renamed into place,
-    the snapshot last, the next name on `409 name-taken` -- chunk keys
-    placed new and read again, `capture --sign-with` signing before the
-    index is uploaded, and `features` saying so
+    capture refused until 3.2.0.0, and prune, repack, protect, sign, init
+    and ingest always. restate-proxy's log no longer names a session's id
+  - [x] **Capture through the proxy** (3.2.0.0): an `append` session's
+    writes made in a stage on this machine, laid out as the repository is,
+    and read from there until sent; each pack's files uploaded and the pack
+    committed, in one curl, once its `.idx` is renamed into place; the
+    snapshot last, made again under the next name on `409 name-taken`;
+    chunk keys placed new; `capture --sign-with` signing the staged index
+    before it is uploaded; copy into a proxy too; and `features` saying so
+    (`remote_capture`)
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
 - [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,

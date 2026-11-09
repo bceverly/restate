@@ -2110,11 +2110,6 @@ int rs_cmd_capture(const struct rs_options *o)
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "%s", "");
         return RESTATE_EXIT_TROUBLE;
     }
-    if (remote_refused("capture", o->output, "through restate-proxy is not supported yet"))
-    {
-        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "%s", "");
-        return RESTATE_EXIT_TROUBLE;
-    }
     if (o->no_hash)
     {
         /* Every kept file is read to store it, so its digest costs nothing
@@ -3647,6 +3642,9 @@ int rs_cmd_features(const struct rs_options *o)
      * what reads one: snapshots, list, diff, status, du, check, copy out of
      * it and restore. */
     rs_jobj_bool(&doc, "remote_repository", true);
+    /* And capture into one, and copy into one: as --append-only does, with
+     * the proxy's append lock. */
+    rs_jobj_bool(&doc, "remote_capture", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)

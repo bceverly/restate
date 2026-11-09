@@ -108,6 +108,31 @@ void rs_remote_prefetch(struct rs_remote *rm, const char *const *names, size_t n
  * sessions (503) in this run, in any store. */
 bool rs_remote_busy(void);
 
+/*
+ * Writing, in an append session. What a capture writes is made in a stage on
+ * this machine, laid out as the repository is -- rs_remote_stage, a local
+ * store -- and sent on once it is put in place there (rs_remote_placed):
+ *
+ *   packs/NAME.idx      the pack's files uploaded, then the pack committed
+ *   packs/NAME.*        nothing yet: sent with its .idx
+ *   snapshots/NAME      the directory's files uploaded, then committed; a
+ *                       name another snapshot has is EEXIST
+ *   chunk-key[.NAME]    uploaded and committed, kept if one is there already
+ *
+ * What is sent is taken out of the stage. A name with a component beginning
+ * with '.' is one being made, and nothing is sent; anything else is EROFS.
+ * Each returns 0, or -1 with errno, and rs_remote_said saying why.
+ */
+struct rs_store *rs_remote_stage(const struct rs_remote *rm);   /* NULL outside one */
+int              rs_remote_placed(struct rs_remote *rm, const char *name);
+/* The stage's `from` as the chunk key `to`, only if there is none: 1 if it was
+ * put there, 0 if one was there already, -1 if neither. */
+int              rs_remote_place_new(struct rs_remote *rm, const char *from, const char *to);
+/* Why the last write failed, as the proxy or curl said; NULL if it did not,
+ * or since rs_remote_unsay. */
+const char      *rs_remote_said(const struct rs_remote *rm);
+void             rs_remote_unsay(struct rs_remote *rm);
+
 /* The Restate-Reason of the last answer from a proxy that was a failure, in
  * any store, for a result's proxy_reason; NULL if there has been none. */
 const char *rs_remote_reason(void);

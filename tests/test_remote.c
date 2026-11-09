@@ -12,6 +12,8 @@
 
 #include "remote.h"
 #include "repo.h"
+#include "rules.h"
+#include "scan.h"
 #include "store.h"
 #include "test.h"
 #include "util.h"
@@ -32,7 +34,106 @@ struct fake {
     int         ends;
     char        kind[16];   /* the last session's */
     char        last_range[64];
+    char       *staging;    /* where uploads go, until committed */
+    int         uploads;
+    int         commits;
+    int         pack_status; /* what a pack's commit is answered, if not 0 */
+    bool        take_once;  /* the next snapshot's name is taken as it commits */
 };
+
+/* `from` moved to `to`, making the directory it goes in. */
+static bool move_in(const char *from, const char *to)
+{
+    char *dir = rs_xstrdup(to);
+    char *slash = strrchr(dir, '/');
+
+    if (slash)
+    {
+        *slash = '\0';
+        (void)mkdir(dir, 0700);
+    }
+    free(dir);
+    return rename(from, to) == 0;
+}
+
+/* An upload, into staging: 201. */
+static int fake_upload(struct fake *f, const char *name, const char *from)
+{
+    char *to = rs_xasprintf("%s/%s", f->staging, name);
+    char *text = rs_test_slurp(from);
+    char *dir = rs_xstrdup(to);
+    char *p;
+
+    f->uploads++;
+    for (p = strchr(dir + strlen(f->staging) + 1, '/'); p; p = strchr(p + 1, '/'))
+    {
+        *p = '\0';
+        (void)mkdir(dir, 0700);
+        *p = '/';
+    }
+    rs_test_write("/", to + 1, text, 0600);
+    free(dir);
+    free(text);
+    free(to);
+    return 201;
+}
+
+/* A commit, from staging into the repository, as the proxy makes one; its
+ * status and reason. */
+static int fake_commit(struct fake *f, const char *name, const char **reason)
+{
+    char *from = rs_xasprintf("%s/%s", f->staging, name);
+    char *to = rs_xasprintf("%s/%s", f->repo, name);
+    int   status = 201;
+
+    f->commits++;
+    if (rs_starts_with(name, "packs/"))
+    {
+        static const char *const ext[] = { "tar.gz", "sum", "seek", "idx" };
+        size_t                   i;
+
+        status = f->pack_status ? f->pack_status : 201;
+        for (i = 0; status == 201 && i < 4; i++)
+        {
+            char *a = rs_xasprintf("%s.%s", from, ext[i]);
+            char *b = rs_xasprintf("%s.%s", to, ext[i]);
+
+            (void)move_in(a, b);
+            free(a);
+            free(b);
+        }
+        *reason = status == 201 ? NULL : "invalid";
+    } else if (rs_starts_with(name, "snapshots/"))
+    {
+        struct stat st;
+
+        if (f->take_once)
+        {
+            f->take_once = false;
+            (void)mkdir(to, 0700);
+        }
+        if (lstat(to, &st) == 0)
+        {
+            status = 409;
+            *reason = "name-taken";
+        } else
+        {
+            (void)move_in(from, to);
+        }
+    } else
+    {
+        struct stat st;
+
+        status = lstat(to, &st) == 0 ? 200 : 201;
+        if (status == 201)
+        {
+            (void)move_in(from, to);
+        }
+    }
+    free(from);
+    free(to);
+    return status;
+}
 
 /* How the fake answers from now on: refusing sessions as busy, or saying
  * nothing at all. */
@@ -40,6 +141,12 @@ static void fake_set(struct fake *f, bool busy, bool silent)
 {
     f->busy = busy;
     f->silent = silent;
+}
+
+/* What the fake answers a pack's commit from now on: 0 for as it should. */
+static void fake_pack_status(struct fake *f, int status)
+{
+    f->pack_status = status;
 }
 
 /* `line`'s value, if it is `key = "VALUE"`: unquoted, the caller's to free. */
@@ -110,7 +217,8 @@ static bool list_dir(const char *path, struct rs_buf *out)
 
 /* One request answered: headers into `hdr`, a body into `out`. */
 static void answer(struct fake *f, const char *url, const char *auth, const char *range,
-                   const char *method, const char *data, const char *hdr, const char *out)
+                   const char *method, const char *data, const char *upload, const char *hdr,
+                   const char *out)
 {
     const char   *path = url + strlen(URL);
     struct rs_buf head;
@@ -141,6 +249,17 @@ static void answer(struct fake *f, const char *url, const char *auth, const char
     {
         f->ends++;
         status = 204;
+    } else if (upload && rs_starts_with(path, "/sessions/" SID "/files/"))
+    {
+        status = fake_upload(f, path + strlen("/sessions/" SID "/files/"), upload);
+    } else if (method && rs_starts_with(path, "/sessions/" SID "/commit/"))
+    {
+        status = fake_commit(f, path + strlen("/sessions/" SID "/commit/"), &reason);
+        if (reason)
+        {
+            rs_buf_addf(&body, "the commit of %s was refused\n",
+                        path + strlen("/sessions/" SID "/commit/"));
+        }
     } else if (rs_starts_with(path, "/list/"))
     {
         char  *dir = rs_xasprintf("%s/%s", f->repo, path + 6);
@@ -209,7 +328,8 @@ static void answer(struct fake *f, const char *url, const char *auth, const char
     {
         rs_buf_addf(&head, "Restate-Reason: %s\r\n", reason);
     }
-    if (status == 201 || (method && status == 204))
+    if ((status == 201 && !upload && strstr(path, "/commit/") == NULL) ||
+        (method && status == 204))
     {
         rs_buf_addstr(&head, "restate-session: " SID "\r\nRestate-Lease:  60 \r\n");
     }
@@ -232,6 +352,7 @@ static int fake_curl(const char *conf, void *ctx)
     char        *range = NULL;
     char        *method = NULL;
     char        *data = NULL;
+    char        *upload = NULL;
     char        *hdr = NULL;
     char        *out = NULL;
 
@@ -253,9 +374,10 @@ static int fake_curl(const char *conf, void *ctx)
         }
         if (strcmp(line, "next") == 0 && url)
         {
-            answer(f, url, auth, range, method, data, hdr, out);
+            answer(f, url, auth, range, method, data, upload, hdr, out);
             free(url), free(auth), free(range), free(method), free(data), free(hdr), free(out);
-            url = auth = range = method = data = hdr = out = NULL;
+            free(upload);
+            url = auth = range = method = data = upload = hdr = out = NULL;
         } else if ((v = value_of(line, "url")) != NULL)
         {
             url = v;
@@ -277,6 +399,9 @@ static int fake_curl(const char *conf, void *ctx)
         } else if ((v = value_of(line, "data-binary")) != NULL)
         {
             data = v;
+        } else if ((v = value_of(line, "upload-file")) != NULL)
+        {
+            upload = v;
         } else if ((v = value_of(line, "dump-header")) != NULL)
         {
             hdr = v;
@@ -287,9 +412,10 @@ static int fake_curl(const char *conf, void *ctx)
     }
     if (url)
     {
-        answer(f, url, auth, range, method, data, hdr, out);
+        answer(f, url, auth, range, method, data, upload, hdr, out);
     }
     free(url), free(auth), free(range), free(method), free(data), free(hdr), free(out);
+    free(upload);
     free(text);
     return 0;
 }
@@ -423,6 +549,8 @@ static char *setup(struct fake *f, char **token)
     rs_test_write(dir, "token", TOKEN "\n", 0600);
     *token = rs_xasprintf("%s/token", dir);
     f->repo = repo;
+    f->staging = rs_xasprintf("%s/staging", dir);
+    (void)mkdir(f->staging, 0700);
     rs_remote_set_transport(fake_curl, f);
     rs_remote_configure(*token, NULL, NULL, 0);
     return dir;
@@ -433,6 +561,7 @@ static void teardown(char *dir, struct fake *f, char *token)
     rs_remote_set_transport(NULL, NULL);
     rs_remote_configure(NULL, NULL, NULL, 0);
     free((char *)f->repo);
+    free(f->staging);
     free(token);
     rs_test_rmtree(dir);
     free(dir);
@@ -715,6 +844,251 @@ static void remote_sessions(void)
     teardown(dir, &f, token);
 }
 
+/* Whether `name` is a file under `dir`. */
+static bool there(const char *dir, const char *name)
+{
+    char       *path = rs_xasprintf("%s/%s", dir, name);
+    struct stat st;
+    bool        yes = lstat(path, &st) == 0;
+
+    free(path);
+    return yes;
+}
+
+/* `text` into the new file `name` in the store, through rs_store_create. */
+static bool made(const struct rs_store *st, const char *name, const char *text)
+{
+    int  fd = rs_store_create(st, name);
+    bool ok = fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text);
+
+    if (fd >= 0)
+    {
+        ok = close(fd) == 0 && ok;
+    }
+    return ok;
+}
+
+static void remote_writing(void)
+{
+    struct fake          f;
+    char                *token;
+    char                *dir = setup(&f, &token);
+    struct rs_store     *st = rs_store_at(URL);
+    struct rs_store_stat ss;
+    struct rs_buf        err;
+    const char          *said;
+    char                *path;
+    char                *tmp;
+    bool                 busy;
+    int                  before;
+
+    TEST_CASE("remote: writing");
+    rs_buf_init(&err);
+    /* Outside an append session, nothing is written. */
+    CHECK(rs_store_create(st, "packs/.P2.tar.gz.tmp") < 0);
+    CHECK_INT(errno, EROFS);
+    CHECK(!rs_store_write_new(st, "packs/.x.tmp", "x", 1, &err));
+    CHECK_CONTAINS(err.data, "only by a capture or a copy");
+    rs_buf_reset(&err);
+    CHECK(rs_store_make_temp_dir(st, "snapshots/.S.") == NULL);
+    CHECK(rs_store_rename(st, "packs/.a", "packs/a", false) < 0);
+    CHECK(rs_store_place_new(st, "packs/.a", "chunk-key") < 0);
+    CHECK(rs_store_remove(st, "packs/P.idx", false) < 0);
+    CHECK(rs_store_remove_dir(st, "snapshots/S", false) < 0);
+    CHECK(rs_store_said(st) == NULL);
+
+    CHECK(rs_store_begin(st, RS_STORE_APPEND, &busy, &err));
+    CHECK_STR(f.kind, "append");
+    /* The packs' listing, so that a commit is seen in it with nothing asked. */
+    CHECK_INT(rs_store_stat(st, "packs/P.idx", &ss), 0);
+
+    /* A pack: made here, and nothing sent until its .idx is in place. */
+    CHECK(made(st, "packs/.P2.tar.gz.tmp", "the content"));
+    CHECK_INT(rs_store_rename(st, "packs/.P2.tar.gz.tmp", "packs/P2.tar.gz", false), 0);
+    CHECK(rs_store_replace(st, "packs/P2.sum", "a sum\n", 6, &err));
+    CHECK(rs_store_write_new(st, "packs/.P2.idx.tmp", "an index\n", 9, &err));
+    CHECK_STR(err.data ? err.data : "", "");
+    path = rs_store_path(st, "packs/.P2.idx.tmp");
+    CHECK(!rs_starts_with(path, URL));
+    free(path);
+    path = rs_store_path(st, "packs/P.idx");
+    CHECK_STR(path, URL "/packs/P.idx");
+    free(path);
+    CHECK_INT(rs_store_stat(st, "packs/P2.tar.gz", &ss), 0);
+    CHECK_INT(ss.size, 11);
+    {
+        char buf[8];
+
+        CHECK_INT(rs_store_peek(st, "packs/P2.tar.gz", buf, 3), 3);
+    }
+    CHECK_INT(f.uploads, 0);
+    before = f.requests;
+    CHECK_INT(rs_store_rename(st, "packs/.P2.idx.tmp", "packs/P2.idx", false), 0);
+    CHECK_INT(f.requests - before, 4);
+    CHECK_INT(f.uploads, 3);
+    CHECK_INT(f.commits, 1);
+    CHECK(there(f.repo, "packs/P2.idx") && there(f.repo, "packs/P2.tar.gz") &&
+          there(f.repo, "packs/P2.sum"));
+    before = f.requests;
+    CHECK_INT(rs_store_stat(st, "packs/P2.idx", &ss), 0);
+    CHECK_INT(ss.size, 9);
+    CHECK_INT(f.requests, before);
+    path = rs_store_path(st, "packs/P2.idx");
+    CHECK_STR(path, URL "/packs/P2.idx");
+    free(path);
+
+    /* One the proxy will not have: what it said is what the rename says. */
+    fake_pack_status(&f, 422);
+    CHECK(made(st, "packs/.Q2.tar.gz.tmp", "more"));
+    CHECK_INT(rs_store_rename(st, "packs/.Q2.tar.gz.tmp", "packs/Q2.tar.gz", false), 0);
+    CHECK(rs_store_replace(st, "packs/Q2.sum", "a sum\n", 6, &err));
+    CHECK(made(st, "packs/.Q2.idx.tmp", "x"));
+    CHECK(rs_store_rename(st, "packs/.Q2.idx.tmp", "packs/Q2.idx", false) < 0);
+    said = rs_store_said(st) ? rs_store_said(st) : "";
+    CHECK_CONTAINS(said, "the commit of packs/Q2 was refused");
+    CHECK_CONTAINS(said, "422 invalid");
+    CHECK(!there(f.repo, "packs/Q2.idx"));
+    /* Taken out of the stage again, as a failed capture does. */
+    CHECK_INT(rs_store_remove(st, "packs/Q2.idx", false), 0);
+    CHECK_INT(rs_store_remove(st, "packs/Q2.tar.gz", false), 0);
+    fake_pack_status(&f, 0);
+    /* A pack with no .sum is not sent at all. */
+    CHECK(made(st, "packs/.R2.idx.tmp", "x"));
+    CHECK(rs_store_rename(st, "packs/.R2.idx.tmp", "packs/R2.idx", false) < 0);
+    CHECK_CONTAINS(rs_store_said(st) ? rs_store_said(st) : "", "not made here");
+
+    /* A snapshot: sent with its directory; one whose name is taken is
+     * EEXIST, and that name is seen as taken from then on. */
+    tmp = rs_store_make_temp_dir(st, "snapshots/.S.");
+    CHECK(tmp != NULL);
+    path = tmp ? rs_xasprintf("%s/info", tmp) : rs_xstrdup("x");
+    CHECK(rs_store_write_new(st, path, "a summary\n", 10, &err));
+    free(path);
+    CHECK(rs_store_rename(st, tmp ? tmp : "x", "snapshots/S", false) < 0);
+    CHECK_INT(errno, EEXIST);
+    CHECK_CONTAINS(rs_store_said(st) ? rs_store_said(st) : "", "another snapshot has that name");
+    free(tmp);
+    tmp = rs_store_make_temp_dir(st, "snapshots/.T.");
+    path = tmp ? rs_xasprintf("%s/info", tmp) : rs_xstrdup("x");
+    CHECK(rs_store_write_new(st, path, "a summary\n", 10, &err));
+    free(path);
+    CHECK_INT(rs_store_rename(st, tmp ? tmp : "x", "snapshots/T", false), 0);
+    CHECK(there(f.repo, "snapshots/T/info"));
+    CHECK_INT(rs_store_stat(st, "snapshots/T", &ss), 0);
+    CHECK(ss.kind == RS_STORE_DIR);
+    free(tmp);
+
+    /* A chunk key: put there only if there is none. */
+    CHECK(rs_store_write_new(st, "packs/.ck.tmp", "a key\n", 6, &err));
+    CHECK_INT(rs_store_place_new(st, "packs/.ck.tmp", "chunk-key"), 1);
+    CHECK_INT(rs_store_place_new(st, "packs/.ck.tmp", "chunk-key"), 0);
+    CHECK(rs_store_place_new(st, "packs/.ck.tmp", "packs/other") < 0);
+    CHECK(rs_store_place_new(st, "packs/.none", "chunk-key.x") < 0);
+    CHECK_INT(rs_store_remove(st, "packs/.ck.tmp", false), 0);
+    CHECK(made(st, "packs/.ck2.tmp", "another key\n"));
+    CHECK_INT(rs_store_rename(st, "packs/.ck2.tmp", "chunk-key.20261109T000000Z-000", false), 0);
+    CHECK(there(f.repo, "chunk-key.20261109T000000Z-000"));
+
+    /* Nothing else goes there, nor is anything there removed or made. */
+    CHECK(made(st, "packs/.m.tmp", "x"));
+    CHECK(rs_store_rename(st, "packs/.m.tmp", "restate-repository", false) < 0);
+    CHECK_INT(errno, EROFS);
+    CHECK(rs_store_remove(st, "packs/P.idx", false) < 0);
+    CHECK(there(f.repo, "packs/P.idx"));
+    CHECK(rs_store_make_dir(st, "packs/x", 0700, false) < 0);
+    CHECK(!rs_store_write_new_thawed(st, "snapshots/S/index.sig", "x", 1, &err));
+
+    rs_buf_free(&err);
+    rs_store_free(st);
+    CHECK_INT(f.ends, 1);
+    teardown(dir, &f, token);
+}
+
+/* A whole capture through the fake: its packs, then its snapshot, under the
+ * next name where the first is taken as it is committed. */
+static void remote_capturing(void)
+{
+    static const char *const kit[] = { "/etc/" };
+    struct fake              f;
+    char                    *token;
+    char                    *dir = setup(&f, &token);
+    const char              *real = rs_xasprintf("%s/real", dir);
+    char                    *tree = rs_xasprintf("%s/tree", dir);
+    char                    *cache = rs_xasprintf("%s/cache", dir);
+    struct rs_rules          rules;
+    struct rs_scan_opts      so;
+    struct rs_scan_stats     stats;
+    struct rs_index          ix;
+    struct rs_repo          *r;
+    struct rs_repo_writer   *w;
+    struct rs_repo_written   done;
+    struct rs_buf            err;
+    bool                     busy;
+
+    TEST_CASE("remote: capturing");
+    rs_buf_init(&err);
+    CHECK(rs_repo_init(real, false, &err));
+    free((char *)f.repo);
+    f.repo = real;
+    (void)mkdir(tree, 0700);
+    rs_test_write(tree, "one.conf", "one\n", 0644);
+    rs_repo_set_cache_dir(cache);
+    r = rs_repo_open(URL, RS_REPO_WRITE, &busy, &err);
+    CHECK(r != NULL);
+    CHECK_STR(f.kind, "append");
+    memset(&done, 0, sizeof(done));
+    w = r ? rs_repo_writer_begin(r, &err) : NULL;
+    CHECK(w != NULL);
+    if (w)
+    {
+        bool ok;
+
+        rs_rules_init(&rules);
+        memset(&so, 0, sizeof(so));
+        memset(&stats, 0, sizeof(stats));
+        so.root = tree;
+        so.rules = &rules;
+        so.hash = true;
+        rs_index_init(&ix);
+        rs_repo_writer_kit(w, kit, 1);
+        so.store = rs_repo_store;
+        so.store_ctx = w;
+        so.have = rs_repo_have;
+        ok = rs_scan(&so, &ix, &stats, &err);
+        CHECK(ok);
+        ix.created = rs_xstrdup("2026-11-09T01:02:03.000000000Z");
+        ix.root = rs_xstrdup(tree);
+        ix.host = rs_xstrdup("test");
+        ix.version = rs_xstrdup("x");
+        ix.content = rs_xstrdup("state");
+        ix.hashed = true;
+        f.take_once = true;
+        if (ok)
+        {
+            ok = rs_repo_writer_finish(w, &ix, NULL, &done, &err);
+        } else
+        {
+            rs_repo_writer_abort(w);
+        }
+        CHECK(ok);
+        CHECK_STR(err.data ? err.data : "", "");
+        CHECK_STR(done.name ? done.name : "", "20261109T010203Z-2");
+        CHECK(there(real, "snapshots/20261109T010203Z-2/index.json.gz"));
+        CHECK(there(real, "snapshots/20261109T010203Z-2/packs"));
+        CHECK(f.commits >= 3);
+        free(done.name);
+        rs_index_free(&ix);
+        rs_rules_free(&rules);
+    }
+    rs_repo_close(r);
+    CHECK_INT(f.ends, 1);
+    rs_repo_set_cache_dir(NULL);
+    rs_buf_free(&err);
+    free(tree);
+    free(cache);
+    teardown(dir, &f, token);
+}
+
 void test_remote(void)
 {
     remote_names();
@@ -722,4 +1096,6 @@ void test_remote(void)
     remote_tokens();
     remote_reading();
     remote_sessions();
+    remote_writing();
+    remote_capturing();
 }
