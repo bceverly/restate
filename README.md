@@ -366,8 +366,9 @@ Commands:
                           check, copy, restore and the rest, with its options
                           -- from a file only its owner can change (see JOBS)
   features                list what this restate can do: its commands, options,
-                          job keys, result schema and the hooks here, for a
-                          program to check before it asks for any of them
+                          job keys, result schema and the hooks whose service
+                          is on this host, for a program to check before it
+                          asks for any of them
 
 Options:
   -r, --root=DIR          treat DIR as the root of the tree to scan, verify, or
