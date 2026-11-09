@@ -23,6 +23,7 @@
 #endif
 
 #include "fsflags.h"
+#include "remote.h"
 
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW 0
@@ -35,8 +36,28 @@
 #endif
 
 struct rs_store {
-    char *dir;
+    char             *dir;      /* or a remote one's URL */
+    struct rs_remote *remote;   /* NULL for a local store */
 };
+
+/* What a remote store refuses, for now: anything that writes. */
+static bool refused_write(const struct rs_store *st, struct rs_buf *err)
+{
+    if (err)
+    {
+        rs_buf_addf(err, "%s: writing to a repository behind restate-proxy is not supported "
+                    "yet", st->dir);
+    }
+    errno = EROFS;
+    return false;
+}
+
+/* The same, where -1 says it was refused. */
+static int refused(const struct rs_store *st)
+{
+    (void)refused_write(st, NULL);
+    return -1;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Directories reached only through descriptors                              */
@@ -253,15 +274,45 @@ struct rs_store *rs_store_local(const char *dir)
 
 struct rs_store *rs_store_at(const char *where)
 {
-    return rs_store_local(where);
+    struct rs_store *st = rs_store_local(where);
+
+    if (rs_remote_is(where))
+    {
+        st->remote = rs_remote_new(where);
+    }
+    return st;
 }
 
 void rs_store_free(struct rs_store *st)
 {
     if (st)
     {
+        rs_remote_free(st->remote);
         free(st->dir);
         free(st);
+    }
+}
+
+bool rs_store_remote(const struct rs_store *st)
+{
+    return st->remote != NULL;
+}
+
+bool rs_store_begin(struct rs_store *st, enum rs_store_use use, bool *busy, struct rs_buf *err)
+{
+    enum rs_remote_kind kind = use == RS_STORE_APPEND ? RS_REMOTE_APPEND
+                             : use == RS_STORE_READ   ? RS_REMOTE_READ
+                                                      : RS_REMOTE_LOOK;
+
+    *busy = false;
+    return !st->remote || rs_remote_begin(st->remote, kind, busy, err);
+}
+
+void rs_store_prefetch(const struct rs_store *st, const char *const *names, size_t n)
+{
+    if (st->remote)
+    {
+        rs_remote_prefetch(st->remote, names, n);
     }
 }
 
@@ -281,14 +332,14 @@ char *rs_store_path(const struct rs_store *st, const char *name)
 
 const char *rs_store_local_dir(const struct rs_store *st)
 {
-    return st->dir;
+    return st->remote ? NULL : st->dir;
 }
 
 /* ------------------------------------------------------------------------- */
 /* Reading                                                                   */
 /* ------------------------------------------------------------------------- */
 
-int rs_store_stat(const struct rs_store *st, const char *name, struct rs_store_stat *out)
+static int local_stat(const struct rs_store *st, const char *name, struct rs_store_stat *out)
 {
     char       *path = rs_store_path(st, name);
     struct stat s;
@@ -308,6 +359,15 @@ int rs_store_stat(const struct rs_store *st, const char *name, struct rs_store_s
     return 0;
 }
 
+int rs_store_stat(const struct rs_store *st, const char *name, struct rs_store_stat *out)
+{
+    if (st->remote)
+    {
+        return rs_remote_stat(st->remote, name, out);
+    }
+    return local_stat(st, name, out);
+}
+
 bool rs_store_is_file(const struct rs_store *st, const char *name)
 {
     struct rs_store_stat s;
@@ -320,8 +380,8 @@ static int by_name(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-char **rs_store_list(const struct rs_store *st, const char *name, rs_store_keep keep, void *ctx,
-                     size_t *n)
+static char **local_list(const struct rs_store *st, const char *name, rs_store_keep keep, void *ctx,
+                         size_t *n)
 {
     char                *path = rs_store_path(st, name);
     DIR                 *d = p_opendir(path);
@@ -356,6 +416,16 @@ char **rs_store_list(const struct rs_store *st, const char *name, rs_store_keep 
     return names;
 }
 
+char **rs_store_list(const struct rs_store *st, const char *name, rs_store_keep keep, void *ctx,
+                     size_t *n)
+{
+    if (st->remote)
+    {
+        return rs_remote_list(st->remote, st, name, keep, ctx, n);
+    }
+    return local_list(st, name, keep, ctx, n);
+}
+
 bool rs_store_keep_all(const struct rs_store *st, const char *dir, const char *name, void *ctx,
                        char **out)
 {
@@ -370,7 +440,7 @@ bool rs_store_keep_all(const struct rs_store *st, const char *dir, const char *n
     return true;
 }
 
-int rs_store_open(const struct rs_store *st, const char *name)
+static int local_open(const struct rs_store *st, const char *name)
 {
     char *path = rs_store_path(st, name);
     int   fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
@@ -381,7 +451,16 @@ int rs_store_open(const struct rs_store *st, const char *name)
     return fd;
 }
 
-int rs_store_open_at(const struct rs_store *st, const char *name, uint64_t offset)
+int rs_store_open(const struct rs_store *st, const char *name)
+{
+    if (st->remote)
+    {
+        return rs_remote_open_at(st->remote, name, 0);
+    }
+    return local_open(st, name);
+}
+
+static int local_open_at(const struct rs_store *st, const char *name, uint64_t offset)
 {
     int fd = rs_store_open(st, name);
 
@@ -396,7 +475,16 @@ int rs_store_open_at(const struct rs_store *st, const char *name, uint64_t offse
     return fd;
 }
 
-ssize_t rs_store_peek(const struct rs_store *st, const char *name, void *buf, size_t max)
+int rs_store_open_at(const struct rs_store *st, const char *name, uint64_t offset)
+{
+    if (st->remote)
+    {
+        return rs_remote_open_at(st->remote, name, offset);
+    }
+    return local_open_at(st, name, offset);
+}
+
+static ssize_t local_peek(const struct rs_store *st, const char *name, void *buf, size_t max)
 {
     char   *path = rs_store_path(st, name);
     int     fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
@@ -417,8 +505,17 @@ ssize_t rs_store_peek(const struct rs_store *st, const char *name, void *buf, si
     return got;
 }
 
-bool rs_store_read(const struct rs_store *st, const char *name, size_t max, struct rs_buf *out,
-                   struct rs_buf *err)
+ssize_t rs_store_peek(const struct rs_store *st, const char *name, void *buf, size_t max)
+{
+    if (st->remote)
+    {
+        return rs_remote_peek(st->remote, name, buf, max);
+    }
+    return local_peek(st, name, buf, max);
+}
+
+static bool local_read(const struct rs_store *st, const char *name, size_t max, struct rs_buf *out,
+                       struct rs_buf *err)
 {
     char *path = rs_store_path(st, name);
     int   fd = p_open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
@@ -462,6 +559,16 @@ bool rs_store_read(const struct rs_store *st, const char *name, size_t max, stru
     (void)close(fd);
     free(path);
     return ok;
+}
+
+bool rs_store_read(const struct rs_store *st, const char *name, size_t max, struct rs_buf *out,
+                   struct rs_buf *err)
+{
+    if (st->remote)
+    {
+        return rs_remote_read(st->remote, name, max, out, err);
+    }
+    return local_read(st, name, max, out, err);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -613,7 +720,7 @@ static int create_new(const char *path)
     return fd;
 }
 
-int rs_store_create(const struct rs_store *st, const char *name)
+static int local_create(const struct rs_store *st, const char *name)
 {
     char *path = rs_store_path(st, name);
     int   fd = create_new(path);
@@ -628,8 +735,17 @@ int rs_store_create(const struct rs_store *st, const char *name)
     return fd;
 }
 
-bool rs_store_write_new(const struct rs_store *st, const char *name, const void *data, size_t len,
-                        struct rs_buf *err)
+int rs_store_create(const struct rs_store *st, const char *name)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_create(st, name);
+}
+
+static bool local_write_new(const struct rs_store *st, const char *name, const void *data,
+                            size_t len, struct rs_buf *err)
 {
     char *path = rs_store_path(st, name);
     int   fd = create_new(path);
@@ -656,6 +772,16 @@ bool rs_store_write_new(const struct rs_store *st, const char *name, const void 
     return ok;
 }
 
+bool rs_store_write_new(const struct rs_store *st, const char *name, const void *data, size_t len,
+                        struct rs_buf *err)
+{
+    if (st->remote)
+    {
+        return refused_write(st, err);
+    }
+    return local_write_new(st, name, data, len, err);
+}
+
 /* The directory `name` is in, as a path. */
 static char *parent_of(const struct rs_store *st, const char *name)
 {
@@ -667,8 +793,8 @@ static char *parent_of(const struct rs_store *st, const char *name)
     return path;
 }
 
-bool rs_store_write_new_thawed(const struct rs_store *st, const char *name, const void *data,
-                               size_t len, struct rs_buf *err)
+static bool local_write_new_thawed(const struct rs_store *st, const char *name, const void *data,
+                                   size_t len, struct rs_buf *err)
 {
     char                    *dir = parent_of(st, name);
     struct rs_fsflags_thawed thawed;
@@ -681,8 +807,18 @@ bool rs_store_write_new_thawed(const struct rs_store *st, const char *name, cons
     return ok;
 }
 
-bool rs_store_replace(const struct rs_store *st, const char *name, const void *data, size_t len,
-                      struct rs_buf *err)
+bool rs_store_write_new_thawed(const struct rs_store *st, const char *name, const void *data,
+                               size_t len, struct rs_buf *err)
+{
+    if (st->remote)
+    {
+        return refused_write(st, err);
+    }
+    return local_write_new_thawed(st, name, data, len, err);
+}
+
+static bool local_replace(const struct rs_store *st, const char *name, const void *data, size_t len,
+                          struct rs_buf *err)
 {
     const char              *slash = strrchr(name, '/');
     char                    *tmp = slash ? rs_xasprintf("%.*s/.%s.%ld.tmp", (int)(slash - name),
@@ -713,7 +849,17 @@ bool rs_store_replace(const struct rs_store *st, const char *name, const void *d
     return ok;
 }
 
-int rs_store_rename(const struct rs_store *st, const char *from, const char *to, bool thawed)
+bool rs_store_replace(const struct rs_store *st, const char *name, const void *data, size_t len,
+                      struct rs_buf *err)
+{
+    if (st->remote)
+    {
+        return refused_write(st, err);
+    }
+    return local_replace(st, name, data, len, err);
+}
+
+static int local_rename(const struct rs_store *st, const char *from, const char *to, bool thawed)
 {
     char *a = rs_store_path(st, from);
     char *b = rs_store_path(st, to);
@@ -726,11 +872,20 @@ int rs_store_rename(const struct rs_store *st, const char *from, const char *to,
     return rc;
 }
 
+int rs_store_rename(const struct rs_store *st, const char *from, const char *to, bool thawed)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_rename(st, from, to, thawed);
+}
+
 /* With link(2), which never replaces; where the filesystem has no hard links
  * (exFAT, FAT, many SMB shares), by taking the name with O_EXCL, which only
  * one machine can, and renaming over what it took. Until the rename, the name
  * is an empty file, which a reader takes for a key it cannot read. */
-int rs_store_place_new(const struct rs_store *st, const char *from, const char *to)
+static int local_place_new(const struct rs_store *st, const char *from, const char *to)
 {
     char *tmp = rs_store_path(st, from);
     char *path = rs_store_path(st, to);
@@ -772,7 +927,16 @@ int rs_store_place_new(const struct rs_store *st, const char *from, const char *
     return rc;
 }
 
-int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
+int rs_store_place_new(const struct rs_store *st, const char *from, const char *to)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_place_new(st, from, to);
+}
+
+static int local_remove(const struct rs_store *st, const char *name, bool thawed)
 {
     char *path = rs_store_path(st, name);
     int   rc = thawed ? rs_fsflags_unlink(path) : p_unlink(path);
@@ -783,7 +947,16 @@ int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
     return rc;
 }
 
-int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed)
+int rs_store_remove(const struct rs_store *st, const char *name, bool thawed)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_remove(st, name, thawed);
+}
+
+static int local_remove_dir(const struct rs_store *st, const char *name, bool thawed)
 {
     char *path = rs_store_path(st, name);
     int   rc = thawed ? rs_fsflags_rmdir(path) : p_rmdir(path);
@@ -794,7 +967,16 @@ int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed
     return rc;
 }
 
-int rs_store_make_dir(const struct rs_store *st, const char *name, unsigned mode, bool there_ok)
+int rs_store_remove_dir(const struct rs_store *st, const char *name, bool thawed)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_remove_dir(st, name, thawed);
+}
+
+static int local_make_dir(const struct rs_store *st, const char *name, unsigned mode, bool there_ok)
 {
     char *path = rs_store_path(st, name);
     int   rc = p_mkdir(path, (mode_t)mode);
@@ -813,7 +995,16 @@ int rs_store_make_dir(const struct rs_store *st, const char *name, unsigned mode
     return rc;
 }
 
-char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
+int rs_store_make_dir(const struct rs_store *st, const char *name, unsigned mode, bool there_ok)
+{
+    if (st->remote)
+    {
+        return refused(st);
+    }
+    return local_make_dir(st, name, mode, there_ok);
+}
+
+static char *local_make_temp_dir(const struct rs_store *st, const char *prefix)
 {
     char  *at = rs_store_path(st, prefix);
     char  *path = rs_xasprintf("%sXXXXXX", at);
@@ -835,7 +1026,17 @@ char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
     return name;
 }
 
-void rs_store_sync_dir(const struct rs_store *st, const char *name)
+char *rs_store_make_temp_dir(const struct rs_store *st, const char *prefix)
+{
+    if (st->remote)
+    {
+        (void)refused(st);
+        return NULL;
+    }
+    return local_make_temp_dir(st, prefix);
+}
+
+static void local_sync_dir(const struct rs_store *st, const char *name)
 {
     char *path = rs_store_path(st, name);
     int   fd = p_open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
@@ -846,6 +1047,15 @@ void rs_store_sync_dir(const struct rs_store *st, const char *name)
         (void)close(fd);
     }
     free(path);
+}
+
+void rs_store_sync_dir(const struct rs_store *st, const char *name)
+{
+    if (st->remote)
+    {
+        return;
+    }
+    local_sync_dir(st, name);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -984,8 +1194,8 @@ static int lock_asking(int fd, bool shared, bool *refused)
     }
 }
 
-int rs_store_lock(const struct rs_store *st, const char *name, bool shared, bool *busy,
-                  bool *refused, struct rs_buf *err)
+static int local_lock(const struct rs_store *st, const char *name, bool shared, bool *busy,
+                      bool *refused, struct rs_buf *err)
 {
     char *path = rs_store_path(st, name);
     int   fd = p_open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0);
@@ -1017,10 +1227,22 @@ int rs_store_lock(const struct rs_store *st, const char *name, bool shared, bool
     return fd;
 }
 
+int rs_store_lock(const struct rs_store *st, const char *name, bool shared, bool *busy,
+                  bool *refused, struct rs_buf *err)
+{
+    if (st->remote)
+    {
+        *refused = false;
+        return rs_remote_lock(st->remote, name, shared, busy, err);
+    }
+    return local_lock(st, name, shared, busy, refused, err);
+}
+
 void rs_store_unlock(const struct rs_store *st, int lock)
 {
-    (void)st;
-    if (lock >= 0)
+    /* A remote store's lock is its session's, a handle and no descriptor:
+     * the session lets it go as it ends. */
+    if (lock >= 0 && !st->remote)
     {
         (void)close(lock);
     }

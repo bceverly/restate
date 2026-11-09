@@ -280,6 +280,7 @@ int main(int argc, char **argv)
     test_result();
     test_grant();
     test_request();
+    test_remote();
 #ifdef RS_WITH_PROXY
     test_tls();
     test_serve();

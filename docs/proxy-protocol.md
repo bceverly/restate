@@ -493,7 +493,7 @@ operations becomes:
 | Store operation           | Through the proxy                                        |
 |---------------------------|----------------------------------------------------------|
 | open a repository         | open a session: `append` for capture, `read` for restore, `look` otherwise |
-| stat, is a file           | `HEAD /f/NAME`                                           |
+| stat, is a file           | its directory's `GET /list/DIR/`, fetched once a session |
 | list                      | `GET /list/DIR/`                                         |
 | read, peek, open          | `GET /f/NAME`; open at an offset is `Range`              |
 | create, write             | a file on this machine, until it is put in place         |

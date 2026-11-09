@@ -397,7 +397,7 @@ static void bad_jobs(void)
 
         CHECK(n > 30);
         CHECK_STR(keys[0], "command");
-        CHECK_STR(keys[n - 1], "no_lock");
+        CHECK_STR(keys[n - 1], "repository_pin_sha256");
     }
 }
 

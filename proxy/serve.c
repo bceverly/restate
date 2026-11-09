@@ -1083,7 +1083,36 @@ static const char *method_name(enum rs_method m)
     }
 }
 
-/* The request's line in the log, in key=value form; never its token. */
+/* `target` for the log: a session's id, which the log never holds, as "-"
+ * ("/v1/web01/sessions/-/renew"). The caller's to free. */
+static char *loggable_target(const char *target)
+{
+    static const char at[] = "/sessions/";
+    struct rs_buf     out;
+    const char       *p = target;
+    const char       *hit;
+
+    rs_buf_init(&out);
+    rs_buf_add(&out, "", 0);
+    while ((hit = strstr(p, at)) != NULL)
+    {
+        const char *id = hit + sizeof(at) - 1;
+        size_t      n = strspn(id, "0123456789abcdefABCDEF");
+
+        rs_buf_add(&out, p, (size_t)(id - p));
+        if (n > 0 && (id[n] == '/' || id[n] == '\0'))
+        {
+            rs_buf_addc(&out, '-');
+            id += n;
+        }
+        p = id;
+    }
+    rs_buf_addstr(&out, p);
+    return rs_buf_detach(&out);
+}
+
+/* The request's line in the log, in key=value form; never its token, nor a
+ * session's id. */
 static void log_request(const struct rs_proxy_conn *c, const struct rs_request *req,
                         const struct rs_route *route, const struct answer *a, const char *why)
 {
@@ -1101,8 +1130,10 @@ static void log_request(const struct rs_proxy_conn *c, const struct rs_request *
     }
     if (req)
     {
-        rs_buf_addf(&line, " method=%s target=%s", method_name(req->method),
-                    req->target ? req->target : "-");
+        char *target = loggable_target(req->target ? req->target : "-");
+
+        rs_buf_addf(&line, " method=%s target=%s", method_name(req->method), target);
+        free(target);
     }
     rs_buf_addf(&line, " status=%d", a->status);
     if (a->reason)

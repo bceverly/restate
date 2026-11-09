@@ -167,6 +167,23 @@ The order, each a release of its own:
     - a capture that fails removes its packs; through the proxy, ending the
       session does that, so the store's remove of a committed pack is a
       no-op for an `append` session, not a refusal
+  - [x] **Reading through the proxy** (3.1.0.0): `src/remote.c`, a store
+    that runs curl with a `-K` config file and reads each answer from a
+    `-D` header file; snapshots, list, diff, status, du, check, restore
+    and copy out of it; `--repository-token-file`, `--repository-ca-file`,
+    `--repository-pin-sha256` and their job keys; the session opened before
+    the marker is read, its lease renewed and the session ended by a child
+    once the run is gone, `SIGKILL` included; a `stat` answered from its
+    directory's listing, fetched once; every pack's `.idx` fetched in one
+    curl, and cached whether or not the repository is encrypted; 423 and
+    503 are exit 5, and a failed run's result carries `proxy_reason`;
+    capture refused for now, and prune, repack, protect, sign, init and
+    ingest always. restate-proxy's log no longer names a session's id
+  - [ ] **Capture through the proxy** (3.2.0.0): uploads into the session's
+    staging and commits -- each pack once its `.idx` is renamed into place,
+    the snapshot last, the next name on `409 name-taken` -- chunk keys
+    placed new and read again, `capture --sign-with` signing before the
+    index is uploaded, and `features` saying so
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
 - [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,

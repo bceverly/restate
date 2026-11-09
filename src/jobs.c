@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "remote.h"
 #include "restate.h"
 #include "result.h"
 
@@ -64,7 +65,9 @@ enum kind {
     K_PATTERN,    /* as a rules file writes one */
     K_NAME,       /* a hook's or a group's */
     K_SETTING,    /* a hook's: HOOK.KEY=VALUE */
-    K_SNAPSHOT    /* NAME, or REPO::NAME */
+    K_SNAPSHOT,   /* NAME, or REPO::NAME */
+    K_REPOSITORY, /* as K_PATH, or https://HOST[:PORT]/v1/CLIENT */
+    K_PIN         /* a public key's SHA-256, in base64 */
 };
 
 enum key_id {
@@ -116,6 +119,9 @@ enum key_id {
     KEY_OUTPUT,
     KEY_INCLUDE_MOUNT,
     KEY_NO_LOCK,
+    KEY_REPOSITORY_TOKEN_FILE,
+    KEY_REPOSITORY_CA_FILE,
+    KEY_REPOSITORY_PIN_SHA256,
     KEY_COUNT
 };
 
@@ -126,7 +132,7 @@ static const struct key {
     unsigned    commands;
 } keys[KEY_COUNT] = {
     [KEY_COMMAND] = { "command", K_COMMAND, false, J_ANY },
-    [KEY_REPOSITORY] = { "repository", K_PATH, false, J_ANY & ~J_ESTIMATE },
+    [KEY_REPOSITORY] = { "repository", K_REPOSITORY, false, J_ANY & ~J_ESTIMATE },
     [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false,
                        J_RESTORE | J_COPY | J_STATUS | J_LIST | J_SIGN },
     [KEY_PATH] = { "path", K_PATH, false, J_LIST },
@@ -178,6 +184,9 @@ static const struct key {
     [KEY_INCLUDE_MOUNT] = { "include_mount", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_NO_LOCK] = { "no_lock", K_BOOL, false,
                       J_RESTORE | J_CHECK | J_COPY | J_DIFF | J_LIST | J_SNAPSHOTS | J_STATUS },
+    [KEY_REPOSITORY_TOKEN_FILE] = { "repository_token_file", K_PATH, false, J_ANY & ~J_ESTIMATE },
+    [KEY_REPOSITORY_CA_FILE] = { "repository_ca_file", K_PATH, false, J_ANY & ~J_ESTIMATE },
+    [KEY_REPOSITORY_PIN_SHA256] = { "repository_pin_sha256", K_PIN, true, J_ANY & ~J_ESTIMATE },
 };
 
 const char *const *rs_job_keys(size_t *n)
@@ -323,15 +332,30 @@ static bool printable(const char *v)
 }
 
 /* A snapshot's name alone, or REPO::NAME with REPO a path. */
+static bool repository_ok(const char *v)
+{
+    struct rs_buf ignore;
+    bool          ok;
+
+    if (!rs_remote_is(v))
+    {
+        return path_ok(v);
+    }
+    rs_buf_init(&ignore);
+    ok = rs_remote_url_ok(v, &ignore);
+    rs_buf_free(&ignore);
+    return ok;
+}
+
 static bool snapshot_ok(const char *v)
 {
-    const char *sep = strstr(v, "::");
+    const char *sep = strstr(rs_remote_sep_from(v), "::");
     size_t      i;
 
     if (sep)
     {
         char *repo = rs_xstrndup(v, (size_t)(sep - v));
-        bool  ok = path_ok(repo) && !strstr(sep + 2, "::");
+        bool  ok = repository_ok(repo) && !strstr(sep + 2, "::");
 
         free(repo);
         v = sep + 2;
@@ -419,6 +443,10 @@ static bool value_ok(enum kind kind, const char *v)
         return rs_hook_setting_ok(v);
     case K_SNAPSHOT:
         return snapshot_ok(v);
+    case K_REPOSITORY:
+        return repository_ok(v);
+    case K_PIN:
+        return rs_remote_pin_ok(v);
     case K_COMMAND:
     default:
         return true;
@@ -444,6 +472,11 @@ static const char *kind_words(enum kind kind)
                "and a value";
     case K_SNAPSHOT:
         return "a snapshot's name, or REPO::NAME";
+    case K_REPOSITORY:
+        return "an absolute path, with no \".\" or \"..\" in it, or a repository behind "
+               "restate-proxy, https://HOST[:PORT]/v1/CLIENT";
+    case K_PIN:
+        return "a public key's SHA-256 in base64, as openssl prints it";
     case K_COMMAND:
     default:
         return "a command";
@@ -503,6 +536,15 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_PASSPHRASE_FILE:
         o->passphrase_file = v;
+        break;
+    case KEY_REPOSITORY_TOKEN_FILE:
+        o->repository_token_file = v;
+        break;
+    case KEY_REPOSITORY_CA_FILE:
+        o->repository_ca_file = v;
+        break;
+    case KEY_REPOSITORY_PIN_SHA256:
+        add(&o->repository_pins, &o->nrepository_pins, v);
         break;
     case KEY_TRUSTED_KEY:
         add(&o->trusted, &o->ntrusted, v);
@@ -983,7 +1025,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->whole_packs || o->nquiesce_with || o->nhook_options || o->append_only ||
                 o->create || o->json ||
                 o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group ||
-                o->ninclude_mounts;
+                o->ninclude_mounts || o->repository_token_file || o->repository_ca_file ||
+                o->nrepository_pins;
 
     return !said;
 }
@@ -1149,6 +1192,15 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
                   ? rs_xasprintf("run %s: passphrase_file and --passphrase-fd both give the "
                                  "passphrase; give it one way", path)
                   : secret_refused(path, "passphrase_file", job->opts.passphrase_file);
+    }
+    if (!why && job->opts.repository_token_file)
+    {
+        why = secret_refused(path, "repository_token_file", job->opts.repository_token_file);
+    }
+    if (!why && job->opts.nrepository_pins > 2)
+    {
+        why = rs_xasprintf("run %s: repository_pin_sha256 is given at most twice: the key in "
+                           "use, and the one replacing it", path);
     }
     if (why)
     {

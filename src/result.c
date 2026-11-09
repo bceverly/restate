@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "remote.h"
 #include "restate.h"
 #include "util.h"
 
@@ -297,6 +298,12 @@ bool rs_result_write(int status, const char *path, const char *group)
     *v = errors;
     memset(&errors, 0, sizeof(errors));
     rs_jobj_u64(&out, "errors_count", nerrors);
+    /* Through restate-proxy, the proxy's fixed word for why it refused what
+     * ended the run, for a program to choose its message by. */
+    if (status != RESTATE_EXIT_OK && rs_remote_reason())
+    {
+        rs_jobj_str(&out, "proxy_reason", rs_remote_reason());
+    }
     rs_buf_init(&text);
     rs_json_write(&text, &out, 2, 0);
     rs_buf_addc(&text, '\n');

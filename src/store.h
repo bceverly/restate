@@ -20,8 +20,10 @@
  * file there whole or not at all. Messages name a file by rs_store_path(),
  * which is where it is: "DIR/packs/NAME.idx".
  *
- * There is one kind of store so far, the local one, and these functions are
- * it; a second kind dispatches from them.
+ * There are two kinds: the local one, which these functions are, and a
+ * repository behind restate-proxy (remote.h), https://HOST[:PORT]/v1/CLIENT,
+ * which they hand on to. Through the proxy a store only reads, so far: what
+ * would write is refused, with EROFS.
  */
 #ifndef RESTATE_STORE_H
 #define RESTATE_STORE_H
@@ -36,7 +38,8 @@
 struct rs_store;
 
 /* The store a repository's name on the command line, `where`, names: a
- * directory, so far, always. */
+ * repository behind restate-proxy if it begins with "https://", else a
+ * directory. Nothing is asked of either yet. */
 struct rs_store *rs_store_at(const char *where);
 /* A repository in the directory `dir`, which need not exist yet. "" is a
  * store whose names are paths, as given: a file anywhere on this machine. */
@@ -53,6 +56,25 @@ void rs_store_free(struct rs_store *st);
  */
 bool rs_store_confine(const char *const *dirs, size_t n, struct rs_buf *err);
 void rs_store_unconfine(void);
+
+/* Whether the store is a repository behind restate-proxy. */
+bool rs_store_remote(const struct rs_store *st);
+
+/* What a store is to be used for, before anything else is asked of it: what
+ * a repository behind restate-proxy opens its session as, and so the locks
+ * it holds -- none, the readers lock, or the lock. */
+enum rs_store_use {
+    RS_STORE_LOOK = 0,
+    RS_STORE_READ,
+    RS_STORE_APPEND
+};
+/* Nothing, for a local store. For a remote one, its session opened as `use`
+ * says: false if it could not be, with *busy set where the repository is
+ * busy or the proxy at its limit of sessions, and `err` saying why. */
+bool rs_store_begin(struct rs_store *st, enum rs_store_use use, bool *busy, struct rs_buf *err);
+/* For a remote store, `names` fetched at once, so that reading each asks
+ * nothing more of the proxy; nothing, for a local one. */
+void rs_store_prefetch(const struct rs_store *st, const char *const *names, size_t n);
 
 /* Where the store is, for messages: the directory, for a local one. */
 const char *rs_store_where(const struct rs_store *st);

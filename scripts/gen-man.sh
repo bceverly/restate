@@ -1861,6 +1861,81 @@ finished, and
 clears what it left. A repository made by restate 1.3.0, whose packs hold
 whole files, is read as it is, and the first capture or prune into it makes
 it the current kind.
+.SH REMOTE REPOSITORIES
+A repository can be reached through
+.BR restate\-proxy ,
+an HTTPS service on the storage host, rather than by mounting its share:
+.BI https:// HOST\fR[\fP: PORT\fR]\fP/v1/ CLIENT\fR,\fP
+with this client's token in a file
+.RB ( \-\-repository\-token\-file ,
+.B repository_token_file
+in a job) that no one else can read or write. The proxy serves each client
+the one repository the grant for it on the storage host names, and nothing
+else; how it does is docs/proxy\-protocol.md, in restate's source.
+.PP
+.RS
+.nf
+restate snapshots \-\-repository\-token\-file /etc/restate/web01.token \e
+    https://backup.example:8443/v1/web01
+restate restore \-\-repository\-token\-file /etc/restate/web01.token \e
+    \-\-root /mnt/new https://backup.example:8443/v1/web01::20261108T030000Z
+.fi
+.RE
+.PP
+What reads a repository works through a proxy as it does on a directory:
+.BR snapshots ,
+.BR list ,
+.BR diff ,
+.BR status ,
+.BR du ,
+.BR check ,
+.BR restore ,
+and
+.B copy
+out of it into a repository here. A capture through one is not supported
+yet. What changes what a repository holds already \- prune, repack,
+protect, sign of a snapshot already there, init, ingest \- is refused, and
+run on the storage host, as it always has been.
+.PP
+restate opens no connection itself: it runs curl, given everything it is
+to ask on a file in a directory of the run's own, 0700, so that the token
+is never on a command line, where
+.BR ps (1)
+would show it. curl trusts the proxy's certificate as it trusts any, by the
+system's certificate authorities;
+.BI \-\-repository\-ca\-file " FILE"
+trusts the authorities in
+.I FILE
+instead, for a proxy a site's own signed, without the whole machine trusting
+them, and
+.BI \-\-repository\-pin\-sha256 " HASH"
+accepts only a proxy whose public key that is \- given twice, either, so a
+key can be replaced \- as
+.PP
+.RS
+.nf
+openssl x509 \-in proxy.crt \-pubkey \-noout |
+    openssl pkey \-pubin \-outform der |
+    openssl dgst \-sha256 \-binary | base64
+.fi
+.RE
+.PP
+prints it.
+.PP
+Each run opens a session in the proxy, which takes the repository's locks
+there as a run on the storage host takes them, so a restore keeps a prune
+there from removing what it is reading. A child of the run renews the
+session's lease while it goes on, and ends the session once it is done,
+however it ends \-
+.B SIGKILL
+included \- so the next run does not find the repository busy. A proxy with
+the repository busy, or with as many sessions open as it allows, is exit 5,
+busy, for a job to try again, as a busy share is; and a run that failed on
+what the proxy refused says the proxy's word for it in its result,
+.B proxy_reason
+(see RESULTS). What is read of a repository through a proxy is kept in this
+machine's cache of it, encrypted or not, so that only what is new is asked
+for again.
 .SH STORAGE
 A repository can be kept on another machine \- a file server, a NAS \- that
 the one captured mounts, over NFS or SMB:
@@ -2253,7 +2328,18 @@ or
 .BR diff .
 .TP
 .B repository
-the repository; every command but estimate.
+the repository \- a directory, or a repository behind restate\-proxy (see
+REMOTE REPOSITORIES); every command but estimate.
+.TP
+.BR repository_token_file ", " repository_ca_file ", " repository_pin_sha256 " (at most twice)"
+every command but estimate: as
+.BR \-\-repository\-token\-file ,
+.B \-\-repository\-ca\-file
+and
+.BR \-\-repository\-pin\-sha256 .
+The token file is held to what
+.B decrypt_with
+is held to, below.
 .TP
 .B snapshot
 restore, copy, status, list, sign: the snapshot's name, or
@@ -2455,7 +2541,14 @@ is the exit status as a word:
 (5). Every warning is collected,
 .B \-\-quiet
 or not \- the first 50 in full \- as is every error, the first 50 in full,
-so a run that failed says why in its result as well as on standard error; and
+so a run that failed says why in its result as well as on standard error \-
+and, through restate\-proxy, what the proxy refused as its fixed word for it,
+.BR proxy_reason ,
+such as
+.B unauthorized
+or
+.BR busy ,
+for a program to choose its message by; and
 every path a walk could not read, the first 100 with why. Each command adds what it did:
 .BR prune ,
 .B pruned

@@ -457,6 +457,107 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     lacks "$(cat server.log)" "confine-failed" "every connection was confined"
     lacks "$(cat server.log)" "commit-failed" "and no commit failed"
     stop
+
+    # restate itself through the proxy: what reads a repository, with the
+    # client's token on a file and the proxy's certificate trusted by
+    # --repository-ca-file. Its own files for curl go in a TMPDIR of the
+    # test's, which has to be empty again after each run.
+    start --max-sessions 2
+    mkdir -m 0700 rtmp
+    URL="https://localhost:$PORT/v1/up01"
+    ON=(--repository-token-file "$WORK/up01.token" --repository-ca-file "$WORK/cert.pem")
+    RUN=(env TMPDIR="$WORK/rtmp" XDG_CACHE_HOME="$WORK/rcache" "$RESTATE")
+    left() { if [ -z "$(ls rtmp)" ]; then ok; else fail "$1: left $(ls rtmp)"; fi; }
+    expect 0 "snapshots through the proxy" -- "${RUN[@]}" snapshots "${ON[@]}" "$URL"
+    contains "$OUT" "$SNAP" "lists the snapshot"
+    left "snapshots"
+    expect 0 "list through the proxy" -- "${RUN[@]}" list "${ON[@]}" "$URL::$SNAP"
+    contains "$OUT" "etc" "lists what it holds"
+    rm -rf rout && mkdir rout
+    expect 0 "restore through the proxy" -- \
+      "${RUN[@]}" restore -q --allow-unverified --root rout "${ON[@]}" "$URL::$SNAP"
+    if cmp -s tree/etc/one.conf rout/etc/one.conf; then ok; else fail "puts its files back"; fi
+    left "restore"
+    expect 0 "check through the proxy" -- "${RUN[@]}" check "${ON[@]}" "$URL"
+    contains "$ERR" "the repository is whole" "reads it all, and finds it whole"
+    expect 0 "copy out of the proxy, into a repository here" -- \
+      "${RUN[@]}" copy "${ON[@]}" "$URL::$SNAP" "$WORK/pulled"
+    expect 0 "which has the snapshot" -- "$RESTATE" snapshots pulled
+    contains "$OUT" "$SNAP" "named as it was"
+    # Every repository's cache: kept, so a second run asks only for what is new.
+    if [ -n "$(ls rcache/restate/repositories 2> /dev/null)" ]; then
+      ok
+    else
+      fail "what was read is cached"
+    fi
+
+    # What changes a repository is the storage host's.
+    expect 2 "capture through the proxy, for now" -- \
+      "${RUN[@]}" capture -r tree --os=linux -q "${ON[@]}" -o "$URL"
+    contains "$ERR" "not supported yet" "says so"
+    expect 2 "prune through the proxy" -- "${RUN[@]}" prune --keep-last 1 "${ON[@]}" "$URL"
+    contains "$ERR" "run on the storage host" "is the storage host's"
+    expect 2 "sign through the proxy" -- \
+      "${RUN[@]}" sign --sign-with x "${ON[@]}" "$URL::$SNAP"
+    contains "$ERR" "capture --sign-with" "says how to sign instead"
+    expect 2 "init through the proxy" -- "${RUN[@]}" init "$URL"
+    expect 2 "protect through the proxy" -- "${RUN[@]}" protect "${ON[@]}" "$URL"
+    contains "$ERR" "run on the storage host" "is the storage host's"
+    left "what is refused"
+
+    # Its token: needed, the client's own, and never on a command line.
+    expect 2 "no token" -- "${RUN[@]}" snapshots --repository-ca-file "$WORK/cert.pem" "$URL"
+    contains "$ERR" "--repository-token-file" "says what it needs"
+    expect 2 "another client's token" -- \
+      "${RUN[@]}" snapshots --repository-token-file "$WORK/db01.token" \
+      --repository-ca-file "$WORK/cert.pem" --result "$WORK/r.json" "$URL"
+    contains "$ERR" "401 unauthorized" "is refused"
+    contains "$(cat r.json)" '"proxy_reason": "unauthorized"' "and its result says why"
+    expect 2 "a proxy it does not trust" -- \
+      "${RUN[@]}" snapshots --repository-token-file "$WORK/up01.token" "$URL"
+    contains "$ERR" "the proxy did not answer" "is not asked"
+    expect 2 "a key that is not the proxy's" -- "${RUN[@]}" snapshots "${ON[@]}" \
+      --repository-pin-sha256 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= "$URL"
+    expect 2 "a URL with more after the client" -- "${RUN[@]}" snapshots "${ON[@]}" "$URL/x"
+    contains "$ERR" "https://HOST[:PORT]/v1/CLIENT" "says what one is"
+    # A proxy at an IPv6 address: "::" of its own, and REPO::NAME after it.
+    expect 2 "a snapshot behind a proxy at an IPv6 address" -- \
+      "${RUN[@]}" list "${ON[@]}" "https://[::1]:1/v1/up01::$SNAP"
+    contains "$ERR" "the proxy did not answer" "is taken for the proxy and the snapshot"
+    left "what failed"
+
+    # A proxy at its limit of sessions: busy, exit 5, for a job to try again.
+    ask -H "$UP" -d look /v1/up01/sessions
+    S1="$(printf '%s\n' "$OUT" | tail -n 1)"
+    ask -H "$UP" -d look /v1/up01/sessions
+    S2="$(printf '%s\n' "$OUT" | tail -n 1)"
+    expect 5 "a proxy with no session to spare" -- "${RUN[@]}" snapshots "${ON[@]}" "$URL"
+    contains "$ERR" "503 sessions-full" "says so"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$S1/end"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$S2/end"
+
+    # A run stopped as it reads ends its session all the same: the child
+    # that renews the lease ends it once restate is gone, however it went.
+    "${RUN[@]}" restore -q --allow-unverified --root rout --plan "${ON[@]}" "$URL::$SNAP" \
+      > /dev/null 2>&1 &
+    RPID=$!
+    kill -KILL "$RPID" 2> /dev/null
+    wait "$RPID" 2> /dev/null
+    sleep 1
+    stop
+    OPENED="$(grep -c 'session-open client=up01' server.log)"
+    ENDED="$(grep -c 'session-end client=up01' server.log)"
+    if [ "$OPENED" -gt 0 ] && [ "$OPENED" = "$ENDED" ]; then
+      ok
+    else
+      fail "every session opened is ended ($OPENED opened, $ENDED ended)"
+    fi
+    if grep -Eq '/sessions/[0-9a-f]{32}' server.log; then
+      fail "the log names a session"
+    else
+      ok
+    fi
+    lacks "$(cat server.log)" "$(cat up01.token)" "nor its token"
   else
     printf '  - uploads not run: restate is not beside %s\n' "$BIN"
   fi

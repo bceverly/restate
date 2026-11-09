@@ -37,6 +37,7 @@
 #include "image.h"
 #include "pgp.h"
 #include "progress.h"
+#include "remote.h"
 #include "sha256.h"
 #include "store.h"
 #include "tar.h"
@@ -831,12 +832,22 @@ bool rs_repo_name_valid(const char *name)
 
 bool rs_repo_is(const char *dir)
 {
-    struct rs_store *st = rs_store_at(dir);
+    struct rs_store *st;
     struct rs_buf    text;
     struct rs_buf    err;
     bool             ok;
 
     rs_buf_init(&err);
+    /* Behind restate-proxy, a repository is taken to be one if its name is
+     * one, and the proxy asked nothing until it is opened -- which says so,
+     * if it is not: asking would be a session each time. */
+    if (rs_remote_is(dir))
+    {
+        ok = rs_remote_url_ok(dir, &err);
+        rs_buf_free(&err);
+        return ok;
+    }
+    st = rs_store_at(dir);
     ok = rs_store_read(st, RS_REPO_MARKER, 4096, &text, &err) &&
          rs_starts_with(text.data, RS_REPO_MARKER " ");
     rs_buf_free(&text);
@@ -1114,6 +1125,13 @@ bool rs_repo_init(const char *dir, bool encrypted, struct rs_buf *err)
     unsigned                 left = 0;
     struct rs_store         *store = rs_store_at(dir);
 
+    if (rs_remote_is(dir))
+    {
+        rs_buf_addf(err, "%s: a repository behind restate-proxy is made on the storage host, "
+                    "with restate init there", dir);
+        rs_store_free(store);
+        return false;
+    }
     /* Made, or else there already: then it has to be an empty directory, and
      * everything about it is learned through the one descriptor on it, so
      * nothing can be swapped in between. */
@@ -1236,7 +1254,8 @@ bool rs_repo_dir_encrypted(const char *dir)
 bool rs_repo_ref(const char *ref, char **dir, char **name)
 {
     const char *sep = NULL;
-    const char *p = ref;
+    /* Past a proxy's IPv6 address, which has "::" of its own. */
+    const char *p = rs_remote_sep_from(ref);
 
     *dir = NULL;
     *name = NULL;
@@ -1531,6 +1550,27 @@ static bool upgrade(struct rs_repo *r, struct rs_buf *err)
     return ok;
 }
 
+/*
+ * What the store is opened for: through restate-proxy, the session -- `look`,
+ * `read`, or `append` for any capture, which there is always --append-only --
+ * holds the locks, and nothing is read before it is open. A prune, a repack
+ * and what only a process on the storage host does are refused there.
+ */
+static bool begin(struct rs_store *st, enum rs_repo_lock lock, bool *busy, struct rs_buf *err)
+{
+    enum rs_store_use use = lock == RS_REPO_LOOK ? RS_STORE_LOOK
+                          : lock == RS_REPO_READ ? RS_STORE_READ
+                                                 : RS_STORE_APPEND;
+
+    if (rs_store_remote(st) && (lock == RS_REPO_PRUNE || lock == RS_REPO_HELD))
+    {
+        rs_buf_addf(err, "%s: what removes or rewrites what a repository holds is run on the "
+                    "storage host, not through restate-proxy", rs_store_where(st));
+        return false;
+    }
+    return rs_store_begin(st, use, busy, err);
+}
+
 static bool no_readers_lock;
 
 void rs_repo_set_no_lock(bool no_lock)
@@ -1548,11 +1588,16 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
 
     *busy = false;
     r->st = rs_store_at(dir);
-    ok = rs_store_read(r->st, RS_REPO_MARKER, 4096, &text, err);
     r->dir = rs_xstrdup(dir);
-    r->mode = lock;
     r->lock_fd = -1;
     r->readers_fd = -1;
+    if (!begin(r->st, lock, busy, err))
+    {
+        rs_repo_close(r);
+        return NULL;
+    }
+    ok = rs_store_read(r->st, RS_REPO_MARKER, 4096, &text, err);
+    r->mode = lock;
     if (ok && !parse_marker(text.data, r, &newer))
     {
         rs_buf_addf(err, "%s: %s", dir,
@@ -1590,7 +1635,9 @@ struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy
         rs_repo_close(r);
         return NULL;
     }
-    if (r->encrypted)
+    /* A remote repository's whether or not it is encrypted: what is read of
+     * it once is not asked of the proxy again. */
+    if (r->encrypted || rs_store_remote(r->st))
     {
         r->cache = cache_dir(r->id);
     }
@@ -1935,6 +1982,37 @@ static bool pack_idx(const struct rs_repo *r, const char *pack, struct rs_repo_i
     return pack_idx_sealed(r, pack, x, true, &sealed, err);
 }
 
+/* Through restate-proxy, the .idx of every pack this machine has no copy of,
+ * fetched in one curl rather than one each. */
+static void prefetch_idx(const struct rs_repo *r)
+{
+    char  **want;
+    size_t  n = 0;
+    size_t  i;
+
+    if (!rs_store_remote(r->st) || r->npacks == 0)
+    {
+        return;
+    }
+    want = rs_xcalloc(r->npacks, sizeof(*want));
+    for (i = 0; i < r->npacks; i++)
+    {
+        char         *name = rs_xasprintf("%s.idx", r->packs[i]);
+        struct rs_buf text;
+
+        if (cache_get(r, "packs", name, SMALL_MAX, &text))
+        {
+            rs_buf_free(&text);
+        } else
+        {
+            want[n++] = rs_xasprintf("packs/%s", name);
+        }
+        free(name);
+    }
+    rs_store_prefetch(r->st, (const char *const *)want, n);
+    rs_repo_free_names(want, n);
+}
+
 /*
  * Every live chunk in every pack, once, and every list whose chunks are all
  * there. A pack whose .idx cannot be read is passed over, with a warning: its
@@ -1953,6 +2031,7 @@ static void load_objects(struct rs_repo *r)
         return;
     }
     r->loaded = true;
+    prefetch_idx(r);
     for (i = 0; i < r->npacks; i++)
     {
         struct rs_repo_idx x;
@@ -6565,6 +6644,12 @@ bool rs_repo_protect(const char *dir, uid_t owner, gid_t group, struct rs_repo_p
 
     memset(out, 0, sizeof(*out));
     memset(&later, 0, sizeof(later));
+    if (rs_remote_is(dir))
+    {
+        rs_buf_addf(err, "%s: protect is run on the storage host, not through restate-proxy",
+                    dir);
+        return false;
+    }
     if (!rs_repo_is(dir))
     {
         rs_buf_addf(err, "%s: not a restate repository", dir);

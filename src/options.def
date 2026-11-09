@@ -206,6 +206,16 @@ RS_OPT('P', "progress",         optional_argument, "json",
        "as one JSON object a line (see PROGRESS)")
 RS_OPT(OPT_PROGRESS_FILE, "progress-file", required_argument, "FILE",
        "write progress into FILE as it goes, one JSON object a line (see PROGRESS)")
+RS_OPT(OPT_REPOSITORY_TOKEN_FILE, "repository-token-file", required_argument, "FILE",
+       "for a repository behind restate-proxy (https://HOST[:PORT]/v1/CLIENT): the file "
+       "holding this client's token, readable and writable by no one else (see REMOTE "
+       "REPOSITORIES)")
+RS_OPT(OPT_REPOSITORY_CA_FILE, "repository-ca-file", required_argument, "FILE",
+       "trust the proxy's certificate by the certificate authorities in FILE (PEM), rather "
+       "than the system's")
+RS_OPT(OPT_REPOSITORY_PIN_SHA256, "repository-pin-sha256", required_argument, "HASH",
+       "accept only a proxy whose public key has this SHA-256 (base64, as openssl prints "
+       "it); at most twice, so that a key can be replaced")
 RS_OPT(OPT_TMPDIR, "tmpdir",          required_argument, "DIR",
        "capture, export: stage the image being written in DIR rather than beside it, so "
        "an image written to a network share is not staged there (see STORAGE)")

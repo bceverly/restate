@@ -124,6 +124,7 @@ void test_arch(void);
 void test_result(void);
 void test_grant(void);
 void test_request(void);
+void test_remote(void);
 #ifdef RS_WITH_PROXY
 /* tests/proxy/: built only where restate-proxy can be (scripts/tls.sh). */
 void test_tls(void);

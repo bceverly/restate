@@ -505,6 +505,11 @@ static void test_reading(const struct rs_grant *grant)
     CHECK(strstr(out, "204 No Content\r\nContent-Length") == NULL);
     CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
     CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    /* The log names no session: its id is a secret of its client's. */
+    CHECK_CONTAINS(log, "target=/v1/web01/sessions/-/renew status=204");
+    CHECK_CONTAINS(log, "target=/v1/web01/sessions/-/end status=204");
+    CHECK(strstr(log, SID_READ) == NULL);
+    CHECK(strstr(log, "dddddddddddddddddddddddddddddddd") == NULL);
     free(out);
     free(log);
 

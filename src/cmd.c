@@ -41,6 +41,7 @@
 #include "pgp.h"
 #include "progress.h"
 #include "reinstall.h"
+#include "remote.h"
 #include "repo.h"
 #include "restore.h"
 #include "result.h"
@@ -1623,6 +1624,18 @@ static char *sign_ref(const char *ref)
     }
 }
 
+/* Whether `repo`, a repository's name or a reference to a snapshot in one, is
+ * behind restate-proxy, where `command` is not run -- having said so, and why. */
+static bool remote_refused(const char *command, const char *repo, const char *why)
+{
+    if (!repo || !rs_remote_is(repo))
+    {
+        return false;
+    }
+    rs_error("%s: %s %s", repo, command, why);
+    return true;
+}
+
 int rs_cmd_sign(const struct rs_options *o)
 {
     char                *path;
@@ -1634,6 +1647,13 @@ int rs_cmd_sign(const struct rs_options *o)
     char                *data = NULL;
     bool                 ok;
 
+    if (remote_refused("sign", o->args[0],
+                       "changes a snapshot already there, which nothing through restate-proxy "
+                       "may: sign it as it is captured, with capture --sign-with, or run sign "
+                       "on the storage host"))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
     if (!o->sign_with)
     {
         rs_error("sign: give the secret key to sign with, --sign-with KEYFILE");
@@ -2087,6 +2107,11 @@ int rs_cmd_capture(const struct rs_options *o)
     {
         rs_error("capture writes an image to a file, or a snapshot to a repository: give one "
                  "with -o FILE.tar or -o REPOSITORY");
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "%s", "");
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (remote_refused("capture", o->output, "through restate-proxy is not supported yet"))
+    {
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "%s", "");
         return RESTATE_EXIT_TROUBLE;
     }
@@ -2683,6 +2708,11 @@ int rs_cmd_protect(const struct rs_options *o)
     bool                     ok;
 
     rs_jobj_str(res, "repository", dir);
+    if (remote_refused("protect", dir, "is run on the storage host, not through restate-proxy"))
+    {
+        log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", dir);
+        return RESTATE_EXIT_TROUBLE;
+    }
     if (!protect_group(o, dir, &gid, &name))
     {
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", dir);
@@ -3143,6 +3173,11 @@ int rs_cmd_ingest(const struct rs_options *o)
     int                     pass;
     size_t                  i;
 
+    if (remote_refused("ingest", dir, "is run on the storage host; restate-proxy runs it "
+                       "itself on what is uploaded to it"))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
     memset(&got, 0, sizeof(got));
     rs_buf_init(&err);
     r = rs_repo_open(dir, RS_REPO_WRITE, &busy, &err);
@@ -3476,10 +3511,11 @@ int rs_cmd_features(const struct rs_options *o)
     static const char *const members[] = { "capture.cache",        "diff.changes",
                                            "diff.from",            "diff.packages",
                                            "list",                 "protect.waited_for",
-                                           "restore.hooks",        "restore.packages",
-                                           "restore.resolved",     "restore.unmatched",
-                                           "skipped_network_mounts", "snapshot",
-                                           "status.capture_rules", "verify.capture_rules" };
+                                           "proxy_reason",         "restore.hooks",
+                                           "restore.packages",     "restore.resolved",
+                                           "restore.unmatched",    "skipped_network_mounts",
+                                           "snapshot",             "status.capture_rules",
+                                           "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;
@@ -3607,6 +3643,10 @@ int rs_cmd_features(const struct rs_options *o)
      * point and goes no further into it, unless --include-mount names it;
      * the result's skipped_network_mounts says which. */
     rs_jobj_bool(&doc, "skips_network_mounts", true);
+    /* A repository behind restate-proxy, https://HOST[:PORT]/v1/CLIENT, for
+     * what reads one: snapshots, list, diff, status, du, check, copy out of
+     * it and restore. */
+    rs_jobj_bool(&doc, "remote_repository", true);
     list = rs_jobj_add(&doc, "programs");
     rs_jval_set_object(list);
     for (i = 0; i < sizeof(programs) / sizeof(programs[0]); i++)
@@ -6544,6 +6584,8 @@ int rs_cmd_run(const struct rs_options *given)
     }
     rs_image_set_stage_dir(o->tmpdir);
     rs_repo_set_no_lock(o->no_lock);
+    rs_remote_configure(o->repository_token_file, o->repository_ca_file, o->repository_pins,
+                        o->nrepository_pins);
     rs_result_begin(rs_command_name(o->command));
     rs_progress_enable(o->progress);
     if (o->progress_file)
@@ -6567,6 +6609,13 @@ int rs_cmd_run(const struct rs_options *given)
     /* Taken once the result is begun, so that whoever reads it learns why
      * the run did not start. */
     status = take_secrets(o) ? dispatch(o) : RESTATE_EXIT_TROUBLE;
+    /* A proxy that would open no session -- busy with a capture or a prune,
+     * or at its limit of sessions -- failed the run wherever it was asked,
+     * and that is the busy a job tries again after, as on a share. */
+    if (status == RESTATE_EXIT_TROUBLE && rs_remote_busy())
+    {
+        status = RESTATE_EXIT_BUSY;
+    }
     rs_progress_finish();
     rs_progress_json(NULL);
     if (progress && fclose(progress) != 0)

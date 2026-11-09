@@ -11,6 +11,7 @@
 
 #include "arch.h"
 #include "identity.h"
+#include "remote.h"
 #include "rules.h"
 
 /* Descriptions start at this column in --help, and wrap to fit 80. */
@@ -174,6 +175,9 @@ void rs_options_free(struct rs_options *o)
     free(o->decrypt_with);
     o->decrypt_with = NULL;
     o->ndecrypt_with = 0;
+    free(o->repository_pins);
+    o->repository_pins = NULL;
+    o->nrepository_pins = 0;
     free(o->debs);
     o->debs = NULL;
     o->ndebs = 0;
@@ -523,6 +527,30 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_PROGRESS_FILE:
             o->progress_file = optarg;
+            break;
+        case OPT_REPOSITORY_TOKEN_FILE:
+            o->repository_token_file = optarg;
+            break;
+        case OPT_REPOSITORY_CA_FILE:
+            o->repository_ca_file = optarg;
+            break;
+        case OPT_REPOSITORY_PIN_SHA256:
+            if (!rs_remote_pin_ok(optarg))
+            {
+                rs_buf_addf(err, "--repository-pin-sha256: \"%s\" is not a key's SHA-256 in "
+                            "base64, as openssl prints it (44 characters, the last '=')",
+                            optarg);
+                return false;
+            }
+            if (o->nrepository_pins == 2)
+            {
+                rs_buf_addstr(err, "--repository-pin-sha256: at most two, the key in use and "
+                                   "the one replacing it");
+                return false;
+            }
+            o->repository_pins = rs_xreallocarray(o->repository_pins, o->nrepository_pins + 1,
+                                                  sizeof(*o->repository_pins));
+            o->repository_pins[o->nrepository_pins++] = optarg;
             break;
         case OPT_TMPDIR:
             if (optarg[0] != '/')

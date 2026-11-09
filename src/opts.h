@@ -70,7 +70,10 @@ enum {
     OPT_TMPDIR,
     OPT_PASSPHRASE_FD,
     OPT_DECRYPT_WITH,
-    OPT_INCLUDE_MOUNT
+    OPT_INCLUDE_MOUNT,
+    OPT_REPOSITORY_TOKEN_FILE,
+    OPT_REPOSITORY_CA_FILE,
+    OPT_REPOSITORY_PIN_SHA256
 };
 
 enum rs_command {
@@ -154,6 +157,12 @@ struct rs_options {
     bool            progress_json;  /* --progress=json */
     const char     *progress_file;  /* --progress-file FILE */
     const char     *tmpdir;         /* --tmpdir DIR */
+    /* A repository behind restate-proxy: --repository-token-file and the
+     * rest, or a job's keys of those names. */
+    const char     *repository_token_file;
+    const char     *repository_ca_file;
+    const char    **repository_pins; /* --repository-pin-sha256, at most two */
+    size_t          nrepository_pins;
     int             passphrase_fd;  /* --passphrase-fd N, where passphrase_given */
     bool            passphrase_given;
     const char     *passphrase_file; /* a job's passphrase_file; no option sets it */
