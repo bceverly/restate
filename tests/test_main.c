@@ -29,8 +29,107 @@ static int case_count = 0;
  */
 static FILE *report = NULL;
 
+/*
+ * What a case writes to stderr -- its own warnings, and those of the gzip and
+ * gpg it runs, which many cases make fail on purpose -- goes to a file of its
+ * own, shown under the case's failures if it has any, and dropped if it has
+ * none. RESTATE_TEST_STDERR=1 leaves stderr alone, to watch it all as it is
+ * written. The file is opened O_APPEND, so that what a case's children write
+ * lands after what it wrote itself, and it is removed as soon as it is open.
+ */
+static int   case_log = -1;
+static int   case_failures_at = 0;
+static pid_t case_log_pid = 0;   /* not a child's: a forked test's exit leaves it be */
+
+static void case_log_open(void)
+{
+    const char *keep = getenv("RESTATE_TEST_STDERR");
+    char       *dir;
+    char       *path;
+
+    if ((keep && strcmp(keep, "1") == 0) || !report)
+    {
+        return;
+    }
+    dir = rs_test_tmpdir();
+    path = rs_xasprintf("%s/stderr", dir);
+    case_log = open(path, O_RDWR | O_CREAT | O_TRUNC | O_APPEND, 0600);
+    (void)unlink(path);
+    (void)rmdir(dir);
+    free(path);
+    free(dir);
+    if (case_log >= 0 && dup2(case_log, STDERR_FILENO) < 0)
+    {
+        (void)close(case_log);
+        case_log = -1;
+    }
+    case_log_pid = getpid();
+}
+
+/* The case done: what it wrote shown, if it failed, and then dropped. */
+static void case_log_end(void)
+{
+    if (case_log < 0)
+    {
+        return;
+    }
+    if (rs_test_failures > case_failures_at && lseek(case_log, 0, SEEK_SET) == 0)
+    {
+        char    buf[4096];
+        ssize_t got;
+        bool    any = false;
+        bool    line_start = true;
+
+        while ((got = read(case_log, buf, sizeof(buf))) > 0)
+        {
+            ssize_t i;
+
+            if (!any)
+            {
+                (void)fprintf(report, "    what %s wrote to stderr:\n", rs_test_case);
+                any = true;
+            }
+            for (i = 0; i < got; i++)
+            {
+                if (line_start)
+                {
+                    (void)fputs("      ", report);
+                }
+                (void)fputc(buf[i], report);
+                line_start = buf[i] == '\n';
+            }
+        }
+        if (any && !line_start)
+        {
+            (void)fputc('\n', report);
+        }
+        (void)fflush(report);
+    }
+    if (ftruncate(case_log, 0) < 0)
+    {
+        /* Not emptied, so the next case's failures would show this one's
+         * stderr too: better to stop catching it than to mislead. */
+        (void)dup2(fileno(report), STDERR_FILENO);
+        (void)close(case_log);
+        case_log = -1;
+    }
+    case_failures_at = rs_test_failures;
+}
+
+/* A test that exits early, as rs_test_tmpdir does when it cannot make one,
+ * says why on stderr: shown, rather than dropped with the file. */
+static void case_log_at_exit(void)
+{
+    if (case_log >= 0 && getpid() == case_log_pid)
+    {
+        case_failures_at = -1;
+        case_log_end();
+    }
+}
+
 void rs_test_begin(const char *name)
 {
+    case_log_end();
     rs_test_case = name;
     case_count++;
 }
@@ -240,6 +339,11 @@ int main(int argc, char **argv)
         }
     }
 
+    case_log_open();
+    if (case_log >= 0)
+    {
+        (void)atexit(case_log_at_exit);
+    }
     (void)printf("restate unit tests\n");
 
     test_util();
@@ -290,6 +394,13 @@ int main(int argc, char **argv)
 #endif
     test_cmd();
 
+    case_log_end();
+    if (case_log >= 0)
+    {
+        (void)dup2(fileno(report), STDERR_FILENO);
+        (void)close(case_log);
+        case_log = -1;
+    }
     rs_name_cache_free();
     if (rs_test_failures == 0)
     {

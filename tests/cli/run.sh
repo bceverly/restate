@@ -28,7 +28,24 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/restate-cli.XXXXXX")" || exit 2
 # macOS's TMPDIR ends in a slash, so that is ".../T//restate-cli.x" -- which a
 # job refuses as a path, rightly, since it is not one written the plain way.
 WORK="$(printf '%s' "$WORK" | tr -s /)"
-trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+# What reaches stderr outside expect -- the gzip and gpg that checks made fail
+# on purpose run, saying so -- goes to a file, shown only if a check failed
+# or this script did; RESTATE_TEST_STDERR=1 leaves stderr alone. Kept on fd 3.
+exec 3>&2
+if [ "${RESTATE_TEST_STDERR:-}" != 1 ]; then
+  exec 2> "$WORK/stray.err"
+fi
+# shellcheck disable=SC2329  # run by the EXIT trap
+finish() {
+  local status=$?
+  if { [ "$status" -ne 0 ] || [ "${FAIL:-0}" -ne 0 ]; } && [ -s "$WORK/stray.err" ]; then
+    printf '  what reached stderr outside the checks (the last 40 lines):\n' >&3
+    tail -40 "$WORK/stray.err" | sed 's/^/        /' >&3
+  fi
+  chmod -R u+rwx "$WORK" 2>/dev/null
+  rm -rf "$WORK"
+}
+trap finish EXIT
 cd "$WORK" || exit 2
 
 # A fixed creation time, so the indexes are comparable run to run.
