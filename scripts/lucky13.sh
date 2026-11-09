@@ -256,12 +256,14 @@ HITS="$(grep_source '\b(setuid|seteuid|setreuid|setresuid|setgid|setegid|setregi
 no_hits "restate never changes identity" "identity changes found" "$HITS"
 # Five programs are run -- gzip, pigz, curl, gpgv and gpg -- from one file, by
 # absolute path, only if root owns them and their directory, with posix_spawn,
-# no shell and a fixed environment. Anything more is a finding. The one fork
-# allowed is restate-proxy's listener's, proxy/server.c, which serves each
-# connection in a child of its own and runs nothing.
+# no shell and a fixed environment. Anything more is a finding. Two forks are
+# allowed, and neither execs anything: restate-proxy's listener's,
+# proxy/server.c, which serves each connection in a child of its own, and the
+# child src/remote.c keeps a proxy session's lease with, which runs curl only
+# as everything else does, through src/run.c.
 HITS="$(grep_source '\b(system|popen|execl|execlp|execle|execv|execvp|execvpe|execve|posix_spawnp|fork|vfork)[[:space:]]*\(' |
-        grep -vE '^[0-9]+:proxy/server\.c: [^(]*\bfork[[:space:]]*\(\)' || true)"
-no_hits "no shell, no exec family, no program found through PATH, and no fork but the proxy's" \
+        grep -vE '^[0-9]+:(proxy/server|src/remote)\.c: [^(]*\bfork[[:space:]]*\(\)' || true)"
+no_hits "no shell, no exec family, no program found through PATH, and no fork but the proxy's and the lease's" \
   "a shell, an exec or a PATH lookup is used to run something" "$HITS"
 HITS="$(grep_source '\bposix_spawn[[:space:]]*\(' | grep -v '^[0-9]*:src/run.c: ')"
 no_hits "posix_spawn appears only in src/run.c" "posix_spawn is called outside src/run.c" "$HITS"
