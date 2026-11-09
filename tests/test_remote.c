@@ -492,6 +492,21 @@ static void remote_tokens(void)
     teardown(dir, &f, token);
 }
 
+/* A keep that, as rs_repo_snapshots' does, stats in another directory for
+ * each entry -- so listings are fetched while one is being walked. */
+static bool keep_stat_within(const struct rs_store *st, const char *dir, const char *name,
+                             void *ctx, char **out)
+{
+    struct rs_store_stat sb;
+    char                *within = rs_xasprintf("%s%s%s/x/y", dir, *dir ? "/" : "", name);
+
+    (void)st;
+    (void)rs_remote_stat(ctx, within, &sb);
+    free(within);
+    *out = rs_xstrdup(name);
+    return true;
+}
+
 static void remote_reading(void)
 {
     static const char *const pins[] = { "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
@@ -544,6 +559,17 @@ static void remote_reading(void)
     CHECK_INT(f.requests, 4);
     CHECK(!rs_remote_list(rm, any, "nothing", rs_store_keep_all, NULL, &n));
     CHECK_INT(errno, ENOENT);
+
+    /* Listings fetched while one is walked leave it where it was. */
+    names = rs_remote_list(rm, any, "", keep_stat_within, rm, &n);
+    CHECK_INT(n, 4);
+    if (n == 4)
+    {
+        CHECK_STR(names[0], "empty");
+        CHECK_STR(names[1], "packs");
+        CHECK_STR(names[3], "snapshots");
+    }
+    rs_repo_free_names(names, n);
 
     CHECK(rs_remote_read(rm, "restate-repository", 4096, &out, &err));
     CHECK_STR(out.data, "restate repository 2\n");

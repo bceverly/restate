@@ -63,7 +63,7 @@ struct rs_remote {
     int                  renew_fd;  /* the pipe whose closing tells it to end, or -1 */
     unsigned             lease;
     unsigned             seq;
-    struct listing      *lists;
+    struct listing     **lists;     /* each its own, so one stays put as more are added */
     size_t               nlists;
     struct fetched      *got;
     size_t               ngot;
@@ -1146,8 +1146,9 @@ void rs_remote_free(struct rs_remote *rm)
     stop_session(rm);
     for (i = 0; i < rm->nlists; i++)
     {
-        rs_remote_entries_free(rm->lists[i].entries, rm->lists[i].n);
-        free(rm->lists[i].dir);
+        rs_remote_entries_free(rm->lists[i]->entries, rm->lists[i]->n);
+        free(rm->lists[i]->dir);
+        free(rm->lists[i]);
     }
     free(rm->lists);
     memset(rm->token, 0, sizeof(rm->token));
@@ -1185,10 +1186,10 @@ static const struct listing *listing_of(struct rs_remote *rm, const char *dir)
 
     for (i = 0; i < rm->nlists; i++)
     {
-        if (strcmp(rm->lists[i].dir, dir) == 0)
+        if (strcmp(rm->lists[i]->dir, dir) == 0)
         {
             errno = ENOENT;
-            return rm->lists[i].gone ? NULL : &rm->lists[i];
+            return rm->lists[i]->gone ? NULL : rm->lists[i];
         }
     }
     rs_buf_init(&err);
@@ -1218,8 +1219,8 @@ static const struct listing *listing_of(struct rs_remote *rm, const char *dir)
         return NULL;
     }
     rm->lists = rs_xreallocarray(rm->lists, rm->nlists + 1, sizeof(*rm->lists));
-    l = &rm->lists[rm->nlists++];
-    memset(l, 0, sizeof(*l));
+    l = rs_xcalloc(1, sizeof(*l));
+    rm->lists[rm->nlists++] = l;
     l->dir = rs_xstrdup(dir);
     l->gone = q->ans.status == 404;
     if (!l->gone)

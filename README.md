@@ -579,6 +579,18 @@ Options:
       --progress-file=FILE
                           write progress into FILE as it goes, one JSON object
                           a line (see PROGRESS)
+      --repository-token-file=FILE
+                          for a repository behind restate-proxy
+                          (https://HOST[:PORT]/v1/CLIENT): the file holding
+                          this client's token, readable and writable by no one
+                          else (see REMOTE REPOSITORIES)
+      --repository-ca-file=FILE
+                          trust the proxy's certificate by the certificate
+                          authorities in FILE (PEM), rather than the system's
+      --repository-pin-sha256=HASH
+                          accept only a proxy whose public key has this SHA-256
+                          (base64, as openssl prints it); at most twice, so
+                          that a key can be replaced
       --tmpdir=DIR        capture, export: stage the image being written in DIR
                           rather than beside it, so an image written to a
                           network share is not staged there (see STORAGE)
