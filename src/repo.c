@@ -8692,13 +8692,13 @@ static bool ingest_pack(struct rs_repo *r, const char *from, const char *name,
     }
     for (i = 0; i < INGEST_EXT; i++)
     {
-        if (!ok && stage[i] && i < staged)
+        if (!ok && i < staged && stage[i])
         {
             (void)rs_store_remove(r->st, stage[i], false);
         }
         /* Placed, and then the rest could not be: without its .idx, which
          * goes last, nothing counts it, and it is taken out again. */
-        if (!ok && stage[i] && i < placed)
+        if (!ok && i < placed && stage[i])
         {
             (void)rs_store_remove(r->st, final[i], false);
         }

@@ -208,10 +208,10 @@ MODE="$(stat -c '%a' "$WORK/ww/out.tgz" 2>/dev/null || stat -f '%Lp' "$WORK/ww/o
 verdict "an image is created 0600 even under umask 000" \
   "an image written under umask 000 is mode $MODE" test "$MODE" = "600"
 ( umask 000 && "$RESTATE" -N -r "$WORK/ww/tree" scan -q > /dev/null )
-if grep -qE 'install -m 0?7?77|chmod [0-7]*[2367][^ ]*\b' scripts/install.sh; then
+if grep -qE 'install -m 0?7?77|chmod [0-7]*[2367][^ ]*\b' scripts/install.sh scripts/install-proxy.sh; then
   bad "the installer creates something world-writable"
 else
-  ok "the installer installs 0755 and 0644, nothing writable by others"
+  ok "the installers install 0755 and 0644, nothing writable by others"
 fi
 
 # ---------------------------------------------------------------------------

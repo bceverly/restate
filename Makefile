@@ -336,6 +336,14 @@ install: build ## Install into $(prefix) (default /usr/local), asking for sudo/d
 uninstall: ## Remove what `make install` installed
 	@scripts/install.sh --uninstall
 
+.PHONY: install-proxy
+install-proxy: proxy ## Install restate-proxy into $(prefix), and make /etc/restate/proxy.d
+	@scripts/install-proxy.sh
+
+.PHONY: uninstall-proxy
+uninstall-proxy: ## Remove what `make install-proxy` installed (the grants stay)
+	@scripts/install-proxy.sh --uninstall
+
 ##@ Packaging
 
 .PHONY: deb

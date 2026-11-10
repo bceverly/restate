@@ -2220,6 +2220,21 @@ sudo make uninstall
 administration tool: a capture worth having reads every file, so it runs as
 root. `/usr/local/sbin` is on root's `PATH` on every Ubuntu release.
 
+`restate-proxy`, which serves repositories over HTTPS from the storage host,
+is installed on its own, since it goes on a different machine from the ones
+that capture. It needs OpenSSL's headers (`libssl-dev`; `make install-dev`
+installs them):
+
+```bash
+sudo make install-proxy                   # /usr/local/sbin/restate-proxy and /etc/restate/proxy.d
+sudo make uninstall-proxy                 # the grants in /etc/restate/proxy.d stay
+```
+
+This installs only the binary and the directory for its grants. The
+certificate, its key, a grant for each client and the staging directory
+(mode 0700, owned by the user the proxy runs as) are up to you. Once they
+exist, `restate-proxy --serve` starts it.
+
 ### Developing on Ubuntu 26.04
 
 ```bash

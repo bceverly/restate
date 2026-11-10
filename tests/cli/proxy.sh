@@ -517,7 +517,15 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     expect 0 "which has the snapshot" -- "$RESTATE" snapshots pulled
     contains "$OUT" "$SNAP" "named as it was"
     # Every repository's cache: kept, so a second run asks only for what is new.
-    if [ -n "$(ls rcache/restate/repositories 2> /dev/null)" ]; then
+    # Root's is in the system's place, whatever XDG_CACHE_HOME says.
+    CACHED=rcache/restate/repositories
+    if [ "$(id -u)" = 0 ]; then
+      case "$(uname -s)" in
+        Darwin) CACHED=/Library/Caches/restate/repositories ;;
+        *) CACHED=/var/cache/restate/repositories ;;
+      esac
+    fi
+    if [ -n "$(ls "$CACHED" 2> /dev/null)" ]; then
       ok
     else
       fail "what was read is cached"

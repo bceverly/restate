@@ -924,32 +924,45 @@ void rs_remote_end(struct rs_remote *rm)
     }
 }
 
-/* What is in the directory `path` removed -- its files, and the directories
- * in it that are empty -- and then it, if it is empty now. A link is removed,
- * never followed. */
-static void empty_out(const char *path)
+/* What is in the open directory `fd` removed -- its files, and the
+ * directories in it that are empty -- by name relative to it, never by a
+ * path: nothing is asked of a name before it is acted on, so there is
+ * nothing for a swap between the two to exploit. An empty directory is
+ * removed, and failing that the name is unlinked, which never follows a
+ * link and removes no directory. `fd` is closed. */
+static void empty_dir_fd(int fd)
 {
-    DIR                 *d = opendir(path);
+    DIR                 *d;
     const struct dirent *de;
 
-    while (d && (de = readdir(d)) != NULL)
+    if (fd < 0)
     {
-        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
+        return;
+    }
+    d = fdopendir(fd);
+    if (!d)
+    {
+        (void)close(fd);
+        return;
+    }
+    /* The directory stream reads `fd` itself, which stays open until
+     * closedir(): the names are acted on relative to it. */
+    while ((de = readdir(d)) != NULL)
+    {
+        if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0 &&
+            unlinkat(fd, de->d_name, AT_REMOVEDIR) != 0)
         {
-            char       *child = rs_xasprintf("%s/%s", path, de->d_name);
-            struct stat st;
-
-            if (lstat(child, &st) == 0)
-            {
-                (void)(S_ISDIR(st.st_mode) ? rmdir(child) : unlink(child));
-            }
-            free(child);
+            (void)unlinkat(fd, de->d_name, 0);
         }
     }
-    if (d)
-    {
-        (void)closedir(d);
-    }
+    (void)closedir(d);
+}
+
+/* The directory `path` emptied as empty_dir_fd() does, and then removed if
+ * it is empty now. A link at `path` is never followed. */
+static void empty_out(const char *path)
+{
+    empty_dir_fd(open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     (void)rmdir(path);
 }
 
@@ -959,9 +972,10 @@ static void remove_tmp(const struct rs_remote *rm)
 {
     static const char *const stage_dirs[] = { "stage/packs", "stage/snapshots", "stage" };
     char                    *snaps;
-    DIR                     *d;
+    DIR                     *d = NULL;
     const struct dirent     *de;
     size_t                   i;
+    int                      sfd;
     int                      saved = errno;
 
     if (!rm->tmp)
@@ -971,19 +985,23 @@ static void remove_tmp(const struct rs_remote *rm)
     /* From the bottom up, as the stage is laid out: a snapshot's directory
      * being made, then the stage's own, then this one. */
     snaps = rs_xasprintf("%s/stage/snapshots", rm->tmp);
-    d = opendir(snaps);
+    sfd = open(snaps, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (sfd >= 0)
+    {
+        d = fdopendir(sfd);
+        if (!d)
+        {
+            (void)close(sfd);
+        }
+    }
     while (d && (de = readdir(d)) != NULL)
     {
         if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
         {
-            char       *child = rs_xasprintf("%s/%s", snaps, de->d_name);
-            struct stat st;
-
-            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode))
-            {
-                empty_out(child);
-            }
-            free(child);
+            /* Each opened as a directory, not through a link, or not at all. */
+            empty_dir_fd(openat(sfd, de->d_name,
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            (void)unlinkat(sfd, de->d_name, AT_REMOVEDIR);
         }
     }
     if (d)
