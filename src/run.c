@@ -18,16 +18,21 @@
 #include <unistd.h>
 
 static const char *const gzip_paths[] = { "/usr/bin/gzip", "/bin/gzip" };
-/* /usr/local/bin too, for curl and the GnuPG tools: that is where the BSDs'
- * packages put them. A path is used only if it and its directory belong to
- * root and nobody else can write them -- see usable() -- which is what rules
- * out a Homebrew /usr/local/bin on macOS, owned by whoever installed it. */
-static const char *const curl_paths[] = { "/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl" };
-static const char *const gpgv_paths[] = { "/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv" };
-static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg" };
-static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz" };
+/* /usr/local/bin too, for curl and the GnuPG tools: that is where FreeBSD's
+ * and OpenBSD's packages put them; and /usr/pkg/bin, where NetBSD's pkgsrc
+ * does. A path is used only if it and its directory belong to root and
+ * nobody else can write them -- see usable() -- which is what rules out a
+ * Homebrew /usr/local/bin on macOS, owned by whoever installed it. */
+static const char *const curl_paths[] = { "/usr/bin/curl", "/usr/local/bin/curl",
+                                          "/usr/pkg/bin/curl", "/bin/curl" };
+static const char *const gpgv_paths[] = { "/usr/bin/gpgv", "/usr/local/bin/gpgv",
+                                          "/usr/pkg/bin/gpgv", "/bin/gpgv" };
+static const char *const gpg_paths[] = { "/usr/bin/gpg", "/usr/local/bin/gpg",
+                                         "/usr/pkg/bin/gpg", "/bin/gpg" };
+static const char *const pigz_paths[] = { "/usr/bin/pigz", "/usr/local/bin/pigz",
+                                          "/usr/pkg/bin/pigz", "/bin/pigz" };
 static const char *const gpgconf_paths[] = { "/usr/bin/gpgconf", "/usr/local/bin/gpgconf",
-                                             "/bin/gpgconf" };
+                                             "/usr/pkg/bin/gpgconf", "/bin/gpgconf" };
 static const char *const sh_paths[] = { "/bin/sh", "/usr/bin/sh" };
 static const char *const ssh_keygen_paths[] = { "/usr/bin/ssh-keygen", "/usr/local/bin/ssh-keygen",
                                                 "/bin/ssh-keygen" };

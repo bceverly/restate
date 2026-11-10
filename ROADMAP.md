@@ -187,6 +187,25 @@ The order, each a release of its own:
     chunk keys placed new; `capture --sign-with` signing the staged index
     before it is uploaded; copy into a proxy too; and `features` saying so
     (`remote_capture`)
+  - [x] **Measured: curl stays, no library linked** (2026-11-10, SysManage's
+    drill VMs on one 1 GbE bridge, restate 3.2.0.2, an encrypted repository
+    of a SysManage server's ~144k paths). A capture of 227.1 MiB new took
+    25.2 s with 19.5 s of it CPU: 54 requests, a median 47 ms apart, the
+    long gaps (12 s, 6.7 s) restate compressing and encrypting between
+    batches. An incremental of 45.4 MiB took 11.2 s through the proxy against
+    11.0 s over NFS into the same repository. The small calls cost nothing
+    the work does not dwarf.
+  - [x] **Found by the measurement, fixed:** a one-file restore with
+    `check_first` fetched the snapshot's index twice and the same packs
+    twice (102 MB for a 13-byte file, in six sessions, each listing the
+    repository again). A restore now keeps its repository open for the whole
+    run -- its index, its accounts, the check and the putting back are one
+    read session -- and a session keeps what it fetches, up to 512 MiB (a
+    quarter of the free space where it keeps them, if less), so each file
+    crosses the network once; `tests/cli/proxy.sh` counts both, plain and
+    encrypted. An encrypted pack is still fetched whole, as it can only be
+    decrypted whole. And on NetBSD, curl and the GnuPG tools were not found
+    in pkgsrc's `/usr/pkg/bin`, which is now in the list
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
 - [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,

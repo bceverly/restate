@@ -147,6 +147,11 @@ bool rs_repo_name_valid(const char *name);
 struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy,
                              struct rs_buf *err);
 void            rs_repo_close(struct rs_repo *r);
+/* While on, a repository behind restate-proxy opened to look or read is kept
+ * open once its last opener closes it, and given again to the next to open
+ * it: one session, its files fetched once, for a run that opens it again and
+ * again (restore). Turned off, one no one has open is closed. */
+void            rs_repo_keep_remote(bool on);
 const char     *rs_repo_dir(const struct rs_repo *r);
 bool            rs_repo_encrypted(const struct rs_repo *r);
 /* This machine's cache of an encrypted repository: its directory, NULL for a

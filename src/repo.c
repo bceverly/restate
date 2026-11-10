@@ -1589,8 +1589,65 @@ void rs_repo_set_no_lock(bool no_lock)
     no_readers_lock = no_lock;
 }
 
+static struct rs_repo *open_repo(const char *dir, enum rs_repo_lock lock, bool *busy,
+                                 struct rs_buf *err);
+static void            close_repo(struct rs_repo *r);
+
+/*
+ * A repository behind restate-proxy kept open between opens, while
+ * rs_repo_keep_remote() says to: a run that opens the same one again and
+ * again -- a restore reads its index, then its accounts, then (with
+ * --check-first) every file twice -- has one session, lists it once and
+ * fetches each of its files once. Kept as a read, which can do all a look
+ * can: the first open that would look reads instead.
+ */
+static bool            keep_remote;
+static struct rs_repo *kept_repo;
+static unsigned        kept_refs;
+
+void rs_repo_keep_remote(bool on)
+{
+    keep_remote = on;
+    if (!on && kept_repo && kept_refs == 0)
+    {
+        struct rs_repo *r = kept_repo;
+
+        kept_repo = NULL;
+        close_repo(r);
+    }
+}
+
 struct rs_repo *rs_repo_open(const char *dir, enum rs_repo_lock lock, bool *busy,
                              struct rs_buf *err)
+{
+    struct rs_repo *r;
+
+    if (!keep_remote || !rs_remote_is(dir) || (lock != RS_REPO_LOOK && lock != RS_REPO_READ))
+    {
+        return open_repo(dir, lock, busy, err);
+    }
+    if (kept_repo && strcmp(kept_repo->dir, dir) == 0)
+    {
+        *busy = false;
+        kept_refs++;
+        return kept_repo;
+    }
+    if (kept_repo)
+    {
+        /* Another is kept: this one is only opened. */
+        return open_repo(dir, lock, busy, err);
+    }
+    r = open_repo(dir, RS_REPO_READ, busy, err);
+    if (r)
+    {
+        kept_repo = r;
+        kept_refs = 1;
+    }
+    return r;
+}
+
+static struct rs_repo *open_repo(const char *dir, enum rs_repo_lock lock, bool *busy,
+                                 struct rs_buf *err)
 {
     struct rs_repo *r = rs_xcalloc(1, sizeof(*r));
     struct rs_buf   text;
@@ -1723,6 +1780,24 @@ static size_t seal_n(const struct rs_repo *r)
 }
 
 void rs_repo_close(struct rs_repo *r)
+{
+    if (r && r == kept_repo)
+    {
+        if (kept_refs > 0)
+        {
+            kept_refs--;
+        }
+        if (kept_refs == 0 && !keep_remote)
+        {
+            kept_repo = NULL;
+            close_repo(r);
+        }
+        return;
+    }
+    close_repo(r);
+}
+
+static void close_repo(struct rs_repo *r)
 {
     if (!r)
     {

@@ -5039,7 +5039,7 @@ static void restore_result(const struct rs_options *o, const struct rs_restore_s
     memset(hooks, 0, sizeof(*hooks));
 }
 
-int rs_cmd_restore(const struct rs_options *o)
+static int restore_cmd(const struct rs_options *o)
 {
     struct rs_jval          plan;
     struct rs_index         ix;
@@ -5319,6 +5319,20 @@ int rs_cmd_restore(const struct rs_options *o)
         return RESTATE_EXIT_INCOMPLETE;
     }
     return packages != RESTATE_EXIT_OK ? packages : renewed;
+}
+
+/* A restore opens its repository again and again -- for its index, for the
+ * accounts, and for the files, twice with --check-first -- which, behind
+ * restate-proxy, is one session kept for all of them, and each file fetched
+ * once. */
+int rs_cmd_restore(const struct rs_options *o)
+{
+    int status;
+
+    rs_repo_keep_remote(true);
+    status = restore_cmd(o);
+    rs_repo_keep_remote(false);
+    return status;
 }
 
 /* ------------------------------------------------------------------------- */

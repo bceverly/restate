@@ -603,7 +603,10 @@ struct rs_tls *rs_tls_connect(struct rs_tls_config *cfg, int fd, const char *nam
     host = rs_xstrdup(name);
     sni = SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, host);
     free(host);
-    if (sni != 1 || SSL_set1_host(ssl, name) != 1 ||
+    /* The name the certificate must carry, set on the connection's own
+     * verification parameters: what SSL_set1_host did, which OpenSSL 4.0
+     * deprecates; this is in 3.x and 4.0 alike. */
+    if (sni != 1 || X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), name, 0) != 1 ||
         SSL_set_alpn_protos(ssl, alpn_wire, sizeof alpn_wire - 1) != 0)
     {
         why(err, "TLS");

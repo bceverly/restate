@@ -3169,6 +3169,8 @@ Each is run from a fixed absolute path \-
 then
 .I /usr/local/bin
 for all but gzip, then
+.I /usr/pkg/bin
+(NetBSD's pkgsrc) for curl, gpg, gpgv, gpgconf and pigz, then
 .IR /bin ;
 .I /bin/sh
 first for sh \- never through

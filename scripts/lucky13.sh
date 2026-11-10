@@ -267,11 +267,15 @@ no_hits "no shell, no exec family, no program found through PATH, and no fork bu
   "a shell, an exec or a PATH lookup is used to run something" "$HITS"
 HITS="$(grep_source '\bposix_spawn[[:space:]]*\(' | grep -v '^[0-9]*:src/run.c: ')"
 no_hits "posix_spawn appears only in src/run.c" "posix_spawn is called outside src/run.c" "$HITS"
-if grep -q '"/usr/bin/gzip", "/bin/gzip"' src/run.c \
-   && grep -q '"/usr/bin/curl", "/usr/local/bin/curl", "/bin/curl"' src/run.c \
-   && grep -q '"/usr/bin/gpgv", "/usr/local/bin/gpgv", "/bin/gpgv"' src/run.c \
-   && grep -q '"/usr/bin/gpg", "/usr/local/bin/gpg", "/bin/gpg"' src/run.c \
-   && grep -q '"/usr/bin/pigz", "/usr/local/bin/pigz", "/bin/pigz"' src/run.c \
+# The lists as written, with their line breaks and indents made one space: an
+# array that runs onto a second line reads the same as one that does not.
+RUN_C="$(tr -s ' \n' '  ' < src/run.c)"
+listed() { case "$RUN_C" in *"$1"*) return 0 ;; esac; return 1; }
+if listed '"/usr/bin/gzip", "/bin/gzip"' \
+   && listed '"/usr/bin/curl", "/usr/local/bin/curl", "/usr/pkg/bin/curl", "/bin/curl"' \
+   && listed '"/usr/bin/gpgv", "/usr/local/bin/gpgv", "/usr/pkg/bin/gpgv", "/bin/gpgv"' \
+   && listed '"/usr/bin/gpg", "/usr/local/bin/gpg", "/usr/pkg/bin/gpg", "/bin/gpg"' \
+   && listed '"/usr/bin/pigz", "/usr/local/bin/pigz", "/usr/pkg/bin/pigz", "/bin/pigz"' \
    && grep -q 'PATH=/usr/bin:/bin' src/run.c; then
   ok "gzip, pigz, curl, gpgv and gpg are run from fixed absolute paths, with a fixed environment"
 else

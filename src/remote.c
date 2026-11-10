@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -54,6 +55,20 @@ struct fetched {
     char *path;
 };
 
+/* A file fetched once and kept for the session, so that what one run reads
+ * twice -- a restore's --check-first pass and then its putting back, or a
+ * snapshot's index for its signature and then for its files -- crosses the
+ * network once: `name` from `offset` to its end, in `path`. What a
+ * repository holds is never changed in place, so a copy is good for as long
+ * as the session lasts. */
+struct kept {
+    char    *name;
+    char    *path;
+    uint64_t offset;
+    uint64_t bytes;
+    unsigned used; /* rm->seq when it was last used, for the oldest to go first */
+};
+
 struct rs_remote {
     char                *url;       /* https://HOST[:PORT]/v1/CLIENT, no '/' after */
     char                *tmp;       /* this process's directory for curl, or NULL */
@@ -68,6 +83,9 @@ struct rs_remote {
     size_t               nlists;
     struct fetched      *got;
     size_t               ngot;
+    struct kept         *kept;
+    size_t               nkept;
+    uint64_t             kept_bytes;
     struct rs_store     *stage;     /* an append session's writes, here, until sent */
     struct rs_buf        said;      /* why the last write sent on failed */
 };
@@ -1101,8 +1119,8 @@ static void start_renewer(struct rs_remote *rm)
     rm->renew_fd = p[1];
 }
 
-/* The files rs_remote_prefetch fetched, forgotten -- and removed, if they are
- * still there. */
+/* The files rs_remote_prefetch fetched, and those kept, forgotten -- and
+ * removed, if they are still there. */
 static void forget_fetched(struct rs_remote *rm)
 {
     size_t i;
@@ -1116,6 +1134,16 @@ static void forget_fetched(struct rs_remote *rm)
     free(rm->got);
     rm->got = NULL;
     rm->ngot = 0;
+    for (i = 0; i < rm->nkept; i++)
+    {
+        (void)unlink(rm->kept[i].path);
+        free(rm->kept[i].path);
+        free(rm->kept[i].name);
+    }
+    free(rm->kept);
+    rm->kept = NULL;
+    rm->nkept = 0;
+    rm->kept_bytes = 0;
 }
 
 /* The child gone, having ended the session and removed the directory, or
@@ -1441,6 +1469,100 @@ static char *take_fetched(struct rs_remote *rm, const char *name)
     return NULL;
 }
 
+/* How much of what is fetched is kept: 512 MiB, or a quarter of what is free
+ * where it is kept, if that is less; 0 for none. */
+static uint64_t kept_budget = (uint64_t)512 * 1024 * 1024;
+
+void rs_remote_set_kept_bytes(uint64_t bytes)
+{
+    kept_budget = bytes;
+}
+
+static uint64_t kept_room(const struct rs_remote *rm)
+{
+    struct statvfs sv;
+    uint64_t       max = kept_budget;
+
+    if (max > 0 && rm->tmp && statvfs(rm->tmp, &sv) == 0 && sv.f_frsize > 0 &&
+        (uint64_t)sv.f_bavail / 4 < max / sv.f_frsize)
+    {
+        max = (uint64_t)sv.f_bavail / 4 * sv.f_frsize;
+    }
+    return max;
+}
+
+/* A new name in this process's directory for the kept copy of `name` from
+ * `offset`, linked to it -- the caller's to remove, as a fetch's is -- or
+ * NULL if none is kept. */
+static char *from_kept(struct rs_remote *rm, const char *name, uint64_t offset)
+{
+    size_t i;
+
+    for (i = 0; i < rm->nkept; i++)
+    {
+        if (rm->kept[i].offset == offset && strcmp(rm->kept[i].name, name) == 0)
+        {
+            char *path = rs_xasprintf("%s/%ld-%u.kept", rm->tmp, (long)getpid(), ++rm->seq);
+
+            if (link(rm->kept[i].path, path) != 0)
+            {
+                free(path);
+                return NULL;
+            }
+            rm->kept[i].used = rm->seq;
+            return path;
+        }
+    }
+    return NULL;
+}
+
+/* The file at `path`, just fetched -- `name` from `offset` on -- kept under a
+ * name of its own beside it, with the oldest let go to make room. */
+static void keep_copy(struct rs_remote *rm, const char *name, uint64_t offset, const char *path)
+{
+    struct stat st;
+    uint64_t    room = kept_room(rm);
+    char       *copy;
+
+    if (room == 0 || stat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (uint64_t)st.st_size > room)
+    {
+        return;
+    }
+    while (rm->nkept > 0 && rm->kept_bytes + (uint64_t)st.st_size > room)
+    {
+        size_t old = 0;
+        size_t i;
+
+        for (i = 1; i < rm->nkept; i++)
+        {
+            if (rm->kept[i].used < rm->kept[old].used)
+            {
+                old = i;
+            }
+        }
+        (void)unlink(rm->kept[old].path);
+        free(rm->kept[old].path);
+        free(rm->kept[old].name);
+        rm->kept_bytes -= rm->kept[old].bytes;
+        rm->kept[old] = rm->kept[--rm->nkept];
+    }
+    copy = rs_xasprintf("%s/%ld-%u.keep", rm->tmp, (long)getpid(), ++rm->seq);
+    if (link(path, copy) != 0)
+    {
+        free(copy);
+        return;
+    }
+    rm->kept = rs_xreallocarray(rm->kept, rm->nkept + 1, sizeof(*rm->kept));
+    rm->kept[rm->nkept].name = rs_xstrdup(name);
+    rm->kept[rm->nkept].path = copy;
+    rm->kept[rm->nkept].offset = offset;
+    rm->kept[rm->nkept].bytes = (uint64_t)st.st_size;
+    rm->kept[rm->nkept].used = rm->seq;
+    rm->kept_bytes += (uint64_t)st.st_size;
+    rm->nkept++;
+}
+
 /*
  * `name` fetched -- from `first` on, to `last`, if `ranged` -- into a file of
  * its own: its path, the caller's to remove and free, and the answer's
@@ -1455,11 +1577,22 @@ static char *fetch(struct rs_remote *rm, const char *name, bool ranged, uint64_t
     char      *what;
     char      *path;
 
+    /* What runs to the file's end can be kept, and had again; a part of it
+     * that stops short is not. */
+    bool to_end = !ranged || last == UINT64_MAX;
+
     *status = 0;
+    path = to_end && rm->tmp ? from_kept(rm, name, ranged ? first : 0) : NULL;
+    if (path)
+    {
+        *status = ranged ? 206 : 200;
+        return path;
+    }
     path = ranged ? NULL : take_fetched(rm, name);
     if (path)
     {
         *status = 200;
+        keep_copy(rm, name, 0, path);
         return path;
     }
     if (!session(rm, err))
@@ -1479,6 +1612,10 @@ static char *fetch(struct rs_remote *rm, const char *name, bool ranged, uint64_t
         *status = q->ans.status;
         path = rs_xstrdup(q->out);
         req_free(q, true);
+        if (to_end && *status != 416)
+        {
+            keep_copy(rm, name, ranged ? first : 0, path);
+        }
         return path;
     }
     what = rs_xasprintf("%s/%s", rm->url, name);
@@ -1511,6 +1648,23 @@ int rs_remote_open_at(struct rs_remote *rm, const char *name, uint64_t offset)
     int           saved;
     char         *path;
 
+    /* Part of a file whose whole is kept: read from there, where it is. */
+    path = offset > 0 && rm->tmp ? from_kept(rm, name, 0) : NULL;
+    if (path)
+    {
+        fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        saved = errno;
+        (void)unlink(path);
+        free(path);
+        if (fd >= 0 && lseek(fd, (off_t)offset, SEEK_SET) < 0)
+        {
+            saved = errno;
+            (void)close(fd);
+            fd = -1;
+        }
+        errno = saved;
+        return fd;
+    }
     rs_buf_init(&err);
     path = fetch(rm, name, offset > 0, offset, UINT64_MAX, &status, &err);
     saved = errno;

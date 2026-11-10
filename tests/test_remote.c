@@ -720,6 +720,9 @@ static void remote_reading(void)
     CHECK_INT(rs_remote_peek(rm, "empty", buf, 0), 0);
     CHECK_INT(rs_remote_peek(rm, "gone", buf, 4), -1);
 
+    /* Fetched whole by the read above that it was too long for, and kept:
+     * a part of it is read from there, asking nothing. */
+    n = (size_t)f.requests;
     fd = rs_remote_open_at(rm, "packs/P.tar.gz", 6);
     CHECK(fd >= 0);
     if (fd >= 0)
@@ -728,7 +731,8 @@ static void remote_reading(void)
         CHECK(memcmp(buf, "6789", 4) == 0);
         (void)close(fd);
     }
-    CHECK_STR(f.last_range, "6-");
+    CHECK_STR(f.last_range, "0-3");
+    CHECK_INT(f.requests, (int)n);
     fd = rs_remote_open_at(rm, "packs/P.tar.gz", 10);
     CHECK(fd >= 0);
     if (fd >= 0)
@@ -773,6 +777,132 @@ static void remote_reading(void)
     rs_buf_free(&err);
     rs_store_free(any);
     free(ca);
+    teardown(dir, &f, token);
+}
+
+/* What a session fetches once, it has again without asking: whole, a part
+ * of it from where a whole copy is, a part asked for at the same place; and
+ * no more of it than its budget, the oldest let go first. */
+static void remote_keeping(void)
+{
+    struct fake       f;
+    char             *token;
+    char             *dir = setup(&f, &token);
+    struct rs_remote *rm = rs_remote_new(URL);
+    struct rs_buf     out;
+    struct rs_buf     err;
+    char              buf[16];
+    int               asked;
+    int               fd;
+
+    TEST_CASE("remote: what is fetched is kept");
+    rs_buf_init(&err);
+    rs_test_write(f.repo, "snapshots/S/kit", "the kit...\n", 0600);
+
+    /* A part, from where it begins: asked for once, then had again. */
+    fd = rs_remote_open_at(rm, "snapshots/S/info", 2);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+    {
+        CHECK_INT(read(fd, buf, sizeof(buf)), 8);
+        CHECK(memcmp(buf, "summary\n", 8) == 0);
+        (void)close(fd);
+    }
+    CHECK_STR(f.last_range, "2-");
+    asked = f.requests;
+    fd = rs_remote_open_at(rm, "snapshots/S/info", 2);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+    {
+        CHECK_INT(read(fd, buf, sizeof(buf)), 8);
+        (void)close(fd);
+    }
+    CHECK_INT(f.requests, asked);
+    /* A part from elsewhere in it is asked for. */
+    fd = rs_remote_open_at(rm, "snapshots/S/info", 4);
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+    CHECK_INT(f.requests, asked + 1);
+    CHECK_STR(f.last_range, "4-");
+
+    /* Whole, read twice: fetched once; and every part of it from there. */
+    CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+    rs_buf_free(&out);
+    asked = f.requests;
+    CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+    CHECK_STR(out.data, "the kit...\n");
+    rs_buf_free(&out);
+    fd = rs_remote_open_at(rm, "snapshots/S/kit", 4);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+    {
+        CHECK_INT(read(fd, buf, sizeof(buf)), 7);
+        CHECK(memcmp(buf, "kit...\n", 7) == 0);
+        (void)close(fd);
+    }
+    fd = rs_remote_open_at(rm, "snapshots/S/kit", 0);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+    {
+        CHECK_INT(read(fd, buf, sizeof(buf)), 11);
+        (void)close(fd);
+    }
+    CHECK_INT(f.requests, asked);
+
+    /* A peek stops short of the end, and is not kept. */
+    CHECK_INT(rs_remote_peek(rm, "packs/Q.idx", buf, 3), 3);
+    asked = f.requests;
+    CHECK_INT(rs_remote_peek(rm, "packs/Q.idx", buf, 3), 3);
+    CHECK_INT(f.requests, asked + 1);
+    rs_remote_free(rm);
+
+    /* A budget of 21 bytes holds two of these files (10, 10 and 11 bytes),
+     * so the third lets the oldest go. */
+    rs_remote_set_kept_bytes(21);
+    rm = rs_remote_new(URL);
+    CHECK(rs_remote_read(rm, "snapshots/S/info", 4096, &out, &err));
+    rs_buf_free(&out);
+    CHECK(rs_remote_read(rm, "packs/P.idx", 4096, &out, &err));
+    rs_buf_free(&out);
+    CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+    rs_buf_free(&out);
+    asked = f.requests;
+    CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+    rs_buf_free(&out);
+    CHECK(rs_remote_read(rm, "packs/P.idx", 4096, &out, &err));
+    rs_buf_free(&out);
+    CHECK_INT(f.requests, asked);
+    CHECK(rs_remote_read(rm, "snapshots/S/info", 4096, &out, &err));
+    CHECK_STR(out.data, "a summary\n");
+    rs_buf_free(&out);
+    CHECK_INT(f.requests, asked + 1);
+    /* One larger than the whole budget is not kept at all. */
+    rs_remote_set_kept_bytes(4);
+    CHECK(rs_remote_read(rm, "packs/Q.idx", 4096, &out, &err));
+    rs_buf_free(&out);
+    asked = f.requests;
+    CHECK(rs_remote_read(rm, "packs/Q.idx", 4096, &out, &err));
+    rs_buf_free(&out);
+    CHECK_INT(f.requests, asked + 1);
+    rs_remote_free(rm);
+
+    /* And with none, each read is asked for. */
+    rs_remote_set_kept_bytes(0);
+    rm = rs_remote_new(URL);
+    CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+    rs_buf_free(&out);
+    {
+        int before = f.requests;
+
+        CHECK(rs_remote_read(rm, "snapshots/S/kit", 4096, &out, &err));
+        rs_buf_free(&out);
+        CHECK_INT(f.requests, before + 1);
+    }
+    rs_remote_free(rm);
+    rs_remote_set_kept_bytes((uint64_t)512 * 1024 * 1024);
+    rs_buf_free(&err);
     teardown(dir, &f, token);
 }
 
@@ -1095,6 +1225,7 @@ void test_remote(void)
     remote_answers();
     remote_tokens();
     remote_reading();
+    remote_keeping();
     remote_sessions();
     remote_writing();
     remote_capturing();

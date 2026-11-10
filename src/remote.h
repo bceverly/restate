@@ -103,6 +103,10 @@ int rs_remote_lock(struct rs_remote *rm, const char *name, bool shared, bool *bu
  * it says why.
  */
 void rs_remote_prefetch(struct rs_remote *rm, const char *const *names, size_t n);
+/* How many bytes of what is fetched a session keeps, to fetch it once however
+ * often it is read (512 MiB by default, at most a quarter of what is free
+ * where it is kept); 0 keeps none. For tests. */
+void rs_remote_set_kept_bytes(uint64_t bytes);
 
 /* Whether a proxy has refused a session as busy (423) or at its limit of
  * sessions (503) in this run, in any store. */

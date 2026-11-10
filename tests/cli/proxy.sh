@@ -510,6 +510,27 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
       "${RUN[@]}" restore -q --allow-unverified --root rout "${ON[@]}" "$URL::$SNAP"
     if cmp -s tree/etc/one.conf rout/etc/one.conf; then ok; else fail "puts its files back"; fi
     left "restore"
+    # restore --check-first reads every file twice, and the snapshot's index
+    # for whose it is and then for its files, its accounts once more: in one
+    # session, each file fetched from the proxy once. fetched_once WHAT
+    # [CLIENT]: the server's log since $MARK has one session of CLIENT's
+    # (up01's), and no file asked for twice.
+    fetched_once() {
+      local since opened twice client="${2:-up01}"
+      since="$(tail -n "+$MARK" server.log)"
+      opened="$(printf '%s\n' "$since" | grep -c "session-open client=$client")"
+      if [ "$opened" = 1 ]; then ok; else fail "$1: one session, not $opened"; fi
+      twice="$(printf '%s\n' "$since" | sed -n "s/.*method=GET target=\\(\\/v1\\/$client\\/f\\/[^ ]*\\) status=20.*/\\1/p" |
+        sort | uniq -d)"
+      if [ -z "$twice" ]; then ok; else fail "$1: fetched twice: $twice"; fi
+    }
+    rm -rf rout && mkdir rout
+    MARK=$(($(wc -l < server.log) + 1))
+    expect 0 "restore --check-first through the proxy" -- \
+      "${RUN[@]}" restore -q --allow-unverified --check-first --root rout "${ON[@]}" "$URL::$SNAP"
+    if cmp -s tree/etc/one.conf rout/etc/one.conf; then ok; else fail "checks it, then puts it back"; fi
+    fetched_once "restore --check-first"
+    left "restore --check-first"
     expect 0 "check through the proxy" -- "${RUN[@]}" check "${ON[@]}" "$URL"
     contains "$ERR" "the repository is whole" "reads it all, and finds it whole"
     expect 0 "copy out of the proxy, into a repository here" -- \
@@ -595,6 +616,17 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
         "${RUN[@]}" snapshots --json --trusted-key signer.pub "${EON[@]}" "$EURL"
       contains "$OUT" '"trusted": true' "by the key that signed it"
       left "an encrypted capture"
+      # What a restore of an encrypted repository fetches is whole packs, to
+      # decrypt: with --check-first, each still crosses once.
+      ESNAP="$(find edst/snapshots -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+      rm -rf rout4 && mkdir rout4
+      MARK=$(($(wc -l < server.log) + 1))
+      expect 0 "restore --check-first of an encrypted snapshot through the proxy" -- \
+        env GNUPGHOME="$WORK/gnupg" "${RUN[@]}" restore -q --allow-unverified --check-first \
+        --root rout4 "${EON[@]}" "$EURL::${ESNAP##*/}"
+      if cmp -s tree3/etc/big.bin rout4/etc/big.bin; then ok; else fail "decrypts it, checks it, puts it back"; fi
+      fetched_once "an encrypted restore --check-first" en01
+      left "an encrypted restore"
       GNUPGHOME="$WORK/gnupg" gpgconf --kill gpg-agent 2> /dev/null || true
     else
       printf '  - encrypted captures through the proxy not run: they need gpg\n'
@@ -664,6 +696,105 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
       ok
     fi
     lacks "$(cat server.log)" "$(cat up01.token)" "nor its token"
+
+    # A capture cut off part way, once a pack is committed and before the
+    # snapshot is. capture_cut STOPHOW: restate run in a process group of
+    # its own (set -m), to be killed as the machine it runs on would stop --
+    # "all", restate, its renewer and curl at once, as a crash or a cut
+    # cable does, so nothing ends its session; "restate", restate alone, as
+    # the OOM killer does, so its renewer ends it. $CUT is 1 if it was cut
+    # off where it should be, and the session's id is left in $CUTSESS.
+    mkdir -p tree4/etc
+    for n in 1 2 3; do head -c 41943040 /dev/urandom > "tree4/etc/big$n.bin"; done
+    capture_cut() {
+      local mark
+      CUT=0
+      CUTSESS=
+      # Only what the server logs from here on: an earlier capture's
+      # commits are in its log too.
+      mark=$(($(wc -l < server.log) + 1))
+      since() { tail -n "+$mark" server.log; }
+      set -m
+      "${RUN[@]}" capture -q -r tree4 --os=linux "${ON[@]}" -o "$URL" > /dev/null 2>&1 &
+      CPID=$!
+      set +m
+      for _ in $(seq 1 600); do
+        if since | grep -q 'target=/v1/up01/sessions/[^ ]*/commit/packs/.* status=201'; then
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$1" = all ]; then
+        kill -KILL -- "-$CPID" 2> /dev/null
+      else
+        kill -KILL "$CPID" 2> /dev/null
+      fi
+      wait "$CPID" 2> /dev/null
+      if since | grep -q 'commit/packs/.* status=201' && ! since | grep -q 'commit/snapshots/'; then
+        CUT=1
+      fi
+      CUTSESS="$(sessions_staged | head -n 1)"
+      rm -rf rtmp/* 2> /dev/null
+    }
+    # dst's packs before, to see that a cut-off capture leaves none behind;
+    # and the sessions' staging directories in the proxy's staging.
+    packs_of() { find dst/packs -name '*.idx' | sort; }
+    sessions_staged() {
+      local d
+      for d in staging/up01/*; do
+        case "${d##*/}" in
+          [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) [ -d "$d" ] && printf '%s\n' "${d##*/}" ;;
+        esac
+      done
+    }
+    BEFORE="$(packs_of)"
+
+    # Everything killed at once: the session is left open, its lock held and
+    # its packs in, until its lease runs out; then the proxy takes it all out.
+    start --lease 4
+    URL="https://localhost:$PORT/v1/up01"
+    capture_cut all
+    if [ "$CUT" = 1 ]; then ok; else fail "the capture was cut off between a pack's commit and its snapshot's"; fi
+    if [ -n "$CUTSESS" ]; then ok; else fail "the cut-off session's staging is still there while its lease runs"; fi
+    if [ "$(packs_of)" != "$BEFORE" ]; then ok; else fail "the pack it committed is in the repository until then"; fi
+    for _ in $(seq 1 40); do
+      grep -q 'session-end client=up01 kind=append.*result=expired' server.log && break
+      sleep 0.25
+    done
+    contains "$(cat server.log)" "result=expired" "the lease runs out, and the proxy ends the session"
+    if [ -z "$CUTSESS" ] || [ ! -e "staging/up01/$CUTSESS" ]; then ok; else fail "its staging is removed when it expires"; fi
+    if [ "$(packs_of)" = "$BEFORE" ]; then ok; else fail "the packs it committed are taken out again"; fi
+    expect 0 "the repository is whole after a capture cut off" -- "$RESTATE" check dst
+    if flock -n dst/lock true 2> /dev/null || ! command -v flock > /dev/null 2>&1; then
+      ok
+    else
+      fail "its lock is let go"
+    fi
+    expect 0 "the next capture goes in" -- \
+      "${RUN[@]}" capture -q -r tree3 --os=linux "${ON[@]}" -o "$URL"
+    left "the capture after one cut off"
+
+    # restate alone killed: its renewer ends the session at once, with no
+    # lease to wait out, and the same is taken out again. A lease of its own,
+    # 30 seconds: one of 4 is shorter than the renewer's least interval (5),
+    # so a pause in the capture could let it lapse before it is cut off; and
+    # 30 is longer than this waits, so only the renewer could end it in time.
+    stop
+    start --lease 30
+    URL="https://localhost:$PORT/v1/up01"
+    BEFORE="$(packs_of)"
+    capture_cut restate
+    if [ "$CUT" = 1 ]; then ok; else fail "the second capture was cut off between a pack's commit and its snapshot's"; fi
+    for _ in $(seq 1 40); do
+      [ "$(packs_of)" = "$BEFORE" ] && [ -z "$(sessions_staged)" ] && break
+      sleep 0.1
+    done
+    if [ "$(packs_of)" = "$BEFORE" ]; then ok; else fail "with restate alone killed, its packs are taken out at once"; fi
+    contains "$(grep 'session-end client=up01 kind=append' server.log)" "result=ended" \
+      "ended by its renewer, not by the lease"
+    expect 0 "and the repository is whole" -- "$RESTATE" check dst
+    stop
+    rm -rf tree4
   else
     printf '  - uploads not run: restate is not beside %s\n' "$BIN"
   fi
