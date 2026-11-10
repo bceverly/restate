@@ -424,7 +424,11 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: macos-latest
+    # macos-15, not macos-latest (2026-11-10): macos-latest is the macos-26
+    # arm64 pool, which has gone short of capacity -- jobs on it queued and
+    # were then canceled, "not acquired by Runner of type hosted", with
+    # nothing of restate's run.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

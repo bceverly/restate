@@ -1133,7 +1133,11 @@ jobs:
   homebrew:
     name: Publish the Homebrew formula
     needs: [build, publish]
-    runs-on: macos-latest
+    # macos-15, not macos-latest (2026-11-10): macos-latest is the macos-26
+    # arm64 pool, which has gone short of capacity -- jobs on it queued and
+    # were then canceled, "not acquired by Runner of type hosted", with
+    # nothing of restate's run.
+    runs-on: macos-15
     timeout-minutes: 45
     permissions:
       contents: read
