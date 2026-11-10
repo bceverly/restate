@@ -711,15 +711,17 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
       CUT=0
       CUTSESS=
       # Only what the server logs from here on: an earlier capture's
-      # commits are in its log too.
+      # commits are in its log too. grep reads it all, not -q: under
+      # pipefail, a grep -q that stops at its match can leave tail killed by
+      # SIGPIPE, and the pipeline false for what it found.
       mark=$(($(wc -l < server.log) + 1))
-      since() { tail -n "+$mark" server.log; }
+      since() { tail -n "+$mark" server.log | grep -- "$1" > /dev/null; }
       set -m
       "${RUN[@]}" capture -q -r tree4 --os=linux "${ON[@]}" -o "$URL" > /dev/null 2>&1 &
       CPID=$!
       set +m
       for _ in $(seq 1 600); do
-        if since | grep -q 'target=/v1/up01/sessions/[^ ]*/commit/packs/.* status=201'; then
+        if since 'target=/v1/up01/sessions/[^ ]*/commit/packs/.* status=201'; then
           break
         fi
         sleep 0.1
@@ -730,7 +732,7 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
         kill -KILL "$CPID" 2> /dev/null
       fi
       wait "$CPID" 2> /dev/null
-      if since | grep -q 'commit/packs/.* status=201' && ! since | grep -q 'commit/snapshots/'; then
+      if since 'commit/packs/.* status=201' && ! since 'commit/snapshots/'; then
         CUT=1
       fi
       CUTSESS="$(sessions_staged | head -n 1)"
@@ -751,13 +753,16 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
 
     # Everything killed at once: the session is left open, its lock held and
     # its packs in, until its lease runs out; then the proxy takes it all out.
-    start --lease 4
+    # A lease of 12 seconds: longer than the renewer's least interval (5), so
+    # the session cannot lapse in a pause before it is cut off, however slow
+    # the build (coverage is); and short enough to wait out.
+    start --lease 12
     URL="https://localhost:$PORT/v1/up01"
     capture_cut all
     if [ "$CUT" = 1 ]; then ok; else fail "the capture was cut off between a pack's commit and its snapshot's"; fi
     if [ -n "$CUTSESS" ]; then ok; else fail "the cut-off session's staging is still there while its lease runs"; fi
     if [ "$(packs_of)" != "$BEFORE" ]; then ok; else fail "the pack it committed is in the repository until then"; fi
-    for _ in $(seq 1 40); do
+    for _ in $(seq 1 120); do
       grep -q 'session-end client=up01 kind=append.*result=expired' server.log && break
       sleep 0.25
     done

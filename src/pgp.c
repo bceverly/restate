@@ -1356,10 +1356,13 @@ static bool first_use(const char *home)
     const char   *list[] = { "--with-colons", "--list-secret-keys" };
     char         *plain = rs_xasprintf("%s/first-use", home);
     char         *sealed = rs_xasprintf("%s/first-use.gpg", home);
+    char         *outfile = rs_xasprintf("%s/first-use.out", home);
     char          fpr[41];
     const char   *seal[] = { "--yes", "--trust-model", "always", "--output", sealed,
                              "--recipient", fpr, "--encrypt", plain };
-    const char   *open_[] = { "--yes", "--output", "/dev/null", "--decrypt", sealed };
+    /* Decrypted into the private home, never to /dev/null: gpg removes its
+     * output file when a decrypt fails, and as root that is the device. */
+    const char   *open_[] = { "--yes", "--output", outfile, "--decrypt", sealed };
     struct rs_buf keys;
     struct rs_buf ignored;
     const char   *p;
@@ -1400,6 +1403,7 @@ static bool first_use(const char *home)
                     usable = false;
                 }
                 (void)unlink(sealed);
+                (void)unlink(outfile);
             }
         }
         p = eol ? eol + 1 : NULL;
@@ -1409,6 +1413,7 @@ static bool first_use(const char *home)
     rs_buf_free(&ignored);
     free(plain);
     free(sealed);
+    free(outfile);
     return usable;
 }
 

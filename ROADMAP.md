@@ -194,7 +194,13 @@ The order, each a release of its own:
     long gaps (12 s, 6.7 s) restate compressing and encrypting between
     batches. An incremental of 45.4 MiB took 11.2 s through the proxy against
     11.0 s over NFS into the same repository. The small calls cost nothing
-    the work does not dwarf.
+    the work does not dwarf. Whole systems on the BSDs, with no NFS to
+    compare: NetBSD captured 5 GB in 349 s (301 s encrypted, 10 s
+    incremental); OpenBSD 8.0, a laptop on Wi-Fi, captured 767,662 paths
+    (59.43 GB read, 39.94 GB new, 13.6 GB sent in 1,163 packs) in one
+    session of 6,593 s, bound by its disk and Wi-Fi (about 9 MB/s read)
+    rather than by the calls; a one-file restore after it matched the live
+    file.
   - [x] **Found by the measurement, fixed:** a one-file restore with
     `check_first` fetched the snapshot's index twice and the same packs
     twice (102 MB for a 13-byte file, in six sessions, each listing the
