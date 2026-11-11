@@ -19,7 +19,11 @@
  * they hold: a session outlives the connection that opened it. A child asks
  * for them over a socket pair of its own, a line at a time, with words it
  * has checked already. Past --max-sessions, a session is refused (503); one
- * idle for --lease seconds is ended.
+ * idle for --lease seconds is ended. A grant's own limits are kept here
+ * too: its max_sessions as a session opens, and its bandwidth for the hour
+ * given to a request as it finds its session, shared by those of the
+ * client's that are being answered then. The quota hook (quota.h), if there
+ * is one, is run from here, and the connection that asked waits for it.
  *
  * A connection is one client's from its first good token: then its
  * process starts a committer of its own and both confine themselves to
@@ -60,6 +64,7 @@ struct rs_proxy_options {
     unsigned           lease;           /* seconds; 0: RS_PROXY_LEASE */
     const char        *staging;         /* NULL: RS_PROXY_STAGING */
     uint64_t           max_staging;     /* bytes; 0: RS_PROXY_MAX_STAGING */
+    const char        *quota_hook;      /* the program asked before what stores more; NULL: none */
 };
 
 /* Runs the server until it is told to stop: the exit status. */

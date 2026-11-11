@@ -5,7 +5,7 @@
 .\"
 .\" Copyright (c) 2026 Bryan C. Everly
 .\" SPDX-License-Identifier: BSD-2-Clause
-.TH RESTATE-PROXY 8 "November 10, 2026" "restate-proxy" "System Manager's Manual"
+.TH RESTATE-PROXY 8 "November 11, 2026" "restate-proxy" "System Manager's Manual"
 .nh
 .SH NAME
 restate-proxy \- serve restate repositories over HTTPS, append-only
@@ -32,6 +32,8 @@ restate-proxy \- serve restate repositories over HTTPS, append-only
 .IR DIR ]
 .RB [ \-\-max\-staging
 .IR MIB ]
+.RB [ \-\-quota\-hook
+.IR PROGRAM ]
 .br
 .B restate-proxy
 .B \-\-check\-grants
@@ -123,6 +125,11 @@ user's alone (mode 0700), or nothing can be uploaded.
 .BI \-\-max\-staging " MIB"
 The most one session's staging may hold (4096).
 .TP
+.BI \-\-quota\-hook " PROGRAM"
+A program, by its absolute path, asked before an append session opens and
+before each upload whether the client may store more; see
+.BR "QUOTA HOOK" .
+.TP
 .BR \-\-check\-grants " [\fIDIR\fP]"
 Read every grant in
 .I DIR
@@ -158,6 +165,9 @@ may write it, and a grant with an error grants nothing:
 repository   = /srv/restate/web01
 operations   = append, read
 token_sha256 = 8f14e45fceea167a5a36dedd4bea2543c8d2d1e3c1b5d7d0a2a6a1f6c1f8a9e0
+max_sessions = 2
+bandwidth    = 08-18 2MiB/s
+bandwidth    = 20MiB/s
 .fi
 .RE
 .PP
@@ -166,6 +176,29 @@ is
 .BR read ,
 .BR append ,
 or both.
+.PP
+.B max_sessions
+is how many sessions the client may have open at once, 1 to 1024; one past
+it is refused with 503, which restate takes as busy (exit 5), as it does the
+proxy's own
+.BR \-\-max\-sessions .
+A run of restate holds one session; a copy from the proxy into it, two.
+.PP
+.B bandwidth
+is how fast the client's requests may move their bytes, each way:
+.BR 512KiB/s ,
+.BR 2MiB/s ,
+.BR 1GiB/s
+(64KiB/s at the least), or
+.BR unlimited .
+Given with hours,
+.IR HH-HH ,
+it is for those hours of the storage host's local day, from the first hour
+to the start of the second,
+.B 22-06
+across midnight; given alone, for every hour no range names. With none,
+there is no limit. The client's requests being answered at once share it.
+.PP
 A second
 .B token_sha256
 line lets a token be replaced without a run failing in between. Write a
@@ -176,6 +209,34 @@ reads only
 The repository is made with
 .B restate init
 and has to be the proxy's user's to write.
+.SH QUOTA HOOK
+The program
+.B \-\-quota\-hook
+names is run by the proxy's listening process, which is not confined, as
+the proxy's user, with no arguments, standard input
+.IR /dev/null ,
+standard error the proxy's log, and an environment of its own:
+.TP
+.B RESTATE_PROXY_EVENT
+.BR open ,
+as an append session opens, or
+.BR upload ,
+before each file of a capture is sent.
+.TP
+.BR RESTATE_PROXY_CLIENT ", " RESTATE_PROXY_REPOSITORY ", " RESTATE_PROXY_LABEL
+The client, its repository, and its grant's label if it has one.
+.TP
+.BR RESTATE_PROXY_NAME ", " RESTATE_PROXY_BYTES
+The upload's name and size; for
+.BR open ,
+no name, and 0.
+.PP
+It exits 0 if the client may store more and 1 if it may not, which the
+client is told as 507
+.B quota-exceeded
+with the first line the program wrote; restate exits 2. Any other exit, a
+signal, or more than 30 seconds, is the hook failing, and the request is
+500. Only the connection that asked waits for it.
 .SH SIGNALS
 .TP
 .B SIGHUP
@@ -199,8 +260,9 @@ removed.
 Standard error, a line per event in
 .I key=value
 form, which a service manager's journal keeps: what it listens on, the
-grants it read and each it refused with why, each request, and each session
-opened and ended. A token is never in it, nor a session's id.
+grants it read and each it refused with why, each request, each session
+opened and ended, and each answer of the quota hook's that refused or
+failed. A token is never in it, nor a session's id.
 .SH EXIT STATUS
 .TP
 .B 0

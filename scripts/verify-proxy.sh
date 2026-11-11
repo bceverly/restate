@@ -94,12 +94,24 @@ if ! command -v openssl > /dev/null 2>&1; then
 fi
 # An address in the certificate, for curl to check it against, where this
 # openssl can say one (-addext); LibreSSL's may not, and then the name alone.
-if ! openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
-       -addext subjectAltName=IP:127.0.0.1 -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
-       > /dev/null 2>&1; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
-    -keyout "$WORK/key.pem" -out "$WORK/cert.pem" > /dev/null 2>&1 \
-    || die "openssl could not make a certificate"
+# And where this openssl has no openssl.cnf of its own (NetBSD's may not),
+# with the least one there can be.
+printf '[req]\ndistinguished_name = dn\nx509_extensions = v3\n[dn]\n[v3]\n%s\n' \
+  'basicConstraints = critical, CA:true' > "$WORK/openssl.cnf"
+made=""
+for config in "" "-config $WORK/openssl.cnf"; do
+  for addext in "-addext subjectAltName=IP:127.0.0.1" ""; do
+    # shellcheck disable=SC2086  # each is its words, or none
+    if openssl req $config -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 $addext \
+         -keyout "$WORK/key.pem" -out "$WORK/cert.pem" > /dev/null 2>> "$WORK/openssl.err"; then
+      made=1
+      break 2
+    fi
+  done
+done
+if [ -z "$made" ]; then
+  sed 's/^/    openssl: /' "$WORK/openssl.err" | head -8
+  die "openssl could not make a certificate"
 fi
 if [ -x "$RESTATE" ]; then
   "$RESTATE" init -q "$WORK/repo" || die "restate init failed"

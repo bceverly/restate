@@ -61,7 +61,12 @@ const char *rs_proxy_kind_name(enum rs_proxy_kind kind);
 struct rs_proxy_session {
     enum rs_proxy_kind kind;
     const char        *repository;  /* its directory, as the grant names it */
+    uint64_t           rate;        /* bytes a second this request may move each way; 0: no limit */
 };
+
+/* What opening a session says of a client at its grant's max_sessions: not
+ * a status of the protocol's, which says it as 503 client-sessions-full. */
+#define RS_PROXY_CLIENT_FULL 429
 
 /* What looking up a session found. */
 enum rs_proxy_found {
@@ -73,13 +78,19 @@ enum rs_proxy_found {
 /*
  * The sessions, as a connection asks them. Each answers with the status a
  * request is to have: open 201 (and the id, and the lease in seconds), or
- * 403, 409, 423, 500 or 503; renew 204 (and the lease); end 204; renew and
- * end 404 for no such session and 401 for another client's.
+ * 403, 409, 423, 500, 503, RS_PROXY_CLIENT_FULL (the client's own limit,
+ * which is said as 503) or 507 (over its quota, with what the quota
+ * hook said in `message`, if it said anything); renew 204 (and the lease);
+ * end 204; renew and end 404 for no such session and 401 for another
+ * client's. quota is NULL where there is no quota hook; otherwise it is
+ * asked before an upload of `bytes` as `name` in session `id`: 0 to take
+ * it, 507 (and the hook's `message`) if it is over the client's quota, 500
+ * if the hook could not say.
  */
 struct rs_proxy_sessions {
     void                *ctx;
     int                 (*open)(void *ctx, const char *client, enum rs_proxy_kind kind,
-                                char id[33], unsigned *lease);
+                                char id[33], unsigned *lease, struct rs_buf *message);
     /* The session `id` of `client`, into *s, held until release. */
     enum rs_proxy_found (*find)(void *ctx, const char *client, const char *id,
                                 struct rs_proxy_session *s);
@@ -90,6 +101,8 @@ struct rs_proxy_sessions {
     void                (*committed)(void *ctx, const char *id, const char *name);
     int                 (*renew)(void *ctx, const char *client, const char *id, unsigned *lease);
     int                 (*end)(void *ctx, const char *client, const char *id);
+    int                 (*quota)(void *ctx, const char *client, const char *id, const char *name,
+                                 uint64_t bytes, struct rs_buf *message);
 };
 
 /* What a connection is served with. */

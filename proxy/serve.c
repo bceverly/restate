@@ -161,6 +161,14 @@ static const char *error_text(int status, const char *reason)
     {
         return "the proxy has as many sessions open as it allows; try again later\n";
     }
+    if (strcmp(reason, "client-sessions-full") == 0)
+    {
+        return "this client has as many sessions open as its grant allows; try again later\n";
+    }
+    if (strcmp(reason, "quota-exceeded") == 0)
+    {
+        return "this client is over its quota on the storage host\n";
+    }
     if (strcmp(reason, "proxy-failed") == 0)
     {
         return "the proxy failed; its log says why\n";
@@ -180,6 +188,17 @@ static void fail(struct answer *a, int status, const char *reason)
     rs_buf_addstr(&a->body, error_text(status, reason));
 }
 
+/* What the quota hook said, if it said anything, in place of the body a
+ * refusal has: one line. */
+static void said(struct answer *a, const struct rs_buf *message)
+{
+    if (message->len > 0)
+    {
+        rs_buf_reset(&a->body);
+        rs_buf_addf(&a->body, "%s\n", message->data);
+    }
+}
+
 /* `t` as HTTP writes a time: "Tue, 20 Oct 2026 03:00:00 GMT". */
 static void http_time(int64_t t, char out[40])
 {
@@ -190,6 +209,93 @@ static void http_time(int64_t t, char out[40])
     {
         (void)snprintf(out, 40, "Thu, 01 Jan 1970 00:00:00 GMT");
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Pacing                                                                   */
+/* ------------------------------------------------------------------------ */
+/*
+ * A request in a session whose grant has a bandwidth moves its bytes no
+ * faster than its rate, each way: the connection read and written through
+ * this, which after each read or write waits until as long has passed since
+ * the request began as its bytes take at the rate.
+ */
+struct paced {
+    const struct rs_proxy_io *io;
+    uint64_t                  rate;     /* bytes a second; 0: no limit */
+    uint64_t                  moved;
+    struct timespec           start;
+};
+
+static uint64_t ns_since(const struct timespec *t)
+{
+    struct timespec now;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec < t->tv_sec || (now.tv_sec == t->tv_sec && now.tv_nsec < t->tv_nsec))
+    {
+        return 0;
+    }
+    return (uint64_t)(now.tv_sec - t->tv_sec) * 1000000000u + (uint64_t)now.tv_nsec -
+           (uint64_t)t->tv_nsec;
+}
+
+/* `p` paced at `rate` from now on, for one request. */
+static void pace_from(struct paced *p, uint64_t rate)
+{
+    p->rate = rate;
+    p->moved = 0;
+    (void)clock_gettime(CLOCK_MONOTONIC, &p->start);
+}
+
+/* `n` bytes more moved: waits until they are due. */
+static void pace(struct paced *p, size_t n)
+{
+    uint64_t due;
+    uint64_t spent;
+
+    if (p->rate == 0 || n == 0)
+    {
+        return;
+    }
+    p->moved += n;
+    /* In two parts, so that no product overflows. */
+    due = p->moved / p->rate * 1000000000u + p->moved % p->rate * 1000000000u / p->rate;
+    spent = ns_since(&p->start);
+    if (due > spent)
+    {
+        struct timespec wait;
+
+        wait.tv_sec = (time_t)((due - spent) / 1000000000u);
+        wait.tv_nsec = (long)((due - spent) % 1000000000u);
+        while (nanosleep(&wait, &wait) != 0 && errno == EINTR)
+        {
+        }
+    }
+}
+
+static long paced_read(void *ctx, void *buf, size_t len)
+{
+    struct paced *p = ctx;
+    long          n = p->io->read(p->io->ctx, buf, len);
+
+    if (n > 0)
+    {
+        pace(p, (size_t)n);
+    }
+    return n;
+}
+
+static bool paced_write(void *ctx, const void *buf, size_t len)
+{
+    struct paced *p = ctx;
+    bool          ok = p->io->write(p->io->ctx, buf, len);
+
+    if (ok)
+    {
+        pace(p, len);
+    }
+    return ok;
 }
 
 /* Sends `length` bytes of `fd`, from where it is: false if it could not be
@@ -494,6 +600,10 @@ static const char *reason_of(int status)
         return "busy";
     case 503:
         return "sessions-full";
+    case RS_PROXY_CLIENT_FULL:
+        return "client-sessions-full";
+    case 507:
+        return "quota-exceeded";
     default:
         return "proxy-failed";
     }
@@ -527,11 +637,16 @@ static size_t read_some(struct body *b, char *out, size_t len)
     return n > 0 ? (size_t)n : 0;
 }
 
-/* The `len` bytes of the body into `out`: false if the connection ended
- * first. */
-static bool read_body(struct body *b, char *out, size_t len)
+/* The `len` bytes of the body into `out`, which holds `size`: false if
+ * that is more than it holds, or the connection ended first. */
+static bool read_body(struct body *b, char *out, size_t size, size_t len)
 {
     size_t got = 0;
+
+    if (len > size)
+    {
+        return false;
+    }
 
     while (got < len)
     {
@@ -564,6 +679,7 @@ static void open_session(const struct rs_proxy_conn *c, const struct rs_request 
                          const struct rs_route *route, struct body *b, struct answer *a)
 {
     enum rs_proxy_kind kind;
+    struct rs_buf      message;
     char               word[KIND_MAX];
     char               id[RS_SESSION_LEN + 1];
     unsigned           lease = 0;
@@ -588,7 +704,7 @@ static void open_session(const struct rs_proxy_conn *c, const struct rs_request 
         a->close = true;
         return;
     }
-    if (!read_body(b, word, (size_t)req->length))
+    if (!read_body(b, word, sizeof(word), (size_t)req->length))
     {
         fail(a, 400, "bad-request");
         a->close = true;
@@ -600,12 +716,18 @@ static void open_session(const struct rs_proxy_conn *c, const struct rs_request 
         return;
     }
     memset(id, 0, sizeof(id));
-    status = c->sessions->open(c->sessions->ctx, route->client, kind, id, &lease);
+    rs_buf_init(&message);
+    status = c->sessions->open(c->sessions->ctx, route->client, kind, id, &lease, &message);
     if (status != 201)
     {
-        fail(a, status, reason_of(status));
+        /* A client's own limit is said as the proxy's is, 503, which a
+         * restate that does not know the reason takes as busy all the same. */
+        fail(a, status == RS_PROXY_CLIENT_FULL ? 503 : status, reason_of(status));
+        said(a, &message);
+        rs_buf_free(&message);
         return;
     }
+    rs_buf_free(&message);
     a->status = 201;
     rs_buf_addf(&a->headers, "Restate-Session: %s\r\nRestate-Lease: %u\r\n", id, lease);
     rs_buf_addf(&a->body, "%s\n", id);
@@ -780,6 +902,28 @@ static void upload(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, full(e) ? 507 : 500, full(e) ? "storage-full" : "proxy-failed");
         return;
     }
+    /* The quota hook, last of what refuses it, and before a byte of it is
+     * sent. */
+    if (c->sessions->quota)
+    {
+        struct rs_buf message;
+        int           q;
+
+        rs_buf_init(&message);
+        q = c->sessions->quota(c->sessions->ctx, route->client,
+                               route->session[0] ? route->session : req->session, route->name,
+                               req->length, &message);
+        if (q != 0)
+        {
+            fail(a, q == 507 ? 507 : 500, q == 507 ? "quota-exceeded" : "proxy-failed");
+            said(a, &message);
+            rs_buf_free(&message);
+            rs_store_free(st);
+            free(dir);
+            return;
+        }
+        rs_buf_free(&message);
+    }
     if (req->expect_continue &&
         !b->io->write(b->io->ctx, "HTTP/1.1 100 Continue\r\n\r\n", 25))
     {
@@ -928,7 +1072,7 @@ static void commit(const struct rs_proxy_conn *c, const struct rs_request *req,
 /* The answer to a whole head, `req`, by what it asks for. */
 static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
                    const struct rs_route *route, struct body *b, struct answer *a,
-                   char held[RS_SESSION_LEN + 1], char **bound)
+                   char held[RS_SESSION_LEN + 1], char **bound, struct paced *p)
 {
     struct rs_proxy_session s;
     const struct rs_grant  *g;
@@ -1034,8 +1178,10 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
     switch (c->sessions->find(c->sessions->ctx, route->client, sid, &s))
     {
     case RS_PROXY_FOUND:
-        /* Held, its lease not running, until it is answered. */
+        /* Held, its lease not running, until it is answered; and from here,
+         * its body and its answer at the rate it has. */
         memcpy(held, sid, RS_SESSION_LEN + 1);
+        pace_from(p, s.rate);
         break;
     case RS_PROXY_NOT_YOURS:
         fail(a, 401, "unauthorized");
@@ -1159,10 +1305,18 @@ static void log_request(const struct rs_proxy_conn *c, const struct rs_request *
 
 unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn *c)
 {
-    char     buf[RS_REQUEST_HEAD_MAX];
-    size_t   have = 0;
-    unsigned served = 0;
-    char    *bound = NULL;
+    char               buf[RS_REQUEST_HEAD_MAX];
+    size_t             have = 0;
+    unsigned           served = 0;
+    char              *bound = NULL;
+    struct paced       paced;
+    struct rs_proxy_io pio;
+
+    memset(&paced, 0, sizeof(paced));
+    paced.io = io;
+    pio.ctx = &paced;
+    pio.read = paced_read;
+    pio.write = paced_write;
 
     for (;;)
     {
@@ -1205,13 +1359,14 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
             return served + 1;
         }
         rs_route_parse(req.target, &route);
-        body.io = io;
+        paced.rate = 0;
+        body.io = &pio;
         body.buf = buf;
         body.have = have;
         body.at = (size_t)head;
         body.read = false;
         held[0] = '\0';
-        decide(c, &req, &route, &body, &a, held, &bound);
+        decide(c, &req, &route, &body, &a, held, &bound, &paced);
         /* A body that was not read ends the connection rather than be left
          * there unread: an Expect: 100-continue was not answered 100, and
          * so it was never sent. */
@@ -1219,7 +1374,7 @@ unsigned rs_proxy_serve(const struct rs_proxy_io *io, const struct rs_proxy_conn
                   a.status == 500;
         log_request(c, &req, &route, &a, NULL);
         served++;
-        ok = respond(io, &a, req.method == RS_METHOD_HEAD);
+        ok = respond(&pio, &a, req.method == RS_METHOD_HEAD);
         if (held[0])
         {
             uint64_t sent = req.method == RS_METHOD_HEAD ? 0

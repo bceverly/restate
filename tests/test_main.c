@@ -390,6 +390,7 @@ int main(int argc, char **argv)
     test_serve();
     test_sessions();
     test_commit();
+    test_quota();
     test_confine();
 #endif
     test_cmd();

@@ -434,8 +434,9 @@ static void remote_names(void)
         "https://proxy.example:65536/v1/web01", "https://proxy.example:/v1/web01",
         "https://proxy.example/v1/web01/x", "https://proxy.example/v1/web01?x",
         "https://[]/v1/web01", "https://[::1/v1/web01", "https://user@host/v1/web01",
-        "https://proxy.example/v1/"
-        "a123456789b123456789c123456789d123456789e123456789f123456789g12345",
+        /* A client's name one longer than there can be. */
+        ("https://proxy.example/v1/"
+         "a123456789b123456789c123456789d123456789e123456789f123456789g12345"),
     };
     size_t i;
 

@@ -171,9 +171,18 @@ expect 2 "--serve --max-connections 0" -- "$BIN" --serve --max-connections 0
 contains "$ERR" "is not a number from 1 to" "is refused"
 expect 2 "--serve --idle-timeout with no value" -- "$BIN" --serve --idle-timeout
 
+# self_signed ARGS...: `openssl req -x509` with ARGS, as this openssl takes
+# it -- or, where it has no openssl.cnf of its own (NetBSD's may not), with
+# the least one there can be -- its errors in openssl.err.
+self_signed() {
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 "$@" > /dev/null 2> openssl.err && return 0
+  printf '[req]\ndistinguished_name = dn\nx509_extensions = v3\n[dn]\n[v3]\n%s\n' \
+    'basicConstraints = critical, CA:true' > openssl.cnf
+  openssl req -config openssl.cnf -x509 -newkey rsa:2048 -nodes -days 2 "$@" \
+    > /dev/null 2>> openssl.err
+}
 if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
-  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=localhost \
-    -keyout key.pem -out cert.pem > /dev/null 2>&1; then
+  self_signed -subj /CN=localhost -keyout key.pem -out cert.pem; then
   # A repository for the sessions to open: its marker, its lock files, and a
   # pack's files and a snapshot's.
   mkdir -p repo/packs repo/snapshots/20261020T030000Z
@@ -557,7 +566,8 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     # storage host, and read back through the proxy.
     mkdir -p tree3/etc
     printf 'three\n' > tree3/etc/three.conf
-    head -c 300000 /dev/urandom > tree3/etc/big.bin
+    # dd, not head -c, which OpenBSD's head does not have.
+    dd if=/dev/urandom of=tree3/etc/big.bin bs=1000 count=300 2> /dev/null
     expect 0 "features says a capture can go through the proxy" -- "$RESTATE" features --json
     contains "$OUT" '"remote_capture": true' "says so"
     expect 0 "capture through the proxy" -- \
@@ -588,6 +598,48 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     if [ -d "dst/snapshots/$SRC2" ]; then ok; else fail "the copy is there"; fi
     expect 0 "and still whole" -- "$RESTATE" check dst
     left "copy into the proxy"
+
+    # What compares and plans reads through it as from a path: diff of two of
+    # its snapshots, status of a tree against one, du, and restore --plan.
+    expect 1 "diff of two snapshots through the proxy" -- \
+      "${RUN[@]}" diff "${ON[@]}" "$URL::$SNAP" "$URL::$SNAP3"
+    contains "$OUT" "/etc/big.bin" "finds what the second added"
+    left "diff"
+    expect 0 "status of a tree against its snapshot through the proxy" -- \
+      "${RUN[@]}" status -r tree3 "${ON[@]}" "$URL::$SNAP3"
+    expect 1 "and of one it differs from" -- "${RUN[@]}" status -r tree3 "${ON[@]}" "$URL::$SNAP"
+    contains "$OUT" "/etc/big.bin" "finds what is not in it"
+    left "status"
+    expect 0 "du through the proxy" -- "${RUN[@]}" du "${ON[@]}" "$URL"
+    contains "$OUT" "$SNAP3" "accounts for each snapshot"
+    left "du"
+    rm -rf rout5 && mkdir rout5
+    expect 0 "restore --plan through the proxy" -- \
+      "${RUN[@]}" restore --plan --allow-unverified --root rout5 "${ON[@]}" "$URL::$SNAP3"
+    contains "$OUT" "would restore /etc/big.bin" "says what it would put back"
+    if [ -z "$(ls -A rout5)" ]; then ok; else fail "and puts nothing back"; fi
+    left "restore --plan"
+
+    # A job's repository can be the proxy, its token in repository_token_file
+    # -- held to what passphrase_file is: nobody else may read it.
+    cat > restore.job << EOF
+command = restore
+snapshot = $URL::$SNAP3
+repository_token_file = $WORK/up01.token
+repository_ca_file = $WORK/cert.pem
+restore_root = $WORK/rout5
+allow_unverified = true
+EOF
+    chmod 0600 restore.job
+    expect 0 "a restore job through the proxy" -- "${RUN[@]}" run restore.job
+    if cmp -s tree3/etc/big.bin rout5/etc/big.bin; then ok; else fail "puts its files back"; fi
+    left "a restore job"
+    chmod 0644 up01.token
+    expect 2 "a job whose token file others can read" -- "${RUN[@]}" run restore.job
+    contains "$ERR" "repository_token_file" "is not run, and says why"
+    expect 2 "and the same on the command line" -- "${RUN[@]}" snapshots "${ON[@]}" "$URL"
+    contains "$ERR" "no one else can read" "is refused"
+    chmod 0600 up01.token
 
     # Busy: another append session holds its lock, so exit 5, for a job to
     # try again.
@@ -702,10 +754,11 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     # its own (set -m), to be killed as the machine it runs on would stop --
     # "all", restate, its renewer and curl at once, as a crash or a cut
     # cable does, so nothing ends its session; "restate", restate alone, as
-    # the OOM killer does, so its renewer ends it. $CUT is 1 if it was cut
-    # off where it should be, and the session's id is left in $CUTSESS.
+    # the OOM killer does, so its renewer ends it; "term", SIGTERM to restate
+    # alone, which it stops on. $CUT is 1 if it was cut off where it should
+    # be, and the session's id is left in $CUTSESS.
     mkdir -p tree4/etc
-    for n in 1 2 3; do head -c 41943040 /dev/urandom > "tree4/etc/big$n.bin"; done
+    for n in 1 2 3; do dd if=/dev/urandom of="tree4/etc/big$n.bin" bs=1048576 count=40 2> /dev/null; done
     capture_cut() {
       local mark
       CUT=0
@@ -726,17 +779,34 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
         fi
         sleep 0.1
       done
-      if [ "$1" = all ]; then
-        kill -KILL -- "-$CPID" 2> /dev/null
-      else
-        kill -KILL "$CPID" 2> /dev/null
-      fi
+      case "$1" in
+        all) kill -KILL -- "-$CPID" 2> /dev/null ;;
+        term) kill -TERM "$CPID" 2> /dev/null ;;
+        *) kill -KILL "$CPID" 2> /dev/null ;;
+      esac
       wait "$CPID" 2> /dev/null
       if since 'commit/packs/.* status=201' && ! since 'commit/snapshots/'; then
         CUT=1
       fi
       CUTSESS="$(sessions_staged | head -n 1)"
-      rm -rf rtmp/* 2> /dev/null
+      # With everything killed, nothing is left to remove restate's own
+      # files for curl. Otherwise its renewer still needs them -- its token
+      # among them -- to end the session, and removes them itself after.
+      if [ "$1" = all ]; then
+        rm -rf rtmp/* 2> /dev/null
+      fi
+    }
+    # cut_ended: restate's renewer has ended the session cut off -- its packs
+    # taken out, its staging and restate's own files gone -- within ten
+    # seconds, however slow the machine.
+    cut_ended() {
+      local _
+      for _ in $(seq 1 100); do
+        [ "$(packs_of)" = "$BEFORE" ] && [ -z "$(sessions_staged)" ] && [ -z "$(ls rtmp)" ] &&
+          return 0
+        sleep 0.1
+      done
+      return 1
     }
     # dst's packs before, to see that a cut-off capture leaves none behind;
     # and the sessions' staging directories in the proxy's staging.
@@ -790,16 +860,114 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     BEFORE="$(packs_of)"
     capture_cut restate
     if [ "$CUT" = 1 ]; then ok; else fail "the second capture was cut off between a pack's commit and its snapshot's"; fi
-    for _ in $(seq 1 40); do
-      [ "$(packs_of)" = "$BEFORE" ] && [ -z "$(sessions_staged)" ] && break
-      sleep 0.1
-    done
-    if [ "$(packs_of)" = "$BEFORE" ]; then ok; else fail "with restate alone killed, its packs are taken out at once"; fi
+    if cut_ended; then ok; else fail "with restate alone killed, its packs are taken out at once"; fi
     contains "$(grep 'session-end client=up01 kind=append' server.log)" "result=ended" \
       "ended by its renewer, not by the lease"
     expect 0 "and the repository is whole" -- "$RESTATE" check dst
+
+    # SIGTERM, as a service manager or a job's timeout stops it: restate
+    # stops, and its session is ended and its packs taken out, as above.
+    BEFORE="$(packs_of)"
+    ENDED="$(grep -c 'session-end client=up01 kind=append.*result=ended' server.log)"
+    capture_cut term
+    if [ "$CUT" = 1 ]; then ok; else fail "the third capture was cut off between a pack's commit and its snapshot's"; fi
+    if cut_ended; then ok; else fail "with SIGTERM, its packs are taken out at once"; fi
+    if [ "$(grep -c 'session-end client=up01 kind=append.*result=ended' server.log)" -gt "$ENDED" ]; then
+      ok
+    else
+      fail "a capture stopped by SIGTERM has its session ended"
+    fi
+    expect 0 "and the repository is whole after it" -- "$RESTATE" check dst
     stop
     rm -rf tree4
+
+    # A grant's own limits -- sessions at once, and bandwidth by the hour --
+    # and the quota hook. up01_grant LINE...: up01's grant, with LINEs.
+    UPTOK="$(grep '^token_sha256' proxy.d/up01.conf)"
+    up01_grant() {
+      {
+        printf 'repository = %s/dst\noperations = read, append\n%s\n' "$WORK" "$UPTOK"
+        [ "$#" -gt 0 ] && printf '%s\n' "$@"
+      } > proxy.d/.up01.tmp
+      chmod 0644 proxy.d/.up01.tmp
+      mv proxy.d/.up01.tmp proxy.d/up01.conf
+    }
+    up01_grant "bandwidth = 08-18 1KiB/s"
+    expect 2 "--check-grants with a bandwidth less than there can be" -- \
+      "$BIN" --check-grants proxy.d
+    contains "$OUT" "64KiB/s at the least" "says what the least is"
+    up01_grant "bandwidth = 08-18 1MiB/s" "bandwidth = 08-09 2MiB/s"
+    expect 2 "--check-grants with an hour in two ranges" -- "$BIN" --check-grants proxy.d
+    contains "$OUT" "the hour from 08:00 is in two of its ranges" "says which"
+    up01_grant "max_sessions = 1" "bandwidth = 128KiB/s"
+    expect 0 "--check-grants with max_sessions and a bandwidth" -- "$BIN" --check-grants proxy.d
+
+    expect 2 "--quota-hook that is not an absolute path" -- \
+      "$BIN" --serve --listen 127.0.0.1:0 --cert cert.pem --key key.pem --grants proxy.d \
+      --quota-hook quota.sh
+    contains "$ERR" "not an absolute path" "is refused as it starts"
+    expect 2 "--quota-hook that is not there" -- \
+      "$BIN" --serve --listen 127.0.0.1:0 --cert cert.pem --key key.pem --grants proxy.d \
+      --quota-hook "$WORK/none.sh"
+    # The hook: what it is asked, kept; and no to an upload while "over" is.
+    # shellcheck disable=SC2016  # its variables are the hook's, expanded as it runs
+    {
+      printf '#!/bin/sh\n'
+      printf 'printf "%%s %%s %%s\\n" "$RESTATE_PROXY_EVENT" "$RESTATE_PROXY_CLIENT" '
+      printf '"$RESTATE_PROXY_BYTES" >> "%s/quota.log"\n' "$WORK"
+      printf 'if [ -e "%s/over" ] && [ "$RESTATE_PROXY_EVENT" = upload ]; then\n' "$WORK"
+      printf '  echo "up01 is over its 1 GiB"\n  exit 1\nfi\nexit 0\n'
+    } > quota.sh
+    chmod 0755 quota.sh
+    : > quota.log
+    start --quota-hook "$WORK/quota.sh"
+    URL="https://localhost:$PORT/v1/up01"
+    contains "$(cat server.log)" "quota_hook=$WORK/quota.sh" "it says it has a quota hook"
+
+    # max_sessions = 1: with one open, the next is refused, exit 5.
+    ask -H "$UP" -d look /v1/up01/sessions
+    S1="$(printf '%s\n' "$OUT" | tail -n 1)"
+    expect 5 "a session past the grant's max_sessions" -- \
+      "${RUN[@]}" snapshots --result "$WORK/r.json" "${ON[@]}" "$URL"
+    contains "$ERR" "503 client-sessions-full" "says so"
+    contains "$(cat r.json)" '"proxy_reason": "client-sessions-full"' "and its result says why"
+    ask -X POST -H "$UP" "/v1/up01/sessions/$S1/end"
+    expect 0 "and once it ends, there is room" -- "${RUN[@]}" snapshots "${ON[@]}" "$URL"
+    left "a session past max_sessions"
+
+    # 128KiB/s: a restore of 300,000 bytes takes two seconds at the least.
+    rm -rf rout6 && mkdir rout6
+    BEGAN=$SECONDS
+    expect 0 "a restore at the grant's bandwidth" -- \
+      "${RUN[@]}" restore -q --allow-unverified --root rout6 "${ON[@]}" "$URL::$SNAP3"
+    if [ $((SECONDS - BEGAN)) -ge 2 ]; then ok; else fail "is paced: $((SECONDS - BEGAN)) s"; fi
+    if cmp -s tree3/etc/big.bin rout6/etc/big.bin; then ok; else fail "and puts it back whole"; fi
+    left "a restore at a bandwidth"
+
+    # The quota hook: asked as a capture opens its session and before each
+    # upload; a no stops the capture, with what the hook said.
+    up01_grant
+    sleep 3
+    printf 'over quota\n' > tree3/etc/quota.conf
+    : > quota.log
+    expect 0 "a capture the quota hook says yes to" -- \
+      "${RUN[@]}" capture -q -r tree3 --os=linux "${ON[@]}" -o "$URL"
+    contains "$(head -n 1 quota.log)" "open up01 0" "it is asked as the session opens"
+    contains "$(cat quota.log)" "upload up01 " "and before each upload"
+    : > over
+    printf 'more\n' > tree3/etc/quota2.conf
+    PACKS="$(find dst/packs -name '*.idx' | wc -l)"
+    expect 2 "a capture the quota hook says no to" -- \
+      "${RUN[@]}" capture -q -r tree3 --os=linux --result "$WORK/r.json" "${ON[@]}" -o "$URL"
+    contains "$ERR" "up01 is over its 1 GiB" "says what the hook said"
+    contains "$ERR" "507 quota-exceeded" "and why"
+    contains "$(cat r.json)" '"proxy_reason": "quota-exceeded"' "and so does its result"
+    contains "$(cat server.log)" 'quota-refused client=up01 event=upload message="up01 is over its 1 GiB"' \
+      "the proxy's log says so"
+    if [ "$(find dst/packs -name '*.idx' | wc -l)" = "$PACKS" ]; then ok; else fail "and nothing is stored"; fi
+    left "a capture over its quota"
+    rm -f over tree3/etc/quota.conf tree3/etc/quota2.conf
+    stop
   else
     printf '  - uploads not run: restate is not beside %s\n' "$BIN"
   fi
@@ -820,6 +988,7 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   stop
 else
   printf '  - --serve not run: it needs curl and openssl(1)\n'
+  [ -s openssl.err ] && sed 's/^/      openssl: /' openssl.err | head -5
 fi
 
 # ---------------------------------------------------------------------------

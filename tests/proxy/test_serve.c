@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "grant.h"
@@ -80,12 +81,14 @@ static void mem_log(void *ctx, const char *line)
 
 static const char *fake_repo;
 static bool        with_sessions;
+static uint64_t    fake_rate;      /* what a session found is paced at */
 
 static enum rs_proxy_found fake_session(void *ctx, const char *client, const char *id,
                                         struct rs_proxy_session *s)
 {
     (void)ctx;
     s->repository = fake_repo;
+    s->rate = fake_rate;
     if (strcmp(id, SID_OTHER) == 0)
     {
         return RS_PROXY_NOT_YOURS;
@@ -103,15 +106,20 @@ static enum rs_proxy_found fake_session(void *ctx, const char *client, const cha
 }
 
 /* What the fake was last asked, and what it answers open with. */
-static int      open_answer = 201;
-static char     last_kind[16];
-static uint64_t released;
+static int         open_answer = 201;
+static const char *open_message;
+static char        last_kind[16];
+static uint64_t    released;
 
 static int fake_open(void *ctx, const char *client, enum rs_proxy_kind kind, char id[33],
-                     unsigned *lease)
+                     unsigned *lease, struct rs_buf *message)
 {
     (void)ctx;
     (void)client;
+    if (open_message)
+    {
+        rs_buf_addstr(message, open_message);
+    }
     (void)snprintf(last_kind, sizeof(last_kind), "%s", rs_proxy_kind_name(kind));
     memcpy(id, SID_READ, sizeof(SID_READ));
     *lease = 300;
@@ -150,9 +158,31 @@ static int fake_end(void *ctx, const char *client, const char *id)
     return fake_renew(ctx, client, id, &lease);
 }
 
+/* The quota hook, as the fake answers it, and what it was last asked. */
+static int         quota_answer;
+static const char *quota_message;
+static char        quota_asked[128];
+
+static int fake_quota(void *ctx, const char *client, const char *id, const char *name,
+                      uint64_t bytes, struct rs_buf *message)
+{
+    (void)ctx;
+    (void)snprintf(quota_asked, sizeof(quota_asked), "%s %s %s %llu", client, id, name,
+                   (unsigned long long)bytes);
+    if (quota_message)
+    {
+        rs_buf_addstr(message, quota_message);
+    }
+    return quota_answer;
+}
+
 static const struct rs_proxy_sessions fake_sessions = {
-    NULL, fake_open, fake_session, fake_release, fake_committed, fake_renew, fake_end,
+    NULL, fake_open, fake_session, fake_release, fake_committed, fake_renew, fake_end, NULL,
 };
+static const struct rs_proxy_sessions fake_sessions_quota = {
+    NULL, fake_open, fake_session, fake_release, fake_committed, fake_renew, fake_end, fake_quota,
+};
+static bool with_quota;
 
 /* Where uploads go, and how a commit and a binding are answered, for the
  * tests that set them. */
@@ -215,7 +245,7 @@ static char *serve(const char *in, const struct rs_grant *grants, size_t ngrants
     c.log_ctx = &m;
     if (with_sessions)
     {
-        c.sessions = &fake_sessions;
+        c.sessions = with_quota ? &fake_sessions_quota : &fake_sessions;
     }
     c.staging = fake_staging;
     c.max_staging = fake_max_staging;
@@ -374,6 +404,39 @@ static void test_reading(const struct rs_grant *grant)
     free(out);
     free(log);
 
+    TEST_CASE("serve: a request in a session whose grant has a bandwidth is paced by it");
+    {
+        char           *big = rs_xmalloc(100 * 1024 + 1);
+        struct timespec t0;
+        struct timespec t1;
+        double          took;
+
+        memset(big, 'k', 100 * 1024);
+        big[100 * 1024] = '\0';
+        rs_test_write(dir, "snapshots/20261020T030000Z/kit", big, 0644);
+        free(big);
+        fake_rate = 64 * 1024;
+        (void)clock_gettime(CLOCK_MONOTONIC, &t0);
+        out = ask(grant, GET("/v1/web01/f/snapshots/20261020T030000Z/kit", IN(SID_LOOK)), &log);
+        (void)clock_gettime(CLOCK_MONOTONIC, &t1);
+        fake_rate = 0;
+        took = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+        CHECK_CONTAINS(out, "Content-Length: 102400\r\n");
+        CHECK_INT((long long)strlen(body_of(out)), 102400);
+        /* 100 KiB at 64 KiB a second: a second and a half, and some. */
+        CHECK(took > 1.4 && took < 30);
+        free(out);
+        free(log);
+        /* And one not in a session is not paced, whatever was before it. */
+        (void)clock_gettime(CLOCK_MONOTONIC, &t0);
+        out = ask(grant, GET("/v1/web01/f/snapshots/20261020T030000Z/kit", IN(SID_LOOK)), &log);
+        (void)clock_gettime(CLOCK_MONOTONIC, &t1);
+        took = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+        CHECK(took < 1.0);
+        free(out);
+        free(log);
+    }
+
     TEST_CASE("serve: one range of a file, and none that is not one within it");
     {
         const char *three =
@@ -445,6 +508,12 @@ static void test_reading(const struct rs_grant *grant)
             { 403, "Restate-Reason: forbidden" },  { 409, "Restate-Reason: repository-version-1" },
             { 423, "Restate-Reason: busy" },       { 503, "Restate-Reason: sessions-full" },
             { 500, "Restate-Reason: proxy-failed" },
+            /* A client's own limit is a 503 too, with a reason of its own. */
+            { RS_PROXY_CLIENT_FULL, "503 Service Unavailable\r\n" },
+            { RS_PROXY_CLIENT_FULL, "Restate-Reason: client-sessions-full" },
+            { RS_PROXY_CLIENT_FULL, "as many sessions open as its grant allows" },
+            { 507, "Restate-Reason: quota-exceeded" },
+            { 507, "over its quota on the storage host" },
         };
         size_t i;
 
@@ -457,6 +526,15 @@ static void test_reading(const struct rs_grant *grant)
             free(out);
             free(log);
         }
+        /* What the quota hook said is the body, where it said something. */
+        open_answer = 507;
+        open_message = "web01 is over its 10 GiB";
+        out = ask(grant, "POST /v1/web01/sessions HTTP/1.1\r\nHost: p\r\n" AUTH
+                         "Content-Length: 6\r\n\r\nappend", &log);
+        CHECK_STR(body_of(out), "web01 is over its 10 GiB\n");
+        free(out);
+        free(log);
+        open_message = NULL;
         open_answer = 201;
     }
     /* A refusal before the body is read sends no 100, and ends the
@@ -651,6 +729,44 @@ static void test_writing(const struct rs_grant *grants)
     free(path);
     free(out);
     free(log);
+
+    TEST_CASE("serve: the quota hook asked of an upload, refusing it before a byte is read");
+    with_quota = true;
+    quota_answer = 507;
+    quota_message = "over 10 GiB";
+    out = ask(grants, PUT(SID_APPEND, "packs/P-3.idx", "Expect: 100-continue\r\n"
+                          "Content-Length: 5\r\n", "abcde"), &log);
+    CHECK(strstr(out, "100 Continue") == NULL);
+    CHECK_CONTAINS(out, "HTTP/1.1 507 Insufficient Storage\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: quota-exceeded\r\n");
+    CHECK_STR(body_of(out), "over 10 GiB\n");
+    CHECK_STR(quota_asked, "web01 " SID_APPEND " packs/P-3.idx 5");
+    path = rs_xasprintf("%s/packs/P-3.idx", session);
+    CHECK(access(path, F_OK) != 0);
+    free(out);
+    free(log);
+    quota_message = NULL;
+    quota_answer = 500;
+    out = ask(grants, PUT(SID_APPEND, "packs/P-3.idx", "Content-Length: 5\r\n", "abcde"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: proxy-failed\r\n");
+    free(out);
+    free(log);
+    quota_answer = 0;
+    out = ask(grants, PUT(SID_APPEND, "packs/P-3.idx", "Content-Length: 5\r\n", "abcde"), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 201 Created\r\n");
+    CHECK(access(path, F_OK) == 0);
+    free(path);
+    free(out);
+    free(log);
+    /* A refusal of its own comes first: the hook is not asked. */
+    quota_asked[0] = '\0';
+    out = ask(grants, PUT(SID_APPEND, "packs/P-0.sum", "Content-Length: 5000\r\n", ""), &log);
+    CHECK_CONTAINS(out, "Restate-Reason: too-large");
+    CHECK_STR(quota_asked, "");
+    free(out);
+    free(log);
+    with_quota = false;
 
     TEST_CASE("serve: an upload whose session has no staging is the proxy's failure");
     out = ask(grants, PUT(SID_GONE, "packs/P-0.sum", "Content-Length: 1\r\n", "a"), &log);

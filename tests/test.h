@@ -131,6 +131,7 @@ void test_tls(void);
 void test_serve(void);
 void test_sessions(void);
 void test_commit(void);
+void test_quota(void);
 void test_confine(void);
 /* The confined half of test_confine, as `unittests --confine-test ROLE REPO
  * STAGING OTHER`. */

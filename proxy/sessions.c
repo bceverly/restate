@@ -366,6 +366,20 @@ int rs_sessions_open(struct rs_sessions *s, const struct rs_grant *g, enum rs_pr
     {
         return 403;
     }
+    if (g->max_sessions > 0)
+    {
+        unsigned open = 0;
+        size_t   i;
+
+        for (i = 0; i < s->n; i++)
+        {
+            open += strcmp(s->s[i].client, g->client) == 0 ? 1u : 0u;
+        }
+        if (open >= g->max_sessions)
+        {
+            return RS_PROXY_CLIENT_FULL;
+        }
+    }
     if (s->n >= s->max)
     {
         return 503;
@@ -475,6 +489,18 @@ void rs_sessions_release(struct rs_sessions *s, const char *id, uint64_t bytes_o
         e->bytes_in += bytes_in;
         e->idle_since = now;
     }
+}
+
+unsigned rs_sessions_busy(const struct rs_sessions *s, const char *client)
+{
+    unsigned busy = 0;
+    size_t   i;
+
+    for (i = 0; i < s->n; i++)
+    {
+        busy += strcmp(s->s[i].client, client) == 0 ? s->s[i].busy : 0u;
+    }
+    return busy;
 }
 
 bool rs_sessions_appending(struct rs_sessions *s, const char *client, const char *id)

@@ -50,19 +50,33 @@ static bool openssl(char *const args[])
 }
 
 /* A self-signed certificate for `cn` and its key, into DIR/NAME.crt and
- * DIR/NAME.key. */
+ * DIR/NAME.key -- with this openssl's own openssl.cnf, or, where it has
+ * none (NetBSD's may not), the least one there can be, DIR/openssl.cnf. */
 static bool make_cert(const char *dir, const char *name, const char *cn)
 {
     char *crt = rs_xasprintf("%s/%s.crt", dir, name);
     char *key = rs_xasprintf("%s/%s.key", dir, name);
     char *subj = rs_xasprintf("/CN=%s", cn);
+    char *cnf = rs_xasprintf("%s/openssl.cnf", dir);
     char *args[] = {"openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                     "-days", "2", "-subj", subj, "-keyout", key, "-out", crt, NULL};
     bool  ok = openssl(args);
 
+    if (!ok)
+    {
+        char *with[] = {"openssl", "req", "-config", cnf, "-x509", "-newkey", "rsa:2048",
+                        "-nodes", "-days", "2", "-subj", subj, "-keyout", key, "-out", crt,
+                        NULL};
+
+        rs_test_write(dir, "openssl.cnf",
+                      "[req]\ndistinguished_name = dn\nx509_extensions = v3\n[dn]\n[v3]\n"
+                      "basicConstraints = critical, CA:true\n", 0600);
+        ok = openssl(with);
+    }
     free(crt);
     free(key);
     free(subj);
+    free(cnf);
     return ok;
 }
 

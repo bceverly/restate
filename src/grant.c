@@ -298,6 +298,123 @@ static bool label_ok(const char *s, size_t len)
     return rs_utf8_valid(s, len);
 }
 
+bool rs_grant_parse_rate(const char *s, size_t len, uint64_t *out)
+{
+    static const struct {
+        const char *unit;
+        uint64_t    scale;
+    } units[] = { { "KiB/s", (uint64_t)1 << 10 }, { "MiB/s", (uint64_t)1 << 20 },
+                  { "GiB/s", (uint64_t)1 << 30 } };
+    int64_t n;
+    size_t  digits_len = 0;
+    size_t  i;
+
+    if (len == 9 && memcmp(s, "unlimited", 9) == 0)
+    {
+        *out = 0;
+        return true;
+    }
+    while (digits_len < len && s[digits_len] >= '0' && s[digits_len] <= '9')
+    {
+        digits_len++;
+    }
+    /* At most seven digits, a number of GiB that no link has: nothing it
+     * is scaled by can overflow. */
+    if (digits_len == 0 || digits_len > 7 || s[0] == '0' || !digits(s, digits_len, &n))
+    {
+        return false;
+    }
+    for (i = 0; i < sizeof(units) / sizeof(units[0]); i++)
+    {
+        if (len - digits_len == strlen(units[i].unit) &&
+            memcmp(s + digits_len, units[i].unit, len - digits_len) == 0)
+        {
+            *out = (uint64_t)n * units[i].scale;
+            return *out >= RS_GRANT_RATE_MIN;
+        }
+    }
+    return false;
+}
+
+uint64_t rs_grant_rate(const struct rs_grant *g, int hour)
+{
+    return hour >= 0 && hour < RS_GRANT_HOURS ? g->bandwidth[hour] : 0;
+}
+
+/* A bandwidth's value, "RATE" or "HH-HH RATE", into `g`: a range's hours
+ * are set, and marked as set by one; a RATE alone sets every hour no range
+ * has, whichever comes first. */
+static bool bandwidth_of(const char *v, size_t vlen, struct rs_grant *g, struct rs_buf *err)
+{
+    int64_t  from = 0;
+    int64_t  to = RS_GRANT_HOURS;
+    uint64_t rate;
+    uint32_t hours = 0;
+    bool     ranged = vlen > 6 && v[2] == '-' && (v[5] == ' ' || v[5] == '\t');
+    int      h;
+
+    if (ranged)
+    {
+        if (!digits(v, 2, &from) || !digits(v + 3, 2, &to) || from > 23 || to > 24 || from == to)
+        {
+            rs_buf_addstr(err, "bandwidth: not hours as HH-HH, 00 to 24, from one hour to "
+                          "another (08-18, or 22-06 across midnight)");
+            return false;
+        }
+        v += 6;
+        vlen -= 6;
+        while (vlen > 0 && (*v == ' ' || *v == '\t'))
+        {
+            v++;
+            vlen--;
+        }
+    }
+    if (!rs_grant_parse_rate(v, vlen, &rate))
+    {
+        rs_buf_addstr(err, "bandwidth: not a rate, as 512KiB/s, 2MiB/s or 1GiB/s (64KiB/s at "
+                      "the least), or unlimited");
+        return false;
+    }
+    if (!ranged)
+    {
+        if (g->bandwidth_default)
+        {
+            rs_buf_addstr(err, "bandwidth: a rate for every other hour is given twice");
+            return false;
+        }
+        g->bandwidth_default = true;
+        for (h = 0; h < RS_GRANT_HOURS; h++)
+        {
+            if ((g->bandwidth_hours & (1u << h)) == 0)
+            {
+                g->bandwidth[h] = rate;
+            }
+        }
+        return true;
+    }
+    for (h = (int)from; h != (int)(to % RS_GRANT_HOURS) || hours == 0; h = (h + 1) % RS_GRANT_HOURS)
+    {
+        hours |= 1u << h;
+    }
+    if ((hours & g->bandwidth_hours) != 0)
+    {
+        for (h = 0; (hours & g->bandwidth_hours & (1u << h)) == 0; h++)
+        {
+        }
+        rs_buf_addf(err, "bandwidth: the hour from %02d:00 is in two of its ranges", h);
+        return false;
+    }
+    g->bandwidth_hours |= hours;
+    for (h = 0; h < RS_GRANT_HOURS; h++)
+    {
+        if ((hours & (1u << h)) != 0)
+        {
+            g->bandwidth[h] = rate;
+        }
+    }
+    return true;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Parsing                                                                   */
 /* ------------------------------------------------------------------------- */
@@ -308,11 +425,14 @@ enum key {
     KEY_TOKEN,
     KEY_EXPIRES,
     KEY_LABEL,
+    KEY_MAX_SESSIONS,
+    KEY_BANDWIDTH,
     KEYS
 };
 
 static const char *const key_names[KEYS] = { "repository", "operations", "token_sha256",
-                                              "expires", "label" };
+                                              "expires", "label", "max_sessions",
+                                              "bandwidth" };
 
 /* One value, for the key `k`, into `g`: false and why into `err`. */
 static bool take_value(enum key k, const char *v, size_t vlen, struct rs_grant *g,
@@ -373,6 +493,20 @@ static bool take_value(enum key k, const char *v, size_t vlen, struct rs_grant *
         }
         g->label = rs_xstrndup(v, vlen);
         return true;
+    case KEY_MAX_SESSIONS:
+    {
+        int64_t n;
+
+        if (vlen > 4 || v[0] == '0' || !digits(v, vlen, &n) || n > RS_GRANT_MAX_SESSIONS)
+        {
+            rs_buf_addf(err, "max_sessions: not a number from 1 to %u", RS_GRANT_MAX_SESSIONS);
+            return false;
+        }
+        g->max_sessions = (unsigned)n;
+        return true;
+    }
+    case KEY_BANDWIDTH:
+        return bandwidth_of(v, vlen, g, err);
     case KEYS:
     default:
         break;
@@ -455,7 +589,7 @@ bool rs_grant_parse(const char *client, const char *text, size_t len, struct rs_
             rs_buf_addf(err, "line %u: \"%.*s\" is not a key a grant has", line,
                         (int)(ke - ks), ks);
             ok = false;
-        } else if (seen[k] && k != KEY_TOKEN)
+        } else if (seen[k] && k != KEY_TOKEN && k != KEY_BANDWIDTH)
         {
             rs_buf_addf(err, "line %u: %s is given twice", line, key_names[k]);
             ok = false;

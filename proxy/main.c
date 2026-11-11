@@ -65,6 +65,7 @@ static void usage(FILE *out)
                   "                     [--key FILE] [--grants DIR] [--max-connections N]\n"
                   "                     [--idle-timeout SECONDS] [--max-sessions N]\n"
                   "                     [--lease SECONDS] [--staging DIR] [--max-staging MIB]\n"
+                  "                     [--quota-hook PROGRAM]\n"
                   "       restate-proxy --check-grants [DIR] [--json]\n"
                   "       restate-proxy --new-token FILE\n"
                   "       restate-proxy --version | --help\n"
@@ -84,6 +85,8 @@ static void usage(FILE *out)
                   "  --staging DIR         where uploads wait to be committed\n"
                   "                        (" RS_PROXY_STAGING ")\n"
                   "  --max-staging MIB     the most one session's staging may hold (4096)\n"
+                  "  --quota-hook PROGRAM  asked before an append session and each upload\n"
+                  "                        whether the client may store more: exit 0 yes, 1 no\n"
                   "  --check-grants [DIR]  read every grant in DIR (" GRANTS_DIR ")\n"
                   "                        as the proxy would, and say what is wrong\n"
                   "                        with each; exit 2 if one is not good\n"
@@ -251,9 +254,10 @@ static int serve(int argc, char **argv)
                                              "--key",             "--grants",
                                              "--max-connections", "--idle-timeout",
                                              "--max-sessions",    "--lease",
-                                             "--staging",         "--max-staging" };
+                                             "--staging",         "--max-staging",
+                                             "--quota-hook" };
         static const unsigned    most[] = { 0, 0, 0, 0, 100000u, 86400u, 100000u, 86400u, 0,
-                                            1048576u };
+                                            1048576u, 0 };
         const char              *v = NULL;
         bool                     matched = false;
         size_t                   k;
@@ -291,6 +295,9 @@ static int serve(int argc, char **argv)
         } else if (k == 8)
         {
             o.staging = v;
+        } else if (k == 10)
+        {
+            o.quota_hook = v;
         } else if (k == 9)
         {
             unsigned mib = 0;

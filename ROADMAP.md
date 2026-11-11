@@ -116,7 +116,7 @@ The order, each a release of its own:
     release
   - The protocol: [docs/proxy-protocol.md](docs/proxy-protocol.md), a draft
     until the first release that implements it
-- [ ] **The remote backend in `restate`:** a repository can be
+- [x] **The remote backend in `restate`:** a repository can be
       `https://PROXY/v1/CLIENT`, with a token file (in a job,
       `repository_token_file`, held to what `passphrase_file` is: a regular
       file, yours or root's, that nobody else can read); capture, snapshots,
@@ -212,8 +212,39 @@ The order, each a release of its own:
     encrypted. An encrypted pack is still fetched whole, as it can only be
     decrypted whole. And on NetBSD, curl and the GnuPG tools were not found
     in pkgsrc's `/usr/pkg/bin`, which is now in the list
-- [ ] **Limits:** per client, the number of sessions at once, bandwidth by
+  - [x] **Every promise above in the test** (2026-11-11): what
+    `tests/cli/proxy.sh` did not yet run through the proxy -- `diff` of two
+    snapshots, `status` of a tree against one, `du`, `restore --plan`, a
+    restore job whose `repository_token_file` is refused once others can read
+    it (and the same file on the command line), and a capture stopped by
+    `SIGTERM` between a pack's commit and its snapshot's, its session ended
+    and its packs taken out at once. Nothing in restate needed changing
+- [x] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
+  - [x] **In the grant** (2026-11-11): `max_sessions` (1 to 1024), past which
+    a session is `503 client-sessions-full` -- a 503 so that a restate that
+    does not know the reason still takes it as busy, exit 5 -- and
+    `bandwidth`, repeatable, `HH-HH RATE` for those hours of the storage
+    host's local day and a `RATE` alone for the rest (`64KiB/s` at the
+    least, or `unlimited`), ranges never overlapping. The listening process
+    gives each request the hour's rate as it finds its session, divided
+    among the client's requests being answered then; the connection's
+    process paces the body each way to it. A run of restate holds one
+    session at a time (measured: capture, restore `--check-first`, diff,
+    status, du, check, copy out of and into the proxy), a copy from the
+    proxy into it two
+  - [x] **The quota hook** (2026-11-11): `--quota-hook PROGRAM`, asked
+    before an append session opens and before each upload, with the
+    client, its repository and label, and the upload's name and size in its
+    environment; exit 0 yes, 1 no (`507 quota-exceeded`, with its first line
+    for the person), anything else, a signal or 30 seconds the hook failing
+    (500). Run by the listening process, unconfined and never waited for --
+    started, its output read as it comes, its exit seen as it is reaped --
+    so only the connection that asked waits; `proxy/quota.c`
+  - [x] **Found on the way, fixed:** a capture refused partway through a
+    pack's uploads gave its result the `proxy_reason` of the commit after
+    them (`invalid`) rather than the refusal (`storage-full`, `too-large`,
+    `quota-exceeded`); the first refusal in a batch is now the reason
 - [x] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,
       for every platform restate ships for, with a service for each init
       system installed but not enabled. Built from the same source at the
@@ -229,12 +260,23 @@ The order, each a release of its own:
       `--help`. Every package's verify installs it beside `restate`, starts it
       with a certificate made there and, where curl is, captures through it
       (`scripts/verify-proxy.sh`)
-- [ ] **Documented:** choosing NFS or the proxy for a repository, the allow
+- [x] **Documented:** choosing NFS or the proxy for a repository, the allow
       list, certificates (Let's Encrypt for a public name, or a site's own
       CA), and a route from outside through a firewall, with pfSense's
       HAProxy routing by SNI in TCP mode as the worked example; the README's
       "restate opens no network connection of its own" said again for a
       remote repository, where `curl` does
+  - [x] **[docs/proxy-guide.md](docs/proxy-guide.md)** (2026-11-11): NFS or
+    the proxy, side by side; setting one up, from `restate init` on the
+    storage host to a client's job; the allow list -- writing, checking,
+    rotating a token, a grant for one restore, the limits; certificates --
+    Let's Encrypt by the DNS challenge on the storage host with a deploy
+    hook, a site's own CA by `repository_ca_file`, pinning; and pfSense's
+    HAProxy in TCP mode routing by SNI to the storage host, with the
+    inspect delay the SNI match needs, timeouts longer than the proxy's,
+    and why not offloading, health checks or the PROXY protocol; and what
+    crosses the network. The README has a section of its own for it, and
+    says `curl` does where restate does not; so does SECURITY.md
 
 ## Done — 0.1
 

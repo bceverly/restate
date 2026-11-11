@@ -67,6 +67,7 @@ restate: 1 added, 0 deleted, 1 modified
 - [Copies](#copies)
 - [Repositories](#repositories)
 - [Storage on a file server](#storage-on-a-file-server)
+- [Storage behind restate-proxy](#storage-behind-restate-proxy)
 - [Jobs](#jobs)
 - [Results, for programs](#results-for-programs)
 - [Images and indexes](#images-and-indexes)
@@ -1564,7 +1565,8 @@ first capture or prune into it makes it the current kind.
 
 A repository can live on a NAS that each machine mounts over NFS or SMB --
 one directory per machine -- and restate opens no network connection of its
-own to get there. What it needs of that storage, and what the storage can do
+own to get there (behind [restate-proxy](#storage-behind-restate-proxy),
+`curl` does). What it needs of that storage, and what the storage can do
 with it on its own:
 
 ```bash
@@ -1708,6 +1710,40 @@ restate du /srv/restate/web01
   the next check does not take what it removed for tampering.
 - **Images too.** `--tmpdir DIR` stages an image's content on the machine
   rather than beside the image on the share.
+
+## Storage behind restate-proxy
+
+The same repositories, on the same storage host, can be reached over HTTPS
+instead, through `restate-proxy` running there: a repository is then a URL,
+`https://backup.example.com:8443/v1/web01`, with a token for each machine.
+Nothing a machine sends through it can remove or change what is in a
+repository, and a machine reaches only the one its grant names -- so a
+machine that has been taken over can add snapshots, but not destroy the
+ones there, and a machine outside your network can back up across the
+internet.
+
+```bash
+sudo restate capture --encrypt-to backup.pub \
+  --repository-token-file /etc/restate/proxy.token -o https://backup.example.com:8443/v1/web01
+```
+
+- **Everything but changing what is there.** Capture, restore, snapshots,
+  list, diff, status, du, check and copy work against it as against a path.
+  Prune, repack, protect, sign on a snapshot already there and making the
+  repository run on the storage host, against its directory.
+- **As fast as NFS.** An incremental capture took 11.2 s through the proxy
+  and 11.0 s over NFS into the same repository; a restore fetches each file
+  once.
+- **restate still opens no connection of its own.** It runs `curl`, as
+  `installer fetch` does, to the URL's host alone: the token in a curl
+  config file only the user running restate can read, never on a command
+  line, and the proxy's certificate trusted as the system trusts it, by
+  `--repository-ca-file`, or pinned with `--repository-pin-sha256`.
+
+[docs/proxy-guide.md](docs/proxy-guide.md) is how to set it up: choosing it
+or a share, grants, certificates, and a way in from outside, with pfSense's
+HAProxy routing by SNI as the worked example.
+[docs/proxy-protocol.md](docs/proxy-protocol.md) is the protocol itself.
 
 ## Jobs
 
@@ -2258,6 +2294,16 @@ a repository made with `restate init` that the `restate-proxy` user owns, and
 a grant for each client in `/etc/restate/proxy.d`, with its token from
 `restate-proxy --new-token`. Its staging is its own: `/var/lib/restate-proxy`
 under systemd and OpenRC, `/var/db/restate-proxy` on the BSDs.
+
+A grant can hold its client to less than every client gets: `max_sessions`,
+how many sessions it may have open at once, and `bandwidth`, how fast it may
+move bytes, by the hour of the storage host's day (`bandwidth = 08-18 2MiB/s`
+in working hours, `bandwidth = 20MiB/s` the rest). A host that stores for
+many clients can hold each to a quota of its own with `--quota-hook
+PROGRAM`, a program of the host's asked before a capture opens its session
+and before each file it sends; it answers by its exit status, and a no stops
+the capture with what it said (`quota-exceeded`). `restate-proxy(8)` and
+[docs/proxy-protocol.md](docs/proxy-protocol.md) have them in full.
 
 From source, where OpenSSL's headers are (`libssl-dev`; `make install-dev`
 installs them):

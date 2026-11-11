@@ -26,6 +26,7 @@
 #include "commit.h"
 #include "confine.h"
 #include "grant.h"
+#include "quota.h"
 #include "repo.h"
 #include "restate.h"
 #include "serve.h"
@@ -303,8 +304,11 @@ static bool grants_changed(const struct grants *gs, const char *dir)
  * A connection's process asks the listening one, which holds the sessions,
  * over a socket pair of its own: a line, and a line in answer.
  *
- *   O CLIENT KIND          open        201 ID LEASE, or the status
- *   F CLIENT ID            find        0 KIND REPOSITORY, 1 (none), 2 (another's)
+ *   O CLIENT KIND          open        201 ID LEASE, or the status; 507 MESSAGE
+ *                                      if the quota hook refused it
+ *   F CLIENT ID            find        0 KIND RATE REPOSITORY, 1 (none), 2 (another's)
+ *   Q CLIENT ID BYTES NAME quota       0, 507 MESSAGE or 500: the quota hook's
+ *                                      answer for an upload
  *   R ID OUT IN            release     ok
  *   C ID NAME              committed   ok
  *   H CLIENT ID            holds       0 if this child holds append session ID of
@@ -313,8 +317,9 @@ static bool grants_changed(const struct grants *gs, const char *dir)
  *   E CLIENT ID            end         the status
  *
  * Every word in them is one the connection's process has checked already:
- * a client's name, a session id, a kind's word. The repository is last, so
- * that a blank in its name is still its own.
+ * a client's name, a session id, a kind's word, an upload's name. The
+ * repository and the hook's message are last, so that a blank in them is
+ * still theirs.
  */
 
 #define ASK_MAX 4352    /* a line: a repository's path, and the rest */
@@ -367,11 +372,20 @@ static bool ask(struct asker *k, const char *question, char *answer, size_t size
     return false;
 }
 
+/* What follows a 507's status, the quota hook's message, into `message`. */
+static void message_of(const char *a, struct rs_buf *message)
+{
+    if (a[0] && a[1] && a[2] && a[3] == ' ' && a[4])
+    {
+        rs_buf_addstr(message, a + 4);
+    }
+}
+
 static int ask_open(void *ctx, const char *client, enum rs_proxy_kind kind, char id[33],
-                    unsigned *lease)
+                    unsigned *lease, struct rs_buf *message)
 {
     char *q = rs_xasprintf("O %s %s\n", client, rs_proxy_kind_name(kind));
-    char  a[128];
+    char  a[RS_QUOTA_SAID_MAX + 64];
     int   status = 500;
     bool  ok = ask(ctx, q, a, sizeof(a));
 
@@ -379,6 +393,10 @@ static int ask_open(void *ctx, const char *client, enum rs_proxy_kind kind, char
     if (ok)
     {
         status = status_of(a);
+        if (status == 507)
+        {
+            message_of(a, message);
+        }
         if (status == 201 && strlen(a) > 4 + RS_SESSION_LEN)
         {
             memcpy(id, a + 4, RS_SESSION_LEN);
@@ -399,6 +417,7 @@ static enum rs_proxy_found ask_find(void *ctx, const char *client, const char *i
     char         *q = rs_xasprintf("F %s %s\n", client, id);
     bool          ok = ask(k, q, k->repository, sizeof(k->repository));
     const char   *kind;
+    const char   *rate;
     const char   *repo;
 
     free(q);
@@ -411,11 +430,13 @@ static enum rs_proxy_found ask_find(void *ctx, const char *client, const char *i
         return RS_PROXY_NOT_YOURS;
     }
     kind = strchr(k->repository, ' ');
-    repo = kind ? strchr(kind + 1, ' ') : NULL;
-    if (!repo || !rs_proxy_kind_of(kind + 1, (size_t)(repo - kind - 1), &s->kind))
+    rate = kind ? strchr(kind + 1, ' ') : NULL;
+    repo = rate ? strchr(rate + 1, ' ') : NULL;
+    if (!repo || !rs_proxy_kind_of(kind + 1, (size_t)(rate - kind - 1), &s->kind))
     {
         return RS_PROXY_NO_SESSION;
     }
+    s->rate = strtoull(rate + 1, NULL, 10);
     s->repository = repo + 1;
     return RS_PROXY_FOUND;
 }
@@ -450,6 +471,26 @@ static int ask_renew(void *ctx, const char *client, const char *id, unsigned *le
         *lease = (unsigned)strtoul(a + 4, NULL, 10);
     }
     return status;
+}
+
+static int ask_quota(void *ctx, const char *client, const char *id, const char *name,
+                     uint64_t bytes, struct rs_buf *message)
+{
+    char *q = rs_xasprintf("Q %s %s %" PRIu64 " %s\n", client, id, bytes, name);
+    char  a[RS_QUOTA_SAID_MAX + 64] = "";
+    int   status = ask(ctx, q, a, sizeof(a)) ? status_of(a) : 500;
+
+    free(q);
+    if (strcmp(a, "0") == 0)
+    {
+        return 0;
+    }
+    if (status == 507)
+    {
+        message_of(a, message);
+        return 507;
+    }
+    return 500;
 }
 
 static int ask_end(void *ctx, const char *client, const char *id)
@@ -857,6 +898,7 @@ static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *p
     sessions.committed = ask_committed;
     sessions.renew = ask_renew;
     sessions.end = ask_end;
+    sessions.quota = o->quota_hook ? ask_quota : NULL;
     memset(&b, 0, sizeof(b));
     b.conn_fd = fd;
     b.ipc_fd = ipc;
@@ -892,22 +934,35 @@ static int serve_child(struct rs_tls_config *tls, int fd, int ipc, const char *p
 
 /* The children serving connections, and the session each holds. */
 struct child {
-    pid_t  pid;
-    int    fd;                          /* the listener's end of its pair */
-    char   held[RS_SESSION_LEN + 1];    /* "" if none */
-    char   in[ASK_MAX];
-    size_t nin;
+    pid_t               pid;
+    int                 fd;                       /* the listener's end of its pair */
+    char                held[RS_SESSION_LEN + 1]; /* "" if none */
+    char                in[ASK_MAX];
+    size_t              nin;
+    /* The quota hook, running for its question `waiting`, which is answered
+     * once it is done; hook_said_yes while it is asked again, after. */
+    struct rs_quota_run hook;
+    char               *waiting;
+    bool                hook_said_yes;
 };
 
 struct children {
-    struct child *c;
-    unsigned      n;
-    unsigned      max;
+    struct child  *c;
+    unsigned       n;
+    unsigned       max;
+    /* The loop's: what it polls, and whose hook each of the last is. Kept
+     * here so that a connection's process, forked from inside the loop,
+     * holds them as it holds the rest of the listener's until it exits. */
+    struct pollfd *pfd;
+    unsigned      *hooked;
 };
 
 /* Child `i` is gone: what it held is let go, and its place taken. */
 static void forget_child(struct children *ch, unsigned i, struct rs_sessions *s)
 {
+    rs_quota_abandon(&ch->c[i].hook);
+    free(ch->c[i].waiting);
+    ch->c[i].waiting = NULL;
     if (ch->c[i].held[0])
     {
         rs_sessions_release(s, ch->c[i].held, 0, 0, (int64_t)time(NULL));
@@ -935,26 +990,78 @@ static void reap(struct children *ch, struct rs_sessions *s)
                 forget_child(ch, i, s);
                 break;
             }
+            if (rs_quota_reaped(&ch->c[i].hook, pid, status))
+            {
+                break;
+            }
         }
     }
 }
 
-/* One question from child `c`, answered into `out`. */
-static void answer_child(struct child *c, char *q, const struct grants *gs,
-                         struct rs_sessions *s, struct rs_buf *out)
+/* The hour of the local day it is now, on the storage host: what a
+ * grant's bandwidth is by. */
+static int local_hour(void)
+{
+    time_t    now = time(NULL);
+    struct tm tm;
+
+    return localtime_r(&now, &tm) ? tm.tm_hour : 0;
+}
+
+/* The quota hook started for child `c`'s question `copy` -- the client of
+ * grant `g` opening an append session, or uploading `bytes` as `name` --
+ * which is answered once it is done: false, said, if it could not be
+ * started, and then the question is answered 500 at once. */
+static bool ask_hook(struct child *c, char *copy, const char *hook, const struct rs_grant *g,
+                     const char *name, uint64_t bytes)
+{
+    struct rs_quota_ask q;
+    struct rs_buf       why;
+
+    q.event = name ? "upload" : "open";
+    q.client = g->client;
+    q.repository = g->repository;
+    q.label = g->label;
+    q.name = name;
+    q.bytes = bytes;
+    rs_buf_init(&why);
+    if (!rs_quota_start(&c->hook, hook, &q, (int64_t)time(NULL), RS_QUOTA_TIMEOUT, &why))
+    {
+        say("quota-hook-failed client=%s event=%s error=\"%s\"", g->client, q.event,
+            why.data ? why.data : "");
+        rs_buf_free(&why);
+        return false;
+    }
+    rs_buf_free(&why);
+    c->waiting = copy;
+    return true;
+}
+
+/*
+ * One question from child `c`, answered into `out`: true; or, where the
+ * quota hook (`hook`, NULL for none) has to be asked first, the hook
+ * started and nothing put in `out` -- false, and the question is asked
+ * again once it says yes (finish_hook).
+ */
+static bool answer_child(struct child *c, char *q, const struct grants *gs,
+                         struct rs_sessions *s, const char *hook, struct rs_buf *out)
 {
     int64_t now = (int64_t)time(NULL);
+    char   *copy = rs_xstrdup(q);
     char   *client = strchr(q, ' ');
     char   *rest = client ? strchr(client + 1, ' ') : NULL;
+    bool    yes = c->hook_said_yes;
     int     status;
 
+    c->hook_said_yes = false;
     /* A session past its lease is gone, whether the loop has got to it yet
      * or not. */
     (void)rs_sessions_expire(s, now);
     if (!client || !rest)
     {
         rs_buf_addstr(out, "500\n");
-        return;
+        free(copy);
+        return true;
     }
     *rest++ = '\0';
     client++;
@@ -968,7 +1075,20 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
         if (!g || !rs_proxy_kind_of(rest, strlen(rest), &kind))
         {
             rs_buf_addstr(out, g ? "500\n" : "401\n");
-            return;
+            free(copy);
+            return true;
+        }
+        /* An append session stores more: the quota hook is asked first,
+         * once the grant allows it at all. */
+        if (hook && !yes && kind == RS_PROXY_APPEND && (g->operations & RS_GRANT_APPEND) != 0)
+        {
+            if (ask_hook(c, copy, hook, g, NULL, 0))
+            {
+                return false;
+            }
+            rs_buf_addstr(out, "500\n");
+            free(copy);
+            return true;
         }
         rs_buf_init(&why);
         status = rs_sessions_open(s, g, kind, now, id, &why);
@@ -991,6 +1111,11 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
         switch (rs_sessions_find(s, client, rest, &found))
         {
         case RS_PROXY_FOUND:
+        {
+            const struct rs_grant *g = rs_grants_find(gs->g, gs->n, client);
+            uint64_t               rate = g ? rs_grant_rate(g, local_hour()) : 0;
+            unsigned               busy;
+
             /* One request at a time on a connection: anything it held
              * before is let go first. */
             if (c->held[0])
@@ -998,8 +1123,17 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
                 rs_sessions_release(s, c->held, 0, 0, now);
             }
             (void)snprintf(c->held, sizeof(c->held), "%s", rest);
-            rs_buf_addf(out, "0 %s %s\n", rs_proxy_kind_name(found.kind), found.repository);
+            /* The client's bandwidth, shared by its requests being answered
+             * now, this one among them. */
+            busy = rs_sessions_busy(s, client);
+            if (rate > 0 && busy > 1)
+            {
+                rate /= busy;
+            }
+            rs_buf_addf(out, "0 %s %" PRIu64 " %s\n", rs_proxy_kind_name(found.kind), rate,
+                        found.repository);
             break;
+        }
         case RS_PROXY_NOT_YOURS:
             rs_buf_addstr(out, "2\n");
             break;
@@ -1007,6 +1141,30 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
         default:
             rs_buf_addstr(out, "1\n");
             break;
+        }
+    } else if (q[0] == 'Q')
+    {
+        /* "Q CLIENT ID BYTES NAME": an upload in the append session this
+         * child holds, whose client's grant is still there. */
+        const struct rs_grant *g = rs_grants_find(gs->g, gs->n, client);
+        char                  *bytes = strchr(rest, ' ');
+        const char            *name = bytes ? strchr(bytes + 1, ' ') : NULL;
+        bool                   ok;
+
+        if (bytes)
+        {
+            *bytes++ = '\0';
+        }
+        ok = g && name && strcmp(c->held, rest) == 0 && rs_sessions_appending(s, client, rest);
+        if (ok && (!hook || yes))
+        {
+            rs_buf_addstr(out, "0\n");
+        } else if (ok && ask_hook(c, copy, hook, g, name + 1, strtoull(bytes, NULL, 10)))
+        {
+            return false;
+        } else
+        {
+            rs_buf_addstr(out, "500\n");
         }
     } else if (q[0] == 'R')
     {
@@ -1053,16 +1211,50 @@ static void answer_child(struct child *c, char *q, const struct grants *gs,
     {
         rs_buf_addstr(out, "500\n");
     }
+    free(copy);
+    return true;
+}
+
+/* The questions child `c` has sent whole, answered in turn -- until one
+ * waits for the quota hook, which is answered when it is done, and then the
+ * rest. False once its end cannot be written to, or a line is longer than
+ * any question. */
+static bool answer_lines(struct child *c, const struct grants *gs, struct rs_sessions *s,
+                         const char *hook)
+{
+    char *nl;
+
+    while (!rs_quota_running(&c->hook) && (nl = strchr(c->in, '\n')) != NULL)
+    {
+        struct rs_buf out;
+        size_t        used = (size_t)(nl - c->in) + 1;
+        bool          ok = true;
+
+        *nl = '\0';
+        rs_buf_init(&out);
+        if (answer_child(c, c->in, gs, s, hook, &out))
+        {
+            ok = write(c->fd, out.data, out.len) == (ssize_t)out.len;
+        }
+        rs_buf_free(&out);
+        memmove(c->in, c->in + used, c->nin - used + 1);
+        c->nin -= used;
+        if (!ok)
+        {
+            return false;
+        }
+    }
+    /* A line longer than any question is none. */
+    return c->nin < sizeof(c->in) - 1;
 }
 
 /* What child `i` has asked, read and answered: false once it has closed
  * its end. */
 static bool hear_child(struct children *ch, unsigned i, const struct grants *gs,
-                       struct rs_sessions *s)
+                       struct rs_sessions *s, const char *hook)
 {
     struct child *c = &ch->c[i];
     ssize_t       n = read(c->fd, c->in + c->nin, sizeof(c->in) - c->nin - 1);
-    char         *nl;
 
     if (n < 0 && (errno == EINTR || errno == EAGAIN))
     {
@@ -1074,26 +1266,69 @@ static bool hear_child(struct children *ch, unsigned i, const struct grants *gs,
     }
     c->nin += (size_t)n;
     c->in[c->nin] = '\0';
-    while ((nl = strchr(c->in, '\n')) != NULL)
-    {
-        struct rs_buf out;
-        size_t        used = (size_t)(nl - c->in) + 1;
-        bool          ok;
+    return answer_lines(c, gs, s, hook);
+}
 
-        *nl = '\0';
-        rs_buf_init(&out);
-        answer_child(c, c->in, gs, s, &out);
-        ok = write(c->fd, out.data, out.len) == (ssize_t)out.len;
-        rs_buf_free(&out);
-        memmove(c->in, c->in + used, c->nin - used + 1);
-        c->nin -= used;
-        if (!ok)
-        {
-            return false;
-        }
+/*
+ * Child `c`'s quota hook is done: its question answered -- refused, or the
+ * hook failed, at once; a yes by asking the question again, this time to
+ * be answered as it would be with no hook -- and then what it has asked
+ * since. False as hear_child is.
+ */
+static bool finish_hook(struct child *c, const struct grants *gs, struct rs_sessions *s,
+                        const char *hook)
+{
+    struct rs_buf message;
+    struct rs_buf why;
+    struct rs_buf out;
+    char         *q = c->waiting;
+    char         *client = strchr(q, ' ');
+    char         *end = client ? strchr(client + 1, ' ') : NULL;
+    const char   *event = q[0] == 'O' ? "open" : "upload";
+    int           answer;
+    bool          ok = true;
+
+    c->waiting = NULL;
+    rs_buf_init(&message);
+    rs_buf_init(&why);
+    rs_buf_init(&out);
+    answer = rs_quota_answer(&c->hook, &message, &why);
+    if (client && end)
+    {
+        *end = '\0';
+        client++;
+    } else
+    {
+        client = q;
     }
-    /* A line longer than any question is none. */
-    return c->nin < sizeof(c->in) - 1;
+    if (answer == 0)
+    {
+        c->hook_said_yes = true;
+        if (end)
+        {
+            *end = ' ';
+        }
+        (void)answer_child(c, q, gs, s, hook, &out);
+    } else if (answer == 507)
+    {
+        say("quota-refused client=%s event=%s message=\"%s\"", client, event,
+            message.data ? message.data : "");
+        rs_buf_addf(&out, "507%s%s\n", message.len ? " " : "", message.data ? message.data : "");
+    } else
+    {
+        say("quota-hook-failed client=%s event=%s error=\"%s\"", client, event,
+            why.data ? why.data : "");
+        rs_buf_addstr(&out, "500\n");
+    }
+    if (c->fd >= 0)
+    {
+        ok = write(c->fd, out.data, out.len) == (ssize_t)out.len;
+    }
+    rs_buf_free(&out);
+    rs_buf_free(&why);
+    rs_buf_free(&message);
+    free(q);
+    return ok && c->fd >= 0 && answer_lines(c, gs, s, hook);
 }
 
 /* Accepts what is waiting on `lfd`, and gives it a child. */
@@ -1159,6 +1394,10 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
         for (j = 0; j < ch->n; j++)
         {
             (void)close(ch->c[j].fd);
+            if (ch->c[j].hook.fd >= 0)
+            {
+                (void)close(ch->c[j].hook.fd);
+            }
         }
         rs_sessions_forget(s);
         (void)close(pair[0]);
@@ -1179,6 +1418,7 @@ static void accept_one(int lfd, int *lfds, size_t nl, struct rs_tls_config *tls,
     (void)close(pair[1]);
     (void)fcntl(pair[0], F_SETFD, FD_CLOEXEC);
     memset(&ch->c[ch->n], 0, sizeof(ch->c[ch->n]));
+    rs_quota_init(&ch->c[ch->n].hook);
     ch->c[ch->n].pid = pid;
     ch->c[ch->n].fd = pair[0];
     ch->n++;
@@ -1192,6 +1432,7 @@ static void stop_children(struct children *ch, struct rs_sessions *s)
 
     for (i = 0; i < ch->n; i++)
     {
+        rs_quota_abandon(&ch->c[i].hook);
         (void)kill(ch->c[i].pid, SIGTERM);
     }
     while (ch->n > 0 && time(NULL) < until)
@@ -1272,6 +1513,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     char                    *staging;
     struct rs_tls_config    *tls;
     struct pollfd           *pfd;
+    unsigned                *hooked;
     struct children          ch;
     struct grants            gs;
     struct rs_buf            err;
@@ -1297,6 +1539,12 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         free(port);
     }
     rs_buf_init(&err);
+    if (o->quota_hook && !rs_quota_program_ok(o->quota_hook, &err))
+    {
+        say("%s", err.data);
+        rs_buf_free(&err);
+        return RESTATE_EXIT_TROUBLE;
+    }
     tls = rs_tls_server_config(o->cert, o->key, &err);
     if (!tls)
     {
@@ -1344,15 +1592,21 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     ch.max = o->max_connections ? o->max_connections : RS_PROXY_MAX_CONNECTIONS;
     ch.n = 0;
     ch.c = rs_xcalloc(ch.max, sizeof(*ch.c));
-    pfd = rs_xcalloc(LISTEN_MAX + 1 + ch.max, sizeof(*pfd));
+    /* The listeners, the wake pipe, each child's pair and each one's hook. */
+    pfd = rs_xcalloc(LISTEN_MAX + 1 + 2 * (size_t)ch.max, sizeof(*pfd));
+    hooked = rs_xcalloc(ch.max, sizeof(*hooked));
+    ch.pfd = pfd;
+    ch.hooked = hooked;
     sessions = rs_sessions_new(o->max_sessions, o->lease, staging, log_line, NULL);
     say("started version=%s tls=\"%s\" confinement=\"%s\" max_connections=%u max_sessions=%u "
-        "lease=%u", RESTATE_VERSION, rs_tls_library(), rs_confine_how(), ch.max,
-        o->max_sessions ? o->max_sessions : RS_PROXY_MAX_SESSIONS, rs_sessions_lease(sessions));
+        "lease=%u quota_hook=%s", RESTATE_VERSION, rs_tls_library(), rs_confine_how(), ch.max,
+        o->max_sessions ? o->max_sessions : RS_PROXY_MAX_SESSIONS, rs_sessions_lease(sessions),
+        o->quota_hook ? o->quota_hook : "none");
 
     while (!got_stop)
     {
         size_t   np = 0;
+        size_t   nh = 0;
         unsigned nc = ch.n;
         unsigned j;
         int      ready;
@@ -1372,7 +1626,20 @@ int rs_proxy_run(const struct rs_proxy_options *o)
             pfd[np].events = POLLIN;
             pfd[np++].revents = 0;
         }
-        ready = poll(pfd, (nfds_t)np, WATCH_MS);
+        /* A hook's output after them all, with whose it is: read as it
+         * comes, so that it never waits to write. */
+        for (j = 0; j < nc; j++)
+        {
+            if (ch.c[j].hook.fd >= 0)
+            {
+                hooked[nh++] = j;
+                pfd[np].fd = ch.c[j].hook.fd;
+                pfd[np].events = POLLIN;
+                pfd[np++].revents = 0;
+            }
+        }
+        /* While a hook runs, its deadline is looked at each second. */
+        ready = poll(pfd, (nfds_t)np, nh > 0 ? 1000 : WATCH_MS);
         if (pfd[nl].revents & POLLIN)
         {
             char drain[64];
@@ -1386,10 +1653,13 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         for (j = nc; ready > 0 && j-- > 0;)
         {
             if ((pfd[nl + 1 + j].revents & (POLLIN | POLLHUP | POLLERR)) &&
-                !hear_child(&ch, j, &gs, sessions))
+                !hear_child(&ch, j, &gs, sessions, o->quota_hook))
             {
                 (void)close(ch.c[j].fd);
                 ch.c[j].fd = -1;
+                rs_quota_abandon(&ch.c[j].hook);
+                free(ch.c[j].waiting);
+                ch.c[j].waiting = NULL;
                 if (ch.c[j].held[0])
                 {
                     rs_sessions_release(sessions, ch.c[j].held, 0, 0, (int64_t)time(NULL));
@@ -1397,7 +1667,33 @@ int rs_proxy_run(const struct rs_proxy_options *o)
                 }
             }
         }
+        for (i = 0; i < nh; i++)
+        {
+            if (pfd[nl + 1 + nc + i].revents & (POLLIN | POLLHUP | POLLERR))
+            {
+                rs_quota_read(&ch.c[hooked[i]].hook);
+            }
+        }
         reap(&ch, sessions);
+        /* Each hook past its deadline killed, and each one done answered. */
+        for (j = 0; j < ch.n; j++)
+        {
+            rs_quota_check_time(&ch.c[j].hook, (int64_t)time(NULL));
+            if (rs_quota_done(&ch.c[j].hook) && !finish_hook(&ch.c[j], &gs, sessions,
+                                                             o->quota_hook))
+            {
+                if (ch.c[j].fd >= 0)
+                {
+                    (void)close(ch.c[j].fd);
+                    ch.c[j].fd = -1;
+                }
+                if (ch.c[j].held[0])
+                {
+                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, (int64_t)time(NULL));
+                    ch.c[j].held[0] = '\0';
+                }
+            }
+        }
         (void)rs_sessions_expire(sessions, (int64_t)time(NULL));
         if (got_stop)
         {
@@ -1430,6 +1726,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
     rs_sessions_free(sessions, (int64_t)time(NULL));
     free(ch.c);
     free(pfd);
+    free(hooked);
     rs_grants_free(gs.g, gs.n);
     rs_tls_config_free(tls);
     free(staging);

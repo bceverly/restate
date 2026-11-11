@@ -16,6 +16,9 @@
 #
 #   RESTATE_PROXY_OPTS="--listen :9443 --max-sessions 16"
 #
+# A --quota-hook program runs as this service does, under everything below:
+# as restate-proxy, with no new privileges, and the system read-only.
+#
 # Anything else -- another user, say -- in a drop-in
 # (systemctl edit restate-proxy). Its log is the journal
 # (journalctl -u restate-proxy).

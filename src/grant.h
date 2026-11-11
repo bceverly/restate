@@ -12,6 +12,9 @@
  *   token_sha256 = 8f14e45fceea167a5a36dedd4bea2543c8d2d1e3c1b5d7d0a2a6a1f6c1f8a9e0
  *   expires      = 2026-12-31T00:00:00Z
  *   label        = managed by sysmanage-agent: web01.example.com
+ *   max_sessions = 2
+ *   bandwidth    = 08-18 2MiB/s
+ *   bandwidth    = 20MiB/s
  *
  * Read as strictly as a job file: an unknown key, a key given twice that may
  * not be, a value of the wrong kind, a line that is not "key = value" -- any
@@ -37,6 +40,9 @@
 #define RS_GRANT_LABEL_MAX 256
 #define RS_GRANT_FILE_MAX  65536    /* far more than a grant needs */
 #define RS_GRANT_CLIENT_MAX 64
+#define RS_GRANT_MAX_SESSIONS 1024u                  /* the most max_sessions may be */
+#define RS_GRANT_RATE_MIN     ((uint64_t)64 * 1024)  /* the least a bandwidth may be, a second */
+#define RS_GRANT_HOURS        24
 
 struct rs_grant {
     char         *client;
@@ -47,6 +53,13 @@ struct rs_grant {
     bool          expires_set;
     int64_t       expires;          /* seconds since the epoch, UTC */
     char         *label;            /* NULL if it has none */
+    unsigned      max_sessions;     /* sessions it may have open at once; 0: no limit of its own */
+    /* Bytes a second its requests may move, each way, in each hour of the
+     * proxy host's local day; 0: no limit. bandwidth_hours has a bit for
+     * each hour a "HH-HH RATE" set, which a RATE alone does not change. */
+    uint64_t      bandwidth[RS_GRANT_HOURS];
+    uint32_t      bandwidth_hours;
+    bool          bandwidth_default; /* whether a RATE alone was given */
 };
 
 /* Whether `name` is a client's name: 1 to 64 of A-Z a-z 0-9 . _ -, not
@@ -77,6 +90,15 @@ void rs_grant_free(struct rs_grant *g);
  * at time `now`: a token, whose digest is one the grant has, in a grant not
  * expired. Every digest the grant has is compared, whichever matches. */
 bool rs_grant_admits(const struct rs_grant *g, const char *token, size_t len, int64_t now);
+
+/* The bandwidth `g` allows in `hour` (0 to 23) of the local day: bytes a
+ * second, each way, or 0 for no limit. */
+uint64_t rs_grant_rate(const struct rs_grant *g, int hour);
+
+/* "unlimited", or a rate as a grant gives one -- "512KiB/s", "2MiB/s",
+ * "1GiB/s" -- as bytes a second into *out (0 for unlimited): false if it
+ * is neither, or less than RS_GRANT_RATE_MIN. */
+bool rs_grant_parse_rate(const char *s, size_t len, uint64_t *out);
 
 /* What restate-proxy --check-grants says of one file. */
 struct rs_grant_checked {

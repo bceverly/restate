@@ -284,6 +284,124 @@ static void test_parsing(void)
         free(extra);
     }
 
+    TEST_CASE("grant: max_sessions");
+    text = grant_text("");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT(g.max_sessions, 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 12), 0);
+    rs_grant_free(&g);
+    free(text);
+    text = grant_text("max_sessions = 2\n");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT(g.max_sessions, 2);
+    rs_grant_free(&g);
+    free(text);
+    text = grant_text("max_sessions = 1024\n");
+    CHECK(parses(text, &why));
+    free(text);
+    {
+        static const char *const bad[] = { "max_sessions = 0\n", "max_sessions = 1025\n",
+                                           "max_sessions = 02\n", "max_sessions = two\n",
+                                           "max_sessions = 99999\n",
+                                           "max_sessions = 1\nmax_sessions = 2\n" };
+        size_t                   i;
+
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        {
+            text = grant_text(bad[i]);
+            CHECK(!parses(text, &why));
+            CHECK_CONTAINS(why.data, "max_sessions");
+            free(text);
+        }
+    }
+
+    TEST_CASE("grant: rates");
+    {
+        uint64_t r = 1;
+
+        CHECK(rs_grant_parse_rate("unlimited", 9, &r) && r == 0);
+        CHECK(rs_grant_parse_rate("64KiB/s", 7, &r) && r == 65536);
+        CHECK(rs_grant_parse_rate("2MiB/s", 6, &r) && r == 2097152);
+        CHECK(rs_grant_parse_rate("1GiB/s", 6, &r) && r == 1073741824);
+        CHECK(rs_grant_parse_rate("9999999GiB/s", 12, &r) && r == 9999999ULL << 30);
+        CHECK(!rs_grant_parse_rate("63KiB/s", 7, &r));
+        CHECK(!rs_grant_parse_rate("10000000GiB/s", 13, &r));
+        CHECK(!rs_grant_parse_rate("2MiB", 4, &r));
+        CHECK(!rs_grant_parse_rate("2MB/s", 5, &r));
+        CHECK(!rs_grant_parse_rate("02MiB/s", 7, &r));
+        CHECK(!rs_grant_parse_rate("MiB/s", 5, &r));
+        CHECK(!rs_grant_parse_rate("", 0, &r));
+        CHECK(!rs_grant_parse_rate("unlimited!", 10, &r));
+    }
+
+    TEST_CASE("grant: bandwidth by hour of the day");
+    text = grant_text("bandwidth = 08-18 2MiB/s\nbandwidth = 20MiB/s\n"
+                      "bandwidth = 22-02\tunlimited\n");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT((long long)rs_grant_rate(&g, 7), 20 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 8), 2 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 17), 2 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 18), 20 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 21), 20 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 22), 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 23), 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 0), 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 1), 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 2), 20 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, -1), 0);
+    CHECK_INT((long long)rs_grant_rate(&g, 24), 0);
+    rs_grant_free(&g);
+    free(text);
+    /* The rate for every other hour first, the range after: the same. */
+    text = grant_text("bandwidth = 1MiB/s\nbandwidth = 00-12 512KiB/s\n");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT((long long)rs_grant_rate(&g, 11), 512 << 10);
+    CHECK_INT((long long)rs_grant_rate(&g, 12), 1 << 20);
+    rs_grant_free(&g);
+    free(text);
+    /* A range alone: no limit outside it; and the whole day as one. */
+    text = grant_text("bandwidth = 09-10 64KiB/s\n");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT((long long)rs_grant_rate(&g, 9), 65536);
+    CHECK_INT((long long)rs_grant_rate(&g, 10), 0);
+    rs_grant_free(&g);
+    free(text);
+    text = grant_text("bandwidth = 00-24 1MiB/s\n");
+    CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+    CHECK_INT((long long)rs_grant_rate(&g, 0), 1 << 20);
+    CHECK_INT((long long)rs_grant_rate(&g, 23), 1 << 20);
+    rs_grant_free(&g);
+    free(text);
+    {
+        static const struct {
+            const char *extra;
+            const char *says;
+        } bad[] = {
+            { "bandwidth = 1MiB/s\nbandwidth = 2MiB/s\n", "every other hour is given twice" },
+            { "bandwidth = 08-18 1MiB/s\nbandwidth = 17-20 2MiB/s\n",
+              "the hour from 17:00 is in two of its ranges" },
+            { "bandwidth = 22-06 1MiB/s\nbandwidth = 05-07 2MiB/s\n",
+              "the hour from 05:00 is in two of its ranges" },
+            { "bandwidth = 08-08 1MiB/s\n", "not hours as HH-HH" },
+            { "bandwidth = 24-02 1MiB/s\n", "not hours as HH-HH" },
+            { "bandwidth = 08-25 1MiB/s\n", "not hours as HH-HH" },
+            { "bandwidth = a8-18 1MiB/s\n", "not hours as HH-HH" },
+            { "bandwidth = 08-1x 1MiB/s\n", "not hours as HH-HH" },
+            { "bandwidth = 08-18 fast\n", "bandwidth: not a rate" },
+            { "bandwidth = 8-18 1MiB/s\n", "bandwidth: not a rate" },
+            { "bandwidth = 1KiB/s\n", "64KiB/s at the least" },
+        };
+        size_t i;
+
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        {
+            text = grant_text(bad[i].extra);
+            CHECK(!parses(text, &why));
+            CHECK_CONTAINS(why.data, bad[i].says);
+            free(text);
+        }
+    }
+
     TEST_CASE("grant: operations");
     {
         static const struct {

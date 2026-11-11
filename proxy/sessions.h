@@ -62,10 +62,11 @@ size_t   rs_sessions_count(const struct rs_sessions *s);
 /*
  * A session of `kind` for the client of grant `g`, in its repository, at
  * `now`: 201, and its id in `id`; or the status to refuse it with -- 403 if
- * the grant does not allow the kind, 503 if the table is full, 409 for a
- * repository of version 1 an append session would have to change, 423 if
- * its lock is held, 500 if it is no repository the proxy can open, with why
- * in `why` for the log.
+ * the grant does not allow the kind, RS_PROXY_CLIENT_FULL if the client
+ * has as many open as its grant's max_sessions, 503 if the table is full,
+ * 409 for a repository of version 1 an append session would have to
+ * change, 423 if its lock is held, 500 if it is no repository the proxy can
+ * open, with why in `why` for the log.
  */
 int rs_sessions_open(struct rs_sessions *s, const struct rs_grant *g, enum rs_proxy_kind kind,
                      int64_t now, char id[RS_SESSION_LEN + 1], struct rs_buf *why);
@@ -78,6 +79,10 @@ enum rs_proxy_found rs_sessions_find(struct rs_sessions *s, const char *client, 
  * `bytes_out` and taken in `bytes_in`: its lease starts again at `now`. */
 void rs_sessions_release(struct rs_sessions *s, const char *id, uint64_t bytes_out,
                          uint64_t bytes_in, int64_t now);
+
+/* The requests being answered in `client`'s sessions: what its bandwidth
+ * is shared by. */
+unsigned rs_sessions_busy(const struct rs_sessions *s, const char *client);
 
 /* Whether `id` is an append session of `client`'s: what a commit is in. */
 bool rs_sessions_appending(struct rs_sessions *s, const char *client, const char *id);

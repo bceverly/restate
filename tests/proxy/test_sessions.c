@@ -286,6 +286,37 @@ void test_sessions(void)
         free(deep);
     }
 
+    TEST_CASE("sessions: a grant's max_sessions, and the requests being answered in a client's");
+    {
+        struct rs_sessions     *t = rs_sessions_new(8, 10, NULL, NULL, NULL);
+        struct rs_grant         one;
+        struct rs_proxy_session f;
+        char                    x[RS_SESSION_LEN + 1];
+        char                    y[RS_SESSION_LEN + 1];
+
+        grant_of("lim", repo, "read", &one);
+        one.max_sessions = 1;
+        CHECK_INT(rs_sessions_open(t, &one, RS_PROXY_LOOK, 1000, x, &why), 201);
+        CHECK_INT(rs_sessions_open(t, &one, RS_PROXY_READ, 1000, y, &why), RS_PROXY_CLIENT_FULL);
+        /* Another client's are its own. */
+        CHECK_INT(rs_sessions_open(t, &ro, RS_PROXY_LOOK, 1000, y, &why), 201);
+        CHECK_INT(rs_sessions_busy(t, "lim"), 0);
+        CHECK_INT(rs_sessions_find(t, "lim", x, &f), RS_PROXY_FOUND);
+        CHECK_INT(rs_sessions_find(t, "lim", x, &f), RS_PROXY_FOUND);
+        CHECK_INT(rs_sessions_find(t, "ro", y, &f), RS_PROXY_FOUND);
+        CHECK_INT(rs_sessions_busy(t, "lim"), 2);
+        CHECK_INT(rs_sessions_busy(t, "ro"), 1);
+        CHECK_INT(rs_sessions_busy(t, "nobody"), 0);
+        rs_sessions_release(t, x, 0, 0, 1001);
+        CHECK_INT(rs_sessions_busy(t, "lim"), 1);
+        rs_sessions_release(t, x, 0, 0, 1001);
+        /* Once one ends, there is room for another. */
+        CHECK_INT(rs_sessions_end(t, "lim", x, 1002), 204);
+        CHECK_INT(rs_sessions_open(t, &one, RS_PROXY_READ, 1002, x, &why), 201);
+        rs_sessions_free(t, 1003);
+        rs_grant_free(&one);
+    }
+
     rs_grant_free(&rw);
     rs_grant_free(&ro);
     rs_grant_free(&other);

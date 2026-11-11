@@ -754,6 +754,7 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
     char         *path;
     size_t        i;
     int           code;
+    bool          refused = false;
 
     rs_buf_init(&b);
     for (i = 0; i < n; i++)
@@ -849,11 +850,15 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
         rs_buf_free(&text);
         /* Not what a run asks of a file that may not be there, or past a
          * file's end, which are no refusal: what is left is what a failed
-         * run's result gives as its proxy_reason. */
+         * run's result gives as its proxy_reason. The first refusal in the
+         * batch, which is what failed it: curl goes on to the rest, and a
+         * pack's commit after its uploads were refused is refused too, for
+         * a reason that is only that. */
         if (q[i].answered && q[i].ans.status >= 300 && q[i].ans.status != 404 &&
-            q[i].ans.status != 416 && q[i].ans.reason[0])
+            q[i].ans.status != 416 && q[i].ans.reason[0] && !refused)
         {
             memcpy(last_reason, q[i].ans.reason, sizeof(last_reason));
+            refused = true;
         }
     }
     return true;

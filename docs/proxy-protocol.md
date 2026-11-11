@@ -141,6 +141,9 @@ token_sha256 = 8f14e45fceea167a5a36dedd4bea2543c8d2d1e3c1b5d7d0a2a6a1f6c1f8a9e0
 token_sha256 = 3b5d5c3712955042212316173ccf37be8b0b0f4a1d5c1e4b8a3e2f7d6c5b4a39
 expires      = 2026-12-31T00:00:00Z
 label        = managed by sysmanage-agent: web01.example.com
+max_sessions = 2
+bandwidth    = 08-18 2MiB/s
+bandwidth    = 20MiB/s
 ```
 
 | Key            | Value                                                          |
@@ -150,6 +153,8 @@ label        = managed by sysmanage-agent: web01.example.com
 | `token_sha256` | a token's SHA-256, in hex; once or twice                       |
 | `expires`      | optional: a UTC time after which the grant is no more          |
 | `label`        | optional: free text, up to 256 bytes, that the proxy ignores   |
+| `max_sessions` | optional: sessions the client may have open at once, 1 to 1024 |
+| `bandwidth`    | optional, repeatable: how fast its requests may move bytes, by the hour |
 
 A line is split at its first `=`: the key is what comes before it and the
 value everything after, blanks at either end aside, so a value may itself
@@ -167,6 +172,28 @@ expiry is how a short-lived, read-only grant for one restore is made, with
 no change to the protocol. A client is added or removed by writing or
 removing its file; the proxy reads them again when they change, and on
 `SIGHUP`. Many clients may have the same repository.
+
+### Limits
+
+A grant can hold its client to less than the proxy allows every client:
+
+- **`max_sessions`**: past it, a session is refused with `503
+  client-sessions-full`, which restate takes as busy (exit 5), as it does
+  the proxy's own `--max-sessions`. A run of restate holds one session at a
+  time; a copy from the proxy into the same proxy holds two. With none, the
+  client is held only to `--max-sessions`.
+- **`bandwidth`**: bytes a second, each way, as `512KiB/s`, `2MiB/s` or
+  `1GiB/s` (`64KiB/s` at the least), or `unlimited`. `HH-HH RATE` is for
+  those hours of the storage host's local day, from the start of the first
+  to the start of the second (`08-18`, or `22-06` across midnight); a
+  `RATE` alone is for every hour no range names. Ranges may not overlap,
+  and a `RATE` alone is given once. With none, there is no limit. The rate
+  is the hour's as each request in a session is begun, and the client's
+  requests being answered at once share it equally: a restore's one
+  connection has it all, and a capture's renewals cost nothing of it.
+
+A proxy that stores for many clients can hold each to a quota of its own
+with `--quota-hook` (below).
 
 What the operations allow:
 
@@ -242,7 +269,11 @@ Content-Length: 33
 - `409` if the repository is version 1 (made by restate 1.3 or older): a
   capture would have to change its marker, which nothing through the proxy
   may. One capture on the storage host makes it version 2.
-- `503` if the proxy has as many sessions open as it allows.
+- `503` if the proxy has as many sessions open as it allows
+  (`sessions-full`), or the client as many as its grant does
+  (`client-sessions-full`).
+- `507` if the quota hook says the client may store no more
+  (`quota-exceeded`); only an `append` session asks it.
 
 A session id is 16 random bytes in hex, belongs to the client that opened
 it, and is `401` from any other.
@@ -386,7 +417,9 @@ read (`413`):
 A pack is cut at 32 MiB of content, plus at most one 4 MiB chunk, so 64 MiB
 leaves room for gzip's and gpg's overhead and nothing more. The proxy also
 limits how much one session's staging may hold, and refuses past it with
-`507`.
+`507`; and with a quota hook, it asks the hook before each upload, and
+refuses one the hook says no to with `507 quota-exceeded` -- before a byte
+of its body is sent.
 
 ### Commits
 
@@ -448,8 +481,8 @@ machines may make one at once.
 | `431` | request line and headers over 8 KiB                                    |
 | `501` | an upload or a commit to a proxy with no staging it can use            |
 | `505` | an HTTP version other than 1.1                                         |
-| `503` | the proxy is at its limit of sessions; try again later                 |
-| `507` | the session's staging, or the disk, is full                            |
+| `503` | the proxy, or this client, is at its limit of sessions; try again later |
+| `507` | the session's staging, or the disk, is full; or the client is over its quota |
 | `500` | the proxy failed; its log says why                                     |
 
 An error's body is one line of `text/plain`, for a person: the client shows
@@ -473,7 +506,9 @@ Restate-Reason: repository-version-1
 | `too-large`              | `413` | larger than restate writes that file               | 2             |
 | `busy`                   | `423` | another capture, or a prune                        | 5             |
 | `sessions-full`          | `503` | the proxy is at its limit of sessions              | 5             |
+| `client-sessions-full`   | `503` | this client is at its grant's `max_sessions`       | 5             |
 | `storage-full`           | `507` | the session's staging, or the disk, is full        | 2             |
+| `quota-exceeded`         | `507` | the quota hook says the client may store no more   | 2             |
 | `bad-request`            | `400`, `405`, `411`, `416`, `417`, `431`, `505` | not a request this protocol has | 2 |
 | `proxy-failed`           | `500` | the proxy failed; its log says why                 | 2             |
 | `not-implemented`        | `501` | the proxy takes no uploads: it has no staging      | 2             |
@@ -536,6 +571,7 @@ restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
                       [--grants DIR] [--max-connections N] [--idle-timeout SECONDS]
                       [--max-sessions N] [--lease SECONDS]
                       [--staging DIR] [--max-staging MIB]
+                      [--quota-hook PROGRAM]
 ```
 
 - `--listen` is `HOST:PORT`, `[ADDRESS]:PORT` for IPv6, or `:PORT` for every
@@ -564,6 +600,9 @@ restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]
   What sessions before a start left there is removed as it starts. One
   session's staging holds at most `--max-staging` MiB (4096), past which an
   upload is `507`.
+- `--quota-hook` is a program, by its absolute path, asked before an
+  `append` session opens and before each upload whether the client may
+  store more (below). The proxy does not start if it is not one it can run.
 - `SIGTERM` or `SIGINT` stops it: it stops listening, ends every connection
   and every session, and exits 0.
 
@@ -575,9 +614,56 @@ bytes=...`), each session opened (`session-open client=... kind=...`) and
 each ended (`session-end`, as above), a session it could not open, with
 why (`session-refused client=... error="..."`), and a commit or an upload
 that failed on its side, not the client's (`commit-failed client=...
-name=... error="..."`, `upload-failed`). A token is never in it, nor a
-session's id. It starts with a line of what it is: `started version=...
-tls="..." confinement="..."`.
+name=... error="..."`, `upload-failed`), and each answer of the quota
+hook's that refused (`quota-refused client=... event=... message="..."`)
+or failed (`quota-hook-failed client=... event=... error="..."`). A token
+is never in it, nor a session's id. It starts with a line of what it is:
+`started version=... tls="..." confinement="..." ... quota_hook=...`.
+
+### The quota hook
+
+A host that stores for many clients holds each to what it pays for, or was
+given, by whatever keeps that -- a filesystem's quotas, a database, a
+billing system -- through a program of its own, `--quota-hook PROGRAM`,
+asked before an `append` session opens and before each upload.
+
+It is run by the listening process, which is not confined (so the hook may
+reach whatever it needs, a socket included), as the proxy's user: with no
+arguments, standard input `/dev/null`, standard error the proxy's log, none
+of the proxy's descriptors, and an environment of its own and nothing of
+the proxy's:
+
+| Variable                   | What it is                                           |
+|----------------------------|------------------------------------------------------|
+| `PATH`                     | `/usr/bin:/bin:/usr/sbin:/sbin`                      |
+| `RESTATE_PROXY_EVENT`      | `open`, as an append session opens; `upload`, before each file of a capture is sent |
+| `RESTATE_PROXY_CLIENT`     | the client, `web01`                                  |
+| `RESTATE_PROXY_REPOSITORY` | its repository, as its grant names it               |
+| `RESTATE_PROXY_LABEL`      | its grant's `label`, where it has one                |
+| `RESTATE_PROXY_NAME`       | the upload's name, `packs/NAME.tar.gz`; not set for `open` |
+| `RESTATE_PROXY_BYTES`      | the upload's size; `0` for `open`                    |
+
+Its answer is how it exits: `0`, the client may; `1`, it may not, and the
+client is told `507 quota-exceeded`, with the first line the hook wrote to
+standard output, if it wrote one (up to 200 bytes, on one line, as text).
+Any other exit, a signal, or still running after 30 seconds -- when it and
+what it started are killed -- is the hook failing, and the request is `500
+proxy-failed`. The listening process never waits for it: only the
+connection that asked does. A capture asks it once for its session and
+once for each file it sends, four or five for each pack of 32 MiB, so a
+hook that answers from what it keeps, rather than by measuring the
+repository each time, costs the capture nothing it would notice.
+
+```sh
+#!/bin/sh
+# /usr/local/libexec/restate-quota: each client to 500 GiB of its own ZFS dataset.
+used=$(zfs get -Hp -o value used "tank/restate/$RESTATE_PROXY_CLIENT") || exit 2
+if [ $((used + RESTATE_PROXY_BYTES)) -gt $((500 * 1024 * 1024 * 1024)) ]; then
+  echo "$RESTATE_PROXY_CLIENT is over its 500 GiB"
+  exit 1
+fi
+exit 0
+```
 
 ### Confinement
 
@@ -606,8 +692,5 @@ the `confinement` the proxy says it has as it starts says so (`none`, or
 
 ## Not in version 1
 
-- Limits per client: sessions at once, bandwidth by hour of day, and a quota
-  hook a multi-tenant host can answer (the roadmap's next item after the
-  remote backend).
 - Anything that removes or changes what is in a repository.
 - A client certificate in place of a token.
