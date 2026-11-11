@@ -97,6 +97,22 @@ static void log_line(void *ctx, const char *line)
     say("%s", line);
 }
 
+/* Seconds by the monotonic clock: what leases and the quota hook's deadline
+ * are timed by, so that the system's clock set forward -- by NTP, as a
+ * machine just started catches up -- ends no session before its time, and
+ * set back keeps none past it. Only how long things take is measured by it;
+ * dates, as a token's expiry is, are the system clock's. */
+static int64_t ticks(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    {
+        return (int64_t)time(NULL);
+    }
+    return (int64_t)ts.tv_sec;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Listening                                                                */
 /* ------------------------------------------------------------------------ */
@@ -965,7 +981,7 @@ static void forget_child(struct children *ch, unsigned i, struct rs_sessions *s)
     ch->c[i].waiting = NULL;
     if (ch->c[i].held[0])
     {
-        rs_sessions_release(s, ch->c[i].held, 0, 0, (int64_t)time(NULL));
+        rs_sessions_release(s, ch->c[i].held, 0, 0, ticks());
     }
     if (ch->c[i].fd >= 0)
     {
@@ -1025,7 +1041,7 @@ static bool ask_hook(struct child *c, char *copy, const char *hook, const struct
     q.name = name;
     q.bytes = bytes;
     rs_buf_init(&why);
-    if (!rs_quota_start(&c->hook, hook, &q, (int64_t)time(NULL), RS_QUOTA_TIMEOUT, &why))
+    if (!rs_quota_start(&c->hook, hook, &q, ticks(), RS_QUOTA_TIMEOUT, &why))
     {
         say("quota-hook-failed client=%s event=%s error=\"%s\"", g->client, q.event,
             why.data ? why.data : "");
@@ -1046,7 +1062,7 @@ static bool ask_hook(struct child *c, char *copy, const char *hook, const struct
 static bool answer_child(struct child *c, char *q, const struct grants *gs,
                          struct rs_sessions *s, const char *hook, struct rs_buf *out)
 {
-    int64_t now = (int64_t)time(NULL);
+    int64_t now = ticks();
     char   *copy = rs_xstrdup(q);
     char   *client = strchr(q, ' ');
     char   *rest = client ? strchr(client + 1, ' ') : NULL;
@@ -1662,7 +1678,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
                 ch.c[j].waiting = NULL;
                 if (ch.c[j].held[0])
                 {
-                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, (int64_t)time(NULL));
+                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, ticks());
                     ch.c[j].held[0] = '\0';
                 }
             }
@@ -1678,7 +1694,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         /* Each hook past its deadline killed, and each one done answered. */
         for (j = 0; j < ch.n; j++)
         {
-            rs_quota_check_time(&ch.c[j].hook, (int64_t)time(NULL));
+            rs_quota_check_time(&ch.c[j].hook, ticks());
             if (rs_quota_done(&ch.c[j].hook) && !finish_hook(&ch.c[j], &gs, sessions,
                                                              o->quota_hook))
             {
@@ -1689,12 +1705,12 @@ int rs_proxy_run(const struct rs_proxy_options *o)
                 }
                 if (ch.c[j].held[0])
                 {
-                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, (int64_t)time(NULL));
+                    rs_sessions_release(sessions, ch.c[j].held, 0, 0, ticks());
                     ch.c[j].held[0] = '\0';
                 }
             }
         }
-        (void)rs_sessions_expire(sessions, (int64_t)time(NULL));
+        (void)rs_sessions_expire(sessions, ticks());
         if (got_stop)
         {
             break;
@@ -1723,7 +1739,7 @@ int rs_proxy_run(const struct rs_proxy_options *o)
         (void)close(lfds[i]);
     }
     stop_children(&ch, sessions);
-    rs_sessions_free(sessions, (int64_t)time(NULL));
+    rs_sessions_free(sessions, ticks());
     free(ch.c);
     free(pfd);
     free(hooked);
