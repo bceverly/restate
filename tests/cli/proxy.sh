@@ -171,15 +171,20 @@ expect 2 "--serve --max-connections 0" -- "$BIN" --serve --max-connections 0
 contains "$ERR" "is not a number from 1 to" "is refused"
 expect 2 "--serve --idle-timeout with no value" -- "$BIN" --serve --idle-timeout
 
-# self_signed ARGS...: `openssl req -x509` with ARGS, as this openssl takes
-# it -- or, where it has no openssl.cnf of its own (NetBSD's may not), with
-# the least one there can be -- its errors in openssl.err.
+# self_signed ARGS...: `openssl req -x509` with ARGS, and a configuration of
+# the test's own rather than the system's (NetBSD may have none), its errors
+# in openssl.err. The certificate names 127.0.0.1 as well as localhost: what
+# restate is pointed at is https://127.0.0.1:PORT, never localhost, which
+# resolves to ::1 too, where nothing listens. NetBSD gives out ports in turn,
+# from the top down, and a fresh one's next IPv6 port comes round to the
+# proxy's: curl's try at [::1]:PORT is then from [::1]:PORT, a socket
+# connected to itself, which answers its own TLS hello -- and fails.
 self_signed() {
-  openssl req -x509 -newkey rsa:2048 -nodes -days 2 "$@" > /dev/null 2> openssl.err && return 0
-  printf '[req]\ndistinguished_name = dn\nx509_extensions = v3\n[dn]\n[v3]\n%s\n' \
-    'basicConstraints = critical, CA:true' > openssl.cnf
+  printf '[req]\ndistinguished_name = dn\nx509_extensions = v3\n[dn]\n[v3]\n%s\n%s\n' \
+    'basicConstraints = critical, CA:true' 'subjectAltName = DNS:localhost, IP:127.0.0.1' \
+    > openssl.cnf
   openssl req -config openssl.cnf -x509 -newkey rsa:2048 -nodes -days 2 "$@" \
-    > /dev/null 2>> openssl.err
+    > /dev/null 2> openssl.err
 }
 if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
   self_signed -subj /CN=localhost -keyout key.pem -out cert.pem; then
@@ -505,7 +510,7 @@ if command -v curl > /dev/null 2>&1 && command -v openssl > /dev/null 2>&1 &&
     # test's, which has to be empty again after each run.
     start --max-sessions 2
     mkdir -m 0700 rtmp
-    URL="https://localhost:$PORT/v1/up01"
+    URL="https://127.0.0.1:$PORT/v1/up01"
     ON=(--repository-token-file "$WORK/up01.token" --repository-ca-file "$WORK/cert.pem")
     RUN=(env TMPDIR="$WORK/rtmp" XDG_CACHE_HOME="$WORK/rcache" "$RESTATE")
     left() { if [ -z "$(ls rtmp)" ]; then ok; else fail "$1: left $(ls rtmp)"; fi; }
@@ -652,7 +657,7 @@ EOF
     left "a capture that was busy"
 
     if [ -n "$ENC" ]; then
-      EURL="https://localhost:$PORT/v1/en01"
+      EURL="https://127.0.0.1:$PORT/v1/en01"
       EON=(--repository-token-file "$WORK/en01.token" --repository-ca-file "$WORK/cert.pem")
       expect 0 "capture --encrypt-to --sign-with through the proxy" -- \
         "${RUN[@]}" capture -q -r tree3 --os=linux --encrypt-to enc.pub --sign-with signer.sec \
@@ -827,7 +832,7 @@ EOF
     # the session cannot lapse in a pause before it is cut off, however slow
     # the build (coverage is); and short enough to wait out.
     start --lease 12
-    URL="https://localhost:$PORT/v1/up01"
+    URL="https://127.0.0.1:$PORT/v1/up01"
     capture_cut all
     if [ "$CUT" = 1 ]; then ok; else fail "the capture was cut off between a pack's commit and its snapshot's"; fi
     if [ -n "$CUTSESS" ]; then ok; else fail "the cut-off session's staging is still there while its lease runs"; fi
@@ -856,7 +861,7 @@ EOF
     # 30 is longer than this waits, so only the renewer could end it in time.
     stop
     start --lease 30
-    URL="https://localhost:$PORT/v1/up01"
+    URL="https://127.0.0.1:$PORT/v1/up01"
     BEFORE="$(packs_of)"
     capture_cut restate
     if [ "$CUT" = 1 ]; then ok; else fail "the second capture was cut off between a pack's commit and its snapshot's"; fi
@@ -921,7 +926,7 @@ EOF
     chmod 0755 quota.sh
     : > quota.log
     start --quota-hook "$WORK/quota.sh"
-    URL="https://localhost:$PORT/v1/up01"
+    URL="https://127.0.0.1:$PORT/v1/up01"
     contains "$(cat server.log)" "quota_hook=$WORK/quota.sh" "it says it has a quota hook"
 
     # max_sessions = 1: with one open, the next is refused, exit 5.
