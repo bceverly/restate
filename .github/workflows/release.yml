@@ -629,14 +629,15 @@ jobs:
           } > notes.md
           # The BSD packages, as the bsd jobs made them, each named for the
           # release and architecture it was built on, with how to install it.
-          PACKAGES="$(cd dist && for f in restate-"$V"-*bsd-*; do
+          PACKAGES="$(cd dist && for f in restate-"$V"-*bsd-* restate-proxy-"$V"-*bsd-*; do
+            [ -e "$f" ] || continue
             case "$f" in
               *-freebsd-*) printf '    pkg add %s\n' "$f" ;;
               *-openbsd-*) printf '    pkg_add -D unsigned %s\n' "$f" ;;
               *-netbsd-*) printf '    pkg_add %s\n' "$f" ;;
             esac
           done)"
-          RPMS="$(cd dist && for f in restate-"$V"-*.rpm; do
+          RPMS="$(cd dist && for f in restate-"$V"-*.rpm restate-proxy-"$V"-*.rpm; do
             [ -e "$f" ] || continue
             case "$f" in
               *.el* | *.fc*) printf '    sudo dnf install ./%s\n' "$f" ;;
@@ -650,6 +651,7 @@ jobs:
 
               sudo add-apt-repository ppa:bceverly/restate
               sudo apt install restate
+              sudo apt install restate-proxy    # on the machine that stores the repositories
 
           Install on FreeBSD, OpenBSD or NetBSD from the package here for
           your release, each built, installed and tested on it, after checking
@@ -660,10 +662,14 @@ jobs:
           (OpenBSD's packages are signed by OpenBSD's own means, which these are
           not: the checksums and the attestation below vouch for them instead.)
 
+          restate-proxy, which serves repositories over HTTPS from the machine
+          that stores them, is a package of its own on each, of the same
+          version: its service is installed and not enabled (restate-proxy(8)).
+
           Install on Fedora, RHEL 9 or 10 and their rebuilds, from COPR, or on
           openSUSE, from the openSUSE Build Service, once each has built it:
 
-              sudo dnf copr enable $COPR && sudo dnf install restate
+              sudo dnf copr enable $COPR && sudo dnf install restate    # and restate-proxy
               # openSUSE: https://software.opensuse.org/download/package?package=restate&project=$OBS_URL
 
           or from the package here for your distribution and architecture --
@@ -677,10 +683,12 @@ jobs:
 
               apk add --allow-untrusted restate-$V-r0-alpineREL-ARCH.apk \
                   restate-doc-$V-r0-alpineREL-ARCH.apk
+              apk add --allow-untrusted restate-proxy-$V-r0-alpineREL-ARCH.apk
 
           Install on macOS with Homebrew:
 
               brew install bceverly/tap/restate
+              brew install bceverly/tap/restate-proxy
 
           Build and install from source (Ubuntu 26.04 and any Linux, the BSDs
           with gmake, macOS):
@@ -722,8 +730,10 @@ jobs:
       - name: Install the packaging tools
         run: |
           sudo apt-get update -qq
+          # libssl-dev for restate-proxy, the source package's second
+          # binary package, which Launchpad builds beside restate.
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential debhelper devscripts dput lintian fakeroot
+            build-essential debhelper devscripts dput lintian fakeroot libssl-dev
 
       # A package whose version is not its tag's cannot be fixed once it is
       # uploaded.
@@ -780,7 +790,7 @@ jobs:
         run: scripts/build-deb.sh
 
       - name: lintian
-        run: lintian --fail-on error,warning ../restate_*.deb
+        run: lintian --fail-on error,warning ../restate_*.deb ../restate-proxy_*.deb
 
       # One signed source package per series: Launchpad builds per series,
       # and rejects an upload whose changelog names one it does not know.
@@ -798,8 +808,8 @@ jobs:
         run: |
           set -eux
           mkdir -p packages
-          cp ../restate_*.deb ../restate_*.dsc ../restate_*.tar.* ../restate_*.changes \
-             ../restate_*.buildinfo packages/
+          cp ../restate_*.deb ../restate-proxy_*.deb ../restate_*.dsc ../restate_*.tar.* \
+             ../restate_*.changes ../restate_*.buildinfo packages/
           # The public half of the key, for the upload job: dput checks the
           # signature on each .changes before it sends it, on a runner whose
           # keyring is empty. Carried here rather than fetched from a key
@@ -1154,9 +1164,12 @@ jobs:
           set -eu
           tar -xzf "source/restate-$V.tar.gz"
           SHA="$(shasum -a 256 "source/restate-$V.tar.gz" | awk '{ print $1 }')"
-          sed -e "s|@VERSION@|$V|g" -e "s|@SHA256@|$SHA|g" \
-            "restate-$V/packaging/homebrew/restate.rb.in" > restate.rb
-          cat restate.rb
+          # restate's and restate-proxy's, from the one tarball.
+          for f in restate restate-proxy; do
+            sed -e "s|@VERSION@|$V|g" -e "s|@SHA256@|$SHA|g" \
+              "restate-$V/packaging/homebrew/$f.rb.in" > "$f.rb"
+            cat "$f.rb"
+          done
 
       # From a tap of its own on this runner, as brew installs formulae only
       # from taps; the URL is the published release's, so this is what
@@ -1165,11 +1178,13 @@ jobs:
         run: |
           set -eu
           brew tap-new --no-git restate/check
-          cp restate.rb "$(brew --repository restate/check)/Formula/restate.rb"
-          brew install --build-from-source restate/check/restate
-          brew test restate/check/restate
-          brew audit --strict restate/check/restate
-          brew uninstall restate/check/restate
+          for f in restate restate-proxy; do
+            cp "$f.rb" "$(brew --repository restate/check)/Formula/$f.rb"
+            brew install --build-from-source "restate/check/$f"
+            brew test "restate/check/$f"
+            brew audit --strict "restate/check/$f"
+            brew uninstall "restate/check/$f"
+          done
           brew untap restate/check
 
       - name: Push it to the tap
@@ -1190,14 +1205,14 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $KEYFILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
           git clone "git@github.com:$TAP.git" tap
           mkdir -p tap/Formula
-          cp restate.rb tap/Formula/restate.rb
+          cp restate.rb restate-proxy.rb tap/Formula/
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/restate.rb
+          git add Formula/restate.rb Formula/restate-proxy.rb
           if git diff --cached --quiet; then
             echo "The tap has restate $V already."
             exit 0
           fi
-          git commit -m "restate $V"
+          git commit -m "restate and restate-proxy $V"
           git push origin HEAD

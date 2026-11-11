@@ -1,0 +1,31 @@
+#!/bin/ksh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy, restate repositories over HTTPS (restate-proxy(8)), as the
+# _restate-proxy user, with its log in syslog. Installed by the package, not
+# enabled: it needs a certificate, its key and a grant first.
+#
+#   rcctl enable restate_proxy
+#   rcctl start restate_proxy
+#   rcctl reload restate_proxy          # read the grants again (SIGHUP)
+#
+# Flags set with `rcctl set restate_proxy flags ...` replace those below, so
+# keep --serve and --staging among them.
+
+daemon="%%PREFIX%%/sbin/restate-proxy"
+daemon_flags="--serve --staging /var/db/restate-proxy/staging"
+daemon_user="_restate-proxy"
+daemon_logger="daemon.info"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+
+# Its directory, its alone: the staging is made inside it.
+rc_pre() {
+	install -d -o _restate-proxy -g _restate-proxy -m 0700 /var/db/restate-proxy
+}
+
+rc_cmd $1

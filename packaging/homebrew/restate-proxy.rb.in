@@ -1,0 +1,62 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy's Homebrew formula, from the same release tarball as
+# restate's, at the same version. The release workflow writes
+# restate-proxy.rb from this, with the version and the SHA-256 of the
+# release's tarball, builds, tests and removes it on macOS, then pushes it to
+# the bceverly/homebrew-tap tap beside restate's:
+#
+#   brew install bceverly/tap/restate-proxy
+class RestateProxy < Formula
+  desc "Serve restate repositories over HTTPS, append-only"
+  homepage "https://github.com/bceverly/restate"
+  url "https://github.com/bceverly/restate/releases/download/v@VERSION@/restate-@VERSION@.tar.gz"
+  sha256 "@SHA256@"
+  license "BSD-2-Clause"
+
+  depends_on "pkgconf" => :build
+  depends_on "openssl@3"
+
+  def install
+    system "make", "proxy", "VERSION=#{version}"
+    system "make", "install-proxy-tree", "DESTDIR=", "prefix=#{prefix}", "sysconfdir=#{etc}",
+           "VERSION=#{version}"
+    (var/"restate-proxy").mkpath
+  end
+
+  def caveats
+    <<~EOS
+      restate-proxy runs as you, from brew services, with its files in
+      Homebrew's etc and var rather than /etc and /var/lib:
+
+        #{etc}/restate/proxy.crt and proxy.key   its certificate and key
+        #{etc}/restate/proxy.d/                  a grant per client
+        #{var}/restate-proxy/staging/            uploads waiting to be committed
+
+      The repositories it serves have to be yours to write. Make a grant with
+      restate-proxy --new-token (see man restate-proxy), then:
+
+        brew services start restate-proxy
+    EOS
+  end
+
+  service do
+    run [opt_sbin/"restate-proxy", "--serve",
+         "--cert", etc/"restate/proxy.crt", "--key", etc/"restate/proxy.key",
+         "--grants", etc/"restate/proxy.d", "--staging", var/"restate-proxy/staging"]
+    keep_alive true
+    log_path var/"log/restate-proxy.log"
+    error_log_path var/"log/restate-proxy.log"
+  end
+
+  test do
+    assert_match "restate-proxy #{version}", shell_output("#{sbin}/restate-proxy --version")
+    (testpath/"proxy.d").mkpath
+    hash = shell_output("#{sbin}/restate-proxy --new-token #{testpath}/c01.token")
+    assert_match(/^token_sha256 = \h{64}$/, hash)
+    (testpath/"proxy.d/c01.conf").write "repository = #{testpath}/repo\noperations = read\n#{hash}"
+    chmod 0o644, testpath/"proxy.d/c01.conf"
+    system sbin/"restate-proxy", "--check-grants", testpath/"proxy.d"
+  end
+end

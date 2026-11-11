@@ -505,6 +505,20 @@ else
   skip "./bin/restate is not built — run 'make build' before 'make lint'"
 fi
 
+# restate-proxy's page is written by hand; what keeps it current is that it
+# names every option the program's --help does.
+if [ -x ./bin/restate-proxy ]; then
+  if scripts/check-proxy-man.sh ./bin/restate-proxy man/restate-proxy.8 \
+       > "$WORK/proxy-man.log" 2>&1; then
+    ok "man/restate-proxy.8 documents every option restate-proxy has"
+  else
+    bad "man/restate-proxy.8 leaves out an option"
+    sed 's/^/      /' "$WORK/proxy-man.log"
+  fi
+else
+  skip "./bin/restate-proxy is not built ($PROXY_NAME is not installed)"
+fi
+
 # The version the binary reports has to be the one this tree should produce, or
 # a release tag will name something that is not what was built. Compared against
 # scripts/version.sh rather than against the VERSION file, because a working

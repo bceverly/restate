@@ -24,7 +24,7 @@ set -eux
 DIR="${1:?usage: verify-rpm.sh DIR}"
 # By glob: a bare image has no find until the tools below are installed.
 RPM=""
-for f in "$DIR"/restate-*.rpm; do
+for f in "$DIR"/restate-[0-9]*.rpm; do
   case "$f" in
     *.src.rpm) ;;
     *) RPM="$f" && break ;;
@@ -67,6 +67,10 @@ if command -v dnf > /dev/null 2>&1; then
   pm dnf install -y -q man-db findutils diffutils
   pm dnf install -y -q "$RPM"
   remove() { dnf remove -y -q restate; }
+  # By path: EL's image has curl-minimal, which conflicts with curl and
+  # provides /usr/bin/curl as well.
+  proxy_add() { pm dnf install -y -q /usr/bin/openssl /usr/bin/curl && pm dnf install -y -q "$1"; }
+  proxy_remove() { dnf remove -y -q restate-proxy; }
 elif command -v zypper > /dev/null 2>&1; then
   # Leap says so in zypp.conf; Tumbleweed in a drop-in under /usr/etc, which
   # one of the same name under /etc replaces.
@@ -78,6 +82,11 @@ elif command -v zypper > /dev/null 2>&1; then
   pm zypper --non-interactive install -y man findutils diffutils
   pm zypper --non-interactive install -y --allow-unsigned-rpm "$RPM"
   remove() { zypper --non-interactive remove -y restate; }
+  proxy_add() {
+    pm zypper --non-interactive install -y openssl curl &&
+      pm zypper --non-interactive install -y --allow-unsigned-rpm "$1"
+  }
+  proxy_remove() { zypper --non-interactive remove -y restate-proxy; }
 else
   echo "neither dnf nor zypper" >&2
   exit 1
@@ -110,6 +119,23 @@ mkdir -p /tmp/back
 restate restore --allow-unverified --root /tmp/back /tmp/tree.tar
 cmp /tmp/tree/home/pat/notes.txt /tmp/back/home/pat/notes.txt
 restate packages > /dev/null
+
+# restate-proxy, beside it: installed, checked by what every package's verify
+# runs (verify-proxy.sh), which serves with a certificate openssl makes and
+# captures through it with curl, and removed.
+PROXY_RPM=""
+for f in "$DIR"/restate-proxy-[0-9]*.rpm; do
+  [ -f "$f" ] && PROXY_RPM="$f" && break
+done
+test -f "$PROXY_RPM"
+proxy_add "$PROXY_RPM"
+rpm -q restate-proxy
+rpm -ql restate-proxy
+test -z "$(find /usr/sbin/restate-proxy \( ! -user 0 -o -perm -020 -o -perm -002 \) -print)"
+sh "$(dirname "$0")/verify-proxy.sh" /usr/sbin restate-proxy \
+  /usr/lib/systemd/system/restate-proxy.service
+proxy_remove
+test ! -e /usr/sbin/restate-proxy
 
 remove
 test ! -e /usr/sbin/restate

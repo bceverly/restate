@@ -106,6 +106,10 @@ restate-lucky13.*
 #   debian/restate/ the staging tree debhelper assembles the package from
 debian/changelog
 debian/restate/
+debian/restate-proxy/
+debian/restate-proxy.service
+debian/restate.restate-job@.service
+debian/restate.restate-job@.timer
 debian/.debhelper/
 debian/files
 debian/debhelper-build-stamp

@@ -5,8 +5,9 @@
 # =============================================================================
 # restate -- Debian packaging
 #
-# Very little here: the package is one program, its manpage and its hooks,
-# built from C with no dependencies. The overrides hand the work to the
+# Very little here: two packages, each one program and its manpage --
+# restate with its hooks, built from C with no dependencies, and
+# restate-proxy, which links OpenSSL. The overrides hand the work to the
 # project's own Makefile rather than letting debhelper guess, so a package
 # build and a developer's build are the same commands.
 # =============================================================================
@@ -29,7 +30,7 @@ RESTATE_VERSION := $(shell cat VERSION)
 override_dh_auto_configure:
 
 override_dh_auto_build:
-	$(MAKE) build VERSION=$(RESTATE_VERSION)
+	$(MAKE) build proxy VERSION=$(RESTATE_VERSION)
 
 # The unit tests: self-contained, and a few seconds. They catch a compiler or
 # libc difference on an architecture nobody develops on, which is what a build
@@ -44,17 +45,24 @@ endif
 override_dh_auto_install:
 	$(MAKE) install-tree DESTDIR=$(CURDIR)/debian/restate prefix=/usr \
 	        VERSION=$(RESTATE_VERSION)
+	$(MAKE) install-proxy-tree DESTDIR=$(CURDIR)/debian/restate-proxy prefix=/usr \
+	        VERSION=$(RESTATE_VERSION)
 
 # Safe here: `make clean` in this project removes build output and nothing
 # else.
 # The units, from the same templates `make install` uses, where this release
 # of debhelper puts units. A template unit is never enabled or started by the
-# package: there is no job until someone writes one.
+# package: there is no job until someone writes one. Nor is restate-proxy's,
+# which needs a certificate and a grant first; once enabled, an upgrade
+# restarts it (deb-systemd-invoke starts only what is enabled).
 override_dh_installsystemd:
 	sed 's|@SBINDIR@|/usr/sbin|' systemd/restate-job@.service.in \
 	    > debian/restate.restate-job@.service
 	cp systemd/restate-job@.timer debian/restate.restate-job@.timer
-	dh_installsystemd --name=restate-job@ --no-enable --no-start
+	dh_installsystemd -prestate --name=restate-job@ --no-enable --no-start
+	sed 's|@SBINDIR@|/usr/sbin|' systemd/restate-proxy.service.in \
+	    > debian/restate-proxy.service
+	dh_installsystemd -prestate-proxy --no-enable
 
 override_dh_auto_clean:
 	$(MAKE) clean

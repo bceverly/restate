@@ -49,6 +49,8 @@ else
   "$REPO_ROOT/scripts/source-tarball.sh" "$WORK/build/restate-$VERSION.tar.gz"
 fi
 sed "s|@VERSION@|$VERSION|g" "$REPO_ROOT/packaging/alpine/APKBUILD.in" > "$WORK/build/APKBUILD"
+# The install script APKBUILD names, beside it, where abuild looks.
+cp "$REPO_ROOT/packaging/alpine/restate-proxy.pre-install" "$WORK/build/"
 
 if [ -n "${ABUILD_PRIVKEY:-}" ]; then
   if [ ! -f "$ABUILD_PRIVKEY" ] || [ ! -f "$ABUILD_PRIVKEY.pub" ]; then

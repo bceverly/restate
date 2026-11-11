@@ -54,6 +54,20 @@ restate restore --allow-unverified --root /tmp/back /tmp/tree.tar
 cmp /tmp/tree/home/pat/notes.txt /tmp/back/home/pat/notes.txt
 restate packages > /dev/null
 
+# restate-proxy, beside it: installed, checked by what every package's verify
+# runs (verify-proxy.sh), which serves with a certificate openssl makes and
+# captures through it with curl, and removed.
+PROXY_APK="$(find "$DIR" -name 'restate-proxy-[0-9]*.apk' | head -1)"
+test -f "$PROXY_APK"
+apk add -q openssl curl
+apk add -q --allow-untrusted "$PROXY_APK"
+apk info -e restate-proxy
+apk info -L restate-proxy
+test -z "$(find /usr/sbin/restate-proxy \( ! -user 0 -o -perm -020 -o -perm -002 \) -print)"
+sh "$(dirname "$0")/verify-proxy.sh" /usr/sbin restate-proxy /etc/init.d/restate-proxy
+apk del -q restate-proxy
+test ! -e /usr/sbin/restate-proxy
+
 apk del -q restate restate-doc
 test ! -e /usr/sbin/restate
 test ! -e /usr/libexec/restate/hooks/postgresql

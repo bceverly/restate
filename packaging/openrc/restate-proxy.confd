@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy's own options, besides --serve (restate-proxy(8)): where it
+# listens, its certificate and key, its grants, its limits. Its defaults are
+# :8443, /etc/restate/proxy.crt and proxy.key, and /etc/restate/proxy.d.
+#RESTATE_PROXY_OPTS="--listen :8443"
+RESTATE_PROXY_OPTS=""

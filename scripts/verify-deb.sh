@@ -64,6 +64,22 @@ restate restore --allow-unverified --root /tmp/back /tmp/tree.tar
 cmp /tmp/tree/home/pat/notes.txt /tmp/back/home/pat/notes.txt
 restate packages > /dev/null
 
+# restate-proxy, beside it: installed, checked by what every package's verify
+# runs (verify-proxy.sh), which serves with a certificate openssl makes and
+# captures through it with curl, and removed. Not started by the package:
+# nothing to serve until a site has a certificate and a grant.
+apt-get install -y -qq --no-install-recommends openssl curl ca-certificates
+apt-get install -y -qq "$DIR"/restate-proxy_*.deb
+dpkg-query -W -f='${Status}\n' restate-proxy | grep -qx 'install ok installed'
+dpkg -L restate-proxy
+test -f /usr/share/doc/restate-proxy/copyright
+# Where this release's debhelper puts units: /usr/lib on newer, /lib before.
+unit=/usr/lib/systemd/system/restate-proxy.service
+[ -f "$unit" ] || unit=/lib/systemd/system/restate-proxy.service
+sh "$(dirname "$0")/verify-proxy.sh" /usr/sbin restate-proxy "$unit"
+apt-get remove -y -qq restate-proxy
+test ! -e /usr/sbin/restate-proxy
+
 # And it goes away cleanly.
 apt-get remove -y -qq restate
 test ! -e /usr/sbin/restate

@@ -7,13 +7,19 @@
 # what it put there, and remove it -- as a person installing it from the
 # release would, on a machine with no restate on it already:
 #
-#   scripts/verify-bsd-pkg.sh PACKAGE
+#   scripts/verify-bsd-pkg.sh PACKAGE [PROXY-PACKAGE]
 #
 # Run as root (sudo or doas). It refuses a machine that has restate under
 # /usr/local already, since removing the package would take that one too.
+#
+# PROXY-PACKAGE, restate-proxy's, is installed beside restate's once that has
+# been checked, checked by what every package's verify runs
+# (scripts/verify-proxy.sh), and removed. `verify-bsd-pkg.sh dist/restate-*`
+# gives both, restate's first.
 set -eu
 
-PKG="${1:?usage: verify-bsd-pkg.sh PACKAGE}"
+PKG="${1:?usage: verify-bsd-pkg.sh PACKAGE [PROXY-PACKAGE]}"
+PROXY_PKG="${2:-}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(cat "$REPO_ROOT/VERSION")"
 PREFIX=/usr/local
@@ -29,6 +35,18 @@ case "$PKG" in
   *) PKG="$PWD/$PKG" ;;
 esac
 [ ! -e "$PREFIX/sbin/restate" ] || die "$PREFIX/sbin/restate is there already"
+if [ -n "$PROXY_PKG" ]; then
+  [ -f "$PROXY_PKG" ] || die "no such package: $PROXY_PKG"
+  case "$PROXY_PKG" in
+    /*) ;;
+    *) PROXY_PKG="$PWD/$PROXY_PKG" ;;
+  esac
+  case "$(basename "$PROXY_PKG")" in
+    restate-proxy-*) ;;
+    *) die "$PROXY_PKG is not restate-proxy's package" ;;
+  esac
+  [ ! -e "$PREFIX/sbin/restate-proxy" ] || die "$PREFIX/sbin/restate-proxy is there already"
+fi
 
 case "$(uname -s)" in
 FreeBSD)
@@ -76,6 +94,38 @@ bad="$(find "$PREFIX/sbin/restate" "$HOOKS" \( ! -user 0 -o -perm -020 -o -perm 
 ok "it and its hooks are root's, and no one else's to write"
 "$PREFIX/sbin/restate" features --json > /dev/null
 ok "restate features runs"
+
+if [ -n "$PROXY_PKG" ]; then
+  case "$(uname -s)" in
+  FreeBSD)
+    pkg add "$PROXY_PKG"
+    proxy_user=restate-proxy
+    proxy_rc="$PREFIX/etc/rc.d/restate_proxy"
+    proxy_remove() { pkg delete -y restate-proxy; }
+    ;;
+  OpenBSD)
+    cp "$PROXY_PKG" "$named/restate-proxy-$VERSION.tgz"
+    pkg_add -D unsigned "$named/restate-proxy-$VERSION.tgz"
+    proxy_user=_restate-proxy
+    proxy_rc=/etc/rc.d/restate_proxy
+    proxy_remove() { pkg_delete restate-proxy; }
+    ;;
+  NetBSD)
+    pkg_add "$PROXY_PKG"
+    proxy_user=restate-proxy
+    proxy_rc="$PREFIX/share/examples/rc.d/restate_proxy"
+    proxy_remove() { pkg_delete restate-proxy; }
+    ;;
+  esac
+  [ -d /etc/restate/proxy.d ] || die "the package did not make /etc/restate/proxy.d"
+  bad="$(find "$PREFIX/sbin/restate-proxy" \( ! -user 0 -o -perm -020 -o -perm -002 \) -print)"
+  [ -z "$bad" ] || die "not root's alone: $bad"
+  sh "$REPO_ROOT/scripts/verify-proxy.sh" "$PREFIX/sbin" "$proxy_user" "$proxy_rc"
+  proxy_remove
+  [ ! -e "$PREFIX/sbin/restate-proxy" ] || die "removing restate-proxy left $PREFIX/sbin/restate-proxy"
+  [ ! -e "$proxy_rc" ] || die "removing restate-proxy left $proxy_rc"
+  ok "restate-proxy installed, checked and removed"
+fi
 
 remove
 [ ! -e "$PREFIX/sbin/restate" ] || die "removing the package left $PREFIX/sbin/restate"

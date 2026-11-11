@@ -1,0 +1,6 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy's user, which its service runs as (sysusers.d(5)): the
+# repositories it serves are its to write, and the key its to read.
+u restate-proxy - "restate-proxy, restate repositories over HTTPS" /var/lib/restate-proxy

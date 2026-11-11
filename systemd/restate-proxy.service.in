@@ -1,0 +1,76 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy.service: serves the repositories /etc/restate/proxy.d grants
+# over HTTPS (restate-proxy(8)). Installed by the package, not enabled: it
+# needs a certificate, its key and a grant first.
+#
+#   systemctl enable --now restate-proxy
+#   systemctl reload restate-proxy        # read the grants again (SIGHUP)
+#   systemctl restart restate-proxy       # a new certificate or key
+#
+# Its own options besides --serve -- --listen, --cert, --key, --grants,
+# --staging and the limits -- go in RESTATE_PROXY_OPTS, in
+# /etc/default/restate-proxy (Debian, Ubuntu) or /etc/sysconfig/restate-proxy
+# (Fedora, EL, openSUSE), neither of which the package installs:
+#
+#   RESTATE_PROXY_OPTS="--listen :9443 --max-sessions 16"
+#
+# Anything else -- another user, say -- in a drop-in
+# (systemctl edit restate-proxy). Its log is the journal
+# (journalctl -u restate-proxy).
+
+[Unit]
+Description=restate-proxy, restate repositories over HTTPS
+Documentation=man:restate-proxy(8)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/restate-proxy
+EnvironmentFile=-/etc/sysconfig/restate-proxy
+# $RESTATE_PROXY_OPTS unbraced: split into its words, one option each.
+ExecStart=@SBINDIR@/restate-proxy --serve $RESTATE_PROXY_OPTS
+ExecReload=/bin/kill -HUP $MAINPID
+# A user of its own, which the package makes: the repositories it serves are
+# its to write, the key its to read (root's, group restate-proxy, 0640), and
+# nothing else of the machine's.
+User=restate-proxy
+Group=restate-proxy
+# /var/lib/restate-proxy, its alone: the staging is made inside it.
+StateDirectory=restate-proxy
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+# 2 is what it cannot start with -- no certificate, a key that does not match,
+# an address it cannot listen on -- which starting it again will not mend:
+# failed, and the journal says why, rather than tried every five seconds.
+RestartPreventExitStatus=2
+# Each session committed or ended as it stops; one being committed may take a
+# while for a large pack.
+TimeoutStopSec=5min
+# The proxy confines each connection itself (Landlock and seccomp); this is
+# the service's own, around all of it. Not ProtectSystem=strict or
+# ProtectHome: a repository can be anywhere a grant says.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

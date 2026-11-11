@@ -282,6 +282,7 @@ fuzz: ## Fuzz the manifest, rules and pattern parsers (FUZZ_SECONDS=30 by defaul
 
 .PHONY: lint
 lint: build ## Compiler, analyzers, house style, copyright audit, generated-file checks
+	@$(if $(PROXY_OK),$(MAKE) --no-print-directory proxy,$(PROXY_MISSING))
 	@scripts/passed.sh lint scripts/lint.sh
 
 .PHONY: style
@@ -378,18 +379,35 @@ install-tree: build ## Install into DESTDIR, for the package build
 	@$(INSTALL) -m 0755 hooks/* $(DESTDIR)$(exec_prefix)/libexec/$(PROG)/hooks/
 	@printf '  \033[92m✓\033[0m installed into %s\n' "$(DESTDIR)$(prefix)"
 
+# restate-proxy's staged install, as install-tree is restate's, for the
+# packages: the program, its manual and the directory of its grants. Each
+# package adds its own service for its init system, and its user.
+.PHONY: install-proxy-tree
+install-proxy-tree: proxy ## Install restate-proxy into DESTDIR, for the package build
+	@$(INSTALL) -d $(DESTDIR)$(sbindir) $(DESTDIR)$(mandir)/man8
+	@$(INSTALL) -d -m 0755 $(DESTDIR)$(sysconfdir)/$(PROG)/proxy.d
+	@$(INSTALL) -m 0755 $(BIN_DIR)/$(PROXY) $(DESTDIR)$(sbindir)/$(PROXY)
+	@$(INSTALL) -m 0644 man/$(PROXY).8 $(DESTDIR)$(mandir)/man8/$(PROXY).8
+	@printf '  \033[92m✓\033[0m installed %s into %s\n' "$(PROXY)" "$(DESTDIR)$(prefix)"
+
 # A BSD's binary package, built with that system's own tool from a staged
 # install (scripts/build-bsd-pkg.sh). OpenBSD's and NetBSD's packages put the
 # manual under $(prefix)/man, as their ports and pkgsrc do.
 BSD_STAGE := pkg-stage
 BSD_MANDIR = $(if $(filter OpenBSD NetBSD,$(shell uname -s)),$(prefix)/man,$(mandir))
 
+# Then restate-proxy's, the same way, where its TLS library is here (the
+# base system's on each BSD).
 .PHONY: bsd-pkg
-bsd-pkg: build ## Build this BSD's binary package into dist/
+bsd-pkg: build ## Build this BSD's binary packages (restate, restate-proxy) into dist/
 	@rm -rf $(BSD_STAGE)
 	@$(MAKE) --no-print-directory install-tree DESTDIR=$(CURDIR)/$(BSD_STAGE) \
 	         mandir=$(BSD_MANDIR) > /dev/null
 	@scripts/build-bsd-pkg.sh $(BSD_STAGE) dist
+	@rm -rf $(BSD_STAGE)
+	@$(if $(PROXY_OK),$(MAKE) --no-print-directory install-proxy-tree \
+	         DESTDIR=$(CURDIR)/$(BSD_STAGE) mandir=$(BSD_MANDIR) > /dev/null \
+	   && scripts/build-bsd-pkg.sh --proxy $(BSD_STAGE) dist,$(PROXY_MISSING))
 	@rm -rf $(BSD_STAGE)
 
 # An RPM for the Fedora, EL or openSUSE this runs on, and an Alpine package
@@ -405,10 +423,12 @@ apk: ## Build this Alpine release's package into dist/ (as root, in a throwaway 
 
 .PHONY: deb-clean
 deb-clean: ## Remove what the package builds left behind
-	@rm -rf debian/$(PROG) debian/.debhelper debian/files debian/changelog
+	@rm -rf debian/$(PROG) debian/$(PROXY) debian/.debhelper debian/files debian/changelog
 	@rm -f debian/*.substvars debian/*.debhelper debian/*.debhelper.log
 	@rm -f debian/debhelper-build-stamp
 	@rm -f debian/restate.restate-job@.service debian/restate.restate-job@.timer
+	@rm -f debian/restate-proxy.service
+	@rm -f ../$(PROXY)_*.deb ../$(PROXY)-dbgsym_*.ddeb 2>/dev/null || true
 	@rm -f ../$(PROG)_*.deb ../$(PROG)-dbgsym_*.ddeb ../$(PROG)_*.changes \
 	       ../$(PROG)_*.buildinfo ../$(PROG)_*.build ../$(PROG)_*.dsc \
 	       ../$(PROG)_*.tar.* ../$(PROG)_*.upload 2>/dev/null || true

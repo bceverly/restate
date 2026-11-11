@@ -197,16 +197,20 @@ if [ "$MODE" != source ]; then
   # shellcheck disable=SC2012  # sorting by mtime is the point, and these are
   # our own filenames: dpkg-buildpackage names them, not a user.
   DEB="$(ls -t ../restate_*.deb 2>/dev/null | head -1 || true)"
+  # shellcheck disable=SC2012  # as above
+  PROXY_DEB="$(ls -t ../restate-proxy_*.deb 2>/dev/null | head -1 || true)"
   if [ -n "$DEB" ]; then
     bold "Result"
-    ok "$DEB ($(du -h "$DEB" | cut -f1))"
-    if command -v lintian > /dev/null 2>&1; then
-      # Informational: lintian's opinion is worth reading and a tag is not a
-      # reason to fail a local build. CI runs it with --fail-on error.
-      info "lintian:"
-      lintian --tag-display-limit 0 "$DEB" 2>&1 | sed 's/^/    /' || true
-    fi
-    printf '\n  Install it with:\n    sudo dpkg -i %s\n\n' "$DEB"
+    for d in "$DEB" ${PROXY_DEB:+"$PROXY_DEB"}; do
+      ok "$d ($(du -h "$d" | cut -f1))"
+      if command -v lintian > /dev/null 2>&1; then
+        # Informational: lintian's opinion is worth reading and a tag is not a
+        # reason to fail a local build. CI runs it with --fail-on error.
+        info "lintian:"
+        lintian --tag-display-limit 0 "$d" 2>&1 | sed 's/^/    /' || true
+      fi
+    done
+    printf '\n  Install them with:\n    sudo apt install %s\n\n' "$DEB${PROXY_DEB:+ $PROXY_DEB}"
   fi
 else
   # shellcheck disable=SC2012  # as above: sorted by mtime, dpkg's own names

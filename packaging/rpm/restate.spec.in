@@ -8,8 +8,9 @@
 # Fedora COPR and the openSUSE Build Service, which build it for every
 # architecture they have.
 #
-# Very little here, as in debian/rules: one program, its manual and its hooks,
-# from C that links only libc, built by the project's own Makefile.
+# Very little here, as in debian/rules: restate, its manual and its hooks,
+# from C that links only libc, and restate-proxy (the restate-proxy
+# subpackage), which links OpenSSL, each built by the project's own Makefile.
 
 Name:           restate
 Version:        @VERSION@
@@ -23,6 +24,15 @@ BuildRequires:  bash
 BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
+# restate-proxy's alone: OpenSSL 3, by each family's name for it. Not
+# pkgconfig(openssl), which openSUSE's zypper may answer with LibreSSL.
+%if 0%{?suse_version}
+BuildRequires:  libopenssl-devel
+# The restate-proxy user, from its sysusers.d file, openSUSE's way.
+BuildRequires:  sysuser-tools
+%else
+BuildRequires:  openssl-devel
+%endif
 # What the unit tests run besides restate, which a build root as bare as
 # OBS's and COPR's does not have unless asked.
 BuildRequires:  diffutils
@@ -59,6 +69,30 @@ Captures can go into a repository that stores each file once, encrypted if
 wanted, with snapshots pruned on a schedule. One C program that links only
 libc.
 
+%package proxy
+Summary:        Serve restate repositories over HTTPS, append-only
+# gzip, which it runs to read what a pack holds.
+Requires:       gzip
+%if 0%{?suse_version}
+# Optional where it is read before sysuser-tools is there to define it, as
+# rpmspec --buildrequires reads it.
+%{?sysusers_requires}
+%else
+Requires(pre):  shadow-utils
+%endif
+%{?systemd_requires}
+
+%description proxy
+restate-proxy runs on the machine that stores restate repositories, and lets
+the machines that capture into them reach them over HTTPS without being able
+to remove or change what is there: a client may add a snapshot, and read,
+list and restore what its grant allows, and a capture cut off part way
+leaves nothing of itself behind.
+
+Each client has a grant of its own in /etc/restate/proxy.d. The package
+installs the restate-proxy service but neither enables nor starts it: it
+needs a certificate, its key and a grant first. See restate-proxy(8).
+
 %prep
 %autosetup
 
@@ -66,7 +100,10 @@ libc.
 # set_build_flags exports: both apply, as in debian/rules.
 %build
 %{?set_build_flags}
-make build VERSION=%{version}
+make build proxy VERSION=%{version}
+%if 0%{?suse_version}
+%sysusers_generate_pre systemd/restate-proxy.sysusers restate-proxy restate-proxy.conf
+%endif
 
 # The unit tests: self-contained, and a few seconds. Not the end-to-end
 # tests, which build their fixtures with whatever tar, gzip and gpg the
@@ -84,6 +121,50 @@ install -d %{buildroot}%{_unitdir}
 sed 's|@SBINDIR@|%{_sbindir}|' systemd/restate-job@.service.in \
     > %{buildroot}%{_unitdir}/restate-job@.service
 install -m 0644 systemd/restate-job@.timer %{buildroot}%{_unitdir}/restate-job@.timer
+make install-proxy-tree DESTDIR=%{buildroot} prefix=%{_prefix} sbindir=%{_sbindir} \
+     mandir=%{_mandir} VERSION=%{version}
+sed 's|@SBINDIR@|%{_sbindir}|' systemd/restate-proxy.service.in \
+    > %{buildroot}%{_unitdir}/restate-proxy.service
+install -d %{buildroot}%{_sysusersdir}
+install -m 0644 systemd/restate-proxy.sysusers %{buildroot}%{_sysusersdir}/restate-proxy.conf
+
+# The restate-proxy user before its files: from the sysusers.d file on
+# openSUSE; elsewhere by useradd, which rpm 4.19 and later (Fedora) would do
+# from the file itself, and EL 9 and 10's does not.
+%if 0%{?suse_version}
+%pre proxy -f restate-proxy.pre
+%service_add_pre restate-proxy.service
+%else
+%pre proxy
+getent group restate-proxy > /dev/null || groupadd -r restate-proxy
+getent passwd restate-proxy > /dev/null || \
+    useradd -r -g restate-proxy -d /var/lib/restate-proxy -s /sbin/nologin \
+            -c "restate-proxy, restate repositories over HTTPS" restate-proxy
+exit 0
+%endif
+
+# Installed, not enabled or started: it needs a certificate, its key and a
+# grant first. Once enabled, an upgrade restarts it.
+%post proxy
+%if 0%{?suse_version}
+%service_add_post restate-proxy.service
+%else
+%systemd_post restate-proxy.service
+%endif
+
+%preun proxy
+%if 0%{?suse_version}
+%service_del_preun restate-proxy.service
+%else
+%systemd_preun restate-proxy.service
+%endif
+
+%postun proxy
+%if 0%{?suse_version}
+%service_del_postun restate-proxy.service
+%else
+%systemd_postun_with_restart restate-proxy.service
+%endif
 
 # A template unit is never enabled or started by the package: there is no job
 # until someone writes one.
@@ -100,6 +181,15 @@ install -m 0644 systemd/restate-job@.timer %{buildroot}%{_unitdir}/restate-job@.
 %dir %{_sysconfdir}/restate/jobs.d
 %{_unitdir}/restate-job@.service
 %{_unitdir}/restate-job@.timer
+
+%files proxy
+%license LICENSE
+%{_sbindir}/restate-proxy
+%{_mandir}/man8/restate-proxy.8*
+%dir %{_sysconfdir}/restate
+%dir %{_sysconfdir}/restate/proxy.d
+%{_unitdir}/restate-proxy.service
+%{_sysusersdir}/restate-proxy.conf
 
 %changelog
 * @DATE@ Bryan C. Everly <bryan@theeverlys.com> - @VERSION@-1

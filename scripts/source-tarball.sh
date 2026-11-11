@@ -30,7 +30,8 @@ mkdir "$WORK/restate-$VERSION"
     --exclude=./.git --exclude=./bin --exclude=./obj --exclude=./dist --exclude=./pkg-stage \
     --exclude=./.coverage --exclude=./.lint --exclude='./.sanitize*' --exclude=./.passed \
     --exclude=./.fuzz --exclude=./.security-reports --exclude=./.cache \
-    --exclude=./debian/restate --exclude=./debian/.debhelper --exclude=./debian/changelog \
+    --exclude=./debian/restate --exclude=./debian/restate-proxy --exclude=./debian/.debhelper \
+    --exclude=./debian/changelog \
     --exclude='*.o' --exclude='*.gcno' --exclude='*.gcda' --exclude='*.deb' --exclude='*.rpm' \
     --exclude='*.apk' --exclude='restate-test.*' --exclude='restate-cli.*' . ) |
   ( cd "$WORK/restate-$VERSION" && tar -xf - )

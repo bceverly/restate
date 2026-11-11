@@ -19,13 +19,17 @@ license="BSD-2-Clause"
 # and pigz it uses when they are there, and says which is missing when it
 # needs one: apk has no recommendations to name them in.
 depends="gpgv gzip"
-makedepends="bash"
-subpackages="$pkgname-doc"
+# openssl-dev for restate-proxy alone, the one program here that links a
+# library beyond libc.
+makedepends="bash openssl-dev"
+subpackages="$pkgname-doc $pkgname-proxy:proxy"
 source="$pkgname-$pkgver.tar.gz"
+# The restate-proxy user, made before its package's files go in.
+install="$pkgname-proxy.pre-install"
 
 # The Makefile appends its own flags to abuild's CFLAGS, which it exports.
 build() {
-	make build VERSION="$pkgver"
+	make build proxy VERSION="$pkgver"
 }
 
 # The unit tests: self-contained, and a few seconds.
@@ -37,4 +41,17 @@ check() {
 # the sbin it runs from.
 package() {
 	make install-tree DESTDIR="$pkgdir" prefix=/usr VERSION="$pkgver"
+	make install-proxy-tree DESTDIR="$pkgdir" prefix=/usr VERSION="$pkgver"
+	install -Dm 0755 packaging/openrc/restate-proxy.initd "$pkgdir"/etc/init.d/restate-proxy
+	install -Dm 0644 packaging/openrc/restate-proxy.confd "$pkgdir"/etc/conf.d/restate-proxy
+}
+
+# restate-proxy, its grants' directory and its OpenRC service, added to no
+# runlevel: it needs a certificate, its key and a grant first. Its manual is
+# in restate-doc, beside restate's.
+proxy() {
+	pkgdesc="Serve restate repositories over HTTPS, append-only"
+	depends="gzip"
+	amove usr/sbin/restate-proxy etc/restate/proxy.d etc/init.d/restate-proxy \
+		etc/conf.d/restate-proxy
 }

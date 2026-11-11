@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# PROVIDE: restate_proxy
+# REQUIRE: DAEMON NETWORKING
+# KEYWORD: shutdown
+#
+# restate-proxy, restate repositories over HTTPS (restate-proxy(8)), as the
+# restate-proxy user, with its log in syslog. The package puts this in
+# %%PREFIX%%/share/examples/rc.d; to use it:
+#
+#   cp %%PREFIX%%/share/examples/rc.d/restate_proxy /etc/rc.d/
+#   echo restate_proxy=YES >> /etc/rc.conf
+#   service restate_proxy start
+#   service restate_proxy reload        # read the grants again (SIGHUP)
+#
+# restate_proxy_flags are restate-proxy's own options (--listen, --cert, ...);
+# --serve and the staging directory are given here.
+
+$_rc_subr_loaded . /etc/rc.subr
+
+name="restate_proxy"
+rcvar=$name
+desc="restate repositories over HTTPS"
+command="%%PREFIX%%/sbin/restate-proxy"
+restate_proxy_user="restate-proxy"
+restate_proxy_group="restate-proxy"
+procname="$command"
+pidfile="/var/run/${name}.pid"
+start_cmd="restate_proxy_start"
+extra_commands="reload"
+sig_reload=HUP
+
+load_rc_config $name
+
+: "${restate_proxy_dir:=/var/db/restate-proxy}"
+
+# Its directory, its alone: the staging is made inside it. Then the proxy in
+# the background, as its user, what it says to syslog by logger(1), and its
+# pid kept for stop and reload.
+restate_proxy_start()
+{
+	install -d -o "$restate_proxy_user" -g "$restate_proxy_group" -m 0700 \
+	    "$restate_proxy_dir"
+	echo "Starting ${name}."
+	su -m "$restate_proxy_user" -c "exec $command --serve \
+--staging $restate_proxy_dir/staging $restate_proxy_flags" \
+	    2>&1 < /dev/null | logger -t restate-proxy -p daemon.info &
+	sleep 1
+	pgrep -u "$restate_proxy_user" -x restate-proxy | head -n 1 > "$pidfile"
+}
+
+run_rc_command "$1"

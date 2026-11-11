@@ -1,0 +1,19 @@
+#!/bin/sh
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# The restate-proxy user, which its service runs as: the repositories it
+# serves are its to write, and the key its to read. A system user and group
+# of their own, with no login; /var/lib/restate-proxy is made by systemd
+# (StateDirectory) as the service starts. Kept when the package is removed,
+# as files it owned may still be there.
+set -e
+
+if [ "$1" = configure ] && ! getent passwd restate-proxy > /dev/null; then
+  adduser --quiet --system --group --no-create-home \
+    --home /var/lib/restate-proxy restate-proxy
+fi
+
+#DEBHELPER#
+
+exit 0

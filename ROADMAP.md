@@ -214,9 +214,21 @@ The order, each a release of its own:
     in pkgsrc's `/usr/pkg/bin`, which is now in the list
 - [ ] **Limits:** per client, the number of sessions at once, bandwidth by
       hour of day, and a quota hook a multi-tenant host can answer
-- [ ] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,
+- [x] **Packages:** `restate-proxy` as a package of its own, beside `restate`'s,
       for every platform restate ships for, with a service for each init
-      system (systemd, rc.d, rcctl) installed but not enabled
+      system installed but not enabled. Built from the same source at the
+      same version: a second binary package of the Debian source package
+      (so the PPA builds both from one upload), the spec's `restate-proxy`
+      subpackage (COPR, OBS and the release's RPMs), the APKBUILD's, a second
+      package from `make bsd-pkg` on each BSD, and a formula of its own in the
+      tap. A user of its own on each (`restate-proxy`; `_restate-proxy`, uid
+      993, on OpenBSD) and a service for its init system: systemd (hardened,
+      `StateDirectory`), OpenRC, FreeBSD's rc.d under daemon(8), OpenBSD's
+      rcctl, NetBSD's rc.d example, and `brew services`. Its manual,
+      `restate-proxy(8)`, is written by hand and checked by lint against its
+      `--help`. Every package's verify installs it beside `restate`, starts it
+      with a certificate made there and, where curl is, captures through it
+      (`scripts/verify-proxy.sh`)
 - [ ] **Documented:** choosing NFS or the proxy for a repository, the allow
       list, certificates (Let's Encrypt for a public name, or a site's own
       CA), and a route from outside through a firewall, with pfSense's

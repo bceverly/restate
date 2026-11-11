@@ -1,0 +1,11 @@
+#!/bin/sh
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# The restate-proxy user, which its service runs as: the repositories it
+# serves are its to write, and the key its to read. Kept when the package is
+# removed, as files it owned may still be there.
+addgroup -S restate-proxy 2> /dev/null
+adduser -S -D -H -h /var/lib/restate-proxy -s /sbin/nologin -G restate-proxy \
+  -g restate-proxy restate-proxy 2> /dev/null
+exit 0

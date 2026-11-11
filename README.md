@@ -2220,20 +2220,57 @@ sudo make uninstall
 administration tool: a capture worth having reads every file, so it runs as
 root. `/usr/local/sbin` is on root's `PATH` on every Ubuntu release.
 
+### Installing restate-proxy
+
 `restate-proxy`, which serves repositories over HTTPS from the storage host,
-is installed on its own, since it goes on a different machine from the ones
-that capture. It needs OpenSSL's headers (`libssl-dev`; `make install-dev`
+is a package of its own, since it goes on a different machine from the ones
+that capture. It is built from the same source as `restate` and released
+with it, at the same version, everywhere `restate` is: from the PPA,
+COPR and the openSUSE Build Service, as packages attached to each release
+for the BSDs, the RPM distributions and Alpine, and from the Homebrew tap.
+
+```bash
+sudo apt install restate-proxy                     # Ubuntu, from the PPA
+sudo dnf install restate-proxy                     # Fedora, EL, from COPR
+pkg add restate-proxy-VERSION-freebsd-15.1-amd64.pkg  # FreeBSD (OpenBSD and NetBSD as restate's)
+apk add --allow-untrusted restate-proxy-VERSION-r0-alpine3.24-x86_64.apk
+brew install bceverly/tap/restate-proxy            # macOS
+```
+
+Each package puts `restate-proxy` beside `restate`, with its manual
+(`man restate-proxy`), makes `/etc/restate/proxy.d` for its grants and a
+user of its own for its service to run as -- `restate-proxy`, or
+`_restate-proxy` (uid 993) on OpenBSD -- and installs that service, not
+enabled: it needs a certificate, its key and a grant first.
+
+| System | The service | Turned on with |
+|---|---|---|
+| Ubuntu, Fedora, EL, openSUSE | `restate-proxy.service` (systemd) | `systemctl enable --now restate-proxy` |
+| Alpine | `/etc/init.d/restate-proxy` (OpenRC) | `rc-update add restate-proxy && rc-service restate-proxy start` |
+| FreeBSD | `/usr/local/etc/rc.d/restate_proxy` | `sysrc restate_proxy_enable=YES && service restate_proxy start` |
+| OpenBSD | `/etc/rc.d/restate_proxy` | `rcctl enable restate_proxy && rcctl start restate_proxy` |
+| NetBSD | `/usr/local/share/examples/rc.d/restate_proxy`, to copy into `/etc/rc.d` | `restate_proxy=YES` in `/etc/rc.conf`, then `service restate_proxy start` |
+| macOS | `brew services` (as you, with its files in Homebrew's `etc` and `var`) | `brew services start restate-proxy` |
+
+Before turning it on: the certificate chain in `/etc/restate/proxy.crt`, its
+key in `/etc/restate/proxy.key` (root's, group `restate-proxy`, mode 0640),
+a repository made with `restate init` that the `restate-proxy` user owns, and
+a grant for each client in `/etc/restate/proxy.d`, with its token from
+`restate-proxy --new-token`. Its staging is its own: `/var/lib/restate-proxy`
+under systemd and OpenRC, `/var/db/restate-proxy` on the BSDs.
+
+From source, where OpenSSL's headers are (`libssl-dev`; `make install-dev`
 installs them):
 
 ```bash
-sudo make install-proxy                   # /usr/local/sbin/restate-proxy and /etc/restate/proxy.d
+sudo make install-proxy                   # /usr/local/sbin/restate-proxy, its manual and /etc/restate/proxy.d
 sudo make uninstall-proxy                 # the grants in /etc/restate/proxy.d stay
 ```
 
-This installs only the binary and the directory for its grants. The
-certificate, its key, a grant for each client and the staging directory
-(mode 0700, owned by the user the proxy runs as) are up to you. Once they
-exist, `restate-proxy --serve` starts it.
+This installs only the program, its manual and the directory for its grants.
+The certificate, its key, a grant for each client, the staging directory
+(mode 0700, owned by the user the proxy runs as) and a service are up to
+you. Once they exist, `restate-proxy --serve` starts it.
 
 ### Developing on Ubuntu 26.04
 

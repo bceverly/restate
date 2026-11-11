@@ -111,16 +111,18 @@ if [ -z "$dist" ]; then
 fi
 cp "$TOP"/SRPMS/restate-"$VERSION"-*.src.rpm "$OUTDIR/"
 if [ "$MODE" = binary ]; then
-  for f in "$TOP"/RPMS/*/restate-"$VERSION"-*.rpm; do
+  for f in "$TOP"/RPMS/*/restate-"$VERSION"-*.rpm "$TOP"/RPMS/*/restate-proxy-"$VERSION"-*.rpm; do
     case "$f" in
       *-debuginfo-* | *-debugsource-*) continue ;;
     esac
+    name="$(rpm -qp --qf '%{NAME}' "$f" 2> /dev/null)"
     arch="$(rpm -qp --qf '%{ARCH}' "$f" 2> /dev/null)"
-    cp "$f" "$OUTDIR/restate-$VERSION-1${dist}.$arch.rpm"
+    cp "$f" "$OUTDIR/$name-$VERSION-1${dist}.$arch.rpm"
   done
 fi
 made=""
-for f in "$OUTDIR"/restate-"$VERSION"-*.rpm; do
+for f in "$OUTDIR"/restate-"$VERSION"-*.rpm "$OUTDIR"/restate-proxy-"$VERSION"-*.rpm; do
+  [ -e "$f" ] || continue
   made="$made$(basename "$f") "
 done
 ok "${made}in $OUTDIR"

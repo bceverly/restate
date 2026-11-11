@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# PROVIDE: restate_proxy
+# REQUIRE: LOGIN NETWORKING
+# KEYWORD: shutdown
+#
+# restate-proxy, restate repositories over HTTPS (restate-proxy(8)), as the
+# restate-proxy user, with its log in syslog. Installed by the package, not
+# enabled: it needs a certificate, its key and a grant first.
+#
+#   sysrc restate_proxy_enable=YES
+#   service restate_proxy start
+#   service restate_proxy reload        # read the grants again (SIGHUP)
+#
+# Set in rc.conf (sysrc), each with its default:
+#
+#   restate_proxy_user=restate-proxy   who it runs as, with that user's groups
+#   restate_proxy_umask=077            what it makes in a repository is its alone
+#   restate_proxy_dir=/var/db/restate-proxy   its own, the staging inside it
+#   restate_proxy_flags=""             its own options (--listen, --cert, ...);
+#                                      --serve and --staging are given here
+#
+# A site that shares its repositories with a group runs it as a user in that
+# group with restate_proxy_umask=007.
+
+. /etc/rc.subr
+
+name=restate_proxy
+rcvar=restate_proxy_enable
+desc="restate repositories over HTTPS"
+
+load_rc_config $name
+
+: "${restate_proxy_enable:=NO}"
+: "${restate_proxy_user:=restate-proxy}"
+: "${restate_proxy_umask:=077}"
+: "${restate_proxy_dir:=/var/db/restate-proxy}"
+: "${restate_proxy_flags:=}"
+
+# The user and the options are daemon's to give restate-proxy, not rc.subr's:
+# it would run daemon itself as the user, which then could not write the pid
+# files, and put the options before daemon's own. So they are taken here and
+# cleared. The umask rc.subr sets, and daemon and the proxy keep.
+runas="${restate_proxy_user}"
+proxy_flags="${restate_proxy_flags}"
+unset restate_proxy_user restate_proxy_flags
+
+# daemon(8) supervises it -- starting it again should it fail -- and sends
+# what it says to syslog. Its pid file is daemon's, which stop signals;
+# restate-proxy's own is the one reload signals.
+pidfile="/var/run/${name}.pid"
+childpid="/var/run/${name}.child.pid"
+procname="/usr/sbin/daemon"
+command="/usr/sbin/daemon"
+command_args="-P ${pidfile} -p ${childpid} -r -S -l daemon -T restate-proxy \
+-u ${runas} %%PREFIX%%/sbin/restate-proxy --serve \
+--staging ${restate_proxy_dir}/staging ${proxy_flags}"
+
+extra_commands="reload"
+reload_cmd="restate_proxy_reload"
+start_precmd="restate_proxy_prestart"
+
+# Its directory, its user's alone, with that user's own group: the staging is
+# made inside it.
+restate_proxy_prestart()
+{
+	install -d -o "${runas}" -g "$(id -gn "${runas}")" -m 0700 "${restate_proxy_dir}"
+}
+
+restate_proxy_reload()
+{
+	[ -f "${childpid}" ] && kill -HUP "$(cat "${childpid}")"
+}
+
+run_rc_command "$1"

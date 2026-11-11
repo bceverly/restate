@@ -1,0 +1,43 @@
+#!/sbin/openrc-run
+#
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy, restate repositories over HTTPS (restate-proxy(8)), as the
+# restate-proxy user, with its log in syslog. Installed by the package, not
+# added to a runlevel: it needs a certificate, its key and a grant first.
+#
+#   rc-update add restate-proxy
+#   rc-service restate-proxy start
+#   rc-service restate-proxy reload     # read the grants again (SIGHUP)
+#
+# RESTATE_PROXY_OPTS in /etc/conf.d/restate-proxy are restate-proxy's own
+# options (--listen, --cert, ...); --serve is given here.
+
+name="restate-proxy"
+description="restate repositories over HTTPS"
+command="/usr/sbin/restate-proxy"
+command_args="--serve ${RESTATE_PROXY_OPTS}"
+command_user="restate-proxy:restate-proxy"
+command_background=yes
+pidfile="/run/${RC_SVCNAME}.pid"
+output_logger="logger -t restate-proxy -p daemon.info"
+error_logger="logger -t restate-proxy -p daemon.info"
+extra_started_commands="reload"
+
+depend() {
+	need net
+	use logger
+	after firewall
+}
+
+# /var/lib/restate-proxy, its alone: the staging is made inside it.
+start_pre() {
+	checkpath -d -o restate-proxy:restate-proxy -m 0700 /var/lib/restate-proxy
+}
+
+reload() {
+	ebegin "Reading ${name}'s grants again"
+	start-stop-daemon --signal HUP --pidfile "${pidfile}"
+	eend $?
+}

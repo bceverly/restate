@@ -8,9 +8,12 @@ Maintainer: Bryan C. Everly <bryan@theeverlys.com>
 # vendor and nothing to fetch, and a Launchpad builder -- which has no
 # network -- builds it from the source package alone. What it runs (gzip,
 # gpgv, gpg, curl, pigz) it runs as separate processes, so those are runtime
-# dependencies, below, and none of them is needed to build.
+# dependencies, below, and none of them is needed to build. libssl-dev is
+# restate-proxy's alone, the one program here that links a library beyond
+# libc: OpenSSL 3, which every series built for has.
 Build-Depends:
  debhelper-compat (= 13),
+ libssl-dev,
 Standards-Version: 4.7.0
 Homepage: https://github.com/bceverly/restate
 Vcs-Git: https://github.com/bceverly/restate.git
@@ -64,3 +67,30 @@ Description: record what makes a machine different from a fresh install
  machines are paused for exactly as long as their own files take to copy.
  .
  One C program that links only libc.
+
+Package: restate-proxy
+Architecture: any
+# adduser makes the restate-proxy user, in postinst. gzip, which the proxy
+# runs to read what a pack holds, is Essential.
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ adduser,
+# Not needed to serve: restate makes the repositories it serves (restate
+# init), on this machine or another.
+Suggests:
+ restate,
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).

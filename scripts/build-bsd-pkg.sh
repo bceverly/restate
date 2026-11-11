@@ -10,10 +10,28 @@
 #   OpenBSD   pkg_create         restate-VERSION-openbsd-REL-ARCH.tgz
 #   NetBSD    pkg_create         restate-VERSION-netbsd-REL-ARCH.tgz
 #
-#   scripts/build-bsd-pkg.sh STAGE [OUTDIR]
+#   scripts/build-bsd-pkg.sh [--proxy] STAGE [OUTDIR]
 #
 # STAGE is a DESTDIR the program, its manual page and its hooks are installed
-# into under /usr/local; OUTDIR (default dist) is where the package goes. Each
+# into under /usr/local; OUTDIR (default dist) is where the package goes.
+#
+# With --proxy, the package is restate-proxy's (restate-proxy-VERSION-...),
+# from a stage of make install-proxy-tree: the program and its manual, with
+# the service for this system's rc added here, and its user made as the
+# package goes in --
+#
+#   FreeBSD   restate-proxy, by pw in the package's pre-install script;
+#             the service in /usr/local/etc/rc.d (sysrc restate_proxy_enable)
+#   OpenBSD   _restate-proxy, uid and gid 993, by @newuser and @newgroup;
+#             the service in /etc/rc.d (rcctl enable restate_proxy)
+#   NetBSD    restate-proxy, by useradd in the package's +INSTALL; the
+#             service in /usr/local/share/examples/rc.d, as pkgsrc's are,
+#             to copy into /etc/rc.d
+#
+# and /etc/restate/proxy.d, its grants, made for it. None is enabled: it needs
+# a certificate, its key and a grant first. 993 is OpenBSD's ports registry's
+# (infrastructure/db/user.list) first free id far enough past its last (905,
+# in November 2026) that the ports are not soon to reach it. Each
 # is built where it is to run: a package names the release and architecture
 # it was built on, and each system's tools check them.
 #
@@ -26,13 +44,23 @@
 # are its own, and restate run reads them from wherever they are.
 set -eu
 
-STAGE="${1:?usage: build-bsd-pkg.sh STAGE [OUTDIR]}"
+PROXY=0
+if [ "${1:-}" = --proxy ]; then
+  PROXY=1
+  shift
+fi
+STAGE="${1:?usage: build-bsd-pkg.sh [--proxy] STAGE [OUTDIR]}"
 OUTDIR="${2:-dist}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX=/usr/local
 NAME=restate
-VERSION="$(cat "$REPO_ROOT/VERSION")"
 COMMENT="record what makes a machine different from a fresh install"
+if [ "$PROXY" = 1 ]; then
+  NAME=restate-proxy
+  COMMENT="serve restate repositories over HTTPS, append-only"
+fi
+VERSION="$(cat "$REPO_ROOT/VERSION")"
+PROXY_UID=993
 WWW="https://github.com/bceverly/restate"
 MAINTAINER="bryan@theeverlys.com"
 
@@ -65,10 +93,30 @@ ARCH="$(uname -m)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/restate-pkg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
-# The package's description: debian/control's, with its Debian markup taken
-# away, so that there is one to keep up to date.
-sed -n '/^Description:/,$p' "$REPO_ROOT/debian/control" | sed '1d; s/^ //; s/^\.$//' \
-  > "$WORK/desc"
+# The package's description: debian/control's for the package of this name,
+# with its Debian markup taken away, so that there is one to keep up to date.
+awk -v name="$NAME" '
+  /^Package:/ { this = ($2 == name); within = 0; next }
+  this && /^Description:/ { within = 1; next }
+  within && /^[^ ]/ { within = 0 }
+  within && /^$/ { within = 0 }
+  within { print }
+' "$REPO_ROOT/debian/control" | sed 's/^ //; s/^\.$//' > "$WORK/desc"
+[ -s "$WORK/desc" ] || die "no description for $NAME in debian/control"
+
+# restate-proxy's service, for this system's rc, into the stage, with the
+# prefix it is installed under; where each system keeps its own.
+if [ "$PROXY" = 1 ]; then
+  case "$(uname -s)" in
+    FreeBSD) rc="$STAGE$PREFIX/etc/rc.d/restate_proxy" src=freebsd ;;
+    OpenBSD) rc="$STAGE/etc/rc.d/restate_proxy" src=openbsd ;;
+    NetBSD) rc="$STAGE$PREFIX/share/examples/rc.d/restate_proxy" src=netbsd ;;
+    *) die "not a BSD: $(uname -s)" ;;
+  esac
+  mkdir -p "$(dirname "$rc")"
+  sed "s|%%PREFIX%%|$PREFIX|g" "$REPO_ROOT/packaging/bsd/restate_proxy.$src" > "$rc"
+  chmod 0755 "$rc"
+fi
 
 # Every file and directory staged under the prefix, relative to it, in order.
 ( cd "$STAGE$PREFIX" && find . -type f | sed 's,^\./,,' | sort ) > "$WORK/files"
@@ -108,6 +156,20 @@ FreeBSD)
     while IFS= read -r d; do
       printf '    "%s/%s": {"uname": "root", "gname": "wheel", "perm": "0755"},\n' "$PREFIX" "$d"
     done < "$WORK/owndirs" | sed '$s/,$//'
+    if [ "$PROXY" = 1 ]; then
+      # restate-proxy's user, before its files; its grants' directory after.
+      cat > "$WORK/pre-install" <<'SCRIPT'
+pw groupshow restate-proxy > /dev/null 2>&1 || pw groupadd restate-proxy
+pw usershow restate-proxy > /dev/null 2>&1 ||
+  pw useradd restate-proxy -g restate-proxy -d /var/db/restate-proxy -s /usr/sbin/nologin \
+     -c "restate-proxy, restate repositories over HTTPS"
+SCRIPT
+      printf 'install -d -m 0755 /etc/restate /etc/restate/proxy.d\n' > "$WORK/post-install"
+      printf '  },\n'
+      printf '  "scripts": {\n'
+      printf '    "pre-install": "%s",\n' "$(sed 's/\\/\\\\/g; s/"/\\"/g' "$WORK/pre-install" | awk '{printf "%s\\n", $0}')"
+      printf '    "post-install": "%s"\n' "$(sed 's/\\/\\\\/g; s/"/\\"/g' "$WORK/post-install" | awk '{printf "%s\\n", $0}')"
+    fi
     printf '  }\n'
     printf '}\n'
   } > "$WORK/+MANIFEST"
@@ -122,6 +184,16 @@ OpenBSD)
   # Each root's, whoever built it: restate runs only hooks root owns.
   {
     printf '@owner root\n@group bin\n'
+    # restate-proxy's user, its service and its grants' directory: pkg_add
+    # makes the user before the files, puts the rc script in /etc/rc.d, and
+    # makes the directory, which pkg_delete removes only if it is empty.
+    if [ "$PROXY" = 1 ]; then
+      printf '@newgroup _restate-proxy:%s\n' "$PROXY_UID"
+      printf '@newuser _restate-proxy:%s:_restate-proxy:daemon:restate-proxy:/var/empty:/sbin/nologin\n' \
+        "$PROXY_UID"
+      printf '@rcscript /etc/rc.d/restate_proxy\n'
+      printf '@sample /etc/restate/\n@sample /etc/restate/proxy.d/\n'
+    fi
     {
       while IFS= read -r d; do
         printf '%s/\n' "$d"
@@ -167,9 +239,31 @@ NetBSD)
     printf '@owner root\n@group wheel\n'
     cat "$WORK/files"
   } > "$WORK/plist"
+  # restate-proxy's user before its files, and its grants' directory after:
+  # pkg_add runs +INSTALL with PRE-INSTALL, then POST-INSTALL.
+  INSTALL_SCRIPT=""
+  if [ "$PROXY" = 1 ]; then
+    cat > "$WORK/+INSTALL" <<'SCRIPT'
+#!/bin/sh
+case "$2" in
+PRE-INSTALL)
+  groupinfo -e restate-proxy || groupadd restate-proxy
+  userinfo -e restate-proxy ||
+    useradd -g restate-proxy -d /var/db/restate-proxy -s /sbin/nologin \
+      -c "restate-proxy, restate repositories over HTTPS" restate-proxy
+  ;;
+POST-INSTALL)
+  install -d -m 0755 /etc/restate /etc/restate/proxy.d
+  ;;
+esac
+exit 0
+SCRIPT
+    INSTALL_SCRIPT="$WORK/+INSTALL"
+  fi
   info "pkg_create, for NetBSD $REL $ARCH"
   # The file's name says how to compress it: .tgz, gzip.
   ( cd "$WORK" && pkg_create \
+      ${INSTALL_SCRIPT:+-i "$INSTALL_SCRIPT"} \
       -B "$WORK/build-info" \
       -c "-$COMMENT" \
       -d "$WORK/desc" \

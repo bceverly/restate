@@ -1,0 +1,215 @@
+.\" restate-proxy's manual page, written by hand: restate-proxy has a dozen
+.\" options and no generated help to build it from. scripts/check-proxy-man.sh
+.\" (part of make lint) fails if an option `restate-proxy --help` lists is not
+.\" here, so it cannot fall behind. docs/proxy-protocol.md is the whole story.
+.\"
+.\" Copyright (c) 2026 Bryan C. Everly
+.\" SPDX-License-Identifier: BSD-2-Clause
+.TH RESTATE-PROXY 8 "November 10, 2026" "restate-proxy" "System Manager's Manual"
+.nh
+.SH NAME
+restate-proxy \- serve restate repositories over HTTPS, append-only
+.SH SYNOPSIS
+.B restate-proxy
+.B \-\-serve
+.RB [ \-\-listen
+.IR HOST:PORT ]...
+.RB [ \-\-cert
+.IR FILE ]
+.RB [ \-\-key
+.IR FILE ]
+.RB [ \-\-grants
+.IR DIR ]
+.RB [ \-\-max\-connections
+.IR N ]
+.RB [ \-\-idle\-timeout
+.IR SECONDS ]
+.RB [ \-\-max\-sessions
+.IR N ]
+.RB [ \-\-lease
+.IR SECONDS ]
+.RB [ \-\-staging
+.IR DIR ]
+.RB [ \-\-max\-staging
+.IR MIB ]
+.br
+.B restate-proxy
+.B \-\-check\-grants
+.RI [ DIR ]
+.RB [ \-\-json ]
+.br
+.B restate-proxy
+.B \-\-new\-token
+.I FILE
+.br
+.B restate-proxy
+.BR \-\-version " | " \-\-help
+.SH DESCRIPTION
+.B restate-proxy
+runs on the machine that stores
+.BR restate (8)
+repositories, and lets the machines that capture into them reach them over
+HTTPS without being able to remove or change what is there. A client may
+add a snapshot, and read, list and restore what its grant allows; nothing it
+sends can take anything out of a repository. A capture cut off part way
+leaves nothing of itself behind once its session ends.
+.PP
+restate reaches a repository behind the proxy by its URL,
+.IR https://HOST:PORT/v1/CLIENT ,
+with
+.B \-\-repository\-token\-file
+and, for a certificate the system does not trust,
+.B \-\-repository\-ca\-file
+or
+.BR \-\-repository\-pin\-sha256 .
+.PP
+Each connection is served by a process of its own, confined as tightly as
+the system allows: Landlock and seccomp on Linux,
+.BR pledge (2)
+and
+.BR unveil (2)
+on OpenBSD, Capsicum on FreeBSD.
+.SH OPTIONS
+.TP
+.B \-\-serve
+Serve the repositories the grants allow, until
+.BR SIGTERM .
+.TP
+.BI \-\-listen " HOST:PORT"
+Where to listen:
+.I [ADDRESS]:PORT
+for IPv6, or
+.I :PORT
+for every address. Repeatable; the default is
+.BR :8443 .
+.TP
+.BI \-\-cert " FILE"
+The certificate chain in PEM, the proxy's own certificate first
+.RI ( /etc/restate/proxy.crt ).
+Read once, at start.
+.TP
+.BI \-\-key " FILE"
+Its private key in PEM, unencrypted
+.RI ( /etc/restate/proxy.key ).
+Read once, at start.
+.TP
+.BI \-\-grants " DIR"
+The grants
+.RI ( /etc/restate/proxy.d ),
+read again on
+.B SIGHUP
+and whenever the directory changes.
+.TP
+.BI \-\-max\-connections " N"
+Connections served at once (64); one past it is closed as it comes.
+.TP
+.BI \-\-idle\-timeout " SECONDS"
+How long a connection may say nothing before it is closed (60).
+.TP
+.BI \-\-max\-sessions " N"
+Sessions open at once (64); one past it is refused.
+.TP
+.BI \-\-lease " SECONDS"
+How long a session lasts idle and unrenewed (300). restate renews its
+session while it runs, and ends it as it finishes or is killed; a session
+whose client vanished ends when its lease runs out.
+.TP
+.BI \-\-staging " DIR"
+Where an append session's uploads wait to be committed
+.RI ( /var/lib/restate-proxy/staging ).
+Made if it is not there, its parent has to be; it has to be the proxy's
+user's alone (mode 0700), or nothing can be uploaded.
+.TP
+.BI \-\-max\-staging " MIB"
+The most one session's staging may hold (4096).
+.TP
+.BR \-\-check\-grants " [\fIDIR\fP]"
+Read every grant in
+.I DIR
+.RI ( /etc/restate/proxy.d )
+as the proxy would, and say what is wrong with each. Exit 2 if one is not
+good.
+.TP
+.B \-\-json
+Say it as JSON, schema 1.
+.TP
+.BI \-\-new\-token " FILE"
+Write a new client token into
+.IR FILE ,
+which must not exist, readable only by its owner, and print the
+.B token_sha256
+line for the client's grant.
+.TP
+.B \-\-version
+Print the version, the protocol version and the TLS library.
+.TP
+.B \-\-help
+Print a summary of the options.
+.SH GRANTS
+A client's grant is a file in the grants directory named for it,
+.IR CLIENT.conf ,
+in restate's own
+.I key = value
+form. It is read only if it is root's or the proxy's user's and no one else
+may write it, and a grant with an error grants nothing:
+.PP
+.RS
+.nf
+repository   = /srv/restate/web01
+operations   = append, read
+token_sha256 = 8f14e45fceea167a5a36dedd4bea2543c8d2d1e3c1b5d7d0a2a6a1f6c1f8a9e0
+.fi
+.RE
+.PP
+.B operations
+is
+.BR read ,
+.BR append ,
+or both.
+A second
+.B token_sha256
+line lets a token be replaced without a run failing in between. Write a
+grant under a name beginning with a dot and rename it into place: the proxy
+reads only
+.IR CLIENT.conf .
+.PP
+The repository is made with
+.B restate init
+and has to be the proxy's user's to write.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Read the grants again.
+.TP
+.BR SIGTERM ", " SIGINT
+Stop listening, end every connection and every session, and exit 0.
+.SH FILES
+.TP
+.I /etc/restate/proxy.d/
+The grants, one per client.
+.TP
+.IR /etc/restate/proxy.crt ", " /etc/restate/proxy.key
+The certificate chain and its key. Give the key to the proxy's user
+alone: root's, its group the proxy's, mode 0640.
+.TP
+.I /var/lib/restate-proxy/staging/
+Uploads waiting to be committed; what is there when the proxy starts is
+removed.
+.SH LOGGING
+Standard error, a line per event in
+.I key=value
+form, which a service manager's journal keeps: what it listens on, the
+grants it read and each it refused with why, each request, and each session
+opened and ended. A token is never in it, nor a session's id.
+.SH EXIT STATUS
+.TP
+.B 0
+Stopped by a signal, or the grants are all good.
+.TP
+.B 2
+It could not start, or a grant is not good.
+.SH SEE ALSO
+.BR restate (8)
+.PP
+The protocol, the grants and the confinement in full:
+.I https://github.com/bceverly/restate/blob/main/docs/proxy-protocol.md

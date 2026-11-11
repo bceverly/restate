@@ -28,10 +28,12 @@ fi
 
 PREFIX="${prefix:-/usr/local}"
 BINDIR="${sbindir:-$PREFIX/sbin}"
+MANDIR="${mandir:-$PREFIX/share/man}"
 DESTDIR="${DESTDIR:-}"
 PROXY="restate-proxy"
 
 BIN_TARGET="$DESTDIR$BINDIR/$PROXY"
+MAN_TARGET="$DESTDIR$MANDIR/man8/$PROXY.8"
 GRANTS_TARGET="$DESTDIR/etc/restate/proxy.d"
 
 ok()   { printf '  \033[92m✓\033[0m %s\n' "$*"; }
@@ -62,6 +64,7 @@ own_prefix() {
 }
 need_root() {
   writable "$(dirname "$BIN_TARGET")" || return 0
+  writable "$(dirname "$MAN_TARGET")" || return 0
   [ -z "$DESTDIR" ] || return 1
   own_prefix && return 1
   ! writable "$GRANTS_TARGET"
@@ -88,8 +91,8 @@ else
 fi
 
 if [ "$UNINSTALL" = "1" ]; then
-  $SUDO rm -f "$BIN_TARGET"
-  ok "removed $BIN_TARGET"
+  $SUDO rm -f "$BIN_TARGET" "$MAN_TARGET"
+  ok "removed $BIN_TARGET and its manual page"
   # The grants, the certificate, the key and the staging are the site's, and
   # stay; the grants' directory goes only if it is empty.
   if $SUDO rmdir "$GRANTS_TARGET" 2> /dev/null; then
@@ -106,6 +109,9 @@ fi
 $SUDO install -d "$(dirname "$BIN_TARGET")"
 $SUDO install -m 0755 "bin/$PROXY" "$BIN_TARGET"
 ok "installed $BIN_TARGET"
+$SUDO install -d "$(dirname "$MAN_TARGET")"
+$SUDO install -m 0644 "man/$PROXY.8" "$MAN_TARGET"
+ok "installed $MAN_TARGET"
 
 if [ -n "$DESTDIR" ] || [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; then
   $SUDO install -d -m 0755 "$GRANTS_TARGET"
