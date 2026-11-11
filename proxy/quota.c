@@ -8,7 +8,6 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -16,6 +15,7 @@
 #include <unistd.h>
 
 #include "json.h"
+#include "run.h"
 #include "util.h"
 
 void rs_quota_init(struct rs_quota_run *r)
@@ -38,9 +38,11 @@ bool rs_quota_program_ok(const char *program, struct rs_buf *why)
         rs_buf_addf(why, "--quota-hook %s: %s", program, strerror(errno));
         return false;
     }
-    if (!S_ISREG(st.st_mode) || access(program, X_OK) != 0)
+    /* The mode, not access(): that would be a check and then a use, and the
+     * use, each run, is what says whether it can be run. */
+    if (!S_ISREG(st.st_mode) || !(st.st_mode & 0111))
     {
-        rs_buf_addf(why, "--quota-hook %s: not a program this user can run", program);
+        rs_buf_addf(why, "--quota-hook %s: not an executable file", program);
         return false;
     }
     return true;
@@ -79,52 +81,11 @@ static void free_environment(char **env)
     free(env);
 }
 
-/* `program` started with standard input /dev/null, standard output `out`,
- * and `env`: in a process group of its own, so that what it starts is
- * killed with it, with no signal blocked and those the proxy ignores or
- * handles as they would be. Nothing else of the listener's goes with it:
- * every descriptor it has -- its sockets, the children's pairs, the
- * repositories' locks -- is close-on-exec. posix_spawn's code. */
-static int spawn_hook(const char *program, int out, char **env, pid_t *pid)
-{
-    static const int           sigs[] = { SIGPIPE, SIGCHLD, SIGHUP, SIGTERM, SIGINT };
-    posix_spawn_file_actions_t actions;
-    posix_spawnattr_t          attr;
-    sigset_t                   reset;
-    sigset_t                   none;
-    char                      *argv[2];
-    short                      flags = (short)(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK |
-                                               POSIX_SPAWN_SETPGROUP);
-    size_t                     i;
-    int                        rc;
-
-    (void)posix_spawn_file_actions_init(&actions);
-    (void)posix_spawnattr_init(&attr);
-    (void)posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    (void)posix_spawn_file_actions_adddup2(&actions, out, STDOUT_FILENO);
-    (void)sigemptyset(&reset);
-    for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
-    {
-        (void)sigaddset(&reset, sigs[i]);
-    }
-    (void)sigemptyset(&none);
-    (void)posix_spawnattr_setsigdefault(&attr, &reset);
-    (void)posix_spawnattr_setsigmask(&attr, &none);
-    (void)posix_spawnattr_setpgroup(&attr, 0);
-    (void)posix_spawnattr_setflags(&attr, flags);
-    argv[0] = rs_xstrdup(program);
-    argv[1] = NULL;
-    rc = posix_spawn(pid, program, &actions, &attr, argv, env);
-    free(argv[0]);
-    (void)posix_spawn_file_actions_destroy(&actions);
-    (void)posix_spawnattr_destroy(&attr);
-    return rc;
-}
-
 bool rs_quota_start(struct rs_quota_run *r, const char *program, const struct rs_quota_ask *q,
                     int64_t now, unsigned timeout, struct rs_buf *why)
 {
     char **env = environment(q);
+    char  *argv[2];
     int    p[2];
     pid_t  pid = 0;
     int    rc;
@@ -140,7 +101,13 @@ bool rs_quota_start(struct rs_quota_run *r, const char *program, const struct rs
      * one, which is not. */
     (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
     (void)fcntl(p[1], F_SETFD, FD_CLOEXEC);
-    rc = spawn_hook(program, p[1], env, &pid);
+    /* Nothing else of the listener's goes with it: every descriptor it has
+     * -- its sockets, the children's pairs, the repositories' locks -- is
+     * close-on-exec. */
+    argv[0] = rs_xstrdup(program);
+    argv[1] = NULL;
+    rc = rs_spawn_alone(program, argv, env, p[1], &pid);
+    free(argv[0]);
     free_environment(env);
     (void)close(p[1]);
     if (rc != 0)

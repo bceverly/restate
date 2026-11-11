@@ -201,6 +201,39 @@ static int spawn_one(const char *path, char *const argv[], char *const envp[], i
     return rc;
 }
 
+int rs_spawn_alone(const char *path, char *const argv[], char *const env[], int out_fd,
+                   pid_t *pid)
+{
+    static const int           sigs[] = { SIGPIPE, SIGCHLD, SIGHUP, SIGTERM, SIGINT };
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t          attr;
+    sigset_t                   reset;
+    sigset_t                   none;
+    short                      flags = (short)(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK |
+                                               POSIX_SPAWN_SETPGROUP);
+    size_t                     i;
+    int                        rc;
+
+    (void)posix_spawn_file_actions_init(&actions);
+    (void)posix_spawnattr_init(&attr);
+    (void)posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    (void)posix_spawn_file_actions_adddup2(&actions, out_fd, STDOUT_FILENO);
+    (void)sigemptyset(&reset);
+    for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+    {
+        (void)sigaddset(&reset, sigs[i]);
+    }
+    (void)sigemptyset(&none);
+    (void)posix_spawnattr_setsigdefault(&attr, &reset);
+    (void)posix_spawnattr_setsigmask(&attr, &none);
+    (void)posix_spawnattr_setpgroup(&attr, 0);
+    (void)posix_spawnattr_setflags(&attr, flags);
+    rc = posix_spawn(pid, path, &actions, &attr, argv, env);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    (void)posix_spawnattr_destroy(&attr);
+    return rc;
+}
+
 bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int err_fd,
               pid_t *pid, struct rs_buf *err)
 {

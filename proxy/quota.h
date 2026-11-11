@@ -70,8 +70,8 @@ struct rs_quota_run {
 
 void rs_quota_init(struct rs_quota_run *r);
 
-/* Whether `program` is one to run: an absolute path to a regular file this
- * user may run. Why not into `why`. */
+/* Whether `program` is one to run: an absolute path to a regular file with
+ * an execute bit set. Why not into `why`. */
 bool rs_quota_program_ok(const char *program, struct rs_buf *why);
 
 /* `program` started for `q` at `now`, to be done by `now` + `timeout`

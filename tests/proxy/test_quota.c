@@ -112,7 +112,7 @@ void test_quota(void)
     q.name = "packs/P-1.tar.gz";
     q.bytes = 33554432;
 
-    TEST_CASE("quota: a program to run is an absolute path to one this user may run");
+    TEST_CASE("quota: a program to run is an absolute path to an executable file");
     CHECK(rs_quota_program_ok(yes, &why));
     CHECK(!rs_quota_program_ok("hook.sh", &why));
     CHECK_CONTAINS(why.data, "not an absolute path");
@@ -121,7 +121,7 @@ void test_quota(void)
     CHECK_CONTAINS(why.data, "/nonexistent/hook");
     rs_buf_reset(&why);
     CHECK(!rs_quota_program_ok(flat, &why));
-    CHECK_CONTAINS(why.data, "not a program this user can run");
+    CHECK_CONTAINS(why.data, "not an executable file");
     rs_buf_reset(&why);
     CHECK(!rs_quota_program_ok(dir, &why));
 

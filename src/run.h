@@ -84,6 +84,18 @@ void rs_program_pin(enum rs_program p);
 bool rs_spawn(enum rs_program p, char *const argv[], int in_fd, int out_fd, int err_fd,
               pid_t *pid, struct rs_buf *err);
 
+/*
+ * Starts the program at `path` and does not wait for it: for a caller that
+ * watches it in a poll loop of its own, restate-proxy's quota hook. Standard
+ * input /dev/null, standard output `out_fd`, standard error the caller's;
+ * the environment `env` and nothing else; a process group of its own, so that
+ * what it starts can be killed with it; no signal blocked, and SIGPIPE,
+ * SIGCHLD, SIGHUP, SIGTERM and SIGINT as they would be by default. Returns
+ * posix_spawn's code: 0, or why it could not be started.
+ */
+int rs_spawn_alone(const char *path, char *const argv[], char *const env[], int out_fd,
+                   pid_t *pid);
+
 /* Waits for `pid`. *code is its exit status, or 128 + the signal that
  * killed it. */
 bool rs_wait(pid_t pid, int *code, struct rs_buf *err);
