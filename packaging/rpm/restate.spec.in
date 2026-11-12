@@ -25,9 +25,10 @@ BuildRequires:  gcc
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 # restate-proxy's alone: OpenSSL 3, by each family's name for it. Not
-# pkgconfig(openssl), which openSUSE's zypper may answer with LibreSSL.
+# pkgconfig(openssl), which openSUSE's zypper may answer with LibreSSL, and
+# not libopenssl-devel, which on Leap 15.5 is still OpenSSL 1.1.
 %if 0%{?suse_version}
-BuildRequires:  libopenssl-devel
+BuildRequires:  libopenssl-3-devel
 # The restate-proxy user, from its sysusers.d file, openSUSE's way.
 BuildRequires:  sysuser-tools
 %else

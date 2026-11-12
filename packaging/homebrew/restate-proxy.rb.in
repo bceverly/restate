@@ -56,7 +56,7 @@ class RestateProxy < Formula
     hash = shell_output("#{sbin}/restate-proxy --new-token #{testpath}/c01.token")
     assert_match(/^token_sha256 = \h{64}$/, hash)
     (testpath/"proxy.d/c01.conf").write "repository = #{testpath}/repo\noperations = read\n#{hash}"
-    chmod 0o644, testpath/"proxy.d/c01.conf"
+    chmod 0644, testpath/"proxy.d/c01.conf"
     system sbin/"restate-proxy", "--check-grants", testpath/"proxy.d"
   end
 end

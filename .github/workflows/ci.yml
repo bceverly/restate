@@ -302,12 +302,12 @@ jobs:
             verify: verify-rpm.sh
           - name: openSUSE Leap 16
             image: registry.opensuse.org/opensuse/leap:16.0
-            setup: zypper --non-interactive -q install -y gcc make libopenssl-devel openssl diffutils findutils gawk gzip tar gpg2
+            setup: zypper --non-interactive -q install -y gcc make libopenssl-3-devel openssl diffutils findutils gawk gzip tar gpg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
           - name: openSUSE Tumbleweed
             image: registry.opensuse.org/opensuse/tumbleweed:latest
-            setup: zypper --non-interactive -q install -y gcc make libopenssl-devel openssl diffutils findutils gawk gzip tar gpg2
+            setup: zypper --non-interactive -q install -y gcc make libopenssl-3-devel openssl diffutils findutils gawk gzip tar gpg2
             package: bash scripts/build-rpm.sh --deps "" dist
             verify: verify-rpm.sh
     steps:
