@@ -441,7 +441,8 @@ static int fake_curl(const char *conf, void *ctx)
     }
     if (url)
     {
-        if (dropping && nth++ == 0)
+        /* The last request: nth is not counted on past it. */
+        if (dropping && nth == 0)
         {
             drop(f);
         } else

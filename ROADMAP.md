@@ -251,6 +251,14 @@ The order, each a release of its own:
     dump (production, a WordPress host). The hook finds the account's home
     itself, and with no ~/.my.cnf uses Debian's and Ubuntu's maintenance
     login in /etc/mysql/debian.cnf
+  - [ ] **Repositories on the machine are not captured into another**
+    (found 2026-11-12): a capture walks into any directory that is a restate
+    repository (its `restate-repository` file says so) -- other machines'
+    backups on a host that is also a storage host, a USB disk of backups --
+    and stores them again (a lab FreeBSD host read 55 GB of the dev server's
+    repositories and filled its storage). Leave such a directory out by
+    default, saying so in the result's counts, as mount points and network
+    filesystems are; `--keep` a path to take it all the same
   - [ ] **The MySQL hook without stopping the server**: `stop = never`, as
     the PostgreSQL hook has -- the single-transaction dump alone, the
     server's files left out -- so a public site is not down for the copy
