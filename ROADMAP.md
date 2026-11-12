@@ -241,6 +241,10 @@ The order, each a release of its own:
     (500). Run by the listening process, unconfined and never waited for --
     started, its output read as it comes, its exit seen as it is reaped --
     so only the connection that asked waits; `proxy/quota.c`
+  - [x] **Said in `features`** (2026-11-12): `restate features --json` lists
+    `grant_keys`, every key a grant may use, so a program that writes grants
+    (SysManage) gives `max_sessions` and `bandwidth` only to a proxy that
+    reads them -- an older one refuses a grant with a key it does not know
   - [x] **Found on the way, fixed:** a capture refused partway through a
     pack's uploads gave its result the `proxy_reason` of the commit after
     them (`invalid`) rather than the refusal (`storage-full`, `too-large`,

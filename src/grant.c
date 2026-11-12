@@ -434,6 +434,12 @@ static const char *const key_names[KEYS] = { "repository", "operations", "token_
                                               "expires", "label", "max_sessions",
                                               "bandwidth" };
 
+const char *const *rs_grant_keys(size_t *n)
+{
+    *n = KEYS;
+    return key_names;
+}
+
 /* One value, for the key `k`, into `g`: false and why into `err`. */
 static bool take_value(enum key k, const char *v, size_t vlen, struct rs_grant *g,
                        struct rs_buf *err)

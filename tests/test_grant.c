@@ -134,6 +134,17 @@ static void test_names(void)
 {
     char *client = NULL;
 
+    TEST_CASE("grant: the keys a grant may use");
+    {
+        size_t             n = 0;
+        const char *const *keys = rs_grant_keys(&n);
+
+        CHECK(n == 7);
+        CHECK_STR(keys[0], "repository");
+        CHECK_STR(keys[5], "max_sessions");
+        CHECK_STR(keys[6], "bandwidth");
+    }
+
     TEST_CASE("grant: client names and grant file names");
     CHECK(rs_grant_client_valid("web01"));
     CHECK(rs_grant_client_valid("4b1f0c7e-2d6a-4e8f-9a3b-1c2d3e4f5a6b.previous"));

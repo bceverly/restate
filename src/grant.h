@@ -91,6 +91,12 @@ void rs_grant_free(struct rs_grant *g);
  * expired. Every digest the grant has is compared, whichever matches. */
 bool rs_grant_admits(const struct rs_grant *g, const char *token, size_t len, int64_t now);
 
+/* Every key a grant file may use, in the order the parser knows them, `*n`
+ * of them: `restate features --json` lists them as `grant_keys`, so a
+ * program that writes grants (SysManage) writes a key only to a proxy that
+ * reads it -- an older proxy refuses a grant with a key it does not know. */
+const char *const *rs_grant_keys(size_t *n);
+
 /* The bandwidth `g` allows in `hour` (0 to 23) of the local day: bytes a
  * second, each way, or 0 for no limit. */
 uint64_t rs_grant_rate(const struct rs_grant *g, int hour);

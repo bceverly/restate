@@ -27,6 +27,7 @@
 #include "diff.h"
 #include "fsflags.h"
 #include "fstab.h"
+#include "grant.h"
 #include "hooks.h"
 #include "identity.h"
 #include "image.h"
@@ -3555,6 +3556,13 @@ int rs_cmd_features(const struct rs_options *o)
     list = rs_jobj_add(&doc, "job_keys");
     rs_jval_set_array(list);
     keys = rs_job_keys(&nkeys);
+    for (i = 0; i < nkeys; i++)
+    {
+        rs_jval_set_string(rs_jarr_add(list), keys[i]);
+    }
+    list = rs_jobj_add(&doc, "grant_keys");
+    rs_jval_set_array(list);
+    keys = rs_grant_keys(&nkeys);
     for (i = 0; i < nkeys; i++)
     {
         rs_jval_set_string(rs_jarr_add(list), keys[i]);
