@@ -1712,6 +1712,35 @@ HOOK
     wait "$locker"
   fi
 
+  # The MySQL hook finds its login as a service runs it, with no HOME: root's
+  # ~/.my.cnf, or else Debian's and Ubuntu's maintenance login (2026-11-12:
+  # an install guide had given root a password, and restate-job@ has no HOME).
+  my="$HERE/../../hooks/mysql"
+  mkdir -p mybin mydump myhome
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "-- HOME=$HOME $*"\n' > mybin/mysqldump
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\necho "$*" >> "%s/my.log"\n' "$WORK" > mybin/systemctl
+  chmod 0755 mybin/*
+  printf '[client]\nuser = debian-sys-maint\n' > debian.cnf
+  # myrun [VAR=VALUE...] -- the hook's pause, as a service runs it.
+  # shellcheck disable=SC2329  # run by expect
+  myrun() { env -u HOME PATH="$WORK/mybin:$PATH" RESTATE_DUMP_DIR="$WORK/mydump" "$@" sh "$my" pause mysql; }
+  mydumped() { gzip -dc mydump/mysqldump.sql.gz 2> /dev/null; }
+  myhome="$(awk -F: -v uid="$(id -u)" '$3 == uid { print $6; exit }' /etc/passwd)"
+  expect 0 "the mysql hook pauses with no HOME" -- myrun RESTATE_MYSQL_DEBIAN_CNF="$WORK/none.cnf"
+  contains "$(mydumped)" "-- HOME=$myhome --all-databases" "dumping as its account, from its home"
+  contains "$(cat my.log)" "stop mysql" "and stops it"
+  if [ -n "$myhome" ] && [ ! -e "$myhome/.my.cnf" ]; then
+    expect 0 "with no ~/.my.cnf, and Debian's maintenance login" -- \
+      myrun RESTATE_MYSQL_DEBIAN_CNF="$WORK/debian.cnf"
+    contains "$(mydumped)" "--defaults-extra-file=$WORK/debian.cnf --all-databases" "dumps with that login"
+  fi
+  printf '[client]\nuser = root\n' > myhome/.my.cnf
+  expect 0 "with a ~/.my.cnf" -- myrun HOME="$WORK/myhome" RESTATE_MYSQL_DEBIAN_CNF="$WORK/debian.cnf"
+  lacks "$(mydumped)" "defaults-extra-file" "uses that, not the maintenance login"
+  contains "$(mydumped)" "HOME=$WORK/myhome" "from the HOME it was given"
+
   # The PostgreSQL hook, with stand-ins for PostgreSQL's tools: the dump goes
   # through gzip as it is written, is not begun where it cannot fit, leaves
   # nothing behind when it fails, and is left out where the configuration says.

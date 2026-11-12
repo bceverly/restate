@@ -1395,6 +1395,9 @@ void rs_remote_free(struct rs_remote *rm)
     }
     free(rm->lists);
     rs_buf_free(&rm->said);
+    /* What curl last said was said of this remote, and nothing reads it
+     * after: the next run's first request resets it. */
+    rs_buf_free(&curl_said);
     memset(rm->token, 0, sizeof(rm->token));
     free(rm->url);
     free(rm);

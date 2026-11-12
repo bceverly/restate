@@ -245,6 +245,15 @@ The order, each a release of its own:
     `grant_keys`, every key a grant may use, so a program that writes grants
     (SysManage) gives `max_sessions` and `bandwidth` only to a proxy that
     reads them -- an older one refuses a grant with a key it does not know
+  - [x] **The MySQL hook's login under a service** (2026-11-12): run by
+    restate-job@ a hook has no HOME, so mysqldump never read root's
+    ~/.my.cnf, and a root an install guide had given a password could not
+    dump (production, a WordPress host). The hook finds the account's home
+    itself, and with no ~/.my.cnf uses Debian's and Ubuntu's maintenance
+    login in /etc/mysql/debian.cnf
+  - [ ] **The MySQL hook without stopping the server**: `stop = never`, as
+    the PostgreSQL hook has -- the single-transaction dump alone, the
+    server's files left out -- so a public site is not down for the copy
   - [x] **A repository not made yet** (2026-11-12): a client whose grant
     names a repository the storage host has not made is answered `404
     no-repository` at its first good token, saying the storage host must

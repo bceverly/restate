@@ -11,7 +11,11 @@
 #   resume NAME   start it again
 #
 # NAME is "mysql" or "mariadb", which is also the unit's name. The dump uses
-# root's own login to the server, as Debian and Ubuntu set it up (the socket).
+# root's own login to the server, as Debian and Ubuntu set it up (the socket),
+# or the one root's ~/.my.cnf gives -- read even when the hook is run with no
+# HOME, as a systemd service is (restate-job@) -- or else, with neither,
+# Debian's and Ubuntu's maintenance login in /etc/mysql/debian.cnf: a root
+# given a password by an install guide still dumps (2026-11-12).
 #
 # To change what this does, copy it to /etc/restate/hooks.d/mysql (root's,
 # mode 0755) and edit the copy: that one is used in place of this.
@@ -36,7 +40,17 @@ pause)
     out="$RESTATE_DUMP_DIR/mysqldump.sql"
     dump=mysqldump
     command -v mariadb-dump > /dev/null 2>&1 && dump=mariadb-dump
-    "$dump" --all-databases --single-transaction --routines --events --triggers > "$out.tmp"
+    # A service has no HOME, and the client finds ~/.my.cnf only through it.
+    if [ -z "${HOME:-}" ]; then
+      HOME=$(awk -F: -v uid="$(id -u)" '$3 == uid { print $6; exit }' /etc/passwd)
+      HOME=${HOME:-/root}
+      export HOME
+    fi
+    set --
+    if [ ! -r "$HOME/.my.cnf" ] && [ -r "${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}" ]; then
+      set -- "--defaults-extra-file=${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}"
+    fi
+    "$dump" "$@" --all-databases --single-transaction --routines --events --triggers > "$out.tmp"
     gzip -f "$out.tmp"
     mv -f "$out.tmp.gz" "$out.gz"
   fi
