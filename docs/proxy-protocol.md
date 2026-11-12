@@ -539,6 +539,14 @@ operations becomes:
 | remove                    | in the stage; nothing in the repository is removed -- a failed capture's packs go with its session |
 | lock, unlock              | the session's own locks; unlock is ending it             |
 
+A curl run in which a request never reached the proxy -- curl could not
+resolve its name or connect -- is asked again whole after 1, 2, 4, 8, 15 and
+30 seconds, with a warning each time, before the run fails. Whole, because
+curl goes on to the rest: a pack's commit after an upload that never
+arrived is refused, and must be asked again after it. Asking a run twice is
+asking it once: an upload is put again, a commit already made is answered
+`200`, a read is read again.
+
 Everything that would remove, replace or rename something already in the
 repository -- prune, repack, sign on a snapshot already there, protect --
 is refused against a proxy, and run on the storage host.

@@ -251,6 +251,15 @@ The order, each a release of its own:
     make it, and its result's `proxy_reason` says so -- not `500
     proxy-failed`, with the reason only in the proxy's log as Landlock
     failing to confine to a directory that is not there
+  - [x] **A moment without the proxy** (2026-11-12): a curl run in which a
+    request could not reach the proxy (6 or 7, in its exit status or its
+    first error: curl goes on through a batch and exits with the last
+    request's status) is asked again whole after 1, 2, 4, 8, 15 and 30
+    seconds, saying so, before the run fails -- so a pack's commit refused
+    for its upload missing is asked again with it. Found in the lab: a
+    FreeBSD host on Wi-Fi lost its ARP entry for the storage host 28 minutes
+    into a 6 GB capture, failed every connect for 20 seconds, and the whole
+    capture with them
   - [x] **Found on the way, fixed:** a capture refused partway through a
     pack's uploads gave its result the `proxy_reason` of the commit after
     them (`invalid`) rather than the refusal (`storage-full`, `too-large`,

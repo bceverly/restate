@@ -154,6 +154,16 @@ const char *rs_remote_reason(void);
 typedef int (*rs_remote_transport)(const char *conf, void *ctx);
 void rs_remote_set_transport(rs_remote_transport fn, void *ctx);
 
+/* What a test's transport says curl printed, as its first error line (curl
+ * goes on through a batch after a request fails, and exits with the last
+ * one's status). */
+void rs_remote_transport_said(const char *line);
+
+/* What pauses before a request that could not reach the proxy is asked
+ * again: sleep(3) by default; a test's own, which need not wait. NULL
+ * restores sleep(3). */
+void rs_remote_set_pause(void (*fn)(unsigned seconds));
+
 /* What an answer's headers say: the status of the last response in them --
  * after any 100 Continue -- and its Restate-Reason, Restate-Session and
  * Restate-Lease. False if there is no status line in them. */

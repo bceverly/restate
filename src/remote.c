@@ -116,6 +116,7 @@ static void               *transport_ctx;
 static char                last_reason[64];
 static bool                was_busy;
 static struct rs_buf       curl_said;
+static void              (*pause_for)(unsigned seconds);
 
 /* ------------------------------------------------------------------------- */
 /* Names                                                                     */
@@ -262,6 +263,17 @@ void rs_remote_configure(const char *token, const char *ca, const char *const *k
     /* What a run learns is its own. */
     was_busy = false;
     last_reason[0] = '\0';
+}
+
+void rs_remote_transport_said(const char *line)
+{
+    rs_buf_reset(&curl_said);
+    rs_buf_addstr(&curl_said, line);
+}
+
+void rs_remote_set_pause(void (*fn)(unsigned seconds))
+{
+    pause_for = fn;
 }
 
 void rs_remote_set_transport(rs_remote_transport fn, void *ctx)
@@ -753,22 +765,28 @@ static void req_free(struct req *q, bool keep_out)
     free(q->upload);
 }
 
-/* The requests asked of curl in one run, over one connection; each one's
- * answer read back. False only if curl could not be run at all. */
-static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_buf *err)
+/* The requests asked of curl in one run, over one connection, and each
+ * one's answer read back; curl's exit status in *code. False only if curl
+ * could not be run. */
+static bool batch_once(struct rs_remote *rm, struct req *q, size_t n, int *code,
+                       struct rs_buf *err)
 {
     struct rs_buf b;
     char         *path;
     size_t        i;
-    int           code;
     bool          refused = false;
 
     rs_buf_init(&b);
     for (i = 0; i < n; i++)
     {
-        char *url = rs_xasprintf("%s%s", rm->url, q[i].target);
+        char *url;
         char *h;
 
+        /* Nothing of a try before this one is read as this one's answer. */
+        (void)unlink(q[i].hdr);
+        (void)unlink(q[i].out);
+        q[i].answered = false;
+        url = rs_xasprintf("%s%s", rm->url, q[i].target);
         if (i > 0)
         {
             rs_buf_addstr(&b, "next\n");
@@ -840,10 +858,17 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
         memset(b.data, 0, b.len);
     }
     rs_buf_free(&b);
-    code = transport ? transport(path, transport_ctx) : run_curl(path, NULL);
+    if (transport)
+    {
+        rs_buf_reset(&curl_said);
+        *code = transport(path, transport_ctx);
+    } else
+    {
+        *code = run_curl(path, NULL);
+    }
     (void)unlink(path);
     free(path);
-    if (code < 0)
+    if (*code < 0)
     {
         rs_buf_addf(err, "%s: %s", rm->url, curl_said.len ? curl_said.data : "curl failed");
         return false;
@@ -869,6 +894,71 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
         }
     }
     return true;
+}
+
+/* How long to wait before each new try of requests curl could not connect
+ * for: a minute in all, which outlasts a lease, a router's moment, or an ARP
+ * entry a busy Wi-Fi link let lapse (FreeBSD then fails every connect for 20
+ * seconds), and is far short of a session's lease. */
+static const unsigned retry_waits[] = { 1, 2, 4, 8, 15, 30 };
+
+/* Whether curl could not reach the proxy for some request of the run: the
+ * name not resolved or no connection made (6, 7). curl goes on to the rest
+ * of a batch, and exits with the last one's status, so its first error line
+ * is read too: a pack's upload that could not connect, then its commit
+ * refused for the upload missing, exits 0. */
+static bool not_reached(int code)
+{
+    return code == 6 || code == 7 || strstr(curl_said.data ? curl_said.data : "", "curl: (6)") ||
+           strstr(curl_said.data ? curl_said.data : "", "curl: (7)");
+}
+
+/* The requests asked of curl in one run, over one connection; each one's
+ * answer read back. A run in which curl could not reach the proxy for one
+ * of them is asked again whole, after a pause, for a minute: what it asks
+ * is the same asked twice (an upload is put again, a commit already made is
+ * answered 200, a read is read again), and a commit refused for an upload
+ * that never arrived is so asked again after it. False only if curl could
+ * not be run at all. */
+static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_buf *err)
+{
+    char   reason[sizeof(last_reason)];
+    size_t try = 0;
+    int    code = 0;
+
+    memcpy(reason, last_reason, sizeof(reason));
+    for (;;)
+    {
+        bool   unanswered = false;
+        size_t i;
+
+        if (!batch_once(rm, q, n, &code, err))
+        {
+            return false;
+        }
+        for (i = 0; i < n; i++)
+        {
+            unanswered = unanswered || !q[i].answered;
+        }
+        if (!unanswered || !not_reached(code) ||
+            try >= sizeof(retry_waits) / sizeof(retry_waits[0]))
+        {
+            return true;
+        }
+        rs_warn("%s: %s; trying again in %u s", rm->url,
+                curl_said.len ? curl_said.data : "the proxy could not be reached",
+                retry_waits[try]);
+        if (pause_for)
+        {
+            pause_for(retry_waits[try]);
+        } else
+        {
+            (void)sleep(retry_waits[try]);
+        }
+        try++;
+        /* A refusal in the try given up on is none of the run's. */
+        memcpy(last_reason, reason, sizeof(last_reason));
+    }
 }
 
 /* Why `q` failed, for a message about `what`: the proxy's own words, or

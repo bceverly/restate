@@ -28,6 +28,9 @@ struct fake {
     const char *repo;
     bool        busy;       /* sessions are refused, 423 */
     bool        silent;     /* nothing is answered, as with no proxy there */
+    int         unreached;  /* the next runs that cannot connect, curl's 7 */
+    int         drop_first; /* the next runs whose first request cannot */
+    int         dropped;
     int         runs;       /* how many curls */
     int         requests;   /* and requests in them */
     int         renews;
@@ -341,6 +344,14 @@ static void answer(struct fake *f, const char *url, const char *auth, const char
 }
 
 /* A curl that answers from the fake: reads the config file it was given. */
+/* A request curl could not connect for: no answer, and curl's words. */
+static void drop(struct fake *f)
+{
+    f->dropped++;
+    rs_remote_transport_said("curl: (7) Failed to connect to proxy.example port 8443 after 0 ms: "
+                             "Could not connect to server");
+}
+
 static int fake_curl(const char *conf, void *ctx)
 {
     struct fake *f = ctx;
@@ -355,8 +366,20 @@ static int fake_curl(const char *conf, void *ctx)
     char        *upload = NULL;
     char        *hdr = NULL;
     char        *out = NULL;
+    bool         dropping = f->drop_first > 0;
+    int          nth = 0;
 
     f->runs++;
+    if (dropping)
+    {
+        f->drop_first--;
+    }
+    if (f->unreached > 0)
+    {
+        f->unreached--;
+        free(text);
+        return 7;
+    }
     if (f->silent || !text)
     {
         free(text);
@@ -374,7 +397,13 @@ static int fake_curl(const char *conf, void *ctx)
         }
         if (strcmp(line, "next") == 0 && url)
         {
-            answer(f, url, auth, range, method, data, upload, hdr, out);
+            if (dropping && nth++ == 0)
+            {
+                drop(f);
+            } else
+            {
+                answer(f, url, auth, range, method, data, upload, hdr, out);
+            }
             free(url), free(auth), free(range), free(method), free(data), free(hdr), free(out);
             free(upload);
             url = auth = range = method = data = upload = hdr = out = NULL;
@@ -412,12 +441,18 @@ static int fake_curl(const char *conf, void *ctx)
     }
     if (url)
     {
-        answer(f, url, auth, range, method, data, upload, hdr, out);
+        if (dropping && nth++ == 0)
+        {
+            drop(f);
+        } else
+        {
+            answer(f, url, auth, range, method, data, upload, hdr, out);
+        }
     }
     free(url), free(auth), free(range), free(method), free(data), free(hdr), free(out);
     free(upload);
     free(text);
-    return 0;
+    return 0; /* curl's exit status is the last request's */
 }
 
 static void remote_names(void)
@@ -521,6 +556,14 @@ static void remote_answers(void)
     CHECK(!rs_remote_parse_list("restate-list 1\nf 99999999999999999999 1 a\n", 42, &e, &n));
 }
 
+/* What the client paused for, in all: never slept. */
+static unsigned paused;
+
+static void fake_pause(unsigned seconds)
+{
+    paused += seconds;
+}
+
 /* A fake proxy's repository, and a token file for it. */
 static char *setup(struct fake *f, char **token)
 {
@@ -553,6 +596,8 @@ static char *setup(struct fake *f, char **token)
     f->staging = rs_xasprintf("%s/staging", dir);
     (void)mkdir(f->staging, 0700);
     rs_remote_set_transport(fake_curl, f);
+    rs_remote_set_pause(fake_pause);
+    paused = 0;
     rs_remote_configure(*token, NULL, NULL, 0);
     return dir;
 }
@@ -560,6 +605,7 @@ static char *setup(struct fake *f, char **token)
 static void teardown(char *dir, struct fake *f, char *token)
 {
     rs_remote_set_transport(NULL, NULL);
+    rs_remote_set_pause(NULL);
     rs_remote_configure(NULL, NULL, NULL, 0);
     free((char *)f->repo);
     free(f->staging);
@@ -950,10 +996,28 @@ static void remote_sessions(void)
 
     rs_buf_reset(&err);
     fake_set(&f, false, true);
+    f.runs = 0;
+    paused = 0;
     rm = rs_remote_new(URL);
     CHECK(!rs_remote_begin(rm, RS_REMOTE_LOOK, &busy, &err));
     CHECK(!busy);
     CHECK_CONTAINS(err.data, "the proxy did not answer");
+    /* Asked again for a minute first, and then given up on. */
+    CHECK_INT(f.runs, 7);
+    CHECK_INT(paused, 60);
+    rs_remote_free(rm);
+
+    /* A proxy unreachable for a moment -- a lapsed ARP entry on a busy
+     * link -- is asked again, and the session opens. */
+    rs_buf_reset(&err);
+    fake_set(&f, false, false);
+    f.unreached = 2;
+    f.runs = 0;
+    paused = 0;
+    rm = rs_remote_new(URL);
+    CHECK(rs_remote_begin(rm, RS_REMOTE_LOOK, &busy, &err));
+    CHECK_INT(f.runs, 3);
+    CHECK_INT(paused, 3);
     rs_remote_free(rm);
 
     /* The wrong token: the proxy's own words. */
@@ -1185,6 +1249,11 @@ static void remote_capturing(void)
         so.store = rs_repo_store;
         so.store_ctx = w;
         so.have = rs_repo_have;
+        /* The first request of the next run cannot connect, and curl goes
+         * on to the rest (a pack's commit then finds its upload missing)
+         * and exits 0: the run is asked again whole. */
+        f.drop_first = 1;
+        paused = 0;
         ok = rs_scan(&so, &ix, &stats, &err);
         CHECK(ok);
         ix.created = rs_xstrdup("2026-11-09T01:02:03.000000000Z");
@@ -1207,6 +1276,8 @@ static void remote_capturing(void)
         CHECK(there(real, "snapshots/20261109T010203Z-2/index.json.gz"));
         CHECK(there(real, "snapshots/20261109T010203Z-2/packs"));
         CHECK(f.commits >= 3);
+        CHECK_INT(f.dropped, 1);
+        CHECK_INT(paused, 1);
         free(done.name);
         rs_index_free(&ix);
         rs_rules_free(&rules);
