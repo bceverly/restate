@@ -245,6 +245,12 @@ The order, each a release of its own:
     `grant_keys`, every key a grant may use, so a program that writes grants
     (SysManage) gives `max_sessions` and `bandwidth` only to a proxy that
     reads them -- an older one refuses a grant with a key it does not know
+  - [x] **A repository not made yet** (2026-11-12): a client whose grant
+    names a repository the storage host has not made is answered `404
+    no-repository` at its first good token, saying the storage host must
+    make it, and its result's `proxy_reason` says so -- not `500
+    proxy-failed`, with the reason only in the proxy's log as Landlock
+    failing to confine to a directory that is not there
   - [x] **Found on the way, fixed:** a capture refused partway through a
     pack's uploads gave its result the `proxy_reason` of the commit after
     them (`invalid`) rather than the refusal (`storage-full`, `too-large`,

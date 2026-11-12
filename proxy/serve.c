@@ -169,6 +169,11 @@ static const char *error_text(int status, const char *reason)
     {
         return "this client is over its quota on the storage host\n";
     }
+    if (strcmp(reason, "no-repository") == 0)
+    {
+        return "there is no repository for this client on the storage host yet: make it "
+               "there first (restate init)\n";
+    }
     if (strcmp(reason, "proxy-failed") == 0)
     {
         return "the proxy failed; its log says why\n";
@@ -1112,9 +1117,19 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
      * to it, and no other's. */
     if (!*bound)
     {
-        if (c->bind && !c->bind(c->bind_ctx, g))
+        enum rs_proxy_bound to = c->bind ? c->bind(c->bind_ctx, g) : RS_PROXY_BOUND;
+
+        /* The client's repository not made yet is the storage host's to
+         * make, and said so: not the proxy failing. */
+        if (to != RS_PROXY_BOUND)
         {
-            fail(a, 500, "proxy-failed");
+            if (to == RS_PROXY_NO_REPOSITORY)
+            {
+                fail(a, 404, "no-repository");
+            } else
+            {
+                fail(a, 500, "proxy-failed");
+            }
             a->close = true;
             return;
         }

@@ -68,6 +68,13 @@ struct rs_proxy_session {
  * a status of the protocol's, which says it as 503 client-sessions-full. */
 #define RS_PROXY_CLIENT_FULL 429
 
+/* What rs_proxy_conn.bind made of a connection. */
+enum rs_proxy_bound {
+    RS_PROXY_BOUND,         /* bound to the client */
+    RS_PROXY_NO_REPOSITORY, /* the grant's repository is not there yet */
+    RS_PROXY_BIND_FAILED    /* it could not be bound; the log says why */
+};
+
 /* What looking up a session found. */
 enum rs_proxy_found {
     RS_PROXY_FOUND = 0,
@@ -121,9 +128,10 @@ struct rs_proxy_conn {
     const char            *staging;
     uint64_t               max_staging;  /* bytes one session's staging may hold; 0: the default */
     /* The connection bound to the client of grant `g`, at its first good
-     * token: false, and the request is 500 and the connection ended, if it
-     * could not be. NULL binds it to nothing. */
-    bool                   (*bind)(void *ctx, const struct rs_grant *g);
+     * token: RS_PROXY_BOUND, or the request is answered and the connection
+     * ended -- 404 no-repository where the grant's repository is not there
+     * yet, 500 if it could not be bound. NULL binds it to nothing. */
+    enum rs_proxy_bound    (*bind)(void *ctx, const struct rs_grant *g);
     void                  *bind_ctx;
     /* A commit, as rs_proxy_commit does it -- which it is, if NULL. */
     void                   (*commit)(void *ctx, const char *repository, const char *staging,

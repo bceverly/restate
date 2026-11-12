@@ -330,6 +330,13 @@ static bool token_like(const char *v, size_t len, size_t max, bool hex)
     return true;
 }
 
+/* A 404 that says only that the file or directory is not there (not that
+ * the client has no repository on the storage host, say). */
+static bool not_there(const struct rs_remote_answer *ans)
+{
+    return ans->status == 404 && (!ans->reason[0] || strcmp(ans->reason, "not-found") == 0);
+}
+
 bool rs_remote_parse_headers(const char *text, size_t len, struct rs_remote_answer *out)
 {
     const char *p = text;
@@ -854,8 +861,8 @@ static bool run_batch(struct rs_remote *rm, struct req *q, size_t n, struct rs_b
          * batch, which is what failed it: curl goes on to the rest, and a
          * pack's commit after its uploads were refused is refused too, for
          * a reason that is only that. */
-        if (q[i].answered && q[i].ans.status >= 300 && q[i].ans.status != 404 &&
-            q[i].ans.status != 416 && q[i].ans.reason[0] && !refused)
+        if (q[i].answered && q[i].ans.status >= 300 && q[i].ans.status != 416 &&
+            !not_there(&q[i].ans) && q[i].ans.reason[0] && !refused)
         {
             memcpy(last_reason, q[i].ans.reason, sizeof(last_reason));
             refused = true;
@@ -881,7 +888,7 @@ static void say_failed(const struct rs_remote *rm, const struct req *q, const ch
     (void)rm;
     errno = q->ans.status == 404 ? ENOENT : q->ans.status == 401 || q->ans.status == 403
                                                ? EACCES : EIO;
-    if (q->ans.status == 404 && (!q->ans.reason[0] || strcmp(q->ans.reason, "not-found") == 0))
+    if (not_there(&q->ans))
     {
         rs_buf_addf(err, "%s: %s", what, strerror(ENOENT));
         return;
@@ -1350,7 +1357,7 @@ static const struct listing *listing_of(struct rs_remote *rm, const char *dir)
     req_init(rm, q, target);
     free(target);
     if (!run_batch(rm, q, 1, &err) || !q->answered ||
-        (q->ans.status != 200 && q->ans.status != 404))
+        (q->ans.status != 200 && !not_there(&q->ans)))
     {
         int saved = EIO;
 
@@ -1369,7 +1376,7 @@ static const struct listing *listing_of(struct rs_remote *rm, const char *dir)
     l = rs_xcalloc(1, sizeof(*l));
     rm->lists[rm->nlists++] = l;
     l->dir = rs_xstrdup(dir);
-    l->gone = q->ans.status == 404;
+    l->gone = not_there(&q->ans);
     if (!l->gone)
     {
         bool read = slurp(q->out, LIST_MAX, &text);

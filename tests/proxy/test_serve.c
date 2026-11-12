@@ -190,7 +190,7 @@ static const char *fake_staging;
 static uint64_t    fake_max_staging;
 static bool        fake_commits;
 static int         commit_answer = 201;
-static bool        bind_answer = true;
+static enum rs_proxy_bound bind_answer = RS_PROXY_BOUND;
 static unsigned    binds;
 
 static void fake_commit(void *ctx, const char *repository, const char *staging, const char *name,
@@ -208,7 +208,7 @@ static void fake_commit(void *ctx, const char *repository, const char *staging, 
                                                       : "the disk went away");
 }
 
-static bool fake_bind(void *ctx, const struct rs_grant *g)
+static enum rs_proxy_bound fake_bind(void *ctx, const struct rs_grant *g)
 {
     (void)ctx;
     (void)g;
@@ -838,14 +838,26 @@ static void test_writing(const struct rs_grant *grants)
     CHECK_CONTAINS(out, "HTTP/1.1 401 Unauthorized\r\n");
     free(out);
     free(log);
-    bind_answer = false;
+    bind_answer = RS_PROXY_BIND_FAILED;
     out = ask(grants, GET("/v1/web01/list/", IN(SID_LOOK)) GET("/v1/", ""), &log);
     CHECK_CONTAINS(out, "HTTP/1.1 500 Internal Server Error\r\n");
     CHECK_CONTAINS(out, "Connection: close\r\n");
     CHECK(strstr(out, "restate-proxy 1") == NULL);
     free(out);
     free(log);
-    bind_answer = true;
+
+    TEST_CASE("serve: a client whose repository is not made yet is told so, not a failure");
+    bind_answer = RS_PROXY_NO_REPOSITORY;
+    out = ask(grants, GET("/v1/web01/list/", IN(SID_LOOK)) GET("/v1/", ""), &log);
+    CHECK_CONTAINS(out, "HTTP/1.1 404 Not Found\r\n");
+    CHECK_CONTAINS(out, "Restate-Reason: no-repository\r\n");
+    CHECK_CONTAINS(out, "no repository for this client on the storage host yet");
+    CHECK_CONTAINS(out, "Connection: close\r\n");
+    CHECK(strstr(out, "restate-proxy 1") == NULL);
+    CHECK_CONTAINS(log, "reason=no-repository");
+    free(out);
+    free(log);
+    bind_answer = RS_PROXY_BOUND;
 
     with_sessions = false;
     fake_staging = NULL;

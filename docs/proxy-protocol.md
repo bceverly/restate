@@ -469,7 +469,7 @@ machines may make one at once.
 | `400` | not a request this protocol has                                        |
 | `401` | no session or token, or not one that is good for this client           |
 | `403` | not allowed by this client's grant or this session's kind              |
-| `404` | no such file, directory or session                                     |
+| `404` | no such file, directory or session; or no repository for this client yet |
 | `405` | not a method this endpoint takes; every `DELETE`                       |
 | `409` | in the way: a different file of that name, a version 1 repository      |
 | `411` | a body without `Content-Length`                                        |
@@ -500,6 +500,7 @@ Restate-Reason: repository-version-1
 | `unauthorized`           | `401` | no good token for this client, or no such session  | 2             |
 | `forbidden`              | `403` | not in this grant, or not in this kind of session  | 2             |
 | `not-found`              | `404` | no such file or directory                          | 2             |
+| `no-repository`          | `404` | the grant's repository is not on the storage host yet: make it there (`restate init`) | 2 |
 | `repository-version-1`   | `409` | made by restate 1.3 or older: one capture on the storage host makes it version 2 | 2 |
 | `name-taken`             | `409` | a different pack or snapshot of that name is there | 2             |
 | `invalid`                | `422` | not what restate writes                            | 2             |
@@ -671,7 +672,9 @@ A connection is one client's from its first good token: a request for any
 other client on it afterwards is `401`. From then on two processes serve
 it, each confined as tightly as what it does allows, so that a fault in the
 parser, or in what reads an upload, cannot reach another client's
-repository:
+repository. A grant whose repository is not there yet is answered `404
+no-repository` at that first good token, and the connection ended: the
+storage host has not made it, which is no failure of the proxy's.
 
 - **the connection's** -- TLS, the requests, reading, uploads -- reads the
   client's repository and writes its staging, runs no program and makes no

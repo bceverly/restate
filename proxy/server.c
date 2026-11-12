@@ -768,14 +768,23 @@ static void ask_commit(void *ctx, const char *repository, const char *staging, c
 }
 
 /* rs_proxy_conn.bind: the connection bound to the client of grant `g`. Its
- * staging is made, its committer started, and then this process confined
- * to the client's repository and its staging. */
-static bool bind_client(void *ctx, const struct rs_grant *g)
+ * repository must be there; its staging is made, its committer started,
+ * and then this process confined to the repository and its staging. */
+static enum rs_proxy_bound bind_client(void *ctx, const struct rs_grant *g)
 {
     struct binding *b = ctx;
     struct rs_buf   why;
+    struct stat     st;
     int             pair[2];
     bool            ok;
+
+    /* Not made yet: the storage host's to make (restate init, or the
+     * first capture there), and the client is told so. */
+    if (stat(g->repository, &st) != 0 || !S_ISDIR(st.st_mode))
+    {
+        say("no-repository client=%s repository=%s", g->client, g->repository);
+        return RS_PROXY_NO_REPOSITORY;
+    }
 
     if (b->staging && (g->operations & RS_GRANT_APPEND) != 0)
     {
@@ -784,12 +793,12 @@ static bool bind_client(void *ctx, const struct rs_grant *g)
         {
             say("bind-failed client=%s error=\"%s: %s\"", g->client, b->client_staging,
                 strerror(errno));
-            return false;
+            return RS_PROXY_BIND_FAILED;
         }
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
         {
             say("bind-failed client=%s error=\"socketpair: %s\"", g->client, strerror(errno));
-            return false;
+            return RS_PROXY_BIND_FAILED;
         }
         (void)fflush(NULL);
         b->committer = fork();
@@ -798,7 +807,7 @@ static bool bind_client(void *ctx, const struct rs_grant *g)
             say("bind-failed client=%s error=\"fork: %s\"", g->client, strerror(errno));
             (void)close(pair[0]);
             (void)close(pair[1]);
-            return false;
+            return RS_PROXY_BIND_FAILED;
         }
         if (b->committer == 0)
         {
@@ -824,7 +833,7 @@ static bool bind_client(void *ctx, const struct rs_grant *g)
             why.data ? why.data : "");
     }
     rs_buf_free(&why);
-    return ok;
+    return ok ? RS_PROXY_BOUND : RS_PROXY_BIND_FAILED;
 }
 
 /* In the child: the connection `fd` from `peer`, served, asking the

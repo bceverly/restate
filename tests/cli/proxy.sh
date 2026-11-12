@@ -708,6 +708,29 @@ EOF
       --repository-ca-file "$WORK/cert.pem" --result "$WORK/r.json" "$URL"
     contains "$ERR" "401 unauthorized" "is refused"
     contains "$(cat r.json)" '"proxy_reason": "unauthorized"' "and its result says why"
+    # A client whose repository the storage host has not made yet: told so,
+    # as the storage host's to make, and never the proxy failing.
+    expect 0 "a token for a client with no repository yet" -- "$BIN" --new-token nr01.token
+    printf 'repository = %s/not-yet\noperations = read, append\n%s\n' "$WORK" "$OUT" \
+      > proxy.d/.nr01.tmp
+    chmod 0644 proxy.d/.nr01.tmp
+    mv proxy.d/.nr01.tmp proxy.d/nr01.conf
+    kill -HUP "$SERVER_PID"
+    sleep 1
+    expect 2 "a capture before the storage host made its repository" -- \
+      "${RUN[@]}" capture -q -r tree3 --os=linux --repository-token-file "$WORK/nr01.token" \
+      --repository-ca-file "$WORK/cert.pem" --result "$WORK/r.json" -o "${URL%/up01}/nr01"
+    contains "$ERR" "no repository for this client on the storage host yet" "says so"
+    contains "$ERR" "404 no-repository" "and why"
+    lacks "$ERR" "proxy-failed" "and not as the proxy failing"
+    contains "$(cat r.json)" '"proxy_reason": "no-repository"' "and so does its result"
+    contains "$(cat server.log)" "no-repository client=nr01" "the proxy's log says so"
+    lacks "$(cat server.log)" "confine-failed client=nr01" "and confines nothing it cannot"
+    if [ ! -e not-yet ]; then ok; else fail "and makes no repository"; fi
+    rm -f proxy.d/nr01.conf
+    kill -HUP "$SERVER_PID"
+    sleep 1
+    left "a client with no repository yet"
     expect 2 "a proxy it does not trust" -- \
       "${RUN[@]}" snapshots --repository-token-file "$WORK/up01.token" "$URL"
     contains "$ERR" "the proxy did not answer" "is not asked"
