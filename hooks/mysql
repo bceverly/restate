@@ -10,6 +10,24 @@
 #                 --single-transaction, gzipped), then stop the server
 #   resume NAME   start it again
 #
+# Or, with stop = never, nothing is stopped at all, so that a site the server
+# serves is not down while its files are copied: pause takes the dump alone
+# -- one consistent snapshot of every InnoDB table, taken with the server
+# running -- and tells restate to leave the server's files out of the
+# capture, since a copy of them made while it runs is of no use; resume has
+# nothing to do. The dump is written uncompressed, as mysqldump.sql:
+# restate compresses what it stores, and keeps only the parts of a dump that
+# changed since the last one, which a gzipped dump has none of. A table of
+# another engine -- MyISAM, Aria -- is not in that snapshot, and is dumped as
+# it is at the moment it is read: where those tables matter, keep stop =
+# always. /etc/restate/mysql.conf says which, as "stop = never", or a
+# capture's --hook-option mysql.stop=never (a job's hook_option) says it for
+# one capture, read over the file.
+#
+#   stop = always       (the default) dump, then stop the server while its
+#                       files are copied
+#   stop = never        dump with the server running, and leave its files out
+#
 # NAME is "mysql" or "mariadb", which is also the unit's name. The dump uses
 # root's own login to the server, as Debian and Ubuntu set it up (the socket),
 # or the one root's ~/.my.cnf gives -- read even when the hook is run with no
@@ -31,38 +49,122 @@ if [ "$1" = present ]; then
   exit 0
 fi
 
+# Nothing to do after a restore, or before a walk: exit 2 says so, quietly,
+# before any setting here is looked at.
+case "$1" in
+restored | paths) exit 2 ;;
+esac
+
 action=$1
 name=$2
+conf=/etc/restate/mysql.conf
+
+say() { echo "restate hook: mysql $name: $*" >&2; }
+
+# KEY's value: the capture's --hook-option mysql.KEY=VALUE, the last one
+# given, else $conf's ("KEY = VALUE", the last one given), else $2.
+setting() {
+  v=$(printf '%s\n' "${RESTATE_SETTINGS:-}" | sed -n "s/^$1=//p" | tail -n 1)
+  if [ -z "$v" ] && [ -r "$conf" ]; then
+    v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$conf" |
+      sed 's/[[:space:]]*\(#.*\)\{0,1\}$//' | tail -n 1)
+  fi
+  printf '%s\n' "${v:-$2}"
+}
+
+# Tells restate to leave the server's files out of this capture.
+leave_out() {
+  if [ -n "${RESTATE_REPLY:-}" ]; then
+    echo leave-out > "$RESTATE_REPLY"
+  fi
+}
+
+# Dump every database into the dump directory: gzipped, or with stop =
+# never as it is. Called as "dump || ...", so set -e does not apply here:
+# every step is checked.
+dump() {
+  if [ "$stop" = never ]; then
+    out="$RESTATE_DUMP_DIR/mysqldump.sql"
+  else
+    out="$RESTATE_DUMP_DIR/mysqldump.sql.gz"
+  fi
+  tmp="$out.tmp"
+  # A dump left from an earlier capture is not of this one, whichever kind
+  # it was, and an earlier hook's part of one is no use to anyone.
+  rm -f "$RESTATE_DUMP_DIR/mysqldump.sql.gz" "$RESTATE_DUMP_DIR/mysqldump.sql" \
+    "$RESTATE_DUMP_DIR/mysqldump.sql.tmp" "$RESTATE_DUMP_DIR/mysqldump.sql.tmp.gz" \
+    "$RESTATE_DUMP_DIR/mysqldump.sql.gz.tmp" || return 1
+  program=mysqldump
+  command -v mariadb-dump > /dev/null 2>&1 && program=mariadb-dump
+  # A service has no HOME, and the client finds ~/.my.cnf only through it.
+  if [ -z "${HOME:-}" ]; then
+    HOME=$(awk -F: -v uid="$(id -u)" '$3 == uid { print $6; exit }' /etc/passwd)
+    HOME=${HOME:-/root}
+    export HOME
+  fi
+  set --
+  if [ ! -r "$HOME/.my.cnf" ] && [ -r "${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}" ]; then
+    set -- "--defaults-extra-file=${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}"
+  fi
+  # Whatever ends this, the part written goes.
+  trap 'rm -f "$tmp"' EXIT
+  trap 'exit 1' HUP INT TERM
+  if "$program" "$@" --all-databases --single-transaction --routines --events --triggers \
+    > "$tmp"; then
+    how=0
+  else
+    how=$?
+  fi
+  if [ "$how" != 0 ]; then
+    rm -f "$tmp"
+    say "$program exited $how: nothing of its dump is kept"
+    return 1
+  fi
+  if [ "$stop" != never ]; then
+    gzip -f "$tmp" || return 1
+    tmp="$tmp.gz"
+  fi
+  mv -f "$tmp" "$out" || return 1
+  trap - EXIT HUP INT TERM
+}
+
+stop=$(setting stop always)
+case "$stop" in
+always | never) ;;
+*)
+  say "stop = $stop is not always or never"
+  exit 1
+  ;;
+esac
 
 case "$action" in
 pause)
+  if [ "$stop" = never ]; then
+    # The files are left out whatever happens: copied while the server
+    # runs, they are no copy of it, and the capture is incomplete without a
+    # dump to stand in for them.
+    leave_out
+    if [ -z "${RESTATE_DUMP_DIR:-}" ]; then
+      say "stop = never, and no dump directory to dump into: nothing of it is captured"
+      exit 1
+    fi
+    if ! dump; then
+      say "stop = never, and no dump: nothing of it is captured"
+      exit 1
+    fi
+    exit 0
+  fi
   if [ -n "${RESTATE_DUMP_DIR:-}" ]; then
-    out="$RESTATE_DUMP_DIR/mysqldump.sql"
-    dump=mysqldump
-    command -v mariadb-dump > /dev/null 2>&1 && dump=mariadb-dump
-    # A service has no HOME, and the client finds ~/.my.cnf only through it.
-    if [ -z "${HOME:-}" ]; then
-      HOME=$(awk -F: -v uid="$(id -u)" '$3 == uid { print $6; exit }' /etc/passwd)
-      HOME=${HOME:-/root}
-      export HOME
-    fi
-    set --
-    if [ ! -r "$HOME/.my.cnf" ] && [ -r "${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}" ]; then
-      set -- "--defaults-extra-file=${RESTATE_MYSQL_DEBIAN_CNF:-/etc/mysql/debian.cnf}"
-    fi
-    "$dump" "$@" --all-databases --single-transaction --routines --events --triggers > "$out.tmp"
-    gzip -f "$out.tmp"
-    mv -f "$out.tmp.gz" "$out.gz"
+    dump || exit 1
   fi
   systemctl stop "$name"
   ;;
 resume)
+  # Nothing was stopped.
+  if [ "$stop" = never ]; then
+    exit 0
+  fi
   systemctl start "$name"
-  ;;
-restored | paths)
-  # Asked of every hook, after a restore and before a walk: nothing to do
-  # for either here, which exit 2 says without a word.
-  exit 2
   ;;
 *)
   echo "usage: $0 present|pause|resume NAME" >&2

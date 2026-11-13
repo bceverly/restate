@@ -151,6 +151,18 @@ static void record_classification(const struct rs_options *o, const struct rs_ru
             rs_jval_set_string(rs_jarr_add(list), o->include_mounts[i]);
         }
     }
+    /* And restate repositories: an index without this was made by a walk
+     * that went into them, and verify and status of it walk them too. */
+    rs_jobj_bool(out, "leaves_out_repositories", true);
+    if (o->ninclude_repositories > 0)
+    {
+        list = rs_jobj_add(out, "include_repositories");
+        rs_jval_set_array(list);
+        for (i = 0; i < o->ninclude_repositories; i++)
+        {
+            rs_jval_set_string(rs_jarr_add(list), o->include_repositories[i]);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -349,9 +361,9 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
                   st->by_class[RS_CLASS_BASELINE], st->by_class[RS_CLASS_EXPENDABLE], st->stored);
     (void)fprintf(stderr, "restate: skipped %" PRIu64 " ephemeral, %" PRIu64 " expendable, %"
                           PRIu64 " sockets, %" PRIu64 " mount points, %" PRIu64 " network "
-                          "filesystems and automounts\n",
+                          "filesystems and automounts, %" PRIu64 " restate repositories\n",
                   st->skipped_ephemeral, st->skipped_expendable, st->skipped_sockets,
-                  st->skipped_mounts, st->skipped_remote);
+                  st->skipped_mounts, st->skipped_remote, st->skipped_repositories);
     if (st->bytes_hashed > 0)
     {
         (void)fprintf(stderr, "restate: hashed %" PRIu64 " bytes\n", st->bytes_hashed);
@@ -1132,6 +1144,106 @@ static void remote_free(struct remote *r)
     free(r->reached);
 }
 
+/* The restate repositories a walk records and goes no further into
+ * (scan.h): those it is told to walk all the same, and those it left out. */
+struct repositories {
+    const char **include;  /* beneath the root; into the options or the index */
+    size_t       ninclude;
+    bool         walk;     /* verify or status of an index that walked them */
+    char       **left;
+    size_t       nleft;
+};
+
+/* `path`, as --include-repository gives it, beneath `root`. */
+static const char *beneath_root(const char *root, const char *path)
+{
+    size_t len = strcmp(root, "/") == 0 ? 0 : strlen(root);
+
+    while (len > 1 && root[len - 1] == '/')
+    {
+        len--;
+    }
+    if (len > 0 && root[0] == '/' && strncmp(path, root, len) == 0 && path[len] == '/')
+    {
+        return path + len;
+    }
+    return path;
+}
+
+static void repositories_find(const struct rs_options *o, const char *root,
+                              struct repositories *r)
+{
+    const struct rs_jval *was = o->classified && o->ninclude_repositories == 0
+                                    ? rs_jobject_get(o->classified, "include_repositories")
+                                    : NULL;
+    size_t                n = was && was->type == RS_JARRAY ? was->n : o->ninclude_repositories;
+    size_t                i;
+
+    memset(r, 0, sizeof(*r));
+    r->walk = o->classified && !rs_jobject_get(o->classified, "leaves_out_repositories");
+    r->include = rs_xcalloc(n + 1, sizeof(*r->include));
+    for (i = 0; i < n; i++)
+    {
+        const char *named = was ? was->items[i].s : o->include_repositories[i];
+
+        if (named)
+        {
+            r->include[r->ninclude++] = beneath_root(root, named);
+        }
+    }
+}
+
+static void repository_left(void *ctx, const char *path)
+{
+    struct repositories *r = ctx;
+
+    r->left = rs_xreallocarray(r->left, r->nleft + 1, sizeof(*r->left));
+    r->left[r->nleft++] = rs_xstrdup(path);
+}
+
+/* The ones the walk left out, in the result and on standard error. */
+static void repositories_said(const struct rs_options *o, const struct repositories *r)
+{
+    struct rs_jval *list = rs_jobj_add(rs_result(), "skipped_repositories");
+    struct rs_buf   shown;
+    size_t          i;
+
+    rs_jval_set_array(list);
+    rs_buf_init(&shown);
+    for (i = 0; i < r->nleft; i++)
+    {
+        struct rs_jval *one = rs_jarr_add(list);
+
+        rs_jval_set_object(one);
+        rs_jobj_str(one, "path", r->left[i]);
+        if (i > 0)
+        {
+            rs_buf_addstr(&shown, ", ");
+        }
+        rs_escape(&shown, r->left[i]);
+    }
+    if (r->nleft > 0 && !o->quiet)
+    {
+        (void)fprintf(stderr, "restate: recorded %zu restate repositor%s as the director%s "
+                      "alone, walking nothing in %s: %s (--include-repository PATH walks "
+                      "one)\n", r->nleft, r->nleft == 1 ? "y" : "ies",
+                      r->nleft == 1 ? "y" : "ies", r->nleft == 1 ? "it" : "them", shown.data);
+    }
+    rs_buf_free(&shown);
+}
+
+static void repositories_free(struct repositories *r)
+{
+    size_t i;
+
+    for (i = 0; i < r->nleft; i++)
+    {
+        free(r->left[i]);
+    }
+    free(r->left);
+    free(r->include);
+}
+
 /* Where a walk's kept content goes: an image, or a new snapshot in a
  * repository; and, for an incremental run, the index of the last one. */
 struct sink {
@@ -1165,6 +1277,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     size_t                  nkeep = 0;
     const char            **kit = NULL;
     struct remote           remote;
+    struct repositories     repos;
     size_t                  i;
     bool                    ok;
 
@@ -1265,6 +1378,14 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     so.remote = remote.paths;
     so.nremote = remote.n;
     so.remote_reached = remote.reached;
+    /* The root as the index records it, resolved: --include-repository is
+     * an absolute path. */
+    repositories_find(o, m->root, &repos);
+    so.walk_repositories = repos.walk;
+    so.include_repositories = repos.include;
+    so.ninclude_repositories = repos.ninclude;
+    so.repository = repository_left;
+    so.repository_ctx = &repos;
     m->content = rs_xstrdup(!storing ? "none" : o->baseline_content ? "state+baseline" : "state");
     record_classification(o, &rules, &m->classification);
     /* What is running and writing to files the image keeps: named, or with
@@ -1275,6 +1396,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         if (!quiesce_plan(o, &rules, root, &q))
         {
             remote_free(&remote);
+            repositories_free(&repos);
             quiesce_free(&q);
             rs_rules_free(&rules);
             rs_pkgdb_free(&db);
@@ -1368,8 +1490,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     if (ok)
     {
         remote_said(o, &remote);
+        repositories_said(o, &repos);
     }
     remote_free(&remote);
+    repositories_free(&repos);
     if (live)
     {
         st->paused = q.paused;
@@ -3510,8 +3634,8 @@ int rs_cmd_features(const struct rs_options *o)
                                            "proxy_reason",         "restore.hooks",
                                            "restore.packages",     "restore.resolved",
                                            "restore.unmatched",    "skipped_network_mounts",
-                                           "snapshot",             "status.capture_rules",
-                                           "verify.capture_rules" };
+                                           "skipped_repositories", "snapshot",
+                                           "status.capture_rules", "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;
@@ -3646,6 +3770,10 @@ int rs_cmd_features(const struct rs_options *o)
      * point and goes no further into it, unless --include-mount names it;
      * the result's skipped_network_mounts says which. */
     rs_jobj_bool(&doc, "skips_network_mounts", true);
+    /* And every walk records a restate repository's directory and goes no
+     * further into it, unless --include-repository names it; the result's
+     * skipped_repositories says which. */
+    rs_jobj_bool(&doc, "skips_repositories", true);
     /* A repository behind restate-proxy, https://HOST[:PORT]/v1/CLIENT, for
      * what reads one: snapshots, list, diff, status, du, check, copy out of
      * it and restore. */

@@ -17,6 +17,7 @@
 #include "md5.h"
 #include "meta.h"
 #include "progress.h"
+#include "repo.h"
 #include "result.h"
 #include "sha1.h"
 
@@ -283,6 +284,70 @@ static void grew(struct walk *w, const char *path)
     rs_warn("%s: written to while it was being copied; kept as it was when the copy began",
             shown.data);
     rs_buf_free(&shown);
+}
+
+static void verbose_skip(const struct walk *w, const char *path, const char *why);
+
+/* Whether the directory open at `fd` is a restate repository: its marker a
+ * regular file, and saying it is one, of any version. */
+static bool is_repository(int fd)
+{
+    static const char marker[] = RS_REPO_MARKER;
+    char              buf[sizeof(marker)];
+    ssize_t           n;
+    int               mfd = rs_open_regular_at(fd, RS_REPO_MARKER, NULL);
+
+    if (mfd < 0)
+    {
+        return false;
+    }
+    do
+    {
+        n = read(mfd, buf, sizeof(buf));
+    } while (n < 0 && errno == EINTR);
+    (void)close(mfd);
+    return n == (ssize_t)sizeof(buf) && memcmp(buf, marker, sizeof(marker) - 1) == 0 &&
+           (buf[sizeof(marker) - 1] == ' ' || buf[sizeof(marker) - 1] == '\n');
+}
+
+/* Whether include_repositories names `path`; a trailing slash is let be. */
+static bool repository_included(const struct walk *w, const char *path)
+{
+    size_t i;
+
+    for (i = 0; i < w->opts->ninclude_repositories; i++)
+    {
+        const char *named = w->opts->include_repositories[i];
+        size_t      len = strlen(named);
+
+        while (len > 1 && named[len - 1] == '/')
+        {
+            len--;
+        }
+        if (strncmp(named, path, len) == 0 && path[len] == '\0')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Whether the directory `path`, open at `fd`, is a repository the walk
+ * leaves out: counted, and said, if it is. */
+static bool repository_left_out(struct walk *w, int fd, const char *path)
+{
+    if (w->opts->walk_repositories || w->forced || !is_repository(fd) ||
+        repository_included(w, path))
+    {
+        return false;
+    }
+    w->stats->skipped_repositories++;
+    verbose_skip(w, path, "a restate repository");
+    if (w->opts->repository && !w->opts->count_only)
+    {
+        w->opts->repository(w->opts->repository_ctx, path);
+    }
+    return true;
 }
 
 static void verbose_skip(const struct walk *w, const char *path, const char *why)
@@ -1158,6 +1223,11 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
              * there now under the old metadata would be wrong either way. */
             (void)close(fd);
             unreadable(w, tree_path, ESTALE);
+            return;
+        }
+        if (repository_left_out(w, fd, tree_path))
+        {
+            (void)close(fd);
             return;
         }
         walk_dir(w, fd, tree_path, depth + 1);

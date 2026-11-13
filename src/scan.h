@@ -92,6 +92,19 @@ struct rs_scan_opts {
     const char *const     *remote;
     size_t                 nremote;
     bool                  *remote_reached;
+    /* Restate repositories -- a directory whose restate-repository file says
+     * it is one -- recorded and gone no further into, as network filesystems
+     * are: other machines' backups on a storage host, a disk of them, stored
+     * again would fill what they are stored into. Not when walk_repositories
+     * is set (an index made before this was so, which walked them), nor for
+     * one at a path in include_repositories (beneath the root, any order),
+     * nor beneath a path in keep. Each left out is passed to repository(),
+     * if it is set; a count_only walk passes none. */
+    bool                   walk_repositories;
+    const char *const     *include_repositories;
+    size_t                 ninclude_repositories;
+    void                   (*repository)(void *ctx, const char *path);
+    void                  *repository_ctx;
     /* The package manager's record of the files it installed (pkgdb.h), or
      * NULL to classify by the rules alone. With it, every regular file the
      * rules call baseline or state is checked against its package:
@@ -144,6 +157,7 @@ struct rs_scan_stats {
     uint64_t skipped_sockets;
     uint64_t skipped_mounts;
     uint64_t skipped_remote;  /* network filesystems and automounts (opts->remote) */
+    uint64_t skipped_repositories; /* restate repositories (opts->walk_repositories) */
     uint64_t unreadable;
     uint64_t grew;            /* kept as they were when their copy began */
     uint64_t pkg_unmodified;  /* files as their package installed them */

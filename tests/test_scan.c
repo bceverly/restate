@@ -152,6 +152,12 @@ static int scan_pretending(const void *arg)
     return ok && st.grew == 1 && st.unreadable == 2 ? 1 : 0;
 }
 
+/* Each repository a walk left out, a line apiece. */
+static void said_path(void *ctx, const char *path)
+{
+    rs_buf_addf(ctx, "%s\n", path);
+}
+
 static void test_mounts(const char *dir)
 {
     static const char info[] =
@@ -463,6 +469,109 @@ void test_scan(void)
         o.nremote = 0;
         o.keep = NULL;
         o.nkeep = 0;
+    }
+
+    TEST_CASE("scan: a restate repository, recorded and not walked");
+    {
+        char             *srv = rs_xasprintf("%s/srv", root);
+        char             *dir;
+        const char *const include[] = { "/srv/repo/" };
+        const char *const keep[] = { "/srv/repo/packs/p" };
+        struct rs_buf     said;
+
+        CHECK(mkdir(srv, 0755) == 0);
+        dir = rs_xasprintf("%s/repo", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        dir = rs_xasprintf("%s/repo/packs", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        rs_test_write(srv, "repo/restate-repository", "restate-repository 2\nid 0123\n", 0644);
+        rs_test_write(srv, "repo/packs/p", "pack", 0600);
+        /* Old repositories say "restate-repository 1", and a later format
+         * another number: each is one. */
+        dir = rs_xasprintf("%s/old", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        rs_test_write(srv, "old/restate-repository", "restate-repository 1\n", 0644);
+        rs_test_write(srv, "old/data", "x", 0600);
+        /* A file of that name that does not say so, or a directory of it,
+         * is not. */
+        dir = rs_xasprintf("%s/notes", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        rs_test_write(srv, "notes/restate-repository", "restate-repositoryish\n", 0644);
+        rs_test_write(srv, "notes/todo", "x", 0600);
+        dir = rs_xasprintf("%s/odd", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        dir = rs_xasprintf("%s/odd/restate-repository", srv);
+        CHECK(mkdir(dir, 0700) == 0);
+        free(dir);
+        rs_test_write(srv, "odd/data", "x", 0600);
+
+        rs_buf_init(&said);
+        o.repository = said_path;
+        o.repository_ctx = &said;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/srv/repo") != NULL);
+        CHECK(rs_index_find(&m, "/srv/repo/restate-repository") == NULL);
+        CHECK(rs_index_find(&m, "/srv/repo/packs/p") == NULL);
+        CHECK(rs_index_find(&m, "/srv/old") != NULL);
+        CHECK(rs_index_find(&m, "/srv/old/data") == NULL);
+        CHECK(rs_index_find(&m, "/srv/notes/todo") != NULL);
+        CHECK(rs_index_find(&m, "/srv/odd/data") != NULL);
+        CHECK_INT(st.skipped_repositories, 2);
+        CHECK_STR(said.data, "/srv/old\n/srv/repo\n");
+        rs_index_free(&m);
+
+        /* A walk that only counts says none: the walk after it does. */
+        rs_buf_reset(&said);
+        o.count_only = true;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK_INT(st.skipped_repositories, 2);
+        CHECK(said.len == 0);
+        rs_index_free(&m);
+        o.count_only = false;
+
+        /* One named, trailing slash and all, is walked; the other is not. */
+        o.include_repositories = include;
+        o.ninclude_repositories = 1;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/srv/repo/packs/p") != NULL);
+        CHECK(rs_index_find(&m, "/srv/old/data") == NULL);
+        CHECK_INT(st.skipped_repositories, 1);
+        rs_index_free(&m);
+        o.include_repositories = NULL;
+        o.ninclude_repositories = 0;
+
+        /* An index from before: walked, as it was. */
+        o.walk_repositories = true;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/srv/old/data") != NULL);
+        CHECK_INT(st.skipped_repositories, 0);
+        rs_index_free(&m);
+        o.walk_repositories = false;
+
+        /* A kept path inside one is reached all the same. */
+        o.keep = keep;
+        o.nkeep = 1;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK(rs_index_find(&m, "/srv/repo/packs/p") != NULL);
+        rs_index_free(&m);
+        o.keep = NULL;
+        o.nkeep = 0;
+
+        o.repository = NULL;
+        o.repository_ctx = NULL;
+        rs_buf_free(&said);
+        rs_test_rmtree(srv);
+        free(srv);
     }
 
     TEST_CASE("scan: sockets are never recorded");

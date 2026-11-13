@@ -1212,7 +1212,20 @@ left out of the capture, as a copy made while it runs is of no use, and
 .B "dump = never"
 with it is refused. A job gives it for one server as
 .BR "hook_option = postgresql.stop=never" .
-To
+The MySQL and MariaDB hook takes
+.B "stop = never"
+too, from
+.I /etc/restate/mysql.conf
+or
+.BR "hook_option = mysql.stop=never" ,
+so that a site is not down for the copy:
+.B "mysqldump \-\-single\-transaction"
+alone, written uncompressed as
+.IR mysqldump.sql ,
+and the server's files left out. That snapshot is of one moment for InnoDB
+tables only; where MyISAM or Aria tables matter, keep
+.BR "stop = always" ,
+the default. To
 change what a hook does, copy it to
 .I /etc/restate/hooks.d
 and change the copy.
@@ -1682,6 +1695,18 @@ walks the one mounted at
 .I PATH
 all the same, and the index records it for verify and status. The result's
 .B skipped_network_mounts
+lists those left out.
+.PP
+Nor does any walk go into a restate repository \- a directory whose
+.B restate\-repository
+file says it is one, such as other machines' backups on a storage host \-
+which is recorded and not read, so that backups are not stored again.
+.B \-\-include\-repository
+.I PATH
+walks the one at
+.I PATH
+all the same, and the index records it for verify and status. The result's
+.B skipped_repositories
 lists those left out.
 .PP
 .B list
@@ -2371,7 +2396,7 @@ capture, estimate and status, and restore: the tree.
 .B path
 list: the directory to list; / if not given.
 .TP
-.BR rules " (repeatable), " all ", " one_file_system ", " include_mount " (repeatable)"
+.BR rules " (repeatable), " all ", " one_file_system ", " include_mount " (repeatable), " include_repository " (repeatable)"
 capture, estimate and status (rules for restore too); a status job
 classifies by the capture's own rules unless given these.
 .TP

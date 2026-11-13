@@ -106,6 +106,9 @@ RS_OPT('x', "one-file-system",  no_argument,       NULL,
 RS_OPT(OPT_INCLUDE_MOUNT, "include-mount", required_argument, "PATH",
        "descend into the network filesystem or automount mounted at PATH, which every "
        "walk otherwise records and goes no further into; repeatable")
+RS_OPT(OPT_INCLUDE_REPOSITORY, "include-repository", required_argument, "PATH",
+       "descend into the restate repository at PATH, which every walk otherwise records "
+       "and goes no further into; repeatable")
 RS_OPT('n', "no-hash",          no_argument,       NULL,
        "record metadata only; much faster, but content is then judged by size and mtime")
 RS_OPT(OPT_CACHE, "cache",      required_argument, "DIR",

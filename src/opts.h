@@ -71,6 +71,7 @@ enum {
     OPT_PASSPHRASE_FD,
     OPT_DECRYPT_WITH,
     OPT_INCLUDE_MOUNT,
+    OPT_INCLUDE_REPOSITORY,
     OPT_REPOSITORY_TOKEN_FILE,
     OPT_REPOSITORY_CA_FILE,
     OPT_REPOSITORY_PIN_SHA256
@@ -154,6 +155,8 @@ struct rs_options {
     size_t          nincludes;
     const char    **include_mounts; /* --include-mount PATH, each */
     size_t          ninclude_mounts;
+    const char    **include_repositories; /* --include-repository PATH, each */
+    size_t          ninclude_repositories;
     bool            progress_json;  /* --progress=json */
     const char     *progress_file;  /* --progress-file FILE */
     const char     *tmpdir;         /* --tmpdir DIR */

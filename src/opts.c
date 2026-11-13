@@ -190,6 +190,9 @@ void rs_options_free(struct rs_options *o)
     free(o->include_mounts);
     o->include_mounts = NULL;
     o->ninclude_mounts = 0;
+    free(o->include_repositories);
+    o->include_repositories = NULL;
+    o->ninclude_repositories = 0;
     free(o->quiesce_with);
     o->quiesce_with = NULL;
     o->nquiesce_with = 0;
@@ -524,6 +527,17 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             o->include_mounts = rs_xreallocarray(o->include_mounts, o->ninclude_mounts + 1,
                                                  sizeof(*o->include_mounts));
             o->include_mounts[o->ninclude_mounts++] = optarg;
+            break;
+        case OPT_INCLUDE_REPOSITORY:
+            if (optarg[0] != '/')
+            {
+                rs_buf_addf(err, "--include-repository: \"%s\" is not an absolute path", optarg);
+                return false;
+            }
+            o->include_repositories =
+                rs_xreallocarray(o->include_repositories, o->ninclude_repositories + 1,
+                                 sizeof(*o->include_repositories));
+            o->include_repositories[o->ninclude_repositories++] = optarg;
             break;
         case OPT_PROGRESS_FILE:
             o->progress_file = optarg;

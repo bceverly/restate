@@ -472,6 +472,10 @@ Options:
                           descend into the network filesystem or automount
                           mounted at PATH, which every walk otherwise records
                           and goes no further into; repeatable
+      --include-repository=PATH
+                          descend into the restate repository at PATH, which
+                          every walk otherwise records and goes no further
+                          into; repeatable
   -n, --no-hash           record metadata only; much faster, but content is
                           then judged by size and mtime
       --cache=DIR         installer fetch, baseline fetch: keep what is
@@ -694,6 +698,18 @@ written uncompressed, as `pg_dumpall.sql`, since restate compresses what it
 stores and keeps only the parts of a dump that changed, of which a gzipped
 dump has none; the cluster's own files are left out of the capture, since a
 copy made while it runs is of no use; and `dump = never` with it is refused.
+
+The MySQL and MariaDB hook takes `stop = never` too, from
+`/etc/restate/mysql.conf` or `--hook-option mysql.stop=never`, so that a
+public site is not down for the copy: `mysqldump --single-transaction`
+alone, taken while the server runs and written uncompressed as
+`mysqldump.sql`, and the server's files left out. That snapshot is of one
+moment for InnoDB tables only; a MyISAM or Aria table is dumped as it is when
+it is read, so where those matter keep `stop = always`, the default, which
+dumps (gzipped, as `mysqldump.sql.gz`) and then stops the server while its
+files are copied. A dump that fails keeps nothing of itself: with `stop =
+always` the server is not stopped and the pause fails; with `stop = never`
+nothing of the databases is captured, and the capture says it is incomplete.
 
 A capture can give any hook a setting of its own file for one run, as
 `--hook-option HOOK.KEY=VALUE` (in a job, `hook_option = HOOK.KEY=VALUE`,
@@ -1351,6 +1367,17 @@ filesystem are walked as before. `--include-mount PATH` (in a job,
 index records it, and verify and status walk it too. The result's
 `skipped_network_mounts` lists those left out, each `path` and `type`.
 
+Nor does any walk go into a restate repository: a directory whose
+`restate-repository` file says it is one -- other machines' backups on a
+host that is also a storage host, a USB disk of them, this machine's own.
+Stored again they would fill the storage they are stored into, and they are
+backups already. The directory is recorded and nothing in it is read, and
+the summary counts it. `--include-repository PATH` (in a job,
+`include_repository = PATH`) walks the one at PATH all the same; the index
+records it, and verify and status walk it too. The result's
+`skipped_repositories` lists those left out, each `path`. An index made by a
+restate from before this, which walked them, is verified as it was made.
+
 **`list`** says what is directly in one directory of a snapshot -- each
 name's type, mode, owner, size and time, and a symlink's target -- from its
 index alone, reading no pack: to look through what a snapshot holds and pick
@@ -1786,9 +1813,9 @@ a passphrase) -- as a storage host does after a capture, before `protect` --
 and its result says which snapshot (`signed`, `REPO::NAME`) and whose key
 (`signer`). A `list` job
 lists the directory `path` says (`/` if it says none). A `status` job takes
-`rules`, `all`, `one_file_system` and `include_mount` as a capture does,
-though it seldom needs them: it classifies by the capture's own rules unless
-given others.
+`rules`, `all`, `one_file_system`, `include_mount` and `include_repository`
+as a capture does, though it seldom needs them: it classifies by the
+capture's own rules unless given others.
 
 Any job but `estimate`, `protect` and `sign` can read what is encrypted, and takes
 `decrypt_with`, the secret key as `--decrypt-with` takes it -- repeatable,

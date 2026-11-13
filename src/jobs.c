@@ -118,6 +118,7 @@ enum key_id {
     KEY_PACKAGES,
     KEY_OUTPUT,
     KEY_INCLUDE_MOUNT,
+    KEY_INCLUDE_REPOSITORY,
     KEY_NO_LOCK,
     KEY_REPOSITORY_TOKEN_FILE,
     KEY_REPOSITORY_CA_FILE,
@@ -182,6 +183,8 @@ static const struct key {
     [KEY_PACKAGES] = { "packages", K_BOOL, false, J_DIFF | J_RESTORE },
     [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF },
     [KEY_INCLUDE_MOUNT] = { "include_mount", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_STATUS },
+    [KEY_INCLUDE_REPOSITORY] = { "include_repository", K_PATH, true,
+                                 J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_NO_LOCK] = { "no_lock", K_BOOL, false,
                       J_RESTORE | J_CHECK | J_COPY | J_DIFF | J_LIST | J_SNAPSHOTS | J_STATUS },
     [KEY_REPOSITORY_TOKEN_FILE] = { "repository_token_file", K_PATH, false, J_ANY & ~J_ESTIMATE },
@@ -593,6 +596,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_INCLUDE_MOUNT:
         add(&o->include_mounts, &o->ninclude_mounts, v);
+        break;
+    case KEY_INCLUDE_REPOSITORY:
+        add(&o->include_repositories, &o->ninclude_repositories, v);
         break;
     case KEY_EXCLUDE:
         add(&o->excludes, &o->nexcludes, v);
@@ -1025,8 +1031,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->whole_packs || o->nquiesce_with || o->nhook_options || o->append_only ||
                 o->create || o->json ||
                 o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group ||
-                o->ninclude_mounts || o->repository_token_file || o->repository_ca_file ||
-                o->nrepository_pins;
+                o->ninclude_mounts || o->ninclude_repositories || o->repository_token_file ||
+                o->repository_ca_file || o->nrepository_pins;
 
     return !said;
 }

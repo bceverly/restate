@@ -251,17 +251,28 @@ The order, each a release of its own:
     dump (production, a WordPress host). The hook finds the account's home
     itself, and with no ~/.my.cnf uses Debian's and Ubuntu's maintenance
     login in /etc/mysql/debian.cnf
-  - [ ] **Repositories on the machine are not captured into another**
-    (found 2026-11-12): a capture walks into any directory that is a restate
-    repository (its `restate-repository` file says so) -- other machines'
-    backups on a host that is also a storage host, a USB disk of backups --
-    and stores them again (a lab FreeBSD host read 55 GB of the dev server's
-    repositories and filled its storage). Leave such a directory out by
-    default, saying so in the result's counts, as mount points and network
-    filesystems are; `--keep` a path to take it all the same
-  - [ ] **The MySQL hook without stopping the server**: `stop = never`, as
-    the PostgreSQL hook has -- the single-transaction dump alone, the
-    server's files left out -- so a public site is not down for the copy
+  - [x] **Repositories on the machine are not captured into another**
+    (found 2026-11-12, done 2026-11-13): a capture walked into any directory
+    that is a restate repository -- other machines' backups on a host that
+    is also a storage host, a USB disk of backups -- and stored them again (a
+    lab FreeBSD host read 55 GB of the dev server's repositories and filled
+    its storage). Every walk now records such a directory -- its
+    `restate-repository` file a regular file saying it is one, of any
+    version -- and reads nothing in it, as it does a network filesystem's
+    mount point: counted in the summary, said on standard error, and listed
+    in the result's `skipped_repositories`. `--include-repository PATH` (a
+    job's `include_repository`) walks one all the same, and the index
+    records that for verify and status; an index from before, which walked
+    them, is verified as it was made. `restate features` says
+    `skips_repositories`
+  - [x] **The MySQL hook without stopping the server** (2026-11-13): `stop =
+    never`, from `/etc/restate/mysql.conf` or `--hook-option
+    mysql.stop=never`, as the PostgreSQL hook has -- the single-transaction
+    dump alone, uncompressed as `mysqldump.sql`, nothing stopped and the
+    server's files left out -- so a public site is not down for the copy.
+    Consistent for InnoDB tables only, which the hook and the README say. A
+    dump that fails now keeps nothing of itself, and removes the one before,
+    either way
   - [x] **A repository not made yet** (2026-11-12): a client whose grant
     names a repository the storage host has not made is answered `404
     no-repository` at its first good token, saying the storage host must

@@ -1740,6 +1740,41 @@ HOOK
   expect 0 "with a ~/.my.cnf" -- myrun HOME="$WORK/myhome" RESTATE_MYSQL_DEBIAN_CNF="$WORK/debian.cnf"
   lacks "$(mydumped)" "defaults-extra-file" "uses that, not the maintenance login"
   contains "$(mydumped)" "HOME=$WORK/myhome" "from the HOME it was given"
+  expect 0 "and resumes" -- env PATH="$WORK/mybin:$PATH" sh "$my" resume mysql
+  contains "$(tail -n 1 my.log)" "start mysql" "starting it"
+
+  # stop = never: the dump alone, uncompressed, nothing stopped, and the
+  # server's files left out -- so a public site is not down for the copy.
+  : > my.log
+  : > reply
+  # shellcheck disable=SC2329  # run by expect
+  mynever() { myrun RESTATE_SETTINGS="stop=never" RESTATE_REPLY="$WORK/reply" "$@"; }
+  expect 0 "the mysql hook with stop = never" -- mynever HOME="$WORK/myhome"
+  contains "$(cat mydump/mysqldump.sql)" "--all-databases --single-transaction" \
+    "dumps it uncompressed"
+  check "and has no gzipped dump, nor the one before" test ! -e mydump/mysqldump.sql.gz
+  check "stops nothing" test ! -s my.log
+  contains "$(cat reply)" "leave-out" "and leaves its files out"
+  expect 0 "stop = never resumes" -- \
+    env PATH="$WORK/mybin:$PATH" RESTATE_SETTINGS=stop=never sh "$my" resume mysql
+  check "starting nothing" test ! -s my.log
+  printf '#!/bin/sh\necho partial\nexit 2\n' > mybin/mysqldump
+  : > reply
+  expect 1 "stop = never, and a dump that fails" -- mynever HOME="$WORK/myhome"
+  contains "$ERR" "mysqldump exited 2: nothing of its dump is kept" "says so"
+  contains "$ERR" "nothing of it is captured" "and that nothing of it is captured"
+  check "keeping nothing of it, nor the dump before" test -z "$(ls mydump)"
+  contains "$(cat reply)" "leave-out" "and leaves the files out all the same"
+  check "stopping nothing" test ! -s my.log
+  expect 1 "stop = always, and a dump that fails" -- myrun HOME="$WORK/myhome"
+  check "does not stop the server" test ! -s my.log
+  expect 1 "stop = never with no dump directory" -- \
+    env PATH="$WORK/mybin:$PATH" RESTATE_SETTINGS=stop=never sh "$my" pause mysql
+  contains "$ERR" "no dump directory" "is refused"
+  printf 'stop = sometimes  # a typo\n' > /etc/restate/mysql.conf
+  expect 1 "a stop setting that is not one" -- myrun HOME="$WORK/myhome"
+  contains "$ERR" "stop = sometimes is not always or never" "is refused, from mysql.conf"
+  rm -f /etc/restate/mysql.conf
 
   # The PostgreSQL hook, with stand-ins for PostgreSQL's tools: the dump goes
   # through gzip as it is written, is not begun where it cannot fit, leaves
@@ -2034,6 +2069,7 @@ contains "$OUT" '"restore_resolves_links": true' "that restore goes through the 
 contains "$OUT" '"restore_unmatched": true' "and names what matched nothing"
 contains "$OUT" '"restore_hooks": true' "and asks the hooks of the dumps it puts back"
 contains "$OUT" '"skips_network_mounts": true' "and that a walk leaves network filesystems out"
+contains "$OUT" '"skips_repositories": true' "and restate repositories"
 contains "$OUT" '"sign": ["command", "repository", "snapshot", "sign_with"' "and that a job can sign"
 if [ "$(uname -s)" = Linux ]; then
   contains "$OUT" '"protect_flags": true' "and that protect sets Linux's flags"
@@ -2339,6 +2375,35 @@ contains "$ERR" "give --dry-run instead" "is refused"
 
 expect 2 "--include-mount of a relative path" -- "$BIN" scan --include-mount share -r .
 contains "$ERR" '--include-mount: "share" is not an absolute path' "is refused"
+expect 2 "--include-repository of a relative path" -- "$BIN" scan --include-repository r -r .
+contains "$ERR" '--include-repository: "r" is not an absolute path' "is refused"
+
+# A restate repository in the tree -- other machines' backups on a storage
+# host -- is recorded as its directory and not stored again.
+mkdir -p nrtree/etc nrtree/srv
+echo kept > nrtree/etc/one
+"$BIN" init nrtree/srv/web01 > /dev/null 2>&1
+echo pack > nrtree/srv/web01/packs/stored.tar.gz
+"$BIN" init nrrepo > /dev/null 2>&1
+expect 0 "capture of a tree holding a repository" -- \
+  env SOURCE_DATE_EPOCH=1767225600 "$BIN" capture -r nrtree --os=linux --result nr.json -o nrrepo
+contains "$ERR" "recorded 1 restate repository as the directory alone" "says it left one out"
+contains "$ERR" "/srv/web01 (--include-repository PATH walks one)" "names it, and how to walk it"
+contains "$ERR" "1 restate repositories" "and counts it"
+contains "$(cat nr.json)" '"skipped_repositories": [' "the result lists it"
+contains "$(cat nr.json)" '"path": "/srv/web01"' "by its path"
+expect 0 "list of the snapshot" -- "$BIN" list nrrepo /srv/web01
+lacks "$OUT" "restate-repository" "holds nothing of the repository"
+expect 0 "verify of it" -- "$BIN" verify --root nrtree nrrepo
+contains "$ERR" "0 added, 0 deleted, 0 modified" "finds nothing missing"
+expect 0 "capture --include-repository" -- \
+  env SOURCE_DATE_EPOCH=1767312000 "$BIN" capture -r nrtree --os=linux \
+  --include-repository "$PWD/nrtree/srv/web01" -o nrrepo
+lacks "$ERR" "as the directory alone" "leaves nothing out"
+expect 0 "list of that snapshot" -- "$BIN" list nrrepo /srv/web01
+contains "$OUT" "restate-repository" "holds the repository"
+expect 0 "verify of it" -- "$BIN" verify --root nrtree nrrepo
+contains "$ERR" "0 added, 0 deleted, 0 modified" "walks it, as the capture did"
 
 # An --include through a symlink the snapshot holds, as a snap's current is.
 mkdir -p ltree/snap/54589/conf ltree/etc
