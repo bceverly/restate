@@ -1147,7 +1147,7 @@ static void remote_free(struct remote *r)
 /* The restate repositories a walk records and goes no further into
  * (scan.h): those it is told to walk all the same, and those it left out. */
 struct repositories {
-    const char **include;  /* beneath the root; into the options or the index */
+    char       **include;  /* beneath the root, each its own */
     size_t       ninclude;
     bool         walk;     /* verify or status of an index that walked them */
     char       **left;
@@ -1170,6 +1170,29 @@ static const char *beneath_root(const char *root, const char *path)
     return path;
 }
 
+/*
+ * `path` beneath `root` as the walk names it. The root is the real one (its
+ * symlinks resolved), so a path given through a symlink -- on macOS, $PWD is
+ * /var/folders/..., and the real directory /private/var/folders/... -- is
+ * resolved too, where it is there, and beneath that root.
+ */
+static char *include_beneath(const char *root, const char *path)
+{
+    const char *in = beneath_root(root, path);
+    char       *real;
+    char       *out;
+
+    if (in != path)
+    {
+        return rs_xstrdup(in);
+    }
+    real = realpath(path, NULL); /* Flawfinder: ignore */
+    in = real ? beneath_root(root, real) : NULL;
+    out = rs_xstrdup(in && in != real ? in : path);
+    free(real);
+    return out;
+}
+
 static void repositories_find(const struct rs_options *o, const char *root,
                               struct repositories *r)
 {
@@ -1188,7 +1211,7 @@ static void repositories_find(const struct rs_options *o, const char *root,
 
         if (named)
         {
-            r->include[r->ninclude++] = beneath_root(root, named);
+            r->include[r->ninclude++] = include_beneath(root, named);
         }
     }
 }
@@ -1241,6 +1264,10 @@ static void repositories_free(struct repositories *r)
         free(r->left[i]);
     }
     free(r->left);
+    for (i = 0; i < r->ninclude; i++)
+    {
+        free(r->include[i]);
+    }
     free(r->include);
 }
 
@@ -1382,7 +1409,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
      * an absolute path. */
     repositories_find(o, m->root, &repos);
     so.walk_repositories = repos.walk;
-    so.include_repositories = repos.include;
+    so.include_repositories = (const char *const *)repos.include;
     so.ninclude_repositories = repos.ninclude;
     so.repository = repository_left;
     so.repository_ctx = &repos;

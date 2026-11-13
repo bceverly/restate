@@ -523,7 +523,9 @@ void test_scan(void)
         CHECK(rs_index_find(&m, "/srv/notes/todo") != NULL);
         CHECK(rs_index_find(&m, "/srv/odd/data") != NULL);
         CHECK_INT(st.skipped_repositories, 2);
-        CHECK_STR(said.data, "/srv/old\n/srv/repo\n");
+        /* In the order the directory lists them, which is the filesystem's. */
+        CHECK(said.data && (strcmp(said.data, "/srv/old\n/srv/repo\n") == 0 ||
+                            strcmp(said.data, "/srv/repo\n/srv/old\n") == 0));
         rs_index_free(&m);
 
         /* A walk that only counts says none: the walk after it does. */
