@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "chflags.h"
 #include "fstab.h"
 #include "glob.h"
 #include "image.h"
@@ -1019,6 +1020,74 @@ void test_restore(void)
         free(root);
         free(ximg);
         free(xtree);
+    }
+
+    TEST_CASE("restore: file flags, set last");
+    {
+        char            *ft = at(dir, "flagtree");
+        char            *fimg = at(dir, "flags.tar");
+        char            *froot = at(dir, "flagroot");
+        char            *fp;
+        struct rs_index  fix;
+        struct stat      fst;
+        int              fd;
+
+        CHECK(mkdir(ft, 0755) == 0);
+        put(ft, "etc/locked", "kept as it is\n");
+        put(ft, "var/empty/.keep", "");
+        rs_chflags_pretend(true);
+        fp = at(ft, "etc/locked");
+        fd = open(fp, O_RDONLY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_chflags_set(fd, RS_CHF_SCHG | RS_CHF_NODUMP) == 0);
+        (void)close(fd);
+        free(fp);
+        fp = at(ft, "var/empty");
+        fd = open(fp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_chflags_set(fd, RS_CHF_SCHG) == 0);
+        (void)close(fd);
+        free(fp);
+        capture(ft, fimg, &fix);
+        CHECK(fix.records_flags);
+        CHECK_INT(rs_index_find(&fix, "/etc/locked")->flags, RS_CHF_SCHG | RS_CHF_NODUMP);
+        CHECK_INT(rs_index_find(&fix, "/var/empty")->flags, RS_CHF_SCHG);
+        CHECK_INT(rs_index_find(&fix, "/etc")->flags, 0);
+
+        CHECK(mkdir(froot, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        restore_into(&r, fimg, &fix, froot, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.flags, 0);
+        fp = at(froot, "etc/locked");
+        CHECK(stat(fp, &fst) == 0);
+        CHECK_INT(rs_chflags_of(&fst), RS_CHF_SCHG | RS_CHF_NODUMP);
+        free(fp);
+        fp = at(froot, "var/empty");
+        CHECK(stat(fp, &fst) == 0);
+        CHECK_INT(rs_chflags_of(&fst), RS_CHF_SCHG);
+        free(fp);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        rs_chflags_pretend(false);
+
+#if !defined(__FreeBSD__) && !defined(__OpenBSD__) && !defined(__NetBSD__) && \
+    !defined(__APPLE__)
+        TEST_CASE("restore: file flags, where the system has none");
+        rs_test_rmtree(froot);
+        CHECK(mkdir(froot, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        restore_into(&r, fimg, &fix, froot, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.flags, 2);
+        CHECK(r.st.flags_none);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+#endif
+        rs_index_free(&fix);
+        free(ft);
+        free(fimg);
+        free(froot);
     }
 
     TEST_CASE("restore: images it cannot read");

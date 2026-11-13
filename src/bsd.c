@@ -124,6 +124,90 @@ static struct rs_jval *find_disk(struct rs_jval *disks, const char *name)
     return NULL;
 }
 
+/* `obj`'s member `key`, to change, or NULL. */
+static struct rs_jval *member(struct rs_jval *obj, const char *key)
+{
+    size_t i;
+
+    for (i = 0; obj->type == RS_JOBJECT && i < obj->n; i++)
+    {
+        if (strcmp(obj->keys[i], key) == 0)
+        {
+            return &obj->items[i];
+        }
+    }
+    return NULL;
+}
+
+/* The partition called `name`, on whichever disk it is. */
+static struct rs_jval *find_part(struct rs_jval *disks, const char *name)
+{
+    size_t i;
+    size_t j;
+
+    for (i = 0; i < disks->n; i++)
+    {
+        struct rs_jval *parts = member(&disks->items[i], "partitions");
+
+        for (j = 0; parts && parts->type == RS_JARRAY && j < parts->n; j++)
+        {
+            if (eq(rs_jobject_str(&parts->items[j], "name"), name))
+            {
+                return &parts->items[j];
+            }
+        }
+    }
+    return NULL;
+}
+
+/*
+ * A LABEL line: a name glabel gives the partition above it -- gpt/NAME, its
+ * GPT label; gptid/UUID, its GPT partition GUID; ufs/NAME or msdosfs/NAME,
+ * its filesystem's own -- added to that partition, which is the one listed
+ * last a level up, if it is the same size.
+ */
+static void geom_label(struct rs_jval *disks, const char *above, const char *above_size,
+                       const char *name, const char *size)
+{
+    static const struct {
+        const char *prefix;
+        const char *key;
+        bool        content;
+    } kinds[] = {
+        { "gpt/", "label", false },    { "gptid/", "uuid", false },
+        { "ufs/", "label", true },     { "msdosfs/", "label", true },
+    };
+    struct rs_jval *p = above ? find_part(disks, above) : NULL;
+    size_t          i;
+
+    if (!p || !eq(above_size, size))
+    {
+        return;
+    }
+    for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+    {
+        struct rs_jval *to = p;
+
+        if (!rs_starts_with(name, kinds[i].prefix) || name[strlen(kinds[i].prefix)] == '\0')
+        {
+            continue;
+        }
+        if (kinds[i].content)
+        {
+            to = member(p, "content");
+            if (!to)
+            {
+                to = rs_jobj_add(p, "content");
+                rs_jval_set_object(to);
+            }
+        }
+        if (!rs_jobject_get(to, kinds[i].key))
+        {
+            rs_jobj_str(to, kinds[i].key, name + strlen(kinds[i].prefix));
+        }
+    }
+}
+
 void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
 {
     struct rs_jval *disks;
@@ -132,6 +216,11 @@ void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
     char           *line;
     char           *save = NULL;
     int             pass;
+    /* The PART last listed at each depth, and its size, for the LABEL lines
+     * under it. */
+    char           *last[8] = { NULL };
+    char           *last_size[8] = { NULL };
+    size_t          level;
 
     /* Both made before either is held: adding a member to the description
      * can move its others, and a pointer taken earlier would then dangle. */
@@ -158,6 +247,16 @@ void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
             }
             if (n < 5)
             {
+                continue;
+            }
+            if (pass == 1 && strcmp(tok[1], "LABEL") == 0)
+            {
+                unsigned long depth = strtoul(tok[0], NULL, 10);
+
+                if (depth >= 1 && depth < 8)
+                {
+                    geom_label(disks, last[depth - 1], last_size[depth - 1], tok[2], tok[3]);
+                }
                 continue;
             }
             if (pass == 0 && strcmp(tok[1], "DISK") == 0 && !rs_starts_with(tok[2], "cd"))
@@ -219,6 +318,17 @@ void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
                 }
                 rs_jobj_str(p, "type_name", ty);
                 content_from_type(p, ty);
+                {
+                    unsigned long depth = strtoul(tok[0], NULL, 10);
+
+                    if (depth < 8)
+                    {
+                        free(last[depth]);
+                        free(last_size[depth]);
+                        last[depth] = rs_xstrdup(tok[2]);
+                        last_size[depth] = rs_xstrdup(tok[3]);
+                    }
+                }
             } else if (pass == 1 && strcmp(tok[1], "ELI") == 0)
             {
                 struct rs_jval *m = rs_jarr_add(mapped);
@@ -242,6 +352,11 @@ void rs_geom_parse(const char *conftxt, struct rs_jval *machine)
         }
     }
     free(copy);
+    for (level = 0; level < 8; level++)
+    {
+        free(last[level]);
+        free(last_size[level]);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -646,6 +761,22 @@ static void disklabel_disk(struct rs_jval *machine, const char *name)
         n++;
     }
     rs_bsd_add_disk(machine, name, size, sector, "disklabel", parts, n);
+#if defined(__OpenBSD__)
+    /* What OpenBSD's /etc/fstab names the disk by: 3eb7f9d8cd4f05ee.a. */
+    {
+        struct rs_jval *disks = array_member(machine, "disks");
+        char            duid[17];
+
+        for (i = 0; i < 8; i++)
+        {
+            (void)snprintf(duid + 2 * i, 3, "%02x", (unsigned)dl.d_uid[i]);
+        }
+        if (disks->n > 0 && strcmp(duid, "0000000000000000") != 0)
+        {
+            rs_jobj_str(&disks->items[disks->n - 1], "duid", duid);
+        }
+    }
+#endif
 }
 #endif
 
@@ -758,6 +889,13 @@ bool rs_bsd_describe(struct rs_jval *machine)
         free(names);
     }
 #elif defined(__NetBSD__)
+    {
+        char           *boot = sysctl_str("machdep.bootmethod");
+        struct rs_jval *fw = object_member(machine, "firmware");
+
+        put_str(fw, "mode", eq(boot, "UEFI") ? "uefi" : eq(boot, "BIOS") ? "bios" : NULL);
+        free(boot);
+    }
     netbsd_disks(machine);
 #elif defined(__APPLE__)
     note(machine, "on macOS the disks are described through Disk Arbitration, not libc, so "

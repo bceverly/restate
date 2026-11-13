@@ -613,9 +613,10 @@ On macOS, whose disks are described through Disk Arbitration rather than
 libc, the description holds the system, hardware, interfaces and mounts, and
 a note saying so.
 .B buildsheet
-and
+is written from it on FreeBSD, OpenBSD and NetBSD too, and
 .B autoinstall
-are written for Linux in this version.
+on FreeBSD and OpenBSD (see
+.BR REBUILDING ).
 .PP
 An index of any other tree \- a disk mounted from another machine, a
 directory \- has no machine description, because the disks it would describe
@@ -1123,6 +1124,42 @@ its storage. After the system disk fails, the pool is still there for
 on the new system. A ZFS partition on the system's own disk is kept the way
 another system's is.
 .PP
+On FreeBSD, OpenBSD and NetBSD the sheet is written in each system's own
+terms, from the installer's shell. FreeBSD's:
+.BR gpart (8)
+with the GPT labels kept,
+.BR geli (8)
+under what was encrypted (swap encrypts itself at each boot, as its
+.I /etc/fstab
+line says),
+.BR newfs (8)
+for UFS, or the ZFS pool and the datasets that were mounted, the one at
+.I /
+its bootfs; then the memstick's distribution sets unpacked into
+.IR /mnt ,
+the boot code or the EFI loader, and enough of
+.I /etc
+to boot and reach the network. OpenBSD's:
+.BR fdisk (8),
+and the disklabel from an autoallocation template of the sizes it had
+.RB ( "disklabel \-A \-T" );
+then the installer, keeping that label and given each partition's mount
+point, makes the filesystems and installs the sets and boot code. NetBSD's:
+.BR gpt (8)
+with the wedges' names kept (one without is given one), a helper that finds
+a wedge by its name,
+.BR newfs (8),
+and the sets unpacked from the install image. Each then puts restate on the
+new system from its release package, before the packages and the restore.
+The restore keeps the new
+.I /etc/fstab
+where the old one names disks the new machine does not have: OpenBSD's, by
+its disk's DUID, always; the others', rebuilt elsewhere.
+A disk with MBR slices, or a disklabel and no GPT on NetBSD, is left to
+partition by hand, and the sheet says so;
+.B \-\-firmware
+is Linux's.
+.PP
 .B restate autoinstall
 writes the same layout as an Ubuntu autoinstall file, for an install nobody
 has to attend: storage in curtin's terms, locale, keyboard, time zone, host
@@ -1150,6 +1187,33 @@ A package that will not install is said in the installer's log and the
 restore goes on; an image that is not there stops the install, saying so.
 What only a person can do \- per-user installations, a package from a file
 the image does not keep \- is listed in the file, for after the first boot.
+.PP
+On FreeBSD it writes a
+.BR bsdinstall (8)
+script instead \- for
+.I /etc/installerconfig
+on the installer's media, or
+.B bsdinstall script
+.IR FILE :
+the partitions at their sizes, or, for a ZFS pool, bsdinstall's zfsboot
+settings, its datasets the ones that were mounted; the sets; and after them
+the host name, network, SSH server, time zone and keymap. One pool whose root
+is a boot environment
+.RI ( POOL /ROOT/ NAME )
+is what zfsboot makes; any other ZFS layout, or MBR slices, is the build
+sheet's. On OpenBSD it writes an
+.I install.conf
+for
+.BR autoinstall (8),
+with the disklabel template it fetches in its comments, to serve beside it.
+Either installs the system and stops: the restore is the build sheet's,
+from \(lqPut restate on the new system\(rq. NetBSD's installer reads no
+answers, so there is none for NetBSD;
+.BR \-\-clones ,
+.B \-\-firmware
+and
+.B \-\-image\-at
+are Ubuntu's.
 .PP
 With
 .BR "\-\-target vm" ,
@@ -1615,6 +1679,29 @@ NetBSD keep attributes in a user and a system namespace, recorded as
 and
 .IR system. ;
 OpenBSD has none.
+.PP
+On the BSDs and macOS the file flags come back too \-
+.BR chflags (1)'s
+.BR schg ,
+.BR uchg ,
+.BR sappnd ,
+.BR uappnd ,
+.BR nodump ,
+.B hidden
+and the rest, recorded by name \- and last of all, after every file's
+content, owner, mode and times, since an immutable or append-only flag set
+earlier refuses what follows. A file in the way with such a flag has it
+cleared to be replaced. The system flags need root at a securelevel below
+1; a restore that cannot set them, or onto a system with none, says how
+many it left off. Flags a filesystem keeps for itself \- a UFS snapshot's,
+macOS's compression \- are not recorded.
+.BR verify ,
+.B diff
+and
+.B status
+show a change of them as
+.BR flags ,
+where both sides record them.
 .PP
 Owners are restored by name. The system being restored onto has accounts
 of its own: its packages made their system users as they were installed,

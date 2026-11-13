@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "arch.h"
+#include "bsdsheet.h"
 #include "image.h"
 #include "installer.h"
 #include "packages.h"
@@ -35,6 +36,7 @@ struct sheet {
     bool                       *vg_done;
     struct rs_buf               notes;
     unsigned                    step;
+    bool                        bsd;          /* a BSD's: bsdsheet.h wrote the steps to here */
 };
 
 static void say(struct sheet *s, const char *fmt, ...) RESTATE_PRINTF(2, 3);
@@ -247,6 +249,53 @@ static char *clean_name(const char *name)
 /* The sections                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* Adds `text` and a newline to `out`. */
+static void add_line(struct rs_buf *out, const char *text)
+{
+    rs_buf_addstr(out, text);
+    rs_buf_add(out, "\n", 1);
+}
+
+void rs_sheet_image_needs(const struct rs_sheet_opts *o, struct rs_buf *out)
+{
+    struct rs_buf cmd;
+    bool          signed_ = o->trust && rs_starts_with(o->trust, "--trusted-key");
+
+    if (!o->export_from)
+    {
+        rs_buf_addf(out, "  - The image to restore%s%s, on a disk the new machine can read.\n",
+                    o->image ? ": " : "", o->image ? o->image : "");
+        return;
+    }
+    /* The commands below unpack an image's file: the snapshot as one. */
+    rs_buf_init(&cmd);
+    rs_buf_addstr(&cmd, "      restate export ");
+    rs_shell_word(&cmd, o->export_from);
+    rs_buf_addstr(&cmd, " -o ");
+    rs_shell_word(&cmd, o->image);
+    if (o->export_sealed)
+    {
+        rs_buf_addstr(&cmd, " --decrypt-with DECRYPTION-KEYFILE");
+    }
+    if (signed_)
+    {
+        rs_buf_addstr(&cmd, " --sign-with SIGNING-KEYFILE");
+    }
+    add_line(out, "  - The image to restore, exported from the repository by any machine with");
+    add_line(out, "    restate that reaches it, onto a disk the new machine can read:");
+    add_line(out, cmd.data);
+    if (o->export_sealed)
+    {
+        add_line(out, "    DECRYPTION-KEYFILE: the secret key the repository is encrypted to.");
+    }
+    if (signed_)
+    {
+        add_line(out, "    SIGNING-KEYFILE: the secret half of the key the restore's "
+                      "--trusted-key names.");
+    }
+    rs_buf_free(&cmd);
+}
+
 static void intro(struct sheet *s)
 {
     const struct rs_jval *hw = rs_jobject_get(s->machine, "hardware");
@@ -418,43 +467,7 @@ static void needs(struct sheet *s)
     {
         say(s, "%s", "  - The installer for this system: see `restate installer`.");
     }
-    if (s->o->export_from)
-    {
-        struct rs_buf cmd;
-        bool          signed_ = s->o->trust && rs_starts_with(s->o->trust, "--trusted-key");
-
-        /* The commands below unpack an image's file: the snapshot as one. */
-        rs_buf_init(&cmd);
-        rs_buf_addstr(&cmd, "      restate export ");
-        rs_shell_word(&cmd, s->o->export_from);
-        rs_buf_addstr(&cmd, " -o ");
-        rs_shell_word(&cmd, s->o->image);
-        if (s->o->export_sealed)
-        {
-            rs_buf_addstr(&cmd, " --decrypt-with DECRYPTION-KEYFILE");
-        }
-        if (signed_)
-        {
-            rs_buf_addstr(&cmd, " --sign-with SIGNING-KEYFILE");
-        }
-        say(s, "%s", "  - The image to restore, exported from the repository by any machine with");
-        say(s, "%s", "    restate that reaches it, onto a disk the new machine can read:");
-        say(s, "%s", cmd.data);
-        if (s->o->export_sealed)
-        {
-            say(s, "%s", "    DECRYPTION-KEYFILE: the secret key the repository is encrypted to.");
-        }
-        if (signed_)
-        {
-            say(s, "%s", "    SIGNING-KEYFILE: the secret half of the key the restore's "
-                         "--trusted-key names.");
-        }
-        rs_buf_free(&cmd);
-    } else
-    {
-        say(s, "  - The image to restore%s%s, on a disk the new machine can read.",
-            s->o->image ? ": " : "", s->o->image ? s->o->image : "");
-    }
+    rs_sheet_image_needs(s->o, s->out);
 }
 
 static void tree_line(struct sheet *s, size_t i, int depth) /* NOLINT(misc-no-recursion) */
@@ -2234,19 +2247,46 @@ static void restore(struct sheet *s)
 
         say(s, "%s", "With restate restore, which checks every file against the index before it");
         say(s, "%s", "puts it in place, and puts back owners, modes, times and hard links as they");
-        say(s, "%s", "were. The kit put restate back (above); if it is not there, this falls back");
-        say(s, "%s", "to tar, which does the same without the checks:");
+        if (s->bsd)
+        {
+            say(s, "%s", "were. If restate is not there, this falls back to tar, which does the "
+                         "same");
+            say(s, "%s", "without the checks:");
+        } else
+        {
+            say(s, "%s", "were. The kit put restate back (above); if it is not there, this falls "
+                         "back");
+            say(s, "%s", "to tar, which does the same without the checks:");
+        }
         say(s, "%s", "");
         rs_buf_init(&cmd);
-        rs_image_restore_command(&cmd, img, "/", false, s->o->trust, NULL);
-        say(s, "    %s", cmd.data);
-        say(s, "%s", "");
-        say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep the");
-        say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
-        say(s, "%s", "");
-        rs_buf_reset(&cmd);
-        rs_image_restore_command(&cmd, img, "/", true, s->o->trust, NULL);
-        say(s, "    %s", cmd.data);
+        if (s->bsd && rs_bsdsheet_keeps_fstab(s->machine, s->o))
+        {
+            /* The new /etc/fstab is the one that names these disks. */
+            rs_image_restore_command(&cmd, img, "/", true, s->o->trust, NULL);
+            say(s, "    %s", cmd.data);
+            say(s, "%s", "");
+            say(s, "%s", "It keeps the new system's /etc/fstab, which names these disks as they");
+            say(s, "%s", "are now; the old one names the old disks. Any other line of the old one");
+            say(s, "%s", "-- a network mount -- is in the image's restate/files/etc/fstab, to add");
+            say(s, "%s", "by hand.");
+        } else if (s->bsd)
+        {
+            rs_image_restore_command(&cmd, img, "/", false, s->o->trust, NULL);
+            say(s, "    %s", cmd.data);
+        } else
+        {
+            rs_image_restore_command(&cmd, img, "/", false, s->o->trust, NULL);
+            say(s, "    %s", cmd.data);
+            say(s, "%s", "");
+            say(s, "%s", "If the installer formatted any volume itself (so its UUID is new), keep "
+                         "the");
+            say(s, "%s", "installer's /etc/fstab and /etc/crypttab instead of the old ones:");
+            say(s, "%s", "");
+            rs_buf_reset(&cmd);
+            rs_image_restore_command(&cmd, img, "/", true, s->o->trust, NULL);
+            say(s, "    %s", cmd.data);
+        }
         rs_buf_free(&cmd);
         say(s, "%s", "");
         if (s->o->trust && strcmp(s->o->trust, "--allow-unverified") == 0)
@@ -2271,6 +2311,13 @@ static void restore(struct sheet *s)
         say(s, "%s", "them first, or the restored configuration may refer to programs that are");
         say(s, "%s", "not there yet.");
         say(s, "%s", "");
+    }
+    if (s->bsd)
+    {
+        say(s, "%s", "Then reboot:");
+        say(s, "%s", "");
+        say(s, "%s", "    reboot");
+        return;
     }
     say(s, "%s", "Then rebuild the boot files and reboot:");
     say(s, "%s", "");
@@ -2527,11 +2574,27 @@ bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
     {
         const char *kernel = rs_jobject_str(s.sys, "kernel_name");
 
+        if (rs_bsdsheet_for(kernel))
+        {
+            /* Each BSD's own to the first boot; the rest as on Linux. */
+            s.bsd = true;
+            rs_buf_init(&s.notes);
+            if (!rs_bsdsheet_build(machine, o, out, &s.step, &s.notes, err))
+            {
+                rs_buf_free(&s.notes);
+                return false;
+            }
+            reinstall(&s);
+            restore(&s);
+            notes(&s);
+            rs_buf_free(&s.notes);
+            return true;
+        }
         /* The commands are Linux's: sfdisk, cryptsetup, mdadm, LVM. */
         if (kernel && strcmp(kernel, "Linux") != 0)
         {
-            rs_buf_addf(err, "build sheets are written for Linux in this version, and this is "
-                        "%s; its disk layout is in `restate machine`", kernel);
+            rs_buf_addf(err, "build sheets are written for Linux, FreeBSD, OpenBSD and NetBSD, "
+                        "and this is %s; its disk layout is in `restate machine`", kernel);
             return false;
         }
     }

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "arch.h"
+#include "chflags.h"
 #include "json.h"
 
 void rs_index_init(struct rs_index *ix)
@@ -472,6 +473,15 @@ static void entry_json(struct rs_buf *b, const struct rs_entry *e)
         }
         rs_buf_addc(b, ']');
     }
+    if (e->flags)
+    {
+        struct rs_buf names;
+
+        rs_buf_init(&names);
+        rs_chflags_text(e->flags, &names);
+        put_str(b, "flags", names.data, &first);
+        rs_buf_free(&names);
+    }
     if (e->package)
     {
         put_bytes(b, "package", e->package, &first);
@@ -518,6 +528,13 @@ bool rs_index_write(const struct rs_index *ix, FILE *out)
     rs_buf_addstr(&b, ",\n  ");
     put_key(&b, "hashed", &first);
     rs_buf_addstr(&b, ix->hashed ? "true" : "false");
+    if (ix->records_flags)
+    {
+        first = true;
+        rs_buf_addstr(&b, ",\n  ");
+        put_key(&b, "records_flags", &first);
+        rs_buf_addstr(&b, "true");
+    }
     first = true;
     rs_buf_addstr(&b, ",\n  ");
     put_str(&b, "content", ix->content ? ix->content : "none", &first);
@@ -781,6 +798,13 @@ static bool entry_from_json(const struct rs_jval *obj, struct rs_entry *e, const
         *why = "bad \"xattrs\"";
         return false;
     }
+    /* A flag this restate does not know -- a newer system's -- is one it
+     * could not set: as good as none. */
+    v = rs_jobject_get(obj, "flags");
+    if (v && v->type == RS_JSTRING)
+    {
+        e->flags = rs_chflags_parse(v->s, NULL);
+    }
     v = rs_jobject_get(obj, "sha256");
     if (v && v->type == RS_JSTRING)
     {
@@ -995,6 +1019,9 @@ bool rs_index_parse(struct rs_index *ix, const char *text, size_t len,
                 } else if (strcmp(key.data, "hashed") == 0)
                 {
                     ix->hashed = v.type == RS_JBOOL && v.b;
+                } else if (strcmp(key.data, "records_flags") == 0)
+                {
+                    ix->records_flags = v.type == RS_JBOOL && v.b;
                 } else if ((strcmp(key.data, "root") == 0 && !set_string(&ix->root, &v)) ||
                            (strcmp(key.data, "os") == 0 && !set_string(&ix->os, &v)) ||
                            (strcmp(key.data, "host") == 0 && !set_string(&ix->host, &v)) ||

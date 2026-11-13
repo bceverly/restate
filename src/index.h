@@ -102,6 +102,7 @@ struct rs_entry {
     bool               modified; /* not what that package installed */
     struct rs_xattr   *xattrs;   /* sorted by name; NULL when there are none */
     size_t             nxattrs;
+    unsigned           flags;    /* the BSDs' and macOS's file flags (chflags.h) */
     char               type;     /* f d l c b p */
     uint32_t           mode;     /* permission bits, at most 07777 */
     uint64_t           uid;
@@ -133,6 +134,10 @@ struct rs_index {
     char            *version;   /* the restate that wrote it */
     char            *content;   /* "none", "state" or "state+baseline" */
     bool             hashed;
+    /* Its entries say what file flags each had (chflags.h): made where there
+     * are any, by a restate that records them. Without it, a missing "flags"
+     * is not known to mean none. */
+    bool             records_flags;
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
     struct rs_jval   packages;  /* what is installed, or null; see packages.h */
     /* How it was classified, or null: {"rules": [[CLASS, PATTERN], ...], "all",

@@ -5405,6 +5405,14 @@ static int restore_cmd(const struct rs_options *o)
             (void)fprintf(stderr, "restate: %" PRIu64 " extended attributes could not be set: "
                           "some need root, and some filesystems have none\n", st.xattrs);
         }
+        if (st.flags > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " file%s flags (schg, uchg, nodump ...) "
+                          "could not be set: %s\n", st.flags, st.flags == 1 ? "'s" : "s'",
+                          st.flags_none ? "this system has none"
+                                        : "the system ones need root, at a securelevel below 1, "
+                                          "and a symlink's are not set");
+        }
         if (st.other_arch_left > 0)
         {
             (void)fprintf(stderr, "restate: %" PRIu64 " program%s a package installed %s the "

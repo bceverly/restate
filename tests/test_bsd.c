@@ -18,9 +18,15 @@ static const char conftxt[] =
     "516e7cba-6ecf-11d6-8ff8-00022d09712b\n"
     "1 PART ada0p2 4294967296 512 i 2 o 36864 ty freebsd-swap xs GPT xt "
     "516e7cb5-6ecf-11d6-8ff8-00022d09712b\n"
+    "2 LABEL gptid/5a0e1c2b-0000-11ef-8000-000000000002 4294967296 512 i 0 o 0\n"
+    "2 LABEL gpt/swap0 4294967296 512 i 0 o 0\n"
+    "2 LABEL gpt/other 1 512 i 0 o 0\n"
+    "9 LABEL gpt/deep 1 512 i 0 o 0\n"
     "1 PART ada0p1 272629760 512 i 1 o 20480 ty efi xs GPT xt "
     "c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n"
     "2 LABEL gpt/efiboot0 272629760 512 i 0 o 0\n"
+    "2 LABEL msdosfs/EFISYS 272629760 512 i 0 o 0\n"
+    "2 LABEL gpt/ 272629760 512 i 0 o 0\n"
     "2 ELI ada0p2.eli 4294967296 4096\n"
     "0 DISK da0 16008609792 512 hd 255 sc 63\n"
     "1 PART da0s1 16007561216 512 i 1 o 1048576 ty fat32lba xs MBR xt 12\n"
@@ -54,6 +60,11 @@ void test_bsd(void)
     CHECK_STR(rs_jobject_str(rs_jobject_get(p, "content"), "type"), "vfat");
     CHECK_STR(rs_jobject_str(rs_jobject_get(&parts->items[0], "content"), "type"), "zfs_member");
     CHECK_STR(rs_jobject_str(rs_jobject_get(&parts->items[1], "content"), "type"), "swap");
+    CHECK_STR(rs_jobject_str(p, "label"), "efiboot0");
+    CHECK_STR(rs_jobject_str(rs_jobject_get(p, "content"), "label"), "EFISYS");
+    CHECK_STR(rs_jobject_str(&parts->items[1], "label"), "swap0");
+    CHECK_STR(rs_jobject_str(&parts->items[1], "uuid"), "5a0e1c2b-0000-11ef-8000-000000000002");
+    CHECK(rs_jobject_get(&parts->items[0], "label") == NULL);
     CHECK_STR(rs_jobject_str(rs_jobject_get(&disks->items[1], "table"), "type"), "dos");
     p = &rs_jobject_get(&disks->items[1], "partitions")->items[0];
     CHECK_STR(rs_jobject_str(p, "type"), "0x0c");
@@ -112,11 +123,12 @@ void test_bsd(void)
         CHECK(rs_layout_find(&l, "ada0p2.eli") != SIZE_MAX);
         rs_layout_free(&l);
         rs_jval_set_object(sys);
-        rs_jobj_str(sys, "kernel_name", "FreeBSD");
+        rs_jobj_str(sys, "kernel_name", "Darwin");
         rs_buf_init(&out);
         rs_buf_init(&err);
         CHECK(!rs_buildsheet(&m, &o, &out, &err));
-        CHECK_CONTAINS(err.data, "written for Linux in this version, and this is FreeBSD");
+        CHECK_CONTAINS(err.data, "written for Linux, FreeBSD, OpenBSD and NetBSD, and this is "
+                                 "Darwin");
         rs_buf_free(&out);
         rs_buf_free(&err);
     }

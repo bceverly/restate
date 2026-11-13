@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "arch.h"
+#include "bsdsheet.h"
 #include "image.h"
 #include "packages.h"
 
@@ -1634,6 +1635,11 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     g.sys = rs_jobject_get(machine, "system");
     g.o = o;
     g.out = out;
+    if (rs_bsdsheet_for(rs_jobject_str(g.sys, "kernel_name")))
+    {
+        /* FreeBSD's bsdinstall script, OpenBSD's install.conf. */
+        return rs_bsdsheet_autoinstall(machine, o, out, err);
+    }
     if (!eq(rs_jobject_str(g.sys, "id"), "ubuntu"))
     {
         rs_buf_addf(err, "autoinstall files are for Ubuntu; this machine is %s",

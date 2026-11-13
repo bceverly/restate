@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Bryan C. Everly
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# restate-proxy is linked from every one of restate's own objects (the
+# Makefile's LIB_SRC), and with them comes restate's reader of dpkg's
+# database -- the path strings lintian finds. The proxy never calls it: it
+# serves repositories, and reads no package database, nor writes one.
+restate-proxy: uses-dpkg-database-directly [usr/sbin/restate-proxy]

@@ -987,10 +987,36 @@ packages asked for of the other systems' managers (`pkg install`, `pkg_add`,
 in each environment), and the alternatives chosen by hand. The packages no repository has are listed
 with what to do about them.
 
+On FreeBSD, OpenBSD and NetBSD the build sheet is written in each system's
+own terms, from its installer's shell. FreeBSD's: `gpart` with the GPT labels
+kept, `geli` under what was encrypted, `newfs` for UFS or the ZFS pool and the
+datasets that were mounted (the one at `/` its bootfs), then the memstick's
+distribution sets unpacked into `/mnt`, the boot code or EFI loader, and
+enough of `/etc` to boot. OpenBSD's: `fdisk`, and the disklabel from an
+autoallocation template of the sizes it had (`disklabel -A -T`); then the
+installer, keeping that label and given each partition's mount point, does
+the rest. NetBSD's: `gpt` with the wedges' names kept, `newfs`, and the sets
+unpacked from the install image. Each then installs restate's release package
+before the packages and the restore, which keeps the new `/etc/fstab` where
+the old one names disks the new machine does not have -- OpenBSD's always,
+since it names its disk by DUID. MBR slices, and a NetBSD disk with only a
+disklabel, are left to partition by hand, and the sheet says so.
+
 `restate autoinstall` writes the same layout as an Ubuntu autoinstall file for
 an unattended reinstall, with the locale, keyboard, time zone, host name,
 network and SSH server. LUKS passphrases and the first account's password are
 left as `CHANGE-ME`.
+
+On FreeBSD, `restate autoinstall` writes a bsdinstall script instead -- for
+`/etc/installerconfig` on the installer's media, or `bsdinstall script FILE`:
+the partitions at their sizes, or bsdinstall's zfsboot settings and the
+datasets that were mounted for a pool whose root is a boot environment
+(`POOL/ROOT/NAME`), the sets, then the host name, network, SSH server, time
+zone and keymap. On OpenBSD it writes an `install.conf` for `autoinstall(8)`,
+with the disklabel template it fetches in its comments. Either installs the
+system and stops; the restore follows the build sheet from "Put restate on the
+new system". NetBSD's installer reads no answers, so NetBSD has the build
+sheet alone.
 
 Another operating system's partitions -- Windows, BitLocker, macOS, VeraCrypt
 -- are never formatted. For the same machine, both keep them, and the EFI
@@ -1085,6 +1111,18 @@ the owner, since a change of owner clears a file's capabilities, with the
 users and groups an ACL names mapped by name, as owners are. SELinux and
 Smack labels and IMA and EVM signatures are left to the target's own policy
 and keys.
+
+On the BSDs and macOS the file flags come back too -- `schg` and `uchg`,
+`sappnd` and `uappnd`, `nodump`, `hidden` and the rest of chflags(1)'s, which
+FreeBSD sets on its own libc, dynamic linker and `/var/empty` -- and last of
+all, after every file's content, owner, mode and times, since an immutable
+or append-only flag set any earlier refuses what follows. A file in the way
+that has such a flag has it cleared to be replaced. The system flags (`s...`)
+need root, at a securelevel below 1; a restore that cannot set them, or onto
+a system with none, says how many it left off. The ones a filesystem keeps
+for itself -- a UFS snapshot's, macOS's compression -- are not recorded.
+`verify`, `diff` and `status` show a change of flags as `flags`, where both
+sides record them.
 
 A file already in place as the image has it -- the same size and
 modification time, the same names (a hard-linked file has to have all of the
@@ -1964,6 +2002,7 @@ is still read.
 | `target` | a symlink's target |
 | `stored` | where the content is inside the image |
 | `xattrs` | a file's or directory's extended attributes, `[{"name", "value"}]` with the value base64 — on Linux its POSIX ACLs and file capabilities among them |
+| `flags` | the BSDs' and macOS's file flags, by chflags(1)'s names: `"schg,nodump"`; the index says `"records_flags": true` where a missing one means none |
 | `package`, `modified` | the package a file came from, where dpkg says, and `true` where it no longer matches what that package installed |
 | `path_base64`, `target_base64` | the exact bytes of a name that is not valid UTF-8, which JSON cannot hold directly |
 
@@ -2169,6 +2208,23 @@ That puts `restate` in `/usr/sbin`, its manual in section 8 and its
 which checks an image's signature, with it; `curl`, `gpg` and `pigz` come as
 recommendations.
 
+On Debian 12 and 13, from the `.deb` attached to each
+[release](https://github.com/bceverly/restate/releases) for amd64 and arm64:
+the same packaging the PPA builds from, built in that Debian release's
+container from the release's tarball, checked by lintian, then installed,
+used and removed in a fresh one before the release is published. Check it
+against the release's `SHA256SUMS` first, then:
+
+```bash
+sudo apt install ./restate-VERSION-debian13-amd64.deb
+sudo apt install ./restate-proxy-VERSION-debian13-amd64.deb   # on the storage host
+```
+
+They install where the PPA's do. They are signed by no key Debian knows, so
+the release's checksums and its signed attestation vouch for them, as for the
+other packages attached there; a later one installs over an earlier one the
+same way. `make deb` builds the same package on the Debian it runs on.
+
 On FreeBSD, OpenBSD and NetBSD, from the binary package attached to each
 [release](https://github.com/bceverly/restate/releases) for every release
 each system supports -- FreeBSD 14.4, 14.5 and 15.1, OpenBSD 7.9 and 8.0,
@@ -2294,6 +2350,7 @@ for the BSDs, the RPM distributions and Alpine, and from the Homebrew tap.
 
 ```bash
 sudo apt install restate-proxy                     # Ubuntu, from the PPA
+sudo apt install ./restate-proxy-VERSION-debian13-amd64.deb   # Debian, from the release
 sudo dnf install restate-proxy                     # Fedora, EL, from COPR
 pkg add restate-proxy-VERSION-freebsd-15.1-amd64.pkg  # FreeBSD (OpenBSD and NetBSD as restate's)
 apk add --allow-untrusted restate-proxy-VERSION-r0-alpine3.24-x86_64.apk
@@ -2491,7 +2548,10 @@ installs it with apt on clean Ubuntu 24.04 and 26.04 containers, uses it and
 removes it (`scripts/verify-deb.sh`) -- and only then uploads a signed source
 package for each LTS series to the [PPA](#installing), where Launchpad builds
 it for every architecture. An upload cannot be taken back, so nothing goes
-that has not installed. The signing key is pinned by its fingerprint in
+that has not installed. The same packaging is built for Debian 12 and 13,
+amd64 and arm64, in each release's own container from the tarball, checked
+by lintian, installed, used and removed in a fresh one, and attached to the
+release. The signing key is pinned by its fingerprint in
 `debian/signing-fingerprint`; the workflow refuses a secret holding any
 other.
 

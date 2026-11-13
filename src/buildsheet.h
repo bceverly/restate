@@ -16,6 +16,9 @@
  *
  * Nothing is run. Every command is printed for the person to read, check
  * against `lsblk`, and run, because every one of them destroys data.
+ *
+ * On the BSDs the steps to the first boot are each system's own (bsdsheet.h);
+ * the packages and the restore after them are the same as on Linux.
  */
 #ifndef RESTATE_BUILDSHEET_H
 #define RESTATE_BUILDSHEET_H
@@ -44,7 +47,13 @@ struct rs_sheet_opts {
     bool                  export_sealed;  /* that repository is encrypted */
 };
 
-/* Writes the build sheet for `machine` (a machine.h description) to `out`. */
+/* The sheet's "What you need" line for the image to restore -- and, for a
+ * snapshot, the export that makes it one -- added to `out`; the BSDs' sheets
+ * (bsdsheet.h) say it as Linux's does. */
+void rs_sheet_image_needs(const struct rs_sheet_opts *o, struct rs_buf *out);
+
+/* Writes the build sheet for `machine` (a machine.h description) to `out`:
+ * Linux's, or FreeBSD's, OpenBSD's or NetBSD's (bsdsheet.h). */
 bool rs_buildsheet(const struct rs_jval *machine, const struct rs_sheet_opts *o,
                    struct rs_buf *out, struct rs_buf *err);
 

@@ -14,10 +14,11 @@
 # third copy would be a third thing to forget during a release, and a package
 # whose version does not match its tag cannot be fixed once it is uploaded.
 #
-# SERIES selects the Ubuntu release the package is built for. It defaults to
-# this machine's, which is right for a local build; a Launchpad upload wants
-# one source package per series it targets, which is what the release workflow
-# does by setting SERIES for each.
+# SERIES selects the Ubuntu or Debian release the package is built for. It
+# defaults to this machine's, which is right for a local build, and for the
+# Debian packages the release builds in each Debian release's container. A
+# Launchpad upload wants one source package per series it targets, which is
+# what the release workflow does by setting SERIES for each.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,7 +43,7 @@ VERSION="$(cat VERSION)"
 
 # shellcheck disable=SC1091  # /etc/os-release is not a file in this repository
 SERIES="${SERIES:-$(. /etc/os-release && echo "${VERSION_CODENAME:-}")}"
-[ -n "$SERIES" ] || die "Could not determine the Ubuntu series; set SERIES=<codename>"
+[ -n "$SERIES" ] || die "Could not determine the release's codename; set SERIES=<codename>"
 
 bold "restate — Debian package"
 info "Version: $VERSION"

@@ -599,6 +599,35 @@ void test_machine(void)
         free(empty);
     }
 
+    TEST_CASE("machine: a BSD's host name, keymap and time zone");
+    {
+        char                 *fb = rs_xasprintf("%s/freebsd", dir);
+        char                 *ob = rs_xasprintf("%s/openbsd", dir);
+        const struct rs_jval *bsys;
+
+        (void)mkdir(fb, 0755);
+        (void)mkdir(ob, 0755);
+        put(fb, "etc/rc.conf", "# the old one\nhostname=\"old\"\n  hostname=\"fbsd1\"  \n"
+                               "hostname=\nkeymap='uk.kbd'\nkeymapx=no\nifconfig_em0=DHCP");
+        put(fb, "var/db/zoneinfo", "Europe/London\n");
+        memset(&m, 0, sizeof(m));
+        rs_machine_describe(fb, fb, &m);
+        bsys = rs_jobject_get(&m, "system");
+        CHECK_STR(rs_jobject_str(bsys, "hostname"), "fbsd1");
+        CHECK_STR(rs_jobject_str(bsys, "keymap"), "uk.kbd");
+        CHECK_STR(rs_jobject_str(bsys, "timezone"), "Europe/London");
+        rs_jval_free(&m);
+        put(ob, "etc/myname", "puffy.example.org\n");
+        memset(&m, 0, sizeof(m));
+        rs_machine_describe(ob, ob, &m);
+        bsys = rs_jobject_get(&m, "system");
+        CHECK_STR(rs_jobject_str(bsys, "hostname"), "puffy.example.org");
+        CHECK(rs_jobject_get(bsys, "keymap") == NULL);
+        rs_jval_free(&m);
+        free(fb);
+        free(ob);
+    }
+
     TEST_CASE("machine: desktop, virtual machines and containers");
     {
         static const char *const cases[][4] = {

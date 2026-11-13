@@ -484,8 +484,13 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       configuration (GPT, MBR, GELI), OpenBSD's disklabels, NetBSD's wedges
       and disklabels; hardware, interfaces and mounts from sysctl,
       getifaddrs and getmntinfo; a description without disks on macOS
-- [ ] Build sheets for the BSDs: `gpart`, `geli`, `newfs` and `zpool` on
+- [x] Build sheets for the BSDs: `gpart`, `geli`, `newfs` and `zpool` on
       FreeBSD; `disklabel` and `newfs` on OpenBSD; `gpt` and `newfs` on NetBSD
+      (2026-11-13). FreeBSD's from the memstick's shell -- GPT labels kept,
+      GELI, UFS or the pool and its mounted datasets, the sets unpacked, the
+      boot code or EFI loader; OpenBSD's label from an autoallocation
+      template, the installer doing the rest; NetBSD's wedges by name. The
+      description records GEOM's labels and OpenBSD's DUIDs for it
 - [x] **`restate installer`**: which installer matches the machine — release,
       architecture and type (server, desktop, …) — with its official download
       URL, its checksum and the vendor's signed checksum file. Ubuntu done;
@@ -508,7 +513,12 @@ Then the 156 were installed by name, in that VM, from the restored sources:
       locale, keyboard, time zone, identity, network, SSH server
 - [x] The autoinstall file's packages: PPAs and keys, the recorded packages,
       `restate restore` at the end (with the package baseline, above)
-- [ ] `bsdinstall` and OpenBSD `install.conf` equivalents
+- [x] `bsdinstall` and OpenBSD `install.conf` equivalents (2026-11-13):
+      `restate autoinstall` on FreeBSD writes a bsdinstall script --
+      PARTITIONS, or zfsboot's settings and the mounted datasets -- and on
+      OpenBSD an install.conf with its disklabel template; each installs the
+      system and stops, the restore the build sheet's. NetBSD's sysinst reads
+      no answers
 - [x] **Moving between bare metal and a virtual machine**: `buildsheet` and
       `autoinstall` take `--target vm` or `--target metal` and account for
       what changes — the storage and network drivers the initramfs needs
@@ -784,13 +794,16 @@ place:
       Shadow Copy on Windows, APFS local snapshots on macOS, ZFS and UFS
       snapshots on the BSDs, ZFS on Linux too -- so everything is copied as
       it was at one moment
+- [x] BSD file flags (2026-11-13): chflags(1)'s, recorded by name in the
+      index ("schg,nodump") on the BSDs and macOS, set last on restore after
+      every content, owner, mode and time, a file in the way thawed to be
+      replaced; `flags` in diff, verify and status where both sides record
+      them; counted and said where they cannot be set
 - [ ] **Each system's metadata**: NTFS ACLs (security descriptors) and
       alternate data streams; macOS extended attributes (read and restored
       already) and Full Disk Access, which restate needs to be granted to read
-      what macOS protects, said plainly when it has not been; BSD file flags
-      (`chflags`: `schg`, `uchg`, `nodump` and the rest), recorded and set
-      again last, since an immutable flag set early would refuse the rest of
-      the restore. NFSv4 and macOS ACLs are above, under putting it back
+      what macOS protects, said plainly when it has not been. BSD file flags
+      are done (above). NFSv4 and macOS ACLs are above, under putting it back
 - [ ] **Windows** (on hold): paths compared without case, as NTFS does, so
       two paths captured elsewhere that differ only in case are said to
       collide rather than one overwriting the other; long paths, past
@@ -860,7 +873,10 @@ aarch64 natively and on the others under QEMU:
 - [x] A Homebrew formula in the `bceverly/homebrew-tap` tap, installed from
       source, tested and audited on macOS before each release's goes there
 - [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, and Homebrew's own core tap
-- [ ] Debian itself, as against Ubuntu's PPA, and Arch (the AUR)
+- [ ] Debian itself, as against Ubuntu's PPA, and Arch (the AUR). Each
+      release now carries .debs for Debian 12 and 13, amd64 and arm64, built,
+      linted and installed there (2026-11-13); Debian's own archive, which
+      needs a sponsor, and the AUR are still to come
 
 ## Later
 

@@ -362,6 +362,7 @@ int main(int argc, char **argv)
     test_rebuild();
     test_pgp();
     test_bsd();
+    test_bsdsheet();
     test_progress();
     test_scan();
     test_md5();
@@ -370,6 +371,7 @@ int main(int argc, char **argv)
     test_pkgdb();
     test_xattr();
     test_fsflags();
+    test_chflags();
     test_live();
     test_sources();
     test_repo();

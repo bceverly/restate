@@ -53,6 +53,10 @@ unsigned rs_diff_entries(const struct rs_entry *old, const struct rs_entry *new_
     {
         what |= RS_DIFF_XATTRS;
     }
+    if (old->flags != new_->flags)
+    {
+        what |= RS_DIFF_FLAGS;
+    }
     if (old->type == 'l')
     {
         const char *a = old->target ? old->target : "";
@@ -90,6 +94,7 @@ void rs_diff_describe(unsigned what, struct rs_buf *out)
         { RS_DIFF_MODE,    "mode" },
         { RS_DIFF_OWNER,   "owner" },
         { RS_DIFF_XATTRS,  "xattrs" },
+        { RS_DIFF_FLAGS,   "flags" },
     };
     size_t i;
     bool   first = true;
@@ -431,6 +436,12 @@ static bool walk(const struct rs_index *old, const struct rs_index *new_, FILE *
         } else
         {
             what = rs_diff_entries(a, b);
+            if (!old->records_flags || !new_->records_flags)
+            {
+                /* An index from before, or from a system without them, does
+                 * not say a file had none. */
+                what &= ~(unsigned)RS_DIFF_FLAGS;
+            }
             kind = what ? 'M' : 0;
             i++;
             j++;

@@ -174,6 +174,40 @@ void test_diff(void)
     CHECK_INT(st.added + st.deleted + st.modified, 0);
     free(text);
 
+    TEST_CASE("diff: file flags, where both indexes record them");
+    {
+        struct rs_index f1;
+        struct rs_index f2;
+
+        rs_index_init(&f1);
+        rs_index_init(&f2);
+        a = entry("/lib/libc.so.7", 'f');
+        b = a;
+        b.flags = 2;   /* schg */
+        CHECK_INT(rs_diff_entries(&a, &b), RS_DIFF_FLAGS);
+        rs_buf_init(&desc);
+        rs_diff_describe(RS_DIFF_FLAGS | RS_DIFF_XATTRS, &desc);
+        CHECK_STR(desc.data, "xattrs,flags");
+        rs_buf_free(&desc);
+        add(&f1, entry("/", 'd'));
+        add(&f1, a);
+        add(&f2, entry("/", 'd'));
+        add(&f2, b);
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "");   /* neither says it records them */
+        free(text);
+        f1.records_flags = true;
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "");   /* nor both */
+        free(text);
+        f2.records_flags = true;
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "M\t/lib/libc.so.7\tflags\n");
+        free(text);
+        rs_index_free(&f1);
+        rs_index_free(&f2);
+    }
+
     TEST_CASE("diff: the first of each kind of change, for a result");
     {
         struct rs_jval        first;

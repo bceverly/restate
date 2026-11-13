@@ -16,6 +16,7 @@
 
 #include "accounts.h"
 #include "arch.h"
+#include "chflags.h"
 #include "glob.h"
 #include "hooks.h"
 #include "image.h"
@@ -143,7 +144,9 @@ static int open_parent(struct ctx *c, const char *path, const char **name)
             {
                 (void)unlinkat(fd, comp, 0);
             }
-            if (mkdirat(fd, comp, 0700) == 0 || errno == EEXIST)
+            if (mkdirat(fd, comp, 0700) == 0 || errno == EEXIST ||
+                (errno == EPERM && rs_chflags_thaw(fd) &&
+                 (mkdirat(fd, comp, 0700) == 0 || errno == EEXIST)))
             {
                 next = openat(fd, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             }
@@ -530,11 +533,37 @@ static int in_place(const struct ctx *c, int dir, const char *name, const struct
     return -1;
 }
 
+/*
+ * Clears the file flags that refuse a change (chflags.h) from `name` in
+ * `dir` -- a file, a directory or a FIFO, never followed -- and from `dir`
+ * itself: true if any were cleared, so that what they refused is worth
+ * trying again. The last pass (set_flags) puts back the ones the index has.
+ */
+static bool thaw_at(int dir, const char *name)
+{
+    struct stat st;
+    bool        any = rs_chflags_thaw(dir);
+
+    if (name && fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode) || S_ISFIFO(st.st_mode)))
+    {
+        int fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+
+        if (fd >= 0)
+        {
+            any = rs_chflags_thaw(fd) || any;
+            (void)close(fd);
+        }
+    }
+    return any;
+}
+
 /* Renames `tmp` over `name`; a directory in the way is not replaced. */
 static bool put_in_place(struct ctx *c, int dir, const char *tmp, const char *name,
                          const char *path)
 {
-    if (renameat(dir, tmp, dir, name) == 0)
+    if (renameat(dir, tmp, dir, name) == 0 ||
+        (errno == EPERM && thaw_at(dir, name) && renameat(dir, tmp, dir, name) == 0))
     {
         return true;
     }
@@ -628,6 +657,10 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     {
         tmp = temp_name(c);
         out = openat(dir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (out < 0 && errno == EPERM && thaw_at(dir, NULL))
+        {
+            out = openat(dir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        }
         if (out < 0)
         {
             failed(c, e->path, strerror(errno));
@@ -692,7 +725,8 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     }
     if (kept >= 0)
     {
-        if (wrote && ok && !set_meta_fd(c, kept, e))
+        if (wrote && ok && !set_meta_fd(c, kept, e) &&
+            !(errno == EPERM && rs_chflags_thaw(kept) && set_meta_fd(c, kept, e)))
         {
             failed(c, e->path, strerror(errno));
             wrote = false;
@@ -733,6 +767,20 @@ static bool restore_file(struct ctx *c, struct rs_tar_reader *r, const struct rs
     return ok;
 }
 
+static int make_special(int dir, const char *tmp, const struct rs_entry *e)
+{
+    switch (e->type)
+    {
+    case 'l':
+        return symlinkat(e->target, dir, tmp);
+    case 'p':
+        return mkfifoat(dir, tmp, 0600);
+    default:
+        return mknodat(dir, tmp, (mode_t)((e->type == 'c' ? S_IFCHR : S_IFBLK) | 0600),
+                       (dev_t)e->rdev);
+    }
+}
+
 /* A symlink, a FIFO or a device node: made beside its place, then renamed. */
 static void restore_special(struct ctx *c, const struct rs_entry *e)
 {
@@ -758,18 +806,10 @@ static void restore_special(struct ctx *c, const struct rs_entry *e)
         return;
     }
     tmp = temp_name(c);
-    switch (e->type)
+    made = make_special(dir, tmp, e);
+    if (made != 0 && errno == EPERM && thaw_at(dir, NULL))
     {
-    case 'l':
-        made = symlinkat(e->target, dir, tmp);
-        break;
-    case 'p':
-        made = mkfifoat(dir, tmp, 0600);
-        break;
-    default:
-        made = mknodat(dir, tmp, (mode_t)((e->type == 'c' ? S_IFCHR : S_IFBLK) | 0600),
-                       (dev_t)e->rdev);
-        break;
+        made = make_special(dir, tmp, e);
     }
     if (made != 0)
     {
@@ -855,7 +895,9 @@ static void finish_dirs(struct ctx *c)
         }
         dir = open_parent(c, e->path, &name);
         fd = dir >= 0 ? openat(dir, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
-        if (fd < 0 || !set_meta(c, fd, ".", e, false, fd))
+        if (fd < 0 || (!set_meta(c, fd, ".", e, false, fd) &&
+                       !(errno == EPERM && rs_chflags_thaw(fd) &&
+                         set_meta(c, fd, ".", e, false, fd))))
         {
             failed(c, e->path, strerror(errno));
         }
@@ -866,6 +908,61 @@ static void finish_dirs(struct ctx *c)
         if (dir >= 0)
         {
             (void)close(dir);
+        }
+    }
+}
+
+/*
+ * The file flags (chflags.h), last of all: an immutable or append-only one
+ * set any earlier refuses the rest -- a file's times, a directory's next
+ * entry. On a system without them, they are counted, and said once.
+ */
+static void set_flags(struct ctx *c)
+{
+    size_t i;
+
+    for (i = 0; i < c->ix->count; i++)
+    {
+        const struct rs_entry *e = &c->ix->entries[i];
+        const char            *name;
+        struct stat            st;
+        int                    dir;
+        int                    fd = -1;
+
+        if (!e->flags || !c->done[i] || c->o->dry_run)
+        {
+            continue;
+        }
+        if (!rs_chflags_supported() || (e->flags & rs_chflags_settable()) != e->flags)
+        {
+            c->st->flags++;
+            c->st->flags_none = c->st->flags_none || !rs_chflags_supported();
+            if (!rs_chflags_supported())
+            {
+                continue;
+            }
+        }
+        if (e->type != 'f' && e->type != 'd' && e->type != 'p')
+        {
+            c->st->flags++;   /* a symlink's, a device's: not opened to set them */
+            continue;
+        }
+        dir = open_parent(c, e->path, &name);
+        if (dir >= 0)
+        {
+            fd = strcmp(e->path, "/") == 0
+                     ? openat(dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+                     : openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+            (void)close(dir);
+        }
+        if (fd < 0 || fstat(fd, &st) != 0 ||
+            (e->type == 'd') != S_ISDIR(st.st_mode) || rs_chflags_set(fd, e->flags) != 0)
+        {
+            c->st->flags++;
+        }
+        if (fd >= 0)
+        {
+            (void)close(fd);
         }
     }
 }
@@ -1425,6 +1522,10 @@ bool rs_restore(const char *path, const struct rs_index *ix, const struct rs_res
             link_files(&c);
         }
         finish_dirs(&c);
+        if (!o->kit)
+        {
+            set_flags(&c);
+        }
     }
     free(c.done);
     free(c.seen);

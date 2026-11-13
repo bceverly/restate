@@ -1060,6 +1060,11 @@ static void describe_locale(const char *root, struct rs_jval *sys)
     v = read_line(root, "/etc/timezone");
     if (!v)
     {
+        /* FreeBSD's tzsetup copies the zone, and writes its name here. */
+        v = read_line(root, "/var/db/zoneinfo");
+    }
+    if (!v)
+    {
         char    target[512];
         ssize_t n;
 
@@ -1226,6 +1231,49 @@ static void describe_users(const char *root, struct rs_jval *sys)
     free(text);
 }
 
+/* A FreeBSD setting: the last NAME= in /etc/rc.conf, quotes taken off. */
+static char *rc_conf_var(const char *root, const char *name)
+{
+    char       *path = path_join(root, "/etc/rc.conf");
+    char       *text = read_text(path);
+    char       *found = NULL;
+    const char *p = text;
+    size_t      nl_len = strlen(name) + 1;
+
+    free(path);
+    while (p && *p)
+    {
+        const char *nl = strchr(p, '\n');
+        size_t      len = nl ? (size_t)(nl - p) : strlen(p);
+
+        while (len > 0 && (*p == ' ' || *p == '\t'))
+        {
+            p++;
+            len--;
+        }
+        if (len > nl_len && strncmp(p, name, nl_len - 1) == 0 && p[nl_len - 1] == '=')
+        {
+            const char *v = p + nl_len;
+            size_t      vl = len - nl_len;
+
+            while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t' || v[vl - 1] == '\r'))
+            {
+                vl--;
+            }
+            if (vl >= 2 && (v[0] == '"' || v[0] == '\'') && v[vl - 1] == v[0])
+            {
+                v++;
+                vl -= 2;
+            }
+            free(found);
+            found = vl > 0 ? rs_xstrndup(v, vl) : NULL;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    free(text);
+    return found;
+}
+
 static void describe_system(const char *sysroot, const char *root, struct rs_jval *machine)
 {
     struct rs_jval *sys = rs_jobj_add(machine, "system");
@@ -1283,7 +1331,20 @@ static void describe_system(const char *sysroot, const char *root, struct rs_jva
     rs_jobj_str(sys, "kernel", s);
     free(s);
     s = read_line(root, "/etc/hostname");
+    if (!s)
+    {
+        /* OpenBSD's and NetBSD's. */
+        s = read_line(root, "/etc/myname");
+    }
+    if (!s)
+    {
+        s = rc_conf_var(root, "hostname");
+    }
     rs_jobj_str(sys, "hostname", s);
+    free(s);
+    /* FreeBSD's console keyboard: us.kbd, uk.kbd. */
+    s = rc_conf_var(root, "keymap");
+    rs_jobj_str(sys, "keymap", s);
     free(s);
     s = read_line(root, "/var/log/installer/media-info");
     rs_jobj_str(sys, "install_media", s);

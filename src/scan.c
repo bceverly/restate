@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "blake2b.h"
+#include "chflags.h"
 #include "image.h"
 #include "md5.h"
 #include "meta.h"
@@ -420,6 +421,7 @@ static void fill_entry(struct rs_entry *e, int dirfd, const char *name,
     e->rdev = (type == 'c' || type == 'b') ? (uint64_t)st->st_rdev : 0;
     rs_stat_times(st, &e->atime, &e->mtime, &e->ctime);
     rs_birth_time_at(dirfd, name, st, &e->btime);
+    e->flags = rs_chflags_of(st);
     e->cls = cls;
     e->hash_state = RS_HASH_NONE;
 }
@@ -1434,6 +1436,7 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     }
     memset(&w, 0, sizeof(w));
     w.opts = opts;
+    out->records_flags = rs_chflags_supported();
     w.out = out;
     w.stats = stats;
     w.err = err;
