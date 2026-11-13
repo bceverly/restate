@@ -229,9 +229,13 @@ static bool names_part(const struct bs *b, const char *spec, const struct bpart 
     {
         return true;
     }
-    want = rs_xasprintf("%s.eli", p->name);
-    hit = eq(s, want);
-    free(want);
+    hit = false;
+    if (p->name)
+    {
+        want = rs_xasprintf("%s.eli", p->name);
+        hit = eq(s, want);
+        free(want);
+    }
     if (hit || (rs_starts_with(s, "gpt/") && eq(s + 4, p->label)) ||
         (rs_starts_with(s, "ufs/") && eq(s + 4, p->fslabel)) ||
         (rs_starts_with(s, "msdosfs/") && eq(s + 8, p->fslabel)))
