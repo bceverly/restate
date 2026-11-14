@@ -2208,22 +2208,46 @@ That puts `restate` in `/usr/sbin`, its manual in section 8 and its
 which checks an image's signature, with it; `curl`, `gpg` and `pigz` come as
 recommendations.
 
-On Debian 12 and 13, from the `.deb` attached to each
-[release](https://github.com/bceverly/restate/releases) for amd64 and arm64:
-the same packaging the PPA builds from, built in that Debian release's
-container from the release's tarball, checked by lintian, then installed,
-used and removed in a fresh one before the release is published. Check it
-against the release's `SHA256SUMS` first, then:
+On Debian 12 and 13, amd64 and arm64, from restate's apt repository, which
+the release workflow publishes with each release on GitHub Pages:
+
+```bash
+sudo curl -fsSLo /usr/share/keyrings/restate-archive-keyring.asc \
+    https://bceverly.github.io/restate/debian/restate-archive-keyring.asc
+. /etc/os-release
+sudo tee /etc/apt/sources.list.d/restate.sources <<EOF
+Types: deb
+URIs: https://bceverly.github.io/restate/debian
+Suites: $VERSION_CODENAME
+Components: main
+Signed-By: /usr/share/keyrings/restate-archive-keyring.asc
+EOF
+sudo apt update
+sudo apt install restate
+sudo apt install restate-proxy    # on the storage host
+```
+
+`apt upgrade` then brings each release. Each Debian release has a suite of
+its own, by codename, holding the packages built for it: the same packaging
+the PPA builds from, built in that release's container from the release's
+tarball, checked by lintian, then installed, used and removed in a fresh one
+-- and installed from the repository itself, on clean Debian 12 and 13,
+before it is published. It is signed with the key the PPA's uploads are
+(`debian/signing-fingerprint`), and that key is trusted for this repository
+alone (`Signed-By`), not for the rest of the system's. The five newest
+versions stay, so `apt install restate=VERSION~trixie1` can go back one.
+
+The same packages are attached to each
+[release](https://github.com/bceverly/restate/releases), for a machine with
+no route to Pages; check one against the release's `SHA256SUMS`, then:
 
 ```bash
 sudo apt install ./restate-VERSION-debian13-amd64.deb
 sudo apt install ./restate-proxy-VERSION-debian13-amd64.deb   # on the storage host
 ```
 
-They install where the PPA's do. They are signed by no key Debian knows, so
-the release's checksums and its signed attestation vouch for them, as for the
-other packages attached there; a later one installs over an earlier one the
-same way. `make deb` builds the same package on the Debian it runs on.
+They install where the PPA's do. `make deb` builds the same package on the
+Debian it runs on.
 
 On FreeBSD, OpenBSD and NetBSD, from the binary package attached to each
 [release](https://github.com/bceverly/restate/releases) for every release
@@ -2350,7 +2374,7 @@ for the BSDs, the RPM distributions and Alpine, and from the Homebrew tap.
 
 ```bash
 sudo apt install restate-proxy                     # Ubuntu, from the PPA
-sudo apt install ./restate-proxy-VERSION-debian13-amd64.deb   # Debian, from the release
+sudo apt install restate-proxy                     # Debian, from restate's apt repository
 sudo dnf install restate-proxy                     # Fedora, EL, from COPR
 pkg add restate-proxy-VERSION-freebsd-15.1-amd64.pkg  # FreeBSD (OpenBSD and NetBSD as restate's)
 apk add --allow-untrusted restate-proxy-VERSION-r0-alpine3.24-x86_64.apk
@@ -2551,7 +2575,10 @@ it for every architecture. An upload cannot be taken back, so nothing goes
 that has not installed. The same packaging is built for Debian 12 and 13,
 amd64 and arm64, in each release's own container from the tarball, checked
 by lintian, installed, used and removed in a fresh one, and attached to the
-release. The signing key is pinned by its fingerprint in
+release; then added to the apt repository on GitHub Pages
+(`scripts/apt-repo.sh`), which is signed, installed from on clean Debian 12
+and 13 (`scripts/verify-apt-repo.sh`), and only then published, as the
+`gh-pages` branch, one commit replaced each release. The signing key is pinned by its fingerprint in
 `debian/signing-fingerprint`; the workflow refuses a secret holding any
 other.
 
@@ -2579,7 +2606,12 @@ and the Scorecard expect:
 - **Secrets → Actions:** `LAUNCHPAD_GPG_PRIVATE_KEY`, the armored secret key
   `debian/signing-fingerprint` names, registered on the Launchpad account,
   and `LAUNCHPAD_GPG_PASSPHRASE`, its passphrase. The upload runs in the
-  `launchpad` environment, which can be given a required reviewer.
+  `launchpad` environment, which can be given a required reviewer. The same
+  key signs the Debian apt repository.
+- **Pages:** deploy from a branch, `gh-pages`, `/ (root)`, once the first
+  release has pushed it: that is the Debian apt repository. Nothing may stop
+  that branch being force-pushed, which the release workflow does each
+  release. `APT_KEEP` (a variable, default 5) is how many versions it keeps.
 
 ## Project layout
 

@@ -875,8 +875,10 @@ aarch64 natively and on the others under QEMU:
 - [ ] FreeBSD port, OpenBSD port, NetBSD pkgsrc, and Homebrew's own core tap
 - [ ] Debian itself, as against Ubuntu's PPA, and Arch (the AUR). Each
       release now carries .debs for Debian 12 and 13, amd64 and arm64, built,
-      linted and installed there (2026-11-13); Debian's own archive, which
-      needs a sponsor, and the AUR are still to come
+      linted and installed there (2026-11-13), and restate's own signed apt
+      repository on GitHub Pages serves them, a suite for each release,
+      installed from before it is published (2026-11-14); Debian's own
+      archive, which needs a sponsor, and the AUR are still to come
 
 ## Later
 
