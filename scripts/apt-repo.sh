@@ -65,8 +65,11 @@ version_of()
   basename "$1" | sed -n 's/^restate\(-proxy\)\{0,1\}_\([0-9][0-9.]*\)~[a-z]*1_[a-z0-9]*\.deb$/\2/p'
 }
 
+mkdir -p "$SITE/debian/pool"
+# Absolute, as the indexes are written from inside the repository, below.
+SITE="$(cd "$SITE" && pwd)"
+NEW="$(cd "$NEW" && pwd)"
 REPO="$SITE/debian"
-mkdir -p "$REPO/pool"
 
 # The release's packages, into their release's pool.
 found=0
