@@ -2602,8 +2602,13 @@ and the Scorecard expect:
 
 - **Security → Private vulnerability reporting:** on, so SECURITY.md's link works.
 - **Security → Code scanning:** CodeQL and Scorecard upload SARIF here.
-- **Branches → `main` protection:** require the CI, Security and CodeQL checks,
-  require a pull request, and disallow force pushes. Scorecard scores this.
+- **Branches → `main` protection:** require the checks `All CI checks passed`
+  (CI's one summary job, which passes only when every other CI job did),
+  `Security scan`, `Fuzz (3 minutes)` and `CodeQL (c-cpp)`; require a pull
+  request; disallow force pushes. Scorecard scores this. Require CI's jobs
+  by that one name, not each by its own: theirs change as releases are added
+  to the test matrix, and a required name no job reports any more blocks
+  every pull request.
 - **Actions → General → Workflow permissions:** read-only by default; each
   workflow asks for exactly what it needs.
 - **Dependabot:** alerts and security updates on; `dependabot.yml` keeps the

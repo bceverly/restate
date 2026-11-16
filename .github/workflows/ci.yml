@@ -747,3 +747,74 @@ jobs:
             .coverage/index*.html
           retention-days: 14
           if-no-files-found: ignore
+
+  # ==========================================================================
+  # The one check branch protection requires of this workflow: it passes only
+  # when every job above did. Requiring each job by name goes stale whenever a
+  # job is renamed or a matrix gains or drops a release -- "Tests (FreeBSD
+  # 14.4)" -- and a required name that no job reports any more leaves every
+  # pull request waiting for it, forever. This one's name never changes.
+  #
+  # Guarded as the others are, so a pull request from a branch here skips it
+  # as it skips them, and the push run's result is the one that counts.
+  #
+  # A job added above must be added to `needs` too: the first step refuses to
+  # pass while one is missing, so it cannot be left out unnoticed.
+  passed:
+    name: All CI checks passed
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    needs:
+      - lint
+      - test
+      - ubuntu-2604
+      - arm
+      - emulated
+      - distros
+      - share
+      - macos
+      - freebsd
+      - openbsd
+      - openbsd-8
+      - netbsd
+      - memory
+      - coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/workflows/ci.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Every job in this workflow is one this waits for
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          awk '/^jobs:/ { in_jobs = 1; next }
+               in_jobs && /^  [A-Za-z0-9_-]+:[ ]*$/ { sub(/^  /, ""); sub(/:.*/, ""); print }' \
+            .github/workflows/ci.yml | grep -vx passed | sort > jobs.txt
+          printf '%s' "$NEEDS" | jq -r 'keys[]' | sort > needs.txt
+          if ! cmp -s jobs.txt needs.txt; then
+            echo "::error::'passed' must need every other job in ci.yml; the differences:"
+            diff jobs.txt needs.txt || true
+            exit 1
+          fi
+
+      - name: Every one of them passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          FAILED=$(printf '%s' "$NEEDS" |
+                   jq -r 'to_entries[] | select(.value.result != "success") |
+                          "\(.key) (\(.value.result))"')
+          if [ -n "$FAILED" ]; then
+            echo "::error::Not every CI job passed:"
+            printf '%s\n' "$FAILED" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "All $(printf '%s' "$NEEDS" | jq length) jobs passed."
