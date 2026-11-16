@@ -1900,6 +1900,7 @@ into `FILE` when the run ends, replaced whole:
   "reused": 454431, "reused_bytes": 167503724544, "new_bytes": 431996928,
   "repository_bytes": 178241380352, "cache": null,
   "unreadable": {"count": 0, "first": []},
+  "vanished": {"count": 1, "first": ["/var/lib/app/db-journal"]},
   "quiesce": [{"kind": "postgresql", "name": "18-main", "paused_at": "2026-10-20T03:12:40Z",
                "resumed_at": "2026-10-20T03:13:02Z", "status": "ok", "left_out": false,
                "message": ""}],
@@ -1909,7 +1910,11 @@ into `FILE` when the run ends, replaced whole:
 
 Every warning is collected, `--quiet` or not, every error -- so a run that
 failed says why in its result, not only on standard error -- and every path a
-walk could not read with why; prune, repack, protect, check, restore (its plan, in a dry run,
+walk could not read with why. A path the walk listed and found removed before
+it read it -- a database's rollback journal, a lock, a temporary file -- is
+left out of the index and counted in `vanished` instead: nothing that was
+there when it was read is missing, so it leaves a capture no less complete
+(exit 0, not 3), as tar and rsync treat a file that vanished. Prune, repack, protect, check, restore (its plan, in a dry run,
 and `"content_read": false` for a `--plan`), copy, du, estimate and diff add
 what they did. `diff`, `verify` and `status` give the first 1000 of each kind
 of change -- added, deleted, modified -- in `diff.changes`, with

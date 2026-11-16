@@ -159,6 +159,7 @@ struct rs_scan_stats {
     uint64_t skipped_remote;  /* network filesystems and automounts (opts->remote) */
     uint64_t skipped_repositories; /* restate repositories (opts->walk_repositories) */
     uint64_t unreadable;
+    uint64_t vanished;        /* listed, then removed before they were read: left out */
     uint64_t grew;            /* kept as they were when their copy began */
     uint64_t pkg_unmodified;  /* files as their package installed them */
     uint64_t pkg_modified;    /* files changed since their package installed them */

@@ -2648,6 +2648,7 @@ this run's whole result or the last one's:
  "reused_bytes": 9876543210, "new_bytes": 4096, "repository_bytes": 123456789,
  "cache": null,
  "unreadable": {"count": 1, "first": [{"path": "/srv/x", "reason": "..."}]},
+ "vanished": {"count": 1, "first": ["/var/lib/app/db\-journal"]},
  "quiesce": [{"kind": "postgresql", "name": "16\-main",
    "paused_at": "...", "resumed_at": "...", "status": "ok", "left_out": false,
    "message": ""}],
@@ -2679,7 +2680,14 @@ such as
 or
 .BR busy ,
 for a program to choose its message by; and
-every path a walk could not read, the first 100 with why. Each command adds what it did:
+every path a walk could not read, the first 100 with why. A path the walk
+listed and found removed before it read it \- a database's rollback journal,
+a lock, a temporary file, there only while something is busy \- is not one
+it could not read: it is left out of the index and counted in
+.BR vanished ,
+the first 100 named, and leaves the run no less complete
+.RB ( \-v
+names each as it goes). Each command adds what it did:
 .BR prune ,
 .B pruned
 and

@@ -34,6 +34,8 @@ static struct rs_jval errors;        /* the first RS_RESULT_ERRORS */
 static uint64_t       nerrors;
 static struct rs_jval unreadable;    /* the first RS_RESULT_UNREADABLE */
 static uint64_t       nunreadable;
+static struct rs_jval vanished;      /* the first RS_RESULT_VANISHED */
+static uint64_t       nvanished;
 static struct rs_jval quiesce;
 static uint64_t       quiesce_failed;
 
@@ -69,17 +71,20 @@ void rs_result_end(void)
     rs_jval_free(&warnings);
     rs_jval_free(&errors);
     rs_jval_free(&unreadable);
+    rs_jval_free(&vanished);
     rs_jval_free(&quiesce);
     memset(&root, 0, sizeof(root));
     memset(&warnings, 0, sizeof(warnings));
     memset(&errors, 0, sizeof(errors));
     memset(&unreadable, 0, sizeof(unreadable));
+    memset(&vanished, 0, sizeof(vanished));
     memset(&quiesce, 0, sizeof(quiesce));
     free(command);
     command = NULL;
     nwarnings = 0;
     nerrors = 0;
     nunreadable = 0;
+    nvanished = 0;
     quiesce_failed = 0;
     collecting = false;
     if (rs_warn_hook == collect_warning)
@@ -102,6 +107,7 @@ void rs_result_begin(const char *cmd)
     rs_jval_set_array(&warnings);
     rs_jval_set_array(&errors);
     rs_jval_set_array(&unreadable);
+    rs_jval_set_array(&vanished);
     rs_jval_set_array(&quiesce);
     rs_warn_hook = collect_warning;
     rs_error_hook = collect_error;
@@ -133,6 +139,22 @@ void rs_result_unreadable(const char *path, const char *reason)
         free(p);
     }
     nunreadable++;
+}
+
+void rs_result_vanished(const char *path)
+{
+    if (!collecting)
+    {
+        return;
+    }
+    if (nvanished < RS_RESULT_VANISHED)
+    {
+        char *p = rs_utf8_lossy(path, strlen(path));
+
+        rs_jval_set_string(rs_jarr_add(&vanished), p);
+        free(p);
+    }
+    nvanished++;
 }
 
 uint64_t rs_result_unreadable_count(void)
@@ -287,6 +309,12 @@ bool rs_result_write(int status, const char *path, const char *group)
     v = rs_jobj_add(v, "first");
     *v = unreadable;
     memset(&unreadable, 0, sizeof(unreadable));
+    v = rs_jobj_add(&out, "vanished");
+    rs_jval_set_object(v);
+    rs_jobj_u64(v, "count", nvanished);
+    v = rs_jobj_add(v, "first");
+    *v = vanished;
+    memset(&vanished, 0, sizeof(vanished));
     v = rs_jobj_add(&out, "quiesce");
     *v = quiesce;
     memset(&quiesce, 0, sizeof(quiesce));

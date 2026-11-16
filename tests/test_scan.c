@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "mounts.h"
+#include "result.h"
 #include "scan.h"
 #include "test.h"
 
@@ -152,6 +153,163 @@ static int scan_pretending(const void *arg)
     return ok && st.grew == 1 && st.unreadable == 2 ? 1 : 0;
 }
 
+/* A tree whose files are removed as the walk reaches them, the way a
+ * database's journal comes and goes: see vanish_store and vanish_have. */
+struct vanishing {
+    const char *root;
+    char        journal_hash[RS_SHA256_HEX_SIZE];
+};
+
+/* The tree vanish_store removes from. */
+static const char *vanishing_root;
+
+/* Storing either of /pair's two files removes the other, which the walk has
+ * listed by then, whichever it lists first; storing /app/sub, a directory,
+ * removes it before the walk opens it. */
+static bool vanish_store(void *ctx, struct rs_entry *e, int fd, const struct stat *st,
+                         struct rs_buf *err)
+{
+    char *other = NULL;
+
+    (void)ctx;
+    (void)fd;
+    (void)st;
+    (void)err;
+    e->hash_state = e->type == 'f' ? RS_HASH_PRESENT : e->hash_state;
+    e->copy = RS_COPY_OK;
+    if (strcmp(e->path, "/pair/p") == 0)
+    {
+        other = rs_xasprintf("%s/pair/q", vanishing_root);
+    } else if (strcmp(e->path, "/pair/q") == 0)
+    {
+        other = rs_xasprintf("%s/pair/p", vanishing_root);
+    }
+    if (other)
+    {
+        (void)unlink(other);
+        free(other);
+    }
+    if (strcmp(e->path, "/app/sub") == 0)
+    {
+        char *dir = rs_xasprintf("%s/app/sub", vanishing_root);
+
+        CHECK(rmdir(dir) == 0);
+        free(dir);
+    }
+    return true;
+}
+
+/* Asked whether the store has /app/journal's content -- after its stat, and
+ * before it is opened -- removes it, and says no, so the walk opens it. */
+static bool vanish_have(const void *ctx, const char hash[RS_SHA256_HEX_SIZE])
+{
+    const struct vanishing *v = ctx;
+
+    if (strcmp(hash, v->journal_hash) == 0)
+    {
+        char *journal = rs_xasprintf("%s/app/journal", v->root);
+
+        (void)unlink(journal);
+        free(journal);
+    }
+    return false;
+}
+
+static void test_vanished(void)
+{
+    char                  *root = rs_test_tmpdir();
+    struct rs_rules        rules;
+    struct rs_scan_opts    o;
+    struct rs_scan_stats   st;
+    struct rs_index        prev;
+    struct rs_index        m;
+    struct rs_buf          err;
+    struct vanishing       v;
+    const struct rs_entry *e;
+    char                  *p;
+
+    TEST_CASE("scan: what is removed before it is read is left out, not unreadable");
+    rs_rules_init(&rules);
+    rs_buf_init(&err);
+    p = rs_xasprintf("%s/app", root);
+    CHECK(mkdir(p, 0755) == 0);
+    free(p);
+    p = rs_xasprintf("%s/app/sub", root);
+    CHECK(mkdir(p, 0755) == 0);
+    free(p);
+    p = rs_xasprintf("%s/pair", root);
+    CHECK(mkdir(p, 0755) == 0);
+    free(p);
+    rs_test_write(root, "app/db", "the database\n", 0644);
+    rs_test_write(root, "app/journal", "a write half done\n", 0644);
+    rs_test_write(root, "pair/p", "p\n", 0644);
+    rs_test_write(root, "pair/q", "q\n", 0644);
+    memset(&o, 0, sizeof(o));
+    o.root = root;
+    o.rules = &rules;
+    o.hash = true;
+
+    /* The last capture, which had them all: the walk asks the store about
+     * what it recorded then. */
+    rs_index_init(&prev);
+    CHECK(rs_scan(&o, &prev, &st, &err));
+    e = rs_index_find(&prev, "/app/journal");
+    CHECK(e != NULL && e->hash_state == RS_HASH_PRESENT);
+    memset(&v, 0, sizeof(v));
+    v.root = root;
+    vanishing_root = root;
+    if (e)
+    {
+        memcpy(v.journal_hash, e->hash, sizeof(v.journal_hash));
+    }
+
+    o.prev = &prev;
+    o.store = vanish_store;
+    o.store_ctx = &v;
+    o.store_baseline = true;
+    o.have = vanish_have;
+    rs_index_init(&m);
+    rs_result_begin("capture");
+    CHECK(rs_scan(&o, &m, &st, &err));
+    /* The journal, between its stat and its open; one of the pair, between
+     * the listing and its stat; the directory, between its stat and its
+     * open. */
+    CHECK_INT(st.vanished, 3);
+    CHECK_INT(st.unreadable, 0);
+    CHECK_INT(rs_result_unreadable_count(), 0);
+    CHECK(rs_index_find(&m, "/app/db") != NULL);
+    CHECK(rs_index_find(&m, "/app/journal") == NULL);
+    CHECK((rs_index_find(&m, "/pair/p") == NULL) != (rs_index_find(&m, "/pair/q") == NULL));
+    /* Recorded before it went, as it was then: empty. */
+    e = rs_index_find(&m, "/app/sub");
+    CHECK(e != NULL && e->type == 'd');
+    rs_result_end();
+    rs_index_free(&m);
+    rs_index_free(&prev);
+
+    TEST_CASE("scan: a path that cannot be read for another reason is still unreadable");
+    if (geteuid() != 0)
+    {
+        p = rs_xasprintf("%s/app/locked", root);
+        rs_test_write(root, "app/locked", "secret\n", 0000);
+        o.prev = NULL;
+        o.store = NULL;
+        o.have = NULL;
+        rs_index_init(&m);
+        CHECK(rs_scan(&o, &m, &st, &err));
+        CHECK_INT(st.unreadable, 1);
+        CHECK_INT(st.vanished, 0);
+        rs_index_free(&m);
+        (void)chmod(p, 0644);
+        free(p);
+    }
+
+    rs_buf_free(&err);
+    rs_rules_free(&rules);
+    rs_test_rmtree(root);
+    free(root);
+}
+
 /* Each repository a walk left out, a line apiece. */
 static void said_path(void *ctx, const char *path)
 {
@@ -230,6 +388,7 @@ void test_scan(void)
     const struct rs_entry *e;
 
     test_mounts(root);
+    test_vanished();
     build_tree(root);
     rs_buf_init(&err);
     memset(&o, 0, sizeof(o));

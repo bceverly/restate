@@ -15,6 +15,7 @@
  *    "started_at": "2026-10-20T03:00:00Z", "seconds": 812,
  *    ... what the command did ...,
  *    "unreadable": {"count": 2, "first": [{"path": ..., "reason": ...}]},
+ *    "vanished": {"count": 1, "first": ["/var/lib/app/db-journal"]},
  *    "quiesce": [{"kind": "postgresql", "name": "16-main", "paused_at": ...,
  *                 "resumed_at": ..., "status": "ok", "message": ""}],
  *    "warnings": ["..."], "warnings_count": 7,
@@ -29,7 +30,8 @@
  * of them in full -- and every error, the first RS_RESULT_ERRORS in full,
  * so that a run that failed says why there as well as on standard error; as
  * are the paths a walk could not read, the first RS_RESULT_UNREADABLE with
- * why.
+ * why, and those it listed that were removed before it read them -- which
+ * leave a run no less complete -- the first RS_RESULT_VANISHED.
  *
  * The file is its owner's alone, as everything restate writes is, unless a
  * group is given (--report-group): then it is that group's to read too.
@@ -47,6 +49,7 @@
 #define RS_RESULT_WARNINGS   50
 #define RS_RESULT_ERRORS     50
 #define RS_RESULT_UNREADABLE 100
+#define RS_RESULT_VANISHED   100
 
 /* Starts collecting for `command`; the clock starts now. */
 void rs_result_begin(const char *command);
@@ -55,6 +58,8 @@ struct rs_jval *rs_result(void);
 
 /* A path a walk could not read, and why. */
 void rs_result_unreadable(const char *path, const char *reason);
+/* A path a walk listed that was removed before it was read. */
+void rs_result_vanished(const char *path);
 /* A hook that paused something, and how it went: the times are the
  * clock's, and `resumed` 0 if it never was; `left_out` if its paths were not
  * copied, as its pause asked, its dump being the copy (hooks.h). */

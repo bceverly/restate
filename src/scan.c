@@ -56,6 +56,7 @@ struct walk {
     bool                       failed;    /* the store callback gave up */
     bool                       forced;    /* visiting a kept path: state, whatever the rules */
     bool                       deferring; /* visiting a deferred group, at the end */
+    bool                       gone;      /* what visit is recording was removed under it */
 };
 
 /* Whether `path` is a network filesystem's or an automount's mount point,
@@ -256,13 +257,36 @@ static void unreadable_because(struct walk *w, const char *path, const char *why
     rs_buf_free(&shown);
 }
 
+static void verbose_skip(const struct walk *w, const char *path, const char *why);
+
+/*
+ * A path that could not be read for `err`. ENOENT is not that: the walk
+ * listed it, and it was removed before it was looked at or opened -- a
+ * database's rollback journal, a lock, a temporary file, there only while
+ * something is busy. Nothing that was there when it was read is missing, so
+ * it is left out of the index and counted apart, as tar and rsync say a file
+ * "vanished", and the capture is not the less complete for it. A file's
+ * entry is dropped (w->gone); a directory, recorded before it is opened,
+ * stays, as it was then, with nothing in it.
+ */
 static void unreadable(struct walk *w, const char *path, int err)
 {
     struct rs_buf shown;
 
+    if (err == ENOENT)
+    {
+        w->gone = true;
+    }
     /* A counting pass says nothing: the walk after it will, once. */
     if (w->opts->count_only)
     {
+        return;
+    }
+    if (err == ENOENT)
+    {
+        w->stats->vanished++;
+        rs_result_vanished(path);
+        verbose_skip(w, path, "removed while the capture ran");
         return;
     }
     w->stats->unreadable++;
@@ -286,8 +310,6 @@ static void grew(struct walk *w, const char *path)
             shown.data);
     rs_buf_free(&shown);
 }
-
-static void verbose_skip(const struct walk *w, const char *path, const char *why);
 
 /* Whether the directory open at `fd` is a restate repository: its marker a
  * regular file, and saying it is one, of any version. */
@@ -1082,6 +1104,7 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     {
         return;
     }
+    w->gone = false;
     if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT) < 0)
     {
         unreadable(w, tree_path, errno);
@@ -1172,6 +1195,13 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
             if (w->failed || (!checked && !file_content(w, dirfd, name, &st, &e)))
             {
                 w->failed = true;
+                rs_entry_free(&e);
+                return;
+            }
+            if (w->gone)
+            {
+                /* Removed between its stat and its open: nothing of it was
+                 * read or kept, and it is not recorded. */
                 rs_entry_free(&e);
                 return;
             }

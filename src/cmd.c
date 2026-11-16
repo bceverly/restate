@@ -381,6 +381,12 @@ static void scan_summary(const struct rs_options *o, const struct rs_scan_stats 
                       "copied (logs, usually), and are kept as they were when the copy "
                       "began\n", st->grew);
     }
+    if (st->vanished > 0)
+    {
+        (void)fprintf(stderr, "restate: %" PRIu64 " paths were removed while the capture ran, "
+                      "before they were read, and are left out (-v names them)\n",
+                      st->vanished);
+    }
     if (st->unreadable > 0)
     {
         (void)fprintf(stderr, "restate: %" PRIu64 " paths could not be read; "
@@ -2355,8 +2361,9 @@ int rs_cmd_capture(const struct rs_options *o)
     }
     capture_result(o, &st, where, new_bytes, created);
     log_outcome(o, status, began, "output=%s paths=%" PRIu64 " kept=%" PRIu64 " read=%" PRIu64
-                " reused=%" PRIu64 " unreadable=%" PRIu64, where ? where : o->output,
-                st.recorded, st.stored, st.bytes_hashed, st.reused, st.unreadable);
+                " reused=%" PRIu64 " unreadable=%" PRIu64 " vanished=%" PRIu64,
+                where ? where : o->output, st.recorded, st.stored, st.bytes_hashed, st.reused,
+                st.unreadable, st.vanished);
     free(where);
     return status;
 }
@@ -3662,7 +3669,8 @@ int rs_cmd_features(const struct rs_options *o)
                                            "restore.packages",     "restore.resolved",
                                            "restore.unmatched",    "skipped_network_mounts",
                                            "skipped_repositories", "snapshot",
-                                           "status.capture_rules", "verify.capture_rules" };
+                                           "status.capture_rules", "vanished",
+                                           "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;

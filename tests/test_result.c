@@ -101,6 +101,10 @@ static void collecting(const char *dir)
         rs_result_unreadable("/srv/a\xff", "Input/output error");
     }
     CHECK_INT(rs_result_unreadable_count(), RS_RESULT_UNREADABLE + 5);
+    for (i = 0; i < RS_RESULT_VANISHED + 2; i++)
+    {
+        rs_result_vanished("/var/lib/app/db-journal");
+    }
     rs_result_quiesce("postgresql", "16-main", 1000, 1010, true, true, NULL);
     rs_result_quiesce("unifi", "unifi", 1000, 0, false, false, "exited 1");
     CHECK_INT(rs_result_quiesce_failed(), 1);
@@ -124,6 +128,15 @@ static void collecting(const char *dir)
         CHECK_INT(u64_of(u, "count"), RS_RESULT_UNREADABLE + 5);
         CHECK(rs_jobject_get(u, "first") && rs_jobject_get(u, "first")->n == RS_RESULT_UNREADABLE);
         CHECK_CONTAINS(rs_jobject_str(&rs_jobject_get(u, "first")->items[0], "path"), "/srv/a");
+        {
+            const struct rs_jval *g = rs_jobject_get(&v, "vanished");
+            const struct rs_jval *first = g ? rs_jobject_get(g, "first") : NULL;
+
+            CHECK_INT(u64_of(g, "count"), RS_RESULT_VANISHED + 2);
+            CHECK(first && first->type == RS_JARRAY && first->n == RS_RESULT_VANISHED);
+            CHECK_STR(first && first->n > 0 ? first->items[0].s : NULL,
+                      "/var/lib/app/db-journal");
+        }
         CHECK(q && q->n == 2);
         if (q && q->n == 2)
         {
@@ -190,6 +203,7 @@ static void collecting(const char *dir)
     CHECK(read_json(path, &v));
     CHECK_INT(u64_of(&v, "errors_count"), 0);
     CHECK(rs_jobject_get(&v, "errors") && rs_jobject_get(&v, "errors")->n == 0);
+    CHECK_INT(u64_of(rs_jobject_get(&v, "vanished"), "count"), 0);
     rs_jval_free(&v);
 
     TEST_CASE("result: readable by a group too, where one is given");
