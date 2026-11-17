@@ -57,6 +57,10 @@ unsigned rs_diff_entries(const struct rs_entry *old, const struct rs_entry *new_
     {
         what |= RS_DIFF_FLAGS;
     }
+    if (strcmp(old->acl ? old->acl : "", new_->acl ? new_->acl : "") != 0)
+    {
+        what |= RS_DIFF_ACL;
+    }
     if (old->type == 'l')
     {
         const char *a = old->target ? old->target : "";
@@ -95,6 +99,7 @@ void rs_diff_describe(unsigned what, struct rs_buf *out)
         { RS_DIFF_OWNER,   "owner" },
         { RS_DIFF_XATTRS,  "xattrs" },
         { RS_DIFF_FLAGS,   "flags" },
+        { RS_DIFF_ACL,     "acl" },
     };
     size_t i;
     bool   first = true;
@@ -441,6 +446,10 @@ static bool walk(const struct rs_index *old, const struct rs_index *new_, FILE *
                 /* An index from before, or from a system without them, does
                  * not say a file had none. */
                 what &= ~(unsigned)RS_DIFF_FLAGS;
+            }
+            if (!old->records_acls || !new_->records_acls)
+            {
+                what &= ~(unsigned)RS_DIFF_ACL;   /* likewise */
             }
             kind = what ? 'M' : 0;
             i++;

@@ -72,6 +72,7 @@ static void add(struct rs_index *m, struct rs_entry e)
     e.path = rs_xstrdup(e.path);
     e.target = e.target ? rs_xstrdup(e.target) : NULL;
     e.package = e.package ? rs_xstrdup(e.package) : NULL;
+    e.acl = e.acl ? rs_xstrdup(e.acl) : NULL;
     rs_index_add(m, &e);
 }
 
@@ -203,6 +204,41 @@ void test_diff(void)
         f2.records_flags = true;
         text = diff_text(&f1, &f2, &st);
         CHECK_STR(text, "M\t/lib/libc.so.7\tflags\n");
+        free(text);
+        rs_index_free(&f1);
+        rs_index_free(&f2);
+    }
+
+    TEST_CASE("diff: ACLs, where both indexes record them");
+    {
+        struct rs_index f1;
+        struct rs_index f2;
+
+        rs_index_init(&f1);
+        rs_index_init(&f2);
+        a = entry("/srv/share", 'd');
+        b = a;
+        b.acl = "everyone@::read_data::allow";
+        CHECK_INT(rs_diff_entries(&a, &b), RS_DIFF_ACL);
+        CHECK_INT(rs_diff_entries(&b, &b), 0);
+        rs_buf_init(&desc);
+        rs_diff_describe(RS_DIFF_FLAGS | RS_DIFF_ACL, &desc);
+        CHECK_STR(desc.data, "flags,acl");
+        rs_buf_free(&desc);
+        add(&f1, entry("/", 'd'));
+        add(&f1, a);
+        add(&f2, entry("/", 'd'));
+        add(&f2, b);
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "");   /* neither says it records them */
+        free(text);
+        f1.records_acls = true;
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "");   /* nor both */
+        free(text);
+        f2.records_acls = true;
+        text = diff_text(&f1, &f2, &st);
+        CHECK_STR(text, "M\t/srv/share\tacl\n");
         free(text);
         rs_index_free(&f1);
         rs_index_free(&f2);

@@ -30,7 +30,8 @@ enum {
     RS_DIFF_CONTENT = 1u << 3,
     RS_DIFF_TARGET  = 1u << 4,
     RS_DIFF_XATTRS  = 1u << 5,
-    RS_DIFF_FLAGS   = 1u << 6     /* the file flags (chflags.h), where both record them */
+    RS_DIFF_FLAGS   = 1u << 6,    /* the file flags (chflags.h), where both record them */
+    RS_DIFF_ACL     = 1u << 7     /* the NFSv4 or macOS ACL (acl.h), likewise */
 };
 
 struct rs_diff_stats {

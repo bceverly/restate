@@ -108,6 +108,8 @@ struct rs_restore_stats {
     uint64_t xattrs;      /* extended attributes that could not be set */
     uint64_t flags;       /* files whose flags (chflags.h) could not be set */
     bool     flags_none;  /* ... because this system has none */
+    uint64_t acls;        /* files whose NFSv4 or macOS ACL (acl.h) could not be set */
+    bool     acls_none;   /* ... because this system has none */
     uint64_t other_arch_left; /* programs of another processor, a package's: left */
     uint64_t other_arch;  /* programs of another processor no package installed: put
                            * back, though they will not run here */

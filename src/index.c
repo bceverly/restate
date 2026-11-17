@@ -24,7 +24,8 @@ void rs_entry_free(struct rs_entry *e)
     free(e->group);
     free(e->stored);
     free(e->package);
-    e->path = e->target = e->user = e->group = e->stored = e->package = NULL;
+    free(e->acl);
+    e->path = e->target = e->user = e->group = e->stored = e->package = e->acl = NULL;
     rs_xattr_free(e->xattrs, e->nxattrs);
     e->xattrs = NULL;
     e->nxattrs = 0;
@@ -482,6 +483,10 @@ static void entry_json(struct rs_buf *b, const struct rs_entry *e)
         put_str(b, "flags", names.data, &first);
         rs_buf_free(&names);
     }
+    if (e->acl)
+    {
+        put_str(b, "acl", e->acl, &first);   /* UTF-8 always (acl.h) */
+    }
     if (e->package)
     {
         put_bytes(b, "package", e->package, &first);
@@ -533,6 +538,13 @@ bool rs_index_write(const struct rs_index *ix, FILE *out)
         first = true;
         rs_buf_addstr(&b, ",\n  ");
         put_key(&b, "records_flags", &first);
+        rs_buf_addstr(&b, "true");
+    }
+    if (ix->records_acls)
+    {
+        first = true;
+        rs_buf_addstr(&b, ",\n  ");
+        put_key(&b, "records_acls", &first);
         rs_buf_addstr(&b, "true");
     }
     first = true;
@@ -805,6 +817,13 @@ static bool entry_from_json(const struct rs_jval *obj, struct rs_entry *e, const
     {
         e->flags = rs_chflags_parse(v->s, NULL);
     }
+    /* Kept as it is written: one a restore cannot read is one it counts as
+     * not set (acl.h). */
+    v = rs_jobject_get(obj, "acl");
+    if (v && v->type == RS_JSTRING && v->slen > 0)
+    {
+        e->acl = rs_xstrndup(v->s, v->slen);
+    }
     v = rs_jobject_get(obj, "sha256");
     if (v && v->type == RS_JSTRING)
     {
@@ -1022,6 +1041,9 @@ bool rs_index_parse(struct rs_index *ix, const char *text, size_t len,
                 } else if (strcmp(key.data, "records_flags") == 0)
                 {
                     ix->records_flags = v.type == RS_JBOOL && v.b;
+                } else if (strcmp(key.data, "records_acls") == 0)
+                {
+                    ix->records_acls = v.type == RS_JBOOL && v.b;
                 } else if ((strcmp(key.data, "root") == 0 && !set_string(&ix->root, &v)) ||
                            (strcmp(key.data, "os") == 0 && !set_string(&ix->os, &v)) ||
                            (strcmp(key.data, "host") == 0 && !set_string(&ix->host, &v)) ||

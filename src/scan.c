@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "acl.h"
 #include "blake2b.h"
 #include "chflags.h"
 #include "image.h"
@@ -448,9 +449,10 @@ static void fill_entry(struct rs_entry *e, int dirfd, const char *name,
     e->hash_state = RS_HASH_NONE;
 }
 
-/* A file's or directory's extended attributes, read through a descriptor of
- * its own, which must be the one fstatat described. One that cannot be
- * opened has none recorded; reading its content says why, if it is read. */
+/* A file's or directory's extended attributes and ACL, read through a
+ * descriptor of its own, which must be the one fstatat described. One that
+ * cannot be opened has none recorded; reading its content says why, if it
+ * is read. */
 static void read_xattrs(int dirfd, const char *name, const struct stat *st,
                         struct rs_entry *e)
 {
@@ -475,6 +477,7 @@ static void read_xattrs(int dirfd, const char *name, const struct stat *st,
         return;
     }
     (void)rs_xattr_read(fd, &e->xattrs, &e->nxattrs);
+    (void)rs_acl_read(fd, &e->acl);
     (void)close(fd);
 }
 
@@ -1467,6 +1470,7 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     memset(&w, 0, sizeof(w));
     w.opts = opts;
     out->records_flags = rs_chflags_supported();
+    out->records_acls = rs_acl_supported();
     w.out = out;
     w.stats = stats;
     w.err = err;
@@ -1484,6 +1488,7 @@ bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
     fill_entry(&e, fd, ".", &st, 'd', rs_rules_classify(opts->rules, "/", NULL));
     e.path = rs_xstrdup("/");
     (void)rs_xattr_read(fd, &e.xattrs, &e.nxattrs);
+    (void)rs_acl_read(fd, &e.acl);
     if (storing(&w, &e))
     {
         if (!opts->store(opts->store_ctx, &e, -1, &st, err))

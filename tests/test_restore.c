@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "acl.h"
 #include "chflags.h"
 #include "fstab.h"
 #include "glob.h"
@@ -1088,6 +1089,116 @@ void test_restore(void)
         free(ft);
         free(fimg);
         free(froot);
+    }
+
+    TEST_CASE("restore: NFSv4 and macOS ACLs, after the mode");
+    {
+        char           *at_ = at(dir, "acltree");
+        char           *aimg = at(dir, "acl.tar");
+        char           *aroot = at(dir, "aclroot");
+        char           *fp;
+        char           *text;
+        struct rs_index aix;
+        int             fd;
+
+        CHECK(mkdir(at_, 0755) == 0);
+        put(at_, "srv/share/report", "quarterly\n");
+        put(at_, "srv/share/plain", "no ACL\n");
+        rs_acl_pretend(true);
+        fp = at(at_, "srv/share/report");
+        fd = open(fp, O_RDONLY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_acl_set(fd, "group:=4242:read_data::allow,everyone@::write_data::deny",
+                                    NULL, NULL) == 0);
+        (void)close(fd);
+        free(fp);
+        fp = at(at_, "srv/share");
+        fd = open(fp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_acl_set(fd, "owner@::read_data/write_data:file_inherit:allow", NULL,
+                                    NULL) == 0);
+        (void)close(fd);
+        free(fp);
+        capture(at_, aimg, &aix);
+        CHECK(aix.records_acls);
+        CHECK_STR(rs_index_find(&aix, "/srv/share/report")->acl,
+                  "group:=4242:read_data::allow,everyone@::write_data::deny");
+        CHECK_STR(rs_index_find(&aix, "/srv/share")->acl,
+                  "owner@::read_data/write_data:file_inherit:allow");
+        CHECK(rs_index_find(&aix, "/srv/share/plain")->acl == NULL);
+
+        /* One there already, as a directory's might have passed on, is
+         * taken off where the image's had none. */
+        CHECK(mkdir(aroot, 0755) == 0);
+        put(aroot, "srv/share/plain", "no ACL\n");
+        fp = at(aroot, "srv/share/plain");
+        fd = open(fp, O_RDONLY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_acl_set(fd, "everyone@::read_data:inherited:allow", NULL, NULL) == 0);
+        (void)close(fd);
+        free(fp);
+        memset(&r, 0, sizeof(r));
+        restore_into(&r, aimg, &aix, aroot, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.acls, 0);
+        fp = at(aroot, "srv/share/report");
+        fd = open(fp, O_RDONLY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_acl_read(fd, &text));
+        CHECK_STR(text ? text : "", "group:=4242:read_data::allow,everyone@::write_data::deny");
+        free(text);
+        (void)close(fd);
+        free(fp);
+        fp = at(aroot, "srv/share");
+        fd = open(fp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        CHECK(fd >= 0 && rs_acl_read(fd, &text));
+        CHECK_STR(text ? text : "", "owner@::read_data/write_data:file_inherit:allow");
+        free(text);
+        (void)close(fd);
+        free(fp);
+        fp = at(aroot, "srv/share/plain");
+        fd = open(fp, O_RDONLY | O_CLOEXEC);
+        text = NULL;
+        CHECK(fd >= 0 && rs_acl_read(fd, &text));
+        CHECK(text == NULL);
+        free(text);
+        (void)close(fd);
+        free(fp);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+
+        TEST_CASE("restore: an ACL that cannot be set is counted");
+        rs_test_rmtree(aroot);
+        CHECK(mkdir(aroot, 0755) == 0);
+        free(rs_index_find(&aix, "/srv/share/report")->acl);
+        ((struct rs_entry *)(uintptr_t)rs_index_find(&aix, "/srv/share/report"))->acl =
+            rs_xstrdup("owner@::fly::allow");
+        memset(&r, 0, sizeof(r));
+        r.o.verbose = true;
+        restore_into(&r, aimg, &aix, aroot, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.acls, 1);
+        CHECK(!r.st.acls_none);
+        CHECK(strstr(errs, "srv/share/report: its ACL could not be set") != NULL);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+        rs_acl_pretend(false);
+
+#if !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__APPLE__)
+        TEST_CASE("restore: ACLs, where the system has none");
+        rs_test_rmtree(aroot);
+        CHECK(mkdir(aroot, 0755) == 0);
+        memset(&r, 0, sizeof(r));
+        restore_into(&r, aimg, &aix, aroot, &out, &errs);
+        CHECK(r.ok);
+        CHECK_INT(r.st.acls, 2);
+        CHECK(r.st.acls_none);
+        rs_buf_free(&r.err);
+        free(out);
+        free(errs);
+#endif
+        rs_index_free(&aix);
+        free(at_);
+        free(aimg);
+        free(aroot);
     }
 
     TEST_CASE("restore: images it cannot read");

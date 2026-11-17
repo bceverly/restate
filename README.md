@@ -1124,6 +1124,29 @@ for itself -- a UFS snapshot's, macOS's compression -- are not recorded.
 `verify`, `diff` and `status` show a change of flags as `flags`, where both
 sides record them.
 
+NFSv4 ACLs come back too: FreeBSD's on ZFS (and on UFS where `tunefs -N`
+turned them on) and NetBSD's on FFS, along with macOS's ACLs. They are not
+extended attributes, so the index records each as text of its own. The
+entries are kept in the order that decides them, in setfacl(1)'s words for
+what each allows or denies and how it is inherited:
+
+```
+user:alice=1001:read_data/execute::allow,everyone@::write_data::deny
+```
+
+Only an ACL that says more than the mode is recorded. Each is set after the
+mode, since setting the mode would rewrite it, and its users and groups are
+mapped by name, as owners are. A file the image had no ACL on loses any it
+has now, such as one its directory passed on when it was made.
+
+An ACL from the other kind of system is set only where it can be said in
+full. macOS has no `owner@` or `group@`, and the BSDs have nothing for a
+macOS identity that no user or group stands for. One that can't be said is
+left off whole, since part of an ACL can grant what the whole did not. A
+restore says how many ACLs it left off, and `-v` names each. `verify`,
+`diff` and `status` show a changed ACL as `acl`, where both sides record
+them.
+
 A file already in place as the image has it -- the same size and
 modification time, the same names (a hard-linked file has to have all of the
 image's names for it, and no others), and content that hashes to the index's
@@ -2008,6 +2031,7 @@ is still read.
 | `stored` | where the content is inside the image |
 | `xattrs` | a file's or directory's extended attributes, `[{"name", "value"}]` with the value base64 — on Linux its POSIX ACLs and file capabilities among them |
 | `flags` | the BSDs' and macOS's file flags, by chflags(1)'s names: `"schg,nodump"`; the index says `"records_flags": true` where a missing one means none |
+| `acl` | an NFSv4 ACL (FreeBSD, NetBSD) or macOS's, as text: `"owner@::read_data/write_data::allow,group:staff=20:execute::deny"`; the index says `"records_acls": true` where a missing one means none |
 | `package`, `modified` | the package a file came from, where dpkg says, and `true` where it no longer matches what that package installed |
 | `path_base64`, `target_base64` | the exact bytes of a name that is not valid UTF-8, which JSON cannot hold directly |
 

@@ -5448,6 +5448,15 @@ static int restore_cmd(const struct rs_options *o)
                                         : "the system ones need root, at a securelevel below 1, "
                                           "and a symlink's are not set");
         }
+        if (st.acls > 0)
+        {
+            (void)fprintf(stderr, "restate: %" PRIu64 " file%s ACL%s could not be set: %s\n",
+                          st.acls, st.acls == 1 ? "'s" : "s'", st.acls == 1 ? "" : "s",
+                          st.acls_none ? "this system has none of their kind"
+                                       : "some need root or a filesystem that holds them, and an "
+                                         "ACL from another kind of system may say what this one "
+                                         "cannot (-v names each)");
+        }
         if (st.other_arch_left > 0)
         {
             (void)fprintf(stderr, "restate: %" PRIu64 " program%s a package installed %s the "

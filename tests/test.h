@@ -94,6 +94,7 @@ void test_pkgdb(void);
 void test_xattr(void);
 void test_fsflags(void);
 void test_chflags(void);
+void test_acl(void);
 void test_live(void);
 void test_sources(void);
 void test_repo(void);

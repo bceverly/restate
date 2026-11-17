@@ -267,7 +267,10 @@ bool rs_xattr_read(int fd, struct rs_xattr **out, size_t *n)
                 break;
             }
             name = rs_xasprintf("%s%.*s", spaces[s].prefix, (int)nlen, (const char *)list + at + 1);
-            if (rs_xattr_kept(name))
+            /* Where UFS keeps a file's NFSv4 ACL: read as the ACL it is, by
+             * acl.h, its users and groups by name. One written by an older
+             * restate is still set from here. */
+            if (rs_xattr_kept(name) && strcmp(name, "system.nfs4.acl") != 0)
             {
                 const char *bare = name + strlen(spaces[s].prefix);
                 ssize_t     got = extattr_get_fd(fd, spaces[s].ns, bare, value, VALUE_MAX);

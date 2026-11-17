@@ -603,8 +603,13 @@ Then the 156 were installed by name, in that VM, from the restored sources:
 - [x] Every ACL Ubuntu has: POSIX ACLs, on ext4, XFS, Btrfs and ZFS
       (`acltype=posix`), all of them extended attributes, above. OpenZFS on
       Linux has no NFSv4 ACLs (`acltype=nfsv4` is FreeBSD's alone)
-- [ ] ACLs that are not extended attributes, on the other systems: macOS's,
-      and NFSv4 ACLs on ZFS -- FreeBSD's, and Linux's once OpenZFS has them
+- [x] ACLs that are not extended attributes (2026-11-17): NFSv4 ACLs on
+      FreeBSD (ZFS, and UFS with `tunefs -N`) and NetBSD (FFS), and macOS's,
+      recorded in the index as `acl` text in setfacl(1)'s words, set after
+      the mode with users and groups mapped by name, one from the other kind
+      of system set where it can be said whole; `acl` in diff, verify and
+      status where both sides record them. Linux's follow once OpenZFS has
+      NFSv4 ACLs
 - [x] **Air-gapped rebuilds:** `restore --packages --offline`, with no network
       at all -- every apt package from the baseline and the kept `.deb`
       files, apt given a repository of them, indexed with `dpkg-deb`, in

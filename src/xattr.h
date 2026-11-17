@@ -21,6 +21,9 @@
  *                  "system.x", so the index reads alike everywhere
  *   OpenBSD        none: every file has none
  *
+ * On FreeBSD and NetBSD, UFS keeps a file's NFSv4 ACL in the system
+ * namespace, as nfs4.acl: it is read as the ACL it is, by acl.h, not here.
+ *
  * Left out, because they describe the machine rather than the file and a
  * restore onto another would be wrong to set them: SELinux and Smack labels,
  * which the target's policy assigns, and IMA and EVM signatures, which its

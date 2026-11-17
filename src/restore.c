@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "accounts.h"
+#include "acl.h"
 #include "arch.h"
 #include "chflags.h"
 #include "glob.h"
@@ -255,11 +256,57 @@ static void set_xattrs(struct ctx *c, int fd, const struct rs_entry *e)
     }
 }
 
-/* Owner, extended attributes, mode and times on `name` in `dir` (a
- * temporary, not yet renamed); the attributes through `xfd`, open on it, or
- * none if it is -1. Owner first: chown clears set-id bits and capabilities,
- * which the attributes and chmod then put back; mode after the attributes,
- * since setting an ACL sets the group bits from it. */
+/* An NFSv4 or macOS ACL's user or group (acl.h): by name, through the
+ * merged accounts, as owners are; by number where it has no name. */
+static void acl_map(const void *ctx, bool group, const char *name, uint64_t *id)
+{
+    const struct ctx *c = ctx;
+
+    if (c->st->merged && name != NULL)
+    {
+        (void)(group ? rs_accounts_gid(&c->accounts, name, id)
+                     : rs_accounts_uid(&c->accounts, name, id));
+    }
+}
+
+/*
+ * The entry's NFSv4 or macOS ACL (acl.h) on the open `fd`, after its mode:
+ * a mode set on a file with an NFSv4 ACL rewrites the ACL to match, or
+ * drops it. Where the index records ACLs and this file had none, any it has
+ * now -- one its directory passed on as it was made -- is taken off. One
+ * that cannot be set is counted, and said once.
+ */
+static void set_acl(struct ctx *c, int fd, const struct rs_entry *e)
+{
+    if (!c->ix->records_acls)
+    {
+        return;   /* nothing known of them: what the file has is left */
+    }
+    if (!rs_acl_supported())
+    {
+        if (e->acl)
+        {
+            c->st->acls++;
+            c->st->acls_none = true;
+        }
+        return;
+    }
+    if (rs_acl_set(fd, e->acl, acl_map, c) != 0)
+    {
+        c->st->acls++;
+        if (c->o->verbose && !c->o->quiet)
+        {
+            struct rs_buf b;
+
+            rs_buf_init(&b);
+            rs_escape(&b, e->path);
+            (void)fprintf(stderr, "restate: %s: its ACL could not be set: %s\n",
+                          b.data ? b.data : "", strerror(errno));
+            rs_buf_free(&b);
+        }
+    }
+}
+
 /* The owner `e` is to have: by name, through the merged accounts, where the
  * index has a name. */
 static void owner_of(const struct ctx *c, const struct rs_entry *e, uint64_t *uid,
@@ -274,6 +321,12 @@ static void owner_of(const struct ctx *c, const struct rs_entry *e, uint64_t *ui
     }
 }
 
+/* Owner, extended attributes, mode, ACL and times on `name` in `dir` (a
+ * temporary, not yet renamed); the attributes and ACL through `xfd`, open
+ * on it, or none if it is -1. Owner first: chown clears set-id bits and
+ * capabilities, which the attributes and chmod then put back; mode after
+ * the attributes, since setting a POSIX ACL sets the group bits from it;
+ * an NFSv4 or macOS ACL after the mode, which would rewrite it. */
 static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_entry *e,
                      bool symlink, int xfd)
 {
@@ -299,6 +352,10 @@ static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_e
     {
         return false;
     }
+    if (xfd >= 0)
+    {
+        set_acl(c, xfd, e);
+    }
     /* A symlink's own mode: real on macOS and the BSDs, where a link takes
      * its mode from the umask it was made under (restate's is tight); on
      * Linux always 0777, and not to be changed, so "not supported" is fine. */
@@ -312,7 +369,7 @@ static bool set_meta(struct ctx *c, int dir, const char *name, const struct rs_e
     return utimensat(dir, name, ts, flags) == 0;
 }
 
-/* Owner, extended attributes, mode and times, as set_meta sets them, on a
+/* Owner, extended attributes, mode, ACL and times, as set_meta sets them, on a
  * file already in place: through `fd`, open on it, so they land on the file
  * that was checked and not on whatever its name has since become. */
 static bool set_meta_fd(struct ctx *c, int fd, const struct rs_entry *e)
@@ -335,6 +392,7 @@ static bool set_meta_fd(struct ctx *c, int fd, const struct rs_entry *e)
     {
         return false;
     }
+    set_acl(c, fd, e);
     ts[0] = ts_of(&e->atime);
     ts[1] = ts_of(&e->mtime);
     return futimens(fd, ts) == 0;

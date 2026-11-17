@@ -50,6 +50,10 @@
  *                     has any -- POSIX ACLs and file capabilities among them on
  *                     Linux; see xattr.h -- as [{"name", "value"}], the value
  *                     base64
+ *   flags             the BSDs' and macOS's file flags, "schg,nodump"
+ *                     (chflags.h)
+ *   acl               an NFSv4 ACL (FreeBSD, NetBSD) or macOS's, as text
+ *                     (acl.h), where it says more than the mode
  *   package           the package a regular file came from, where the package
  *                     manager says (see pkgdb.h), and "modified": true where
  *                     it no longer matches what the package installed
@@ -103,6 +107,7 @@ struct rs_entry {
     struct rs_xattr   *xattrs;   /* sorted by name; NULL when there are none */
     size_t             nxattrs;
     unsigned           flags;    /* the BSDs' and macOS's file flags (chflags.h) */
+    char              *acl;      /* an NFSv4 or macOS ACL, as acl.h writes it, or NULL */
     char               type;     /* f d l c b p */
     uint32_t           mode;     /* permission bits, at most 07777 */
     uint64_t           uid;
@@ -138,6 +143,9 @@ struct rs_index {
      * are any, by a restate that records them. Without it, a missing "flags"
      * is not known to mean none. */
     bool             records_flags;
+    /* Likewise its ACLs (acl.h): without it, a missing "acl" is not known to
+     * mean none, and a restore leaves a file's as it finds it. */
+    bool             records_acls;
     struct rs_jval   machine;   /* the machine underneath, or null; see machine.h */
     struct rs_jval   packages;  /* what is installed, or null; see packages.h */
     /* How it was classified, or null: {"rules": [[CLASS, PATTERN], ...], "all",

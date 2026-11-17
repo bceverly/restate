@@ -1527,6 +1527,36 @@ show a change of them as
 .BR flags ,
 where both sides record them.
 .PP
+NFSv4 ACLs \- FreeBSD's on ZFS, and on UFS where
+.B tunefs \-N
+turned them on, and NetBSD's on FFS \- and macOS's ACLs come back too. They
+are not extended attributes; the index records each as
+.BR acl ,
+text of its own, its entries in the order that decides them, in
+.BR setfacl (1)'s
+words:
+.IR "user:alice=1001:read_data/execute::allow,everyone@::write_data::deny" .
+Only one that says more than the mode is recorded. Each is set after the
+mode, which would rewrite it, its users and groups mapped by name, as owners
+are; a file the image had none on loses any it has, as one its directory
+passed on when it was made. One from the other kind of system is set only
+where it can be said in full \- macOS has no
+.B owner@
+or
+.BR group@ ,
+and the BSDs nothing for a macOS identity no user or group stands for \-
+and otherwise left off whole, since part of an ACL can grant what the whole
+did not; a restore says how many it left off
+.RB ( \-v
+names each).
+.BR verify ,
+.B diff
+and
+.B status
+show a change of one as
+.BR acl ,
+where both sides record them.
+.PP
 Owners are restored by name. The system being restored onto has accounts
 of its own: its packages made their system users as they were installed,
 numbered in that order \- postgres may be 128 where it was 125 \- and its
