@@ -1913,42 +1913,10 @@ static void test_encrypted(const char *dir)
         char           *oname = NULL;
         char           *a = rs_xasprintf("%s/a", otree);
         char           *b = rs_xasprintf("%s/b", otree);
-        FILE           *in;
-        FILE           *out;
         struct rs_repo *o;
-        int             k;
 
         put(otree, "etc/conf", "conf\n", 0644);
         big_file(otree, "a", 8 * 1024 * 1024, 21);
-        /* b: a's quarters, last first, so its chunks are a's out of order. */
-        in = fopen(a, "r");
-        out = fopen(b, "w");
-        for (k = 3; in && out && k >= 0; k--)
-        {
-            char   chunk[65536];
-            size_t left = 2 * 1024 * 1024;
-
-            (void)fseek(in, (long)k * 2 * 1024 * 1024, SEEK_SET);
-            while (left > 0)
-            {
-                size_t got = fread(chunk, 1, sizeof(chunk), in);
-
-                if (got == 0)
-                {
-                    break;
-                }
-                (void)fwrite(chunk, 1, got, out);
-                left -= got;
-            }
-        }
-        if (in)
-        {
-            (void)fclose(in);
-        }
-        if (out)
-        {
-            (void)fclose(out);
-        }
         CHECK(rs_repo_init(orepo, true, &err));
         o = rs_repo_open(orepo, RS_REPO_WRITE, &busy, &err);
         CHECK(o != NULL);
@@ -1959,8 +1927,49 @@ static void test_encrypted(const char *dir)
             uint64_t                 most;
             uint64_t                 ahead;
             size_t                   packs;
+            FILE                    *in;
+            FILE                    *out;
+            int                      k;
 
             rs_repo_set_recipients(o, recips, 1);
+            /* a first, alone, so its chunks go into the packs in its own
+             * order. Stored in one snapshot with b, whichever of the two the
+             * directory listed first was stored first; with b first, where a
+             * pack ended among a's quarters depended on the random chunking
+             * key, and about one run in a hundred a read of a alone had to
+             * hold three packs at once. */
+            CHECK(snap(o, otree, "2026-03-31T00:00:00.000000000Z", NULL, &st, &oname));
+            free(oname);
+            oname = NULL;
+            /* b: a's quarters, last first, so its chunks are a's out of order. */
+            in = fopen(a, "r");
+            out = fopen(b, "w");
+            for (k = 3; in && out && k >= 0; k--)
+            {
+                char   chunk[65536];
+                size_t left = 2 * 1024 * 1024;
+
+                (void)fseek(in, (long)k * 2 * 1024 * 1024, SEEK_SET);
+                while (left > 0)
+                {
+                    size_t got = fread(chunk, 1, sizeof(chunk), in);
+
+                    if (got == 0)
+                    {
+                        break;
+                    }
+                    (void)fwrite(chunk, 1, got, out);
+                    left -= got;
+                }
+            }
+            if (in)
+            {
+                (void)fclose(in);
+            }
+            if (out)
+            {
+                (void)fclose(out);
+            }
             CHECK(snap(o, otree, "2026-04-01T00:00:00.000000000Z", NULL, &st, &oname));
             pattern = rs_xasprintf("'%s'/packs/*.tar.gz", orepo);
             packs = count(pattern);
