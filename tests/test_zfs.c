@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -43,6 +44,25 @@ static const struct rs_scan_source *source_for(const struct rs_zfs *z, const cha
         }
     }
     return NULL;
+}
+
+/* Whether `paths`, run as restate runs zfs -- "zfs" its first argument --
+ * exits `code`: not so where it is a multi-call binary, busybox's, that
+ * runs the applet that argument names. */
+static bool stands_in(const char *const *paths, size_t n, int code)
+{
+    static char   name[] = "zfs";
+    char         *argv[] = { name, NULL };
+    struct rs_buf err;
+    int           got = -1;
+    bool          ran;
+
+    rs_buf_init(&err);
+    rs_program_set_paths(RS_PROG_ZFS, paths, n);
+    ran = rs_run(RS_PROG_ZFS, argv, NULL, NULL, &got, &err);
+    rs_program_set_paths(RS_PROG_ZFS, NULL, 0);
+    rs_buf_free(&err);
+    return ran && got == code;
 }
 
 static bool stop_now(void)
@@ -189,53 +209,62 @@ static void test_take(const char *dir)
     CHECK(left == NULL && nleft == 0);
     rs_zfs_free(&z);
 
-    TEST_CASE("zfs: a snapshot zfs refuses");
-    rs_program_set_paths(RS_PROG_ZFS, failing, 2);
-    CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
-    CHECK(!rs_zfs_take(&z, &err));
-    CHECK_CONTAINS(err.data ? err.data : "", "zfs snapshot of rpool: exit status 1");
-    CHECK(!z.datasets[0].taken && !z.datasets[2].taken);
-    rs_buf_reset(&err);
-    rs_zfs_leftovers(&z, &left, &nleft);   /* zfs list failing says none */
-    CHECK(nleft == 0);
-    rs_zfs_free(&z);
-
-    TEST_CASE("zfs: taken, but one cannot be opened, and all destroyed again");
-    rs_program_set_paths(RS_PROG_ZFS, working, 2);
-    CHECK(mkdir(a, 0755) == 0 && mkdir(b, 0755) == 0);
-    CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
-    CHECK(!rs_zfs_take(&z, &err));
-    CHECK_CONTAINS(err.data ? err.data : "", "tank_data");
-    CHECK(!z.datasets[0].taken && !z.datasets[1].taken && !z.datasets[2].taken);
-    CHECK(z.datasets[0].fd < 0);
-    rs_buf_reset(&err);
-    rs_zfs_free(&z);
-
-    TEST_CASE("zfs: taken and opened for the walk, then destroyed");
-    CHECK(mkdir(c, 0755) == 0);
-    CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
-    CHECK(rs_zfs_take(&z, &err));
-    CHECK(z.datasets[0].taken && z.datasets[2].taken && z.datasets[2].fd >= 0);
-    CHECK(source_for(&z, "/") && source_for(&z, "/")->fd == z.datasets[0].fd);
-    CHECK(source_for(&z, "/tank") && source_for(&z, "/tank")->fd >= 0);
-    CHECK(rs_zfs_release(&z, &err));
-    CHECK(!z.datasets[0].taken && z.datasets[0].fd < 0);
-    CHECK(source_for(&z, "/")->fd < 0);
-    rs_zfs_free(&z);
-
-    TEST_CASE("zfs: one that cannot be destroyed is said, with how to");
+    /* true and false stand in for zfs; where they are busybox's, which runs
+     * the applet its first argument names -- "zfs" -- they cannot. */
+    if (stands_in(working, 2, 0) && stands_in(failing, 2, 1))
     {
-        const struct rs_mount one[] = { mount_of("/", "zfs", "rpool/ROOT/x", false) };
-
-        CHECK(rs_zfs_plan("/", one, 1, false, "restate-T-1", &z, &err));
-        CHECK(rs_zfs_take(&z, &err));
+        TEST_CASE("zfs: a snapshot zfs refuses");
         rs_program_set_paths(RS_PROG_ZFS, failing, 2);
-        CHECK(!rs_zfs_release(&z, &err));
-        CHECK_CONTAINS(err.data ? err.data : "",
-                       "zfs destroy rpool/ROOT/x@restate-T-1 removes it");
-        CHECK(z.datasets[0].taken);
+        CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
+        CHECK(!rs_zfs_take(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "zfs snapshot of rpool: exit status 1");
+        CHECK(!z.datasets[0].taken && !z.datasets[2].taken);
+        rs_buf_reset(&err);
+        rs_zfs_leftovers(&z, &left, &nleft);   /* zfs list failing says none */
+        CHECK(nleft == 0);
+        rs_zfs_free(&z);
+
+        TEST_CASE("zfs: taken, but one cannot be opened, and all destroyed again");
+        rs_program_set_paths(RS_PROG_ZFS, working, 2);
+        CHECK(mkdir(a, 0755) == 0 && mkdir(b, 0755) == 0);
+        CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
+        CHECK(!rs_zfs_take(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "tank_data");
+        CHECK(!z.datasets[0].taken && !z.datasets[1].taken && !z.datasets[2].taken);
+        CHECK(z.datasets[0].fd < 0);
         rs_buf_reset(&err);
         rs_zfs_free(&z);
+
+        TEST_CASE("zfs: taken and opened for the walk, then destroyed");
+        CHECK(mkdir(c, 0755) == 0);
+        CHECK(rs_zfs_plan("/", two, 3, false, "restate-T-1", &z, &err));
+        CHECK(rs_zfs_take(&z, &err));
+        CHECK(z.datasets[0].taken && z.datasets[2].taken && z.datasets[2].fd >= 0);
+        CHECK(source_for(&z, "/") && source_for(&z, "/")->fd == z.datasets[0].fd);
+        CHECK(source_for(&z, "/tank") && source_for(&z, "/tank")->fd >= 0);
+        CHECK(rs_zfs_release(&z, &err));
+        CHECK(!z.datasets[0].taken && z.datasets[0].fd < 0);
+        CHECK(source_for(&z, "/")->fd < 0);
+        rs_zfs_free(&z);
+
+        TEST_CASE("zfs: one that cannot be destroyed is said, with how to");
+        {
+            const struct rs_mount one[] = { mount_of("/", "zfs", "rpool/ROOT/x", false) };
+
+            CHECK(rs_zfs_plan("/", one, 1, false, "restate-T-1", &z, &err));
+            CHECK(rs_zfs_take(&z, &err));
+            rs_program_set_paths(RS_PROG_ZFS, failing, 2);
+            CHECK(!rs_zfs_release(&z, &err));
+            CHECK_CONTAINS(err.data ? err.data : "",
+                           "zfs destroy rpool/ROOT/x@restate-T-1 removes it");
+            CHECK(z.datasets[0].taken);
+            rs_buf_reset(&err);
+            rs_zfs_free(&z);
+        }
+    } else
+    {
+        (void)printf("  (zfs snapshot tests skipped: true and false run as zfs here do not "
+                     "exit 0 and 1)\n");
     }
 
     TEST_CASE("zfs: snapshots an earlier capture left");
