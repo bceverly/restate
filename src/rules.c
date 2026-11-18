@@ -252,6 +252,9 @@ static const struct builtin freebsd_rules[] = {
     { X, "/var/cache/pkg",         "downloaded packages" },
     { X, "/var/db/freebsd-update", "freebsd-update's working files" },
     { X, "/var/db/portsnap",       "the ports tree snapshot" },
+    { E, "**/.snap",               "UFS's snapshots, each the size of its whole filesystem; "
+                                   "capture --from-snapshot takes its own" },
+    { E, "**/.sujournal",          "UFS's soft-updates journal, its filesystem's own" },
 };
 
 static const struct builtin openbsd_rules[] = {

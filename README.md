@@ -430,9 +430,9 @@ Options:
                           running while its own files are copied, and resume it
                           after, with the hooks for each (see LIVE SERVICES)
       --from-snapshot     capture: read the tree from snapshots of its ZFS
-                          datasets, taken at one moment and destroyed after;
-                          with --quiesce, what is paused is paused only while
-                          they are taken (see SNAPSHOTS)
+                          datasets and UFS filesystems, taken at one moment and
+                          removed after; with --quiesce, what is paused is
+                          paused only while they are taken (see SNAPSHOTS)
       --quiesce-with=NAME
                           capture: also run the hook NAME
                           (/etc/restate/hooks.d/NAME, or one restate ships,
@@ -810,34 +810,41 @@ program's: the `docker` command is not `dockerd`.
 
 ### Reading from a snapshot
 
-On ZFS, `capture --from-snapshot` reads the tree from snapshots of its
-datasets instead of from files that change while they're read, so everything
-in the image is as it was at one moment:
+On ZFS, and on UFS on FreeBSD, `capture --from-snapshot` reads the tree from
+snapshots of its filesystems instead of from files that change while they're
+read, so everything in the image is as it was at one moment:
 
 ```bash
 sudo restate capture --from-snapshot --quiesce -o /mnt/nas/restate/web01
 ```
 
-- **What's snapshotted:** every ZFS dataset mounted at or under the root (with
-  `--one-file-system`, only the root's own), with one `zfs snapshot` for each
-  pool. Each pool's snapshots are atomic, so a database with its data on one
-  dataset and its logs on another is caught at one moment.
+- **What's snapshotted on ZFS:** every dataset mounted at or under the root
+  (with `--one-file-system`, only the root's own), with one `zfs snapshot` for
+  each pool. Each pool's snapshots are atomic, so a database with its data on
+  one dataset and its logs on another is caught at one moment.
+- **What's snapshotted on UFS:** every UFS filesystem at or under the root,
+  with `mksnap_ffs` into its `.snap` directory. The snapshot is attached
+  read-only with `mdconfig` and mounted read-only under `/var/run`, and read
+  there. UFS holds writes to a filesystem while it takes its snapshot (usually
+  well under a second) and takes one filesystem at a time, so two UFS
+  filesystems are each caught at a moment, not the same one.
 - **What's recorded:** every path at its live place. The image is the one a
   capture of the live tree would make, and restores the same way.
-- **What isn't ZFS:** an EFI partition or an ext4 `/boot` is read as it is,
-  and said; network filesystems are left out as always.
+- **What's neither:** an EFI partition, a tmpfs or an ext4 `/boot` is read as
+  it is, and said; network filesystems are left out as always. `.snap` and
+  UFS's `.sujournal` are never captured on FreeBSD, with or without
+  `--from-snapshot`.
 - **With `--quiesce`:** what's running is paused only while the snapshots are
   taken, a moment, instead of while its files are copied.
-- **Afterward:** the snapshots, named `restate-TIME-PID` and marked with the
-  user property `restate:capture`, are destroyed by their full names when the
-  walk is done -- after a Ctrl-C too, which ends the walk first. restate
-  destroys no snapshot it didn't take in that capture. One an earlier capture
+- **Afterward:** the snapshots, named `restate-TIME-PID` (ZFS's marked with the
+  user property `restate:capture`), are removed when the walk is done -- after
+  a Ctrl-C too, which ends the walk first. ZFS's are destroyed by their full
+  names; UFS's are unmounted, detached and their files removed. restate
+  removes no snapshot it didn't take in that capture. One an earlier capture
   left behind (it was killed with `SIGKILL`, or the machine went down) is
-  said, with the `zfs destroy` command that removes it, and left for you to
-  remove.
+  said, with the command that removes it, and left for you to remove.
 
-A job takes `from_snapshot = yes`. UFS snapshots on FreeBSD and APFS on macOS
-are still to come.
+A job takes `from_snapshot = yes`. APFS on macOS is still to come.
 
 ## Packages
 
@@ -2557,6 +2564,7 @@ make test-unit       # the C unit tests
 make test-cli        # end-to-end: the built binary, run as a user runs it
 make test-share SHARE=/mnt/usb   # a repository on that storage, read back bit for bit
 make test-zfs        # capture --from-snapshot from two throwaway ZFS pools (as root, through sudo)
+make test-ufs        # the same from throwaway UFS filesystems, on FreeBSD
 make test-memory     # ASan + UBSan + LSan, then valgrind, over both suites and a malformed-input corpus
 make coverage        # line coverage, and the README badge; fails below 80%
 make fuzz            # libFuzzer (or the built-in mutator) over every parser; FUZZ_SECONDS=30

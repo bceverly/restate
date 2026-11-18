@@ -41,6 +41,11 @@ static const char *const pkg_paths[] = { "/usr/local/sbin/pkg" };
 static const char *const rpm_paths[] = { "/usr/bin/rpm", "/bin/rpm" };
 /* FreeBSD's in /sbin, OpenZFS's on Linux in /usr/sbin or /sbin. */
 static const char *const zfs_paths[] = { "/sbin/zfs", "/usr/sbin/zfs", "/usr/local/sbin/zfs" };
+/* FreeBSD's, for UFS snapshots. */
+static const char *const mksnap_ffs_paths[] = { "/sbin/mksnap_ffs" };
+static const char *const mdconfig_paths[] = { "/sbin/mdconfig" };
+static const char *const mount_paths[] = { "/sbin/mount" };
+static const char *const umount_paths[] = { "/sbin/umount" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -86,6 +91,10 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("pkg", pkg_paths, no_env),
     PROGRAM("rpm", rpm_paths, no_env),
     PROGRAM("zfs", zfs_paths, no_env),
+    PROGRAM("mksnap_ffs", mksnap_ffs_paths, no_env),
+    PROGRAM("mdconfig", mdconfig_paths, no_env),
+    PROGRAM("mount", mount_paths, no_env),
+    PROGRAM("umount", umount_paths, no_env),
 };
 
 #undef PROGRAM

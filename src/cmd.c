@@ -50,8 +50,8 @@
 #include "rules.h"
 #include "run.h"
 #include "scan.h"
+#include "snap.h"
 #include "sources.h"
-#include "zfs.h"
 
 /* The paths a restore's result names, of all it puts back. */
 #define RESTORE_PLAN_MAX 1000
@@ -1028,7 +1028,7 @@ static enum rs_around around(const void *ctx, size_t group, bool before)
 }
 
 /*
- * capture --from-snapshot: the snapshots of the datasets the tree at `root`
+ * capture --from-snapshot: the snapshots of the filesystems the tree at `root`
  * is on, planned and taken, into *z, for the walk to read. What --quiesce
  * pauses is paused for the moment they are taken and resumed straight
  * after. The signals that would end restate are held from here until the
@@ -1037,34 +1037,33 @@ static enum rs_around around(const void *ctx, size_t group, bool before)
  */
 static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rules,
                           const char *root, struct around_ctx *actx, bool live,
-                          struct rs_zfs *z, struct rs_buf *err)
+                          struct rs_snap *z, struct rs_buf *err)
 {
-    struct quiesce  *q = actx->q;
-    struct rs_mount *mounts;
-    size_t           nmounts;
-    struct rs_buf    shown;
-    char           **left;
-    size_t           nleft;
-    char            *name = rs_zfs_snapshot_name(time(NULL), getpid());
-    size_t           i;
-    bool             ok;
+    struct quiesce          *q = actx->q;
+    struct rs_mount         *mounts;
+    size_t                   nmounts;
+    struct rs_buf            shown;
+    struct rs_snap_leftover *left;
+    size_t                   nleft;
+    char                    *name = rs_snap_name(time(NULL), getpid());
+    size_t                   i;
+    bool                     ok;
 
     rs_mounts_all(&mounts, &nmounts);
-    ok = rs_zfs_plan(root, mounts, nmounts, o->one_fs, name, z, err);
+    ok = rs_snap_plan(root, mounts, nmounts, o->one_fs, name, z, err);
     rs_mounts_free(mounts, nmounts);
     free(name);
     if (!ok)
     {
         return false;
     }
-    rs_zfs_leftovers(z, &left, &nleft);
+    rs_snap_leftovers(z, &left, &nleft);
     for (i = 0; i < nleft; i++)
     {
-        tell(o, LOG_WARNING, "%s is a snapshot an earlier capture left behind; "
-                             "zfs destroy %s removes it", left[i], left[i]);
-        free(left[i]);
+        tell(o, LOG_WARNING, "%s is a snapshot an earlier capture left behind; %s removes it",
+             left[i].name, left[i].remove);
     }
-    free(left);
+    rs_snap_leftovers_free(left, nleft);
     rs_buf_init(&shown);
     for (i = 0; i < z->nlive; i++)
     {
@@ -1079,7 +1078,7 @@ static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rul
     }
     if (shown.len > 0)
     {
-        tell(o, LOG_NOTICE, "read as they are, not from a snapshot (not ZFS): %s", shown.data);
+        tell(o, LOG_NOTICE, "read as they are, not from a snapshot: %s", shown.data);
     }
     rs_buf_free(&shown);
 
@@ -1098,7 +1097,7 @@ static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rul
         rs_buf_addstr(err, "interrupted while it paused what it captures");
     } else
     {
-        ok = rs_zfs_take(z, err);
+        ok = rs_snap_take(z, err);
     }
     /* Resumed in the order they were paused, the other way round. */
     {
@@ -1122,29 +1121,31 @@ static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rul
     }
     if (!ok)
     {
-        rs_zfs_free(z);
+        rs_snap_free(z);
         let_stops();
         return false;
     }
     actx->snapshot = true;
-    tell(o, LOG_NOTICE, "reading from the snapshot %s of %zu ZFS dataset%s", z->snapshot,
-         z->ndatasets, z->ndatasets == 1 ? "" : "s");
+    rs_buf_init(&shown);
+    rs_snap_describe(z, &shown);
+    tell(o, LOG_NOTICE, "reading from the snapshot %s of %s", z->snapshot, shown.data);
+    rs_buf_free(&shown);
     return true;
 }
 
-/* The snapshots snapshot_take took, destroyed; and a signal held meanwhile
+/* The snapshots snapshot_take took, removed; and a signal held meanwhile
  * let through. */
-static void snapshot_release(const struct rs_options *o, struct rs_zfs *z)
+static void snapshot_release(const struct rs_options *o, struct rs_snap *z)
 {
     struct rs_buf err;
 
     rs_buf_init(&err);
-    if (!rs_zfs_release(z, &err))
+    if (!rs_snap_release(z, &err))
     {
         tell(o, LOG_ERR, "%s", err.data);
     }
     rs_buf_free(&err);
-    rs_zfs_free(z);
+    rs_snap_free(z);
     let_stops();
 }
 
@@ -1433,7 +1434,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     struct rs_scan_opts     so;
     struct quiesce          q;
     struct around_ctx       actx = { o, &q, false };
-    struct rs_zfs           zfs;
+    struct rs_snap          snaps;
     bool                    snapped = false;
     bool                    live = false;
     struct rs_buf           err;
@@ -1622,12 +1623,12 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     ok = true;
     if (o->from_snapshot && storing)
     {
-        ok = snapshot_take(o, &rules, m->root, &actx, live, &zfs, &err);
+        ok = snapshot_take(o, &rules, m->root, &actx, live, &snaps, &err);
         snapped = ok;
         if (snapped)
         {
-            so.sources = zfs.sources;
-            so.nsources = zfs.nsources;
+            so.sources = snaps.sources;
+            so.nsources = snaps.nsources;
             so.stop = interrupted;
         }
     }
@@ -1684,7 +1685,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         /* The walk is done with them: destroyed before anything else. */
         so.sources = NULL;
         so.nsources = 0;
-        snapshot_release(o, &zfs);
+        snapshot_release(o, &snaps);
     }
     if (ok && fda == RS_FDA_DENIED)
     {
@@ -3835,7 +3836,7 @@ int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN,
-                                                RS_PROG_ZFS };
+                                                RS_PROG_ZFS,  RS_PROG_MKSNAP_FFS };
     static const char *const members[] = { "capture.cache",          "diff.changes",
                                            "diff.from",              "diff.packages",
                                            "full_disk_access",       "list",

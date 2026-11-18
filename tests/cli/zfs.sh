@@ -54,6 +54,8 @@ finish() {
       rstest*) zpool destroy -f "$p" || echo "zfs.sh: zpool destroy $p failed" >&2 ;;
     esac
   done
+  # A flag a restore put back (FreeBSD's) would keep rm out.
+  command -v chflags > /dev/null && chflags -R 0 "$WORK" 2> /dev/null
   rm -rf "$WORK"
 }
 trap finish EXIT
@@ -154,7 +156,7 @@ expect 0 "capture --from-snapshot" -- \
 contains err.txt "reading from the snapshot restate-" "reads from its snapshots"
 contains err.txt "of 4 ZFS datasets" "every dataset under the root, in both pools"
 if [ -n "$TMPFS" ]; then
-  contains err.txt "read as they are, not from a snapshot (not ZFS): $MNT/scratch" \
+  contains err.txt "read as they are, not from a snapshot: $MNT/scratch" \
     "and says what it reads as it is"
 fi
 check "and leaves no snapshot behind" test -z "$(restate_snapshots)"

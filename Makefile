@@ -263,11 +263,17 @@ test-share: build ## Use a repository on SHARE=DIR (exFAT, SMB, NFS...) and read
 	@tests/cli/share.sh ./$(BIN_DIR)/$(PROG) "$(SHARE)"
 
 # capture --from-snapshot on ZFS, in two throwaway pools on sparse files of
-# its own: root's to make, so through sudo where make is not run as root.
+# its own, and on FreeBSD's UFS, on memory disks of its own: root's to make,
+# so through sudo where make is not run as root.
 .PHONY: test-zfs
 test-zfs: build ## Capture --from-snapshot from throwaway ZFS pools (root, through sudo)
 	@if [ "$$(id -u)" -eq 0 ]; then tests/cli/zfs.sh ./$(BIN_DIR)/$(PROG); \
 	else sudo tests/cli/zfs.sh ./$(BIN_DIR)/$(PROG); fi
+
+.PHONY: test-ufs
+test-ufs: build ## Capture --from-snapshot from throwaway UFS filesystems (FreeBSD, root, sudo)
+	@if [ "$$(id -u)" -eq 0 ]; then tests/cli/ufs.sh ./$(BIN_DIR)/$(PROG); \
+	else sudo tests/cli/ufs.sh ./$(BIN_DIR)/$(PROG); fi
 
 .PHONY: test-memory
 test-memory: ## Run everything again under ASan, UBSan, LSan and valgrind

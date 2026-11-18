@@ -543,6 +543,8 @@ jobs:
           # capture --from-snapshot, from two throwaway pools on files.
           sudo kldload -n zfs
           sudo tests/cli/zfs.sh /usr/local/sbin/restate
+          # And from UFS, on memory disks of its own.
+          sudo tests/cli/ufs.sh /usr/local/sbin/restate
 
   # OpenBSD supports its two newest releases: 7.9 here, 8.0 below (which
   # cross-platform-actions has no image of yet).

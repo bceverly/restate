@@ -1425,9 +1425,9 @@ shipped hook is never taken for a program's: the
 command is not
 .BR dockerd .
 .SH SNAPSHOTS
-On ZFS,
+On ZFS, and on UFS on FreeBSD,
 .B capture \-\-from\-snapshot
-reads the tree from snapshots of its datasets rather than from files that
+reads the tree from snapshots of its filesystems rather than from files that
 change while they are read, so that all of it is as it was at one moment.
 Every ZFS dataset mounted at or under the root is snapshotted \- with
 .BR \-\-one\-file\-system ,
@@ -1437,8 +1437,29 @@ for each pool, atomic across that pool's datasets. The walk reads each
 dataset's snapshot, through
 .IB MOUNTPOINT /.zfs/snapshot/ NAME ,
 and records every path at its live place, so the image is the one a capture
-of the live tree would make. What is mounted under the root and is not ZFS
-\- an EFI partition, an ext4
+of the live tree would make.
+.PP
+Every UFS filesystem at or under the root is snapshotted with
+.BR mksnap_ffs (8)
+into its
+.I .snap
+directory (made as
+.BR newfs (8)
+makes it, where it is not there), attached read-only with
+.BR mdconfig (8),
+mounted read-only in a directory of restate's own under
+.IR /var/run ,
+and read there. UFS holds writes to a filesystem while it takes its
+snapshot, usually well under a second, and takes one filesystem's at a time:
+two UFS filesystems are each caught at a moment, not the same one.
+.I .snap
+and
+.I .sujournal
+are never captured on FreeBSD, with or without
+.BR \-\-from\-snapshot .
+.PP
+What is mounted under the root and is neither \- an EFI partition, a tmpfs,
+an ext4
 .I /boot
 \- is read as it is, and said; a network filesystem is left out as always.
 .PP
@@ -1449,14 +1470,14 @@ straight after, rather than while its files are copied.
 .PP
 The snapshots are named
 .BI restate\- TIME \- PID
-and marked with the user property
-.BR restate:capture ,
-and are destroyed by their full names once the walk is done \- after a
-SIGINT, SIGTERM, SIGHUP or SIGQUIT too, which ends the walk first. No
-snapshot restate did not take in that capture is ever destroyed: one an
-earlier capture left behind, killed by SIGKILL or a crash, is said, with the
-.B zfs destroy
-command that removes it, and left for a person to. One capture with
+\- ZFS's marked with the user property
+.B restate:capture
+\- and are removed once the walk is done \- after a SIGINT, SIGTERM, SIGHUP
+or SIGQUIT too, which ends the walk first: ZFS's destroyed by their full
+names, UFS's unmounted, detached and their files removed. No snapshot
+restate did not take in that capture is ever removed: one an earlier capture
+left behind, killed by SIGKILL or a crash, is said, with the command that
+removes it, and left for a person to. One capture with
 .B \-\-from\-snapshot
 or
 .B \-\-quiesce
@@ -3350,7 +3371,7 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs nine programs, each for something it should not do itself:
+runs thirteen programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
@@ -3370,14 +3391,22 @@ other word quoted, so it runs nothing the image's tree wrote) and
 (new SSH host keys, for
 .BR "restore \-\-as" ),
 and
-.BR zfs (8)
+.BR zfs (8),
+and on FreeBSD
+.BR mksnap_ffs (8),
+.BR mdconfig (8),
+.BR mount (8)
+and
+.BR umount (8)
 (the snapshots
 .B capture \-\-from\-snapshot
-reads from; in
+reads from; zfs in
 .IR /sbin ,
 .I /usr/sbin
 or
-.IR /usr/local/sbin ).
+.IR /usr/local/sbin ,
+the others in
+.IR /sbin ).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then

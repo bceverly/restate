@@ -71,11 +71,12 @@ installs them first whenever they differ.
   repository's filesystem. `tests/cli/share.sh` checks it (`make test-cli`
   runs it, and CI on exFAT, FAT and SMB); `make test-share SHARE=DIR` runs it
   on any other storage.
-- A change to `capture --from-snapshot` runs against real ZFS: `make
+- A change to `capture --from-snapshot` runs against real ZFS and UFS: `make
   test-zfs` (as root, through sudo) makes two pools of its own on sparse
   files under `/var/tmp`, captures from them and destroys them by name, and
-  CI runs it on Linux and every FreeBSD release it tests. It never captures
-  anything but its own pools' mount.
+  `make test-ufs` does the same on FreeBSD with UFS filesystems on memory
+  disks of its own; CI runs the first on Linux and both on every FreeBSD
+  release it tests. Neither captures anything but its own filesystems.
 - A change to the packaging builds and installs where it is built for: the
   RPM, Alpine and Homebrew packages are built and installed by CI and by
   the release workflow, and `make rpm` and `make apk` build them by hand.

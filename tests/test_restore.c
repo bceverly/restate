@@ -1097,7 +1097,7 @@ void test_restore(void)
         char           *aimg = at(dir, "acl.tar");
         char           *aroot = at(dir, "aclroot");
         char           *fp;
-        char           *text;
+        char           *text = NULL;
         struct rs_index aix;
         int             fd;
 
@@ -1140,6 +1140,7 @@ void test_restore(void)
         CHECK_INT(r.st.acls, 0);
         fp = at(aroot, "srv/share/report");
         fd = open(fp, O_RDONLY | O_CLOEXEC);
+        text = NULL;
         CHECK(fd >= 0 && rs_acl_read(fd, &text));
         CHECK_STR(text ? text : "", "group:=4242:read_data::allow,everyone@::write_data::deny");
         free(text);
@@ -1147,6 +1148,7 @@ void test_restore(void)
         free(fp);
         fp = at(aroot, "srv/share");
         fd = open(fp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        text = NULL;
         CHECK(fd >= 0 && rs_acl_read(fd, &text));
         CHECK_STR(text ? text : "", "owner@::read_data/write_data:file_inherit:allow");
         free(text);
@@ -1154,6 +1156,7 @@ void test_restore(void)
         free(fp);
         fp = at(aroot, "srv/share/plain");
         fd = open(fp, O_RDONLY | O_CLOEXEC);
+        text = NULL;
         text = NULL;
         CHECK(fd >= 0 && rs_acl_read(fd, &text));
         CHECK(text == NULL);

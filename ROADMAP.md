@@ -803,7 +803,10 @@ place:
       a pool, reads each through `.zfs/snapshot`, records the live paths,
       reads what is not ZFS as it is, pauses `--quiesce`'s services only
       while the snapshots are taken, and destroys only its own, by name,
-      after a Ctrl-C too; UFS and APFS to come
+      after a Ctrl-C too. UFS done (2026-11-18): mksnap_ffs into each
+      filesystem's .snap, attached read-only with mdconfig and mounted
+      read-only under /var/run, unmounted, detached and removed after; .snap
+      and .sujournal left out of every FreeBSD capture. APFS to come
 - [x] BSD file flags (2026-11-13): chflags(1)'s, recorded by name in the
       index ("schg,nodump") on the BSDs and macOS, set last on restore after
       every content, owner, mode and time, a file in the way thawed to be
