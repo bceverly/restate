@@ -25,6 +25,7 @@
 #include "buildsheet.h"
 #include "clones.h"
 #include "diff.h"
+#include "fda.h"
 #include "fsflags.h"
 #include "fstab.h"
 #include "grant.h"
@@ -1311,6 +1312,7 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     const char            **kit = NULL;
     struct remote           remote;
     struct repositories     repos;
+    enum rs_fda             fda;
     size_t                  i;
     bool                    ok;
 
@@ -1330,6 +1332,15 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     so.all = o->all;
     so.one_fs = o->one_fs;
     so.verbose = o->verbose;
+    fda = rs_fda_state(root);
+    if (fda == RS_FDA_GRANTED || fda == RS_FDA_DENIED)
+    {
+        rs_jobj_bool(rs_result(), "full_disk_access", fda == RS_FDA_GRANTED);
+    }
+    if (fda == RS_FDA_DENIED)
+    {
+        rs_fda_warn();
+    }
     rs_pkgdb_init(&db);
     if (!o->rules_only && rs_pkgdb_load(&db, root))
     {
@@ -1520,6 +1531,10 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         resume_one(&actx, q.whole[i]);
     }
     rs_progress_done();
+    if (ok && fda == RS_FDA_DENIED)
+    {
+        rs_fda_summary(st->refused);
+    }
     if (ok)
     {
         remote_said(o, &remote);
@@ -3662,15 +3677,15 @@ int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
-    static const char *const members[] = { "capture.cache",        "diff.changes",
-                                           "diff.from",            "diff.packages",
-                                           "list",                 "protect.waited_for",
-                                           "proxy_reason",         "restore.hooks",
-                                           "restore.packages",     "restore.resolved",
-                                           "restore.unmatched",    "skipped_network_mounts",
-                                           "skipped_repositories", "snapshot",
-                                           "status.capture_rules", "vanished",
-                                           "verify.capture_rules" };
+    static const char *const members[] = { "capture.cache",          "diff.changes",
+                                           "diff.from",              "diff.packages",
+                                           "full_disk_access",       "list",
+                                           "protect.waited_for",     "proxy_reason",
+                                           "restore.hooks",          "restore.packages",
+                                           "restore.resolved",       "restore.unmatched",
+                                           "skipped_network_mounts", "skipped_repositories",
+                                           "snapshot",               "status.capture_rules",
+                                           "vanished",               "verify.capture_rules" };
     struct rs_jval     doc;
     struct rs_jval    *list;
     struct rs_buf      text;

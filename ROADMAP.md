@@ -804,11 +804,15 @@ place:
       every content, owner, mode and time, a file in the way thawed to be
       replaced; `flags` in diff, verify and status where both sides record
       them; counted and said where they cannot be set
+- [x] macOS Full Disk Access (2026-11-17): a capture of the Mac it runs on
+      opens macOS's privacy database first, and where macOS refuses it, warns
+      that what macOS keeps private will be missing and where Full Disk
+      Access is granted; after the walk it counts the paths macOS refused
+      (EPERM), and the result says `full_disk_access`, true or false
 - [ ] **Each system's metadata**: NTFS ACLs (security descriptors) and
-      alternate data streams; macOS extended attributes (read and restored
-      already) and Full Disk Access, which restate needs to be granted to read
-      what macOS protects, said plainly when it has not been. BSD file flags
-      are done (above). NFSv4 and macOS ACLs are above, under putting it back
+      alternate data streams, with Windows (below). macOS extended attributes
+      are read and restored already; BSD file flags are done (above); NFSv4
+      and macOS ACLs are above, under putting it back
 - [ ] **Windows** (on hold): paths compared without case, as NTFS does, so
       two paths captured elsewhere that differ only in case are said to
       collide rather than one overwriting the other; long paths, past

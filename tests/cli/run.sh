@@ -2054,6 +2054,7 @@ contains "$OUT" '"status.capture_rules"' "and that status says how it classified
 check "a restore job takes decrypt_with and passphrase_file" \
   eval "printf '%s' \"\$OUT\" | grep '\"restore\": \[' | grep '\"decrypt_with\", \"passphrase_file\"' > /dev/null"
 contains "$OUT" '"capture.cache"' "what results have gained"
+contains "$OUT" '"full_disk_access"' "among them whether macOS let a capture read all it keeps"
 contains "$OUT" '"programs": {' "and the programs it can use"
 contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
@@ -2121,6 +2122,7 @@ check "makes one" test -f newrepo/restate-repository
 check "its owner's alone" test "$(file_mode newrepo)" = 700
 contains "$(cat cr1.json)" '"created_repository": true' "and says so in the result"
 contains "$(cat cr1.json)" '"snapshot": "' "and captures into it"
+lacks "$(cat cr1.json)" '"full_disk_access"' "a tree that is not this machine's asks nothing of macOS"
 expect 0 "capture --create, where there is one" -- \
   "$BIN" capture -N -r ptree -q -o newrepo --create --result cr2.json
 contains "$(cat cr2.json)" '"created_repository": false' "makes nothing"

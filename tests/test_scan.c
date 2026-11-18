@@ -298,6 +298,7 @@ static void test_vanished(void)
         rs_index_init(&m);
         CHECK(rs_scan(&o, &m, &st, &err));
         CHECK_INT(st.unreadable, 1);
+        CHECK_INT(st.refused, 0);   /* EACCES, a mode's: not the system's */
         CHECK_INT(st.vanished, 0);
         rs_index_free(&m);
         (void)chmod(p, 0644);

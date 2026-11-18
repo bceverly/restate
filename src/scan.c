@@ -291,6 +291,10 @@ static void unreadable(struct walk *w, const char *path, int err)
         return;
     }
     w->stats->unreadable++;
+    if (err == EPERM)
+    {
+        w->stats->refused++;
+    }
     rs_result_unreadable(path, strerror(err));
     rs_buf_init(&shown);
     rs_escape(&shown, path);

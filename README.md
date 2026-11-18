@@ -1947,7 +1947,9 @@ the `snapshot` they read (a repository's newest as `REPO::NAME`) or the
 `image`, and say in `capture_rules` whether they classified by the rules the
 capture recorded. A capture into an encrypted repository gives `"cache": {"path":
 ..., "bytes": ...}`, this machine's cache of it, and `"cache": null` into one
-that is not. `--json` writes the output itself as JSON
+that is not. A scan or capture of a Mac's own root gives
+`"full_disk_access": true` or `false`, whether macOS let it read what it keeps
+private. `--json` writes the output itself as JSON
 for `snapshots`, `diff` (and `--packages`), `verify`, `status`, `list`, `du`,
 `estimate` and `features`; `restate features --json` lists what this restate
 can do -- commands, options, job keys, the commands a job can be and the keys
@@ -2356,6 +2358,15 @@ brew install bceverly/tap/restate
 restate runs as root, and runs only programs and hooks root owns: Homebrew's
 are yours, so the formula's hooks are not run, and an image's signature is
 checked only with a `gpgv` that is root's. `brew info restate` says so too.
+
+On macOS, root is not enough: macOS keeps what it counts as private -- Mail,
+Messages, Safari, Time Machine's settings, other apps' data -- from any
+program it hasn't been told to trust, and says "Operation not permitted"
+whatever the file's mode. Give restate Full Disk Access in System Settings,
+Privacy & Security, Full Disk Access: to the app you run it from (Terminal,
+iTerm) or, where launchd runs it, to `restate` itself. A capture of the Mac
+it runs on checks first, warns if it hasn't been given it, and says how many
+paths macOS refused; the capture is incomplete (exit 3) until it has.
 
 Everywhere else, and for what is not released yet, restate is built from
 source and installed into `/usr/local`, which is the place for software the

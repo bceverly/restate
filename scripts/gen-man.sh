@@ -2819,7 +2819,10 @@ of this machine's cache of it and the
 .B bytes
 it holds, and
 .B null
-for one that is not encrypted. verify, status and list name the
+for one that is not encrypted. A scan or capture of a Mac's own root gives
+.BR full_disk_access ,
+true or false: whether macOS let restate read what it keeps private (see
+SECURITY CONSIDERATIONS). verify, status and list name the
 .B snapshot
 they read, or the
 .BR image ,
@@ -3288,6 +3291,20 @@ everything with
 relative to its parent directory, and refuses a file or directory that is not
 the one it examined a moment earlier, so an unprivileged user cannot redirect
 it by swapping a directory for a symbolic link mid-scan.
+.PP
+On macOS, root is not enough. macOS keeps what it counts as private \- Mail,
+Messages, Safari, Time Machine's settings, other apps' data \- from every
+program it has not been told to trust, and refuses it
+.RB ( EPERM ,
+.IR "Operation not permitted" )
+whatever its mode. A capture of the Mac it runs on checks first, warns when
+restate has not been given Full Disk Access, and counts the paths macOS
+refused it; such a capture is incomplete (exit 3). Full Disk Access is
+granted in System Settings, Privacy & Security, Full Disk Access, to the app
+.B restate
+is run from \- Terminal, iTerm \- or, where launchd runs it, to
+.B restate
+itself.
 .PP
 An image or index is input when it is read back. The JSON and tar parsers
 are strict, bounded and fuzzed, and they reject any path that is not clean
