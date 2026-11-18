@@ -455,34 +455,56 @@ static bool zfs_take(struct rs_snap *z, struct rs_buf *err)
 /* A filesystem's .snap, where mksnap_ffs puts a snapshot: made as newfs
  * makes it -- root's, group operator, 0775 -- where it is not there. One
  * there already has to be a directory of restate's own user, which is
- * root. */
+ * root. Reached from the filesystem's root, a mount point, and never
+ * through a symlink; what is made is changed through a descriptor on it,
+ * so nothing put in its place meanwhile is. */
 static bool snap_dir(const struct rs_snap_fs *f, struct rs_buf *err)
 {
     char       *dir = join(f->name, ".snap");
+    int         top = open(f->name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int         fd = -1;
+    bool        made = false;
+    bool        ok = false;
     struct stat st;
-    bool        ok = true;
 
-    if (lstat(dir, &st) == 0)
+    if (top < 0)
     {
-        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid())
-        {
-            rs_buf_addf(err, "%s: not root's directory, where UFS keeps its snapshots", dir);
-            ok = false;
-        }
-    } else if (errno != ENOENT || mkdir(dir, 0775) != 0)
+        rs_buf_addf(err, "%s: %s", f->name, strerror(errno));
+        free(dir);
+        return false;
+    }
+    if (mkdirat(top, ".snap", 0775) == 0)
+    {
+        made = true;
+    } else if (errno != EEXIST)
     {
         rs_buf_addf(err, "%s: %s", dir, strerror(errno));
-        ok = false;
-    } else if (geteuid() == 0)
+        (void)close(top);
+        free(dir);
+        return false;
+    }
+    fd = openat(top, ".snap", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_uid != geteuid())
+    {
+        rs_buf_addf(err, "%s: not root's directory, where UFS keeps its snapshots", dir);
+    } else if (made && geteuid() == 0)
     {
         const struct group *g = getgrnam("operator");
 
-        if (chown(dir, 0, g ? g->gr_gid : 0) != 0 || (!g && chmod(dir, 0700) != 0))
+        ok = fchown(fd, 0, g ? g->gr_gid : 0) == 0 && (g || fchmod(fd, 0700) == 0);
+        if (!ok)
         {
             rs_buf_addf(err, "%s: %s", dir, strerror(errno));
-            ok = false;
         }
+    } else
+    {
+        ok = true;
     }
+    if (fd >= 0)
+    {
+        (void)close(fd);
+    }
+    (void)close(top);
     free(dir);
     return ok;
 }
