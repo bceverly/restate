@@ -1708,7 +1708,7 @@ HOOK
     sleep 1
     expect 5 "capture --quiesce while another runs" -- \
       "$BIN" capture -N -R live.rules --quiesce -o live.tar
-    contains "$ERR" "another capture with --quiesce is running on this machine" "says why"
+    contains "$ERR" "another capture with --quiesce or --from-snapshot is running on this" "says why"
     wait "$locker"
   fi
 
@@ -2055,6 +2055,8 @@ check "a restore job takes decrypt_with and passphrase_file" \
   eval "printf '%s' \"\$OUT\" | grep '\"restore\": \[' | grep '\"decrypt_with\", \"passphrase_file\"' > /dev/null"
 contains "$OUT" '"capture.cache"' "what results have gained"
 contains "$OUT" '"full_disk_access"' "among them whether macOS let a capture read all it keeps"
+contains "$OUT" '"from_snapshot"' "and that a job can capture from a snapshot"
+contains "$OUT" '"zfs":' "and whether there is a zfs to take one with"
 contains "$OUT" '"programs": {' "and the programs it can use"
 contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
@@ -2123,6 +2125,13 @@ check "its owner's alone" test "$(file_mode newrepo)" = 700
 contains "$(cat cr1.json)" '"created_repository": true' "and says so in the result"
 contains "$(cat cr1.json)" '"snapshot": "' "and captures into it"
 lacks "$(cat cr1.json)" '"full_disk_access"' "a tree that is not this machine's asks nothing of macOS"
+# --from-snapshot where the tree is on no ZFS: said, and nothing captured.
+if ! grep -q ' - zfs ' /proc/self/mountinfo 2> /dev/null; then
+  expect 2 "capture --from-snapshot of a tree on no ZFS" -- \
+    "$BIN" capture -N -r ptree -q -o fs.tar --from-snapshot
+  contains "$ERR" "is on ZFS" "says there is nothing to snapshot"
+  check "and writes nothing" test ! -e fs.tar
+fi
 expect 0 "capture --create, where there is one" -- \
   "$BIN" capture -N -r ptree -q -o newrepo --create --result cr2.json
 contains "$(cat cr2.json)" '"created_repository": false' "makes nothing"

@@ -798,7 +798,12 @@ place:
       filesystem rather than from services paused one by one -- Volume
       Shadow Copy on Windows, APFS local snapshots on macOS, ZFS and UFS
       snapshots on the BSDs, ZFS on Linux too -- so everything is copied as
-      it was at one moment
+      it was at one moment. ZFS done (2026-11-18): `capture --from-snapshot`
+      snapshots every dataset at or under the root, one atomic `zfs snapshot`
+      a pool, reads each through `.zfs/snapshot`, records the live paths,
+      reads what is not ZFS as it is, pauses `--quiesce`'s services only
+      while the snapshots are taken, and destroys only its own, by name,
+      after a Ctrl-C too; UFS and APFS to come
 - [x] BSD file flags (2026-11-13): chflags(1)'s, recorded by name in the
       index ("schg,nodump") on the BSDs and macOS, set last on restore after
       every content, owner, mode and time, a file in the way thawed to be

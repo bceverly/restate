@@ -94,11 +94,14 @@ char *rs_mount_unescape(const char *s, size_t len)
     return rs_buf_detach(&b);
 }
 
-static void add(struct rs_mount **out, size_t *n, char *path, const char *type)
+static void add(struct rs_mount **out, size_t *n, char *path, const char *type, char *source,
+                bool part)
 {
     *out = rs_xreallocarray(*out, *n + 1, sizeof(**out));
     (*out)[*n].path = path;
     (*out)[*n].type = rs_xstrdup(type);
+    (*out)[*n].source = source ? source : rs_xstrdup("");
+    (*out)[*n].part = part;
     (*n)++;
 }
 
@@ -122,7 +125,8 @@ static bool field(const char **p, const char *end, const char **f, size_t *len)
     return true;
 }
 
-void rs_mounts_parse_mountinfo(const char *text, size_t len, struct rs_mount **out, size_t *n)
+/* The mounts in mountinfo's `text`: every one, or only the remote ones. */
+static void parse(const char *text, size_t len, bool all, struct rs_mount **out, size_t *n)
 {
     const char *line = text;
     const char *stop = text ? text + len : NULL;
@@ -136,27 +140,36 @@ void rs_mounts_parse_mountinfo(const char *text, size_t len, struct rs_mount **o
         const char *p = line;
         const char *f = NULL;
         const char *mountpoint = NULL;
+        const char *type = NULL;
+        const char *source = NULL;
         size_t      flen = 0;
         size_t      mlen = 0;
+        size_t      tlen = 0;
+        size_t      slen = 0;
         size_t      k = 0;
+        size_t      after = 0;   /* fields past the "-" */
         bool        dash = false;
+        bool        part = false;
 
-        /* id parent maj:min root mountpoint options [optional...] - type ... */
+        /* id parent maj:min root mountpoint options [optional...] - type
+         * source superoptions */
         while (field(&p, end, &f, &flen))
         {
-            if (k == 4)
+            if (k == 3)
+            {
+                part = !(flen == 1 && f[0] == '/');
+            } else if (k == 4)
             {
                 mountpoint = f;
                 mlen = flen;
-            } else if (k > 5 && dash)
+            } else if (dash && ++after == 1)
             {
-                char *type = rs_xstrndup(f, flen);
-
-                if (mountpoint && mountpoint[0] == '/' && rs_mount_remote_type(type))
-                {
-                    add(out, n, rs_mount_unescape(mountpoint, mlen), type);
-                }
-                free(type);
+                type = f;
+                tlen = flen;
+            } else if (dash && after == 2)
+            {
+                source = f;
+                slen = flen;
                 break;
             } else if (k > 5 && flen == 1 && f[0] == '-')
             {
@@ -164,13 +177,41 @@ void rs_mounts_parse_mountinfo(const char *text, size_t len, struct rs_mount **o
             }
             k++;
         }
+        if (type && mountpoint && mountpoint[0] == '/')
+        {
+            char *t = rs_xstrndup(type, tlen);
+
+            if (all || rs_mount_remote_type(t))
+            {
+                add(out, n, rs_mount_unescape(mountpoint, mlen), t,
+                    source ? rs_mount_unescape(source, slen) : NULL, part);
+            }
+            free(t);
+        }
         line = nl ? nl + 1 : NULL;
     }
+}
+
+void rs_mounts_parse_mountinfo(const char *text, size_t len, struct rs_mount **out, size_t *n)
+{
+    parse(text, len, false, out, n);
+}
+
+void rs_mounts_parse_all(const char *text, size_t len, struct rs_mount **out, size_t *n)
+{
+    parse(text, len, true, out, n);
 }
 
 static int by_path(const void *a, const void *b)
 {
     return strcmp(((const struct rs_mount *)a)->path, ((const struct rs_mount *)b)->path);
+}
+
+static void free_one(struct rs_mount *m)
+{
+    free(m->path);
+    free(m->type);
+    free(m->source);
 }
 
 /* Sorted, and each path once: an automount's trigger and what it mounted
@@ -189,8 +230,7 @@ static void sort_unique(struct rs_mount *m, size_t *n)
     {
         if (strcmp(m[i].path, m[k].path) == 0)
         {
-            free(m[i].path);
-            free(m[i].type);
+            free_one(&m[i]);
         } else
         {
             m[++k] = m[i];
@@ -199,7 +239,7 @@ static void sort_unique(struct rs_mount *m, size_t *n)
     *n = k + 1;
 }
 
-static bool read_mountinfo(const char *path, struct rs_mount **out, size_t *n)
+static bool read_mountinfo(const char *path, bool all, struct rs_mount **out, size_t *n)
 {
     FILE         *fp = fopen(path, "r");
     struct rs_buf b;
@@ -220,18 +260,20 @@ static bool read_mountinfo(const char *path, struct rs_mount **out, size_t *n)
         }
     }
     (void)fclose(fp);
-    rs_mounts_parse_mountinfo(b.data, b.len, out, n);
+    parse(b.data, b.len, all, out, n);
     rs_buf_free(&b);
     return true;
 }
 
-void rs_mounts_remote(struct rs_mount **out, size_t *n)
+/* This host's mounts, every one or the remote ones, in the order they were
+ * mounted. */
+static void host_mounts(bool all, struct rs_mount **out, size_t *n)
 {
     *out = NULL;
     *n = 0;
     if (test_mountinfo)
     {
-        (void)read_mountinfo(test_mountinfo, out, n);
+        (void)read_mountinfo(test_mountinfo, all, out, n);
     } else
     {
 #ifdef RS_MOUNTS_GETMNTINFO
@@ -246,16 +288,55 @@ void rs_mounts_remote(struct rs_mount **out, size_t *n)
 
         for (i = 0; i < count; i++)
         {
-            if (mnt[i].f_mntonname[0] == '/' && rs_mount_remote_type(mnt[i].f_fstypename))
+            if (mnt[i].f_mntonname[0] == '/' &&
+                (all || rs_mount_remote_type(mnt[i].f_fstypename)))
             {
-                add(out, n, rs_xstrdup(mnt[i].f_mntonname), mnt[i].f_fstypename);
+                add(out, n, rs_xstrdup(mnt[i].f_mntonname), mnt[i].f_fstypename,
+                    rs_xstrdup(mnt[i].f_mntfromname), false);
             }
         }
 #else
-        (void)read_mountinfo("/proc/self/mountinfo", out, n);
+        (void)read_mountinfo("/proc/self/mountinfo", all, out, n);
 #endif
     }
+}
+
+void rs_mounts_remote(struct rs_mount **out, size_t *n)
+{
+    host_mounts(false, out, n);
     sort_unique(*out, n);
+}
+
+void rs_mounts_all(struct rs_mount **out, size_t *n)
+{
+    size_t i;
+    size_t j;
+    size_t k = 0;
+
+    host_mounts(true, out, n);
+    /* The later of two at one place is the one there: the earlier goes
+     * first, so that sorting cannot choose between them. */
+    for (i = 0; i < *n; i++)
+    {
+        bool hidden = false;
+
+        for (j = i + 1; j < *n && !hidden; j++)
+        {
+            hidden = strcmp((*out)[i].path, (*out)[j].path) == 0;
+        }
+        if (hidden)
+        {
+            free_one(&(*out)[i]);
+        } else
+        {
+            (*out)[k++] = (*out)[i];
+        }
+    }
+    *n = k;
+    if (k > 0)
+    {
+        qsort(*out, k, sizeof(**out), by_path);
+    }
 }
 
 void rs_mounts_free(struct rs_mount *m, size_t n)
@@ -264,8 +345,7 @@ void rs_mounts_free(struct rs_mount *m, size_t n)
 
     for (i = 0; i < n; i++)
     {
-        free(m[i].path);
-        free(m[i].type);
+        free_one(&m[i]);
     }
     free(m);
 }

@@ -1098,8 +1098,8 @@ static bool entered(const struct walk *w, enum rs_class cls, const char *path, l
  * every user, in their home -- could nest a million of them and crash a scan
  * running as root by exhausting its stack.
  */
-static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no-recursion) */
-                  const char *tree_path, unsigned depth)
+static void visit_at(struct walk *w, int dirfd, /* NOLINT(misc-no-recursion) */
+                     const char *name, const char *tree_path, unsigned depth)
 {
     struct stat     st;
     struct rs_entry e;
@@ -1274,14 +1274,97 @@ static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no
     }
 }
 
+/* What is read in place of `tree_path`, or NULL for what is there. */
+static const struct rs_scan_source *source_of(const struct rs_scan_opts *o,
+                                              const char *tree_path)
+{
+    size_t lo = 0;
+    size_t hi = o->nsources;
+
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int    c = strcmp(o->sources[mid].tree, tree_path);
+
+        if (c == 0)
+        {
+            return &o->sources[mid];
+        }
+        if (c < 0)
+        {
+            lo = mid + 1;
+        } else
+        {
+            hi = mid;
+        }
+    }
+    return NULL;
+}
+
+/* A new descriptor on `s`'s directory. */
+static int source_open(const struct rs_scan_source *s)
+{
+    if (s->fd >= 0)
+    {
+        return openat(s->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    }
+    return open_at(AT_FDCWD, s->dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+/* visit_at, but for a path read from elsewhere (opts->sources): there, as
+ * "." of a descriptor on it, in place of `name` in `dirfd`. */
+static void visit(struct walk *w, int dirfd, const char *name, /* NOLINT(misc-no-recursion) */
+                  const char *tree_path, unsigned depth)
+{
+    const struct rs_scan_source *src = source_of(w->opts, tree_path);
+    long                         which = -1;
+    int                          fd;
+
+    /* What the walk leaves out is not opened to be left out: visit_at finds
+     * the directory there and goes no further. */
+    if (src && !w->forced &&
+        !entered(w, rs_rules_classify(w->opts->rules, tree_path, &which), tree_path, which,
+                 NULL))
+    {
+        src = NULL;
+    }
+    if (!src)
+    {
+        visit_at(w, dirfd, name, tree_path, depth);
+        return;
+    }
+    if (deferred(w, tree_path))
+    {
+        return;
+    }
+    fd = source_open(src);
+    if (fd < 0)
+    {
+        unreadable(w, tree_path, errno);
+        return;
+    }
+    visit_at(w, fd, ".", tree_path, depth);
+    (void)close(fd);
+}
+
 static void walk_dir(struct walk *w, int dirfd, /* NOLINT(misc-no-recursion) */
                      const char *tree_path, unsigned depth)
 {
     size_t count;
     size_t i;
     int    err = 0;
-    char **names = list_names(dirfd, &count, &err);
+    char **names;
 
+    if (w->opts->stop && !w->failed && w->opts->stop())
+    {
+        w->failed = true;
+        rs_buf_addstr(w->err, "interrupted");
+    }
+    if (w->failed)
+    {
+        return;
+    }
+    names = list_names(dirfd, &count, &err);
     if (err != 0)
     {
         unreadable(w, tree_path, err);
@@ -1375,7 +1458,14 @@ static void visit_path(struct walk *w, int rootfd, const char *path, bool forced
             reached = false;
             break;
         }
-        next = open_at(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        {
+            char                        *dir = rs_xstrndup(path, (size_t)(slash - copy) + 1);
+            const struct rs_scan_source *src = source_of(w->opts, dir);
+
+            next = src ? source_open(src)
+                       : open_at(dirfd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            free(dir);
+        }
         (void)close(dirfd);
         dirfd = next;
         p = slash + 1;
@@ -1445,20 +1535,28 @@ static bool visit_deferred(struct walk *w, int rootfd)
 bool rs_scan(const struct rs_scan_opts *opts, struct rs_index *out,
              struct rs_scan_stats *stats, struct rs_buf *err)
 {
-    struct walk     w;
-    struct stat     st;
-    struct rs_entry e;
-    struct rs_buf   dup;
-    int             fd;
-    bool            ok;
+    struct walk                  w;
+    struct stat                  st;
+    struct rs_entry              e;
+    struct rs_buf                dup;
+    const struct rs_scan_source *root;
+    int                          fd;
+    bool                         ok;
 
     memset(stats, 0, sizeof(*stats));
-    /* The root itself may be reached through a symlink -- "/mnt/old" may well
-     * be one -- so this is the one open that follows. */
-    fd = open(opts->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOATIME);
-    if (fd < 0 && errno == EPERM && O_NOATIME != 0)
+    root = source_of(opts, "/");
+    if (root)
     {
-        fd = open(opts->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        fd = source_open(root);
+    } else
+    {
+        /* The root itself may be reached through a symlink -- "/mnt/old" may
+         * well be one -- so this is the one open that follows. */
+        fd = open(opts->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOATIME);
+        if (fd < 0 && errno == EPERM && O_NOATIME != 0)
+        {
+            fd = open(opts->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        }
     }
     if (fd < 0)
     {

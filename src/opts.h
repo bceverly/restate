@@ -58,6 +58,7 @@ enum {
     OPT_HOOK_OPTION,
     OPT_APPEND_ONLY,
     OPT_CREATE,
+    OPT_FROM_SNAPSHOT,
     OPT_RESULT,
     OPT_GROUP,
     OPT_REPORT_GROUP,
@@ -114,6 +115,7 @@ struct rs_options {
     bool            baseline_content;
     bool            keep_local;     /* --keep-local-packages */
     bool            quiesce;        /* --quiesce */
+    bool            from_snapshot;  /* --from-snapshot */
     unsigned        keep_last;      /* prune --keep-last N, and the rest */
     unsigned        keep_daily;
     unsigned        keep_weekly;

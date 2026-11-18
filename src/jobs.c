@@ -92,6 +92,7 @@ enum key_id {
     KEY_ALLOW_UNVERIFIED,
     KEY_APPEND_ONLY,
     KEY_CREATE,
+    KEY_FROM_SNAPSHOT,
     KEY_KEEP_LAST,
     KEY_KEEP_DAILY,
     KEY_KEEP_WEEKLY,
@@ -156,6 +157,7 @@ static const struct key {
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
     [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
+    [KEY_FROM_SNAPSHOT] = { "from_snapshot", K_BOOL, false, J_CAPTURE },
     [KEY_KEEP_LAST] = { "keep_last", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_DAILY] = { "keep_daily", K_COUNT, false, J_PRUNE },
     [KEY_KEEP_WEEKLY] = { "keep_weekly", K_COUNT, false, J_PRUNE },
@@ -563,6 +565,9 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         break;
     case KEY_CREATE:
         o->create = b;
+        break;
+    case KEY_FROM_SNAPSHOT:
+        o->from_snapshot = b;
         break;
     case KEY_KEEP_LAST:
         o->keep_last = u;
@@ -1021,7 +1026,8 @@ static bool only_reporting(const struct rs_options *o)
                 o->sign_with || o->ndecrypt_with || o->ntrusted || o->allow_unverified ||
                 o->no_lock ||
                 o->all || o->rules_only ||
-                o->baseline_content || o->keep_local || o->quiesce || o->keep_last ||
+                o->baseline_content || o->keep_local || o->quiesce || o->from_snapshot ||
+                o->keep_last ||
                 o->keep_daily || o->keep_weekly || o->keep_monthly || o->keep_yearly ||
                 o->exact_versions ||
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||

@@ -64,6 +64,18 @@ enum rs_around {
     RS_AROUND_STOP          /* walk no more: an interrupted capture */
 };
 
+/*
+ * A directory the walk reads in place of what it finds at `tree`: the
+ * snapshot of the filesystem mounted there, or, under a snapshot, a mount
+ * that is not one, read as it is -- a snapshot holds only the empty
+ * directory something else is mounted on.
+ */
+struct rs_scan_source {
+    const char *tree;  /* beneath the root; "/" for the root itself */
+    const char *dir;   /* opened when it is reached, where fd is -1 */
+    int         fd;    /* open on it, held for the whole walk; or -1 */
+};
+
 struct rs_scan_opts {
     const char            *root;      /* the directory to treat as "/" */
     const struct rs_rules *rules;
@@ -89,6 +101,12 @@ struct rs_scan_opts {
      * root, sorted: network filesystems' and automounts' (mounts.h). Not
      * opened at all, so an automount mounts nothing. Each one the walk reaches
      * is set in remote_reached, an array as long, if that is not NULL. */
+    /* Read in place of what is at each one's tree path (capture --from-snapshot),
+     * sorted by it. */
+    const struct rs_scan_source *sources;
+    size_t                       nsources;
+    /* Asked once a directory: true ends the walk, as "interrupted". */
+    bool                  (*stop)(void);
     const char *const     *remote;
     size_t                 nremote;
     bool                  *remote_reached;

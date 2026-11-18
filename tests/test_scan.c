@@ -375,6 +375,36 @@ static void test_mounts(const char *dir)
         }
     }
     rs_mounts_free(m, n);
+
+    TEST_CASE("mounts: every one, with what is mounted there");
+    {
+        static const char all[] =
+            "22 1 0:21 / / rw - zfs rpool/ROOT/ubuntu rw\n"
+            "23 22 0:22 / /home rw - zfs rpool/USERDATA/home rw\n"
+            "24 22 259:1 / /boot/efi rw - vfat /dev/nvme0n1p1 rw\n"
+            "25 22 0:23 /data /srv/bound rw - zfs rpool/data rw\n"
+            "26 22 0:24 / /home rw - tmpfs tmpfs rw\n"
+            "27 22 0:25 / /lonely rw -\n";
+
+        rs_test_write(dir, "mountinfo", all, 0644);
+        rs_mounts_parse_all(all, sizeof(all) - 1, &m, &n);
+        CHECK_INT(n, 5);
+        CHECK_STR(n > 0 ? m[0].source : "", "rpool/ROOT/ubuntu");
+        CHECK(n > 3 && m[3].part && !m[0].part);
+        rs_mounts_free(m, n);
+        rs_mounts_set_mountinfo(path);
+        rs_mounts_all(&m, &n);
+        /* Sorted, and at /home the later mount, the one seen there. */
+        CHECK_INT(n, 4);
+        CHECK_STR(n > 2 ? m[2].path : "", "/home");
+        CHECK_STR(n > 2 ? m[2].type : "", "tmpfs");
+        CHECK_STR(n > 3 ? m[3].path : "", "/srv/bound");
+        rs_mounts_free(m, n);
+    }
+    rs_mounts_set_mountinfo(NULL);
+    rs_mounts_all(&m, &n);
+    CHECK(n > 0);   /* this machine's: / is mounted, at least */
+    rs_mounts_free(m, n);
     free(path);
 }
 

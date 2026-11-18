@@ -502,6 +502,9 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
         case OPT_CREATE:
             o->create = true;
             break;
+        case OPT_FROM_SNAPSHOT:
+            o->from_snapshot = true;
+            break;
         case OPT_RESULT:
             o->result = optarg;
             break;

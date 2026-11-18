@@ -1424,6 +1424,44 @@ shipped hook is never taken for a program's: the
 .B docker
 command is not
 .BR dockerd .
+.SH SNAPSHOTS
+On ZFS,
+.B capture \-\-from\-snapshot
+reads the tree from snapshots of its datasets rather than from files that
+change while they are read, so that all of it is as it was at one moment.
+Every ZFS dataset mounted at or under the root is snapshotted \- with
+.BR \-\-one\-file\-system ,
+the root's own alone \- with one
+.B zfs snapshot
+for each pool, atomic across that pool's datasets. The walk reads each
+dataset's snapshot, through
+.IB MOUNTPOINT /.zfs/snapshot/ NAME ,
+and records every path at its live place, so the image is the one a capture
+of the live tree would make. What is mounted under the root and is not ZFS
+\- an EFI partition, an ext4
+.I /boot
+\- is read as it is, and said; a network filesystem is left out as always.
+.PP
+With
+.BR \-\-quiesce ,
+what is running is paused only while the snapshots are taken, and resumed
+straight after, rather than while its files are copied.
+.PP
+The snapshots are named
+.BI restate\- TIME \- PID
+and marked with the user property
+.BR restate:capture ,
+and are destroyed by their full names once the walk is done \- after a
+SIGINT, SIGTERM, SIGHUP or SIGQUIT too, which ends the walk first. No
+snapshot restate did not take in that capture is ever destroyed: one an
+earlier capture left behind, killed by SIGKILL or a crash, is said, with the
+.B zfs destroy
+command that removes it, and left for a person to. One capture with
+.B \-\-from\-snapshot
+or
+.B \-\-quiesce
+runs on a machine at a time. A job takes
+.BR "from_snapshot = yes" .
 .SH RESTORING
 .B restate restore
 .I IMAGE
@@ -2520,7 +2558,7 @@ classifies by the capture's own rules unless given these.
 .B baseline_content
 capture and estimate.
 .TP
-.BR quiesce ", " quiesce_with " (repeatable), " append_only ", " create ", " tmpdir
+.BR quiesce ", " quiesce_with " (repeatable), " from_snapshot ", " append_only ", " create ", " tmpdir
 capture.
 .TP
 .B sign_with
@@ -3312,7 +3350,7 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs eight programs, each for something it should not do itself:
+runs nine programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
@@ -3330,7 +3368,16 @@ version in it is checked against what its package manager allows, and every
 other word quoted, so it runs nothing the image's tree wrote) and
 .BR ssh-keygen (1)
 (new SSH host keys, for
-.BR "restore \-\-as" ).
+.BR "restore \-\-as" ),
+and
+.BR zfs (8)
+(the snapshots
+.B capture \-\-from\-snapshot
+reads from; in
+.IR /sbin ,
+.I /usr/sbin
+or
+.IR /usr/local/sbin ).
 Each is run from a fixed absolute path \-
 .IR /usr/bin ,
 then

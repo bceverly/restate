@@ -51,6 +51,7 @@
 #include "run.h"
 #include "scan.h"
 #include "sources.h"
+#include "zfs.h"
 
 /* The paths a restore's result names, of all it puts back. */
 #define RESTORE_PLAN_MAX 1000
@@ -842,6 +843,7 @@ static void quiesce_free(struct quiesce *q)
 struct around_ctx {
     const struct rs_options *o;
     struct quiesce          *q;
+    bool                     snapshot;  /* paused and resumed around it already */
 };
 
 /* Whether a signal that ends restate came while something was paused. */
@@ -1007,6 +1009,12 @@ static enum rs_around around(const void *ctx, size_t group, bool before)
     const struct around_ctx *a = ctx;
     size_t                   i = a->q->of[group];
 
+    /* Read from a snapshot, taken while it was paused: its files are what
+     * they were then, and only what its pause said decides. */
+    if (a->snapshot)
+    {
+        return before && a->q->left_out[i] ? RS_AROUND_LEAVE_OUT : RS_AROUND_WALK;
+    }
     if (before)
     {
         if (!pause_one(a, i, true))
@@ -1017,6 +1025,127 @@ static enum rs_around around(const void *ctx, size_t group, bool before)
     }
     resume_one(a, i);
     return RS_AROUND_WALK;
+}
+
+/*
+ * capture --from-snapshot: the snapshots of the datasets the tree at `root`
+ * is on, planned and taken, into *z, for the walk to read. What --quiesce
+ * pauses is paused for the moment they are taken and resumed straight
+ * after. The signals that would end restate are held from here until the
+ * walk is done and they are destroyed (snapshot_release), and a signal ends
+ * the walk instead, so no snapshot is left behind by a Ctrl-C.
+ */
+static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rules,
+                          const char *root, struct around_ctx *actx, bool live,
+                          struct rs_zfs *z, struct rs_buf *err)
+{
+    struct quiesce  *q = actx->q;
+    struct rs_mount *mounts;
+    size_t           nmounts;
+    struct rs_buf    shown;
+    char           **left;
+    size_t           nleft;
+    char            *name = rs_zfs_snapshot_name(time(NULL), getpid());
+    size_t           i;
+    bool             ok;
+
+    rs_mounts_all(&mounts, &nmounts);
+    ok = rs_zfs_plan(root, mounts, nmounts, o->one_fs, name, z, err);
+    rs_mounts_free(mounts, nmounts);
+    free(name);
+    if (!ok)
+    {
+        return false;
+    }
+    rs_zfs_leftovers(z, &left, &nleft);
+    for (i = 0; i < nleft; i++)
+    {
+        tell(o, LOG_WARNING, "%s is a snapshot an earlier capture left behind; "
+                             "zfs destroy %s removes it", left[i], left[i]);
+        free(left[i]);
+    }
+    free(left);
+    rs_buf_init(&shown);
+    for (i = 0; i < z->nlive; i++)
+    {
+        const char *at = z->live[i];
+        const char *tree = strcmp(root, "/") == 0 ? at
+                           : at[strlen(root)] == '\0' ? "/" : at + strlen(root);
+
+        if (matters(rules, o, tree))
+        {
+            rs_buf_addf(&shown, "%s%s", shown.len > 0 ? ", " : "", at);
+        }
+    }
+    if (shown.len > 0)
+    {
+        tell(o, LOG_NOTICE, "read as they are, not from a snapshot (not ZFS): %s", shown.data);
+    }
+    rs_buf_free(&shown);
+
+    hold_stops();
+    ok = true;
+    for (i = 0; live && ok && i < q->nwhole; i++)
+    {
+        ok = pause_one(actx, q->whole[i], false);
+    }
+    for (i = 0; live && ok && i < q->ngroups; i++)
+    {
+        ok = pause_one(actx, q->of[i], true);
+    }
+    if (!ok)
+    {
+        rs_buf_addstr(err, "interrupted while it paused what it captures");
+    } else
+    {
+        ok = rs_zfs_take(z, err);
+    }
+    /* Resumed in the order they were paused, the other way round. */
+    {
+        size_t paused_groups = live ? q->ngroups : 0;
+        size_t paused_whole = live ? q->nwhole : 0;
+
+        for (i = paused_groups; i-- > 0;)
+        {
+            if (q->paused_at[q->of[i]] != 0)
+            {
+                resume_one(actx, q->of[i]);
+            }
+        }
+        for (i = paused_whole; i-- > 0;)
+        {
+            if (q->paused_at[q->whole[i]] != 0)
+            {
+                resume_one(actx, q->whole[i]);
+            }
+        }
+    }
+    if (!ok)
+    {
+        rs_zfs_free(z);
+        let_stops();
+        return false;
+    }
+    actx->snapshot = true;
+    tell(o, LOG_NOTICE, "reading from the snapshot %s of %zu ZFS dataset%s", z->snapshot,
+         z->ndatasets, z->ndatasets == 1 ? "" : "s");
+    return true;
+}
+
+/* The snapshots snapshot_take took, destroyed; and a signal held meanwhile
+ * let through. */
+static void snapshot_release(const struct rs_options *o, struct rs_zfs *z)
+{
+    struct rs_buf err;
+
+    rs_buf_init(&err);
+    if (!rs_zfs_release(z, &err))
+    {
+        tell(o, LOG_ERR, "%s", err.data);
+    }
+    rs_buf_free(&err);
+    rs_zfs_free(z);
+    let_stops();
 }
 
 /* The network filesystems and automounts a walk of `root` records and goes no
@@ -1303,7 +1432,9 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     struct rs_pkgdb         db;
     struct rs_scan_opts     so;
     struct quiesce          q;
-    struct around_ctx       actx = { o, &q };
+    struct around_ctx       actx = { o, &q, false };
+    struct rs_zfs           zfs;
+    bool                    snapped = false;
     bool                    live = false;
     struct rs_buf           err;
     const char             *os_used = NULL;
@@ -1488,6 +1619,19 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
     }
 
     rs_buf_init(&err);
+    ok = true;
+    if (o->from_snapshot && storing)
+    {
+        ok = snapshot_take(o, &rules, m->root, &actx, live, &zfs, &err);
+        snapped = ok;
+        if (snapped)
+        {
+            so.sources = zfs.sources;
+            so.nsources = zfs.nsources;
+            so.stop = interrupted;
+        }
+    }
+    if (ok)
     {
         uint64_t total = 0;
 
@@ -1513,24 +1657,35 @@ static bool run_scan(const struct rs_options *o, const char *root, bool hash,
         }
         rs_progress_phase("walking", total);
     }
-    /* What is paused for the whole walk, around all of it. */
-    ok = true;
-    for (i = 0; live && i < q.nwhole; i++)
+    /* What is paused for the whole walk, around all of it -- unless it was
+     * paused around the snapshot instead. */
+    for (i = 0; ok && live && !snapped && i < q.nwhole; i++)
     {
         ok = pause_one(&actx, q.whole[i], false) && ok;
+        if (!ok)
+        {
+            rs_buf_addstr(&err, "interrupted while it paused what it captures");
+        }
     }
     if (ok)
     {
         ok = rs_scan(&so, m, st, &err);
-    } else
-    {
-        rs_buf_addstr(&err, "interrupted while it paused what it captures");
     }
-    for (i = live ? q.nwhole : 0; i-- > 0;)
+    for (i = live && !snapped ? q.nwhole : 0; i-- > 0;)
     {
-        resume_one(&actx, q.whole[i]);
+        if (q.paused_at[q.whole[i]] != 0)
+        {
+            resume_one(&actx, q.whole[i]);
+        }
     }
     rs_progress_done();
+    if (snapped)
+    {
+        /* The walk is done with them: destroyed before anything else. */
+        so.sources = NULL;
+        so.nsources = 0;
+        snapshot_release(o, &zfs);
+    }
     if (ok && fda == RS_FDA_DENIED)
     {
         rs_fda_summary(st->refused);
@@ -2350,13 +2505,16 @@ int rs_cmd_capture(const struct rs_options *o)
             (void)close(fd);
         }
     }
-    if (status == RESTATE_EXIT_OK && o->quiesce)
+    if (status == RESTATE_EXIT_OK && (o->quiesce || o->from_snapshot))
     {
+        /* One at a time on a machine: what one pauses or snapshots, another
+         * must not, and a snapshot restate finds marked as its own is then
+         * truly one an earlier capture left. */
         lock = quiesce_lock(&busy);
         if (busy)
         {
-            rs_error("another capture with --quiesce is running on this machine (%s); try again "
-                     "when it is done", QUIESCE_LOCK_FILE);
+            rs_error("another capture with --quiesce or --from-snapshot is running on this "
+                     "machine (%s); try again when it is done", QUIESCE_LOCK_FILE);
             status = RESTATE_EXIT_BUSY;
         }
     }
@@ -3676,7 +3834,8 @@ int rs_cmd_estimate(const struct rs_options *o)
 int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
-                                                RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN };
+                                                RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN,
+                                                RS_PROG_ZFS };
     static const char *const members[] = { "capture.cache",          "diff.changes",
                                            "diff.from",              "diff.packages",
                                            "full_disk_access",       "list",

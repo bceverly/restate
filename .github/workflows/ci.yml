@@ -361,6 +361,30 @@ jobs:
   # format assumes nothing of where it is kept, held to (tests/cli/share.sh;
   # make test-cli runs it on the local filesystem, and macOS's is
   # case-insensitive).
+  # capture --from-snapshot on OpenZFS for Linux, whose .zfs/snapshot is
+  # mounted when it is opened.
+  zfs:
+    name: Capture from ZFS snapshots (Linux)
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install OpenZFS
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential zfsutils-linux
+          sudo modprobe zfs
+
+      - name: make build
+        run: make build WERROR=-Werror
+
+      - name: make test-zfs
+        run: make test-zfs
+
   share:
     name: Repository on exFAT, FAT and SMB
     if: >-
@@ -516,6 +540,9 @@ jobs:
           /usr/local/sbin/restate --version
           man -w restate
           /usr/local/sbin/restate classify /usr/local/bin/x /usr/local/etc/x
+          # capture --from-snapshot, from two throwaway pools on files.
+          sudo kldload -n zfs
+          sudo tests/cli/zfs.sh /usr/local/sbin/restate
 
   # OpenBSD supports its two newest releases: 7.9 here, 8.0 below (which
   # cross-platform-actions has no image of yet).
@@ -774,6 +801,7 @@ jobs:
       - emulated
       - distros
       - share
+      - zfs
       - macos
       - freebsd
       - openbsd

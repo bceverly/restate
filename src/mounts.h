@@ -17,8 +17,10 @@
 #include <stddef.h>
 
 struct rs_mount {
-    char *path;  /* where it is mounted, absolute */
-    char *type;  /* "nfs4", "cifs", "autofs", ... */
+    char *path;    /* where it is mounted, absolute */
+    char *type;    /* "nfs4", "cifs", "autofs", "zfs", ... */
+    char *source;  /* what is mounted: a device, a server's share, a ZFS dataset */
+    bool  part;    /* a bind of a directory inside a filesystem, not its root */
 };
 
 /* True if a filesystem of `type` is a network one, or an automount. */
@@ -31,8 +33,15 @@ char *rs_mount_unescape(const char *s, size_t len);
  * order; the caller frees them with rs_mounts_free. */
 void rs_mounts_parse_mountinfo(const char *text, size_t len, struct rs_mount **out, size_t *n);
 
+/* Every mount in mountinfo's `text`, in its order. */
+void rs_mounts_parse_all(const char *text, size_t len, struct rs_mount **out, size_t *n);
+
 /* This host's remote mounts, sorted by path, each path once. */
 void rs_mounts_remote(struct rs_mount **out, size_t *n);
+
+/* Every mount on this host, sorted by path, each path once: where two are
+ * mounted at one place, the later, which is the one seen there. */
+void rs_mounts_all(struct rs_mount **out, size_t *n);
 
 void rs_mounts_free(struct rs_mount *m, size_t n);
 

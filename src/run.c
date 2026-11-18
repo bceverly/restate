@@ -39,6 +39,8 @@ static const char *const ssh_keygen_paths[] = { "/usr/bin/ssh-keygen", "/usr/loc
 /* pkg itself, not /usr/sbin/pkg, which only bootstraps it. */
 static const char *const pkg_paths[] = { "/usr/local/sbin/pkg" };
 static const char *const rpm_paths[] = { "/usr/bin/rpm", "/bin/rpm" };
+/* FreeBSD's in /sbin, OpenZFS's on Linux in /usr/sbin or /sbin. */
+static const char *const zfs_paths[] = { "/sbin/zfs", "/usr/sbin/zfs", "/usr/local/sbin/zfs" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -83,6 +85,7 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("ssh-keygen", ssh_keygen_paths, no_env),
     PROGRAM("pkg", pkg_paths, no_env),
     PROGRAM("rpm", rpm_paths, no_env),
+    PROGRAM("zfs", zfs_paths, no_env),
 };
 
 #undef PROGRAM

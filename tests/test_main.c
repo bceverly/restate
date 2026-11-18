@@ -374,6 +374,7 @@ int main(int argc, char **argv)
     test_chflags();
     test_acl();
     test_fda();
+    test_zfs();
     test_live();
     test_sources();
     test_repo();

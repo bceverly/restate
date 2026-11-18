@@ -5,17 +5,19 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs ten programs, each for something it should not do itself:
+ * restate runs eleven programs, each for something it should not do itself:
  * gzip (compression), pigz (the same compression on every core, where it is
  * installed), curl (HTTPS), gpgv (OpenPGP signature checks), gpg (encrypting,
  * decrypting and signing images), gpgconf (stopping the gpg-agent a
  * signature started in a throwaway home), sh (the script restore
  * --packages writes, which runs apt, snap and the rest as a person would)
- * ssh-keygen (new SSH host keys, for restore --as), and FreeBSD's pkg and rpm
- * (what each package installed, which they keep in SQLite). Writing a compressor, a TLS stack
- * or an OpenPGP implementation here would be hundreds of lines of exactly the
- * code that should not be written twice; linking a library for them would end "links nothing but
- * libc". As separate processes their code stays out of this address space.
+ * ssh-keygen (new SSH host keys, for restore --as), FreeBSD's pkg and rpm
+ * (what each package installed, which they keep in SQLite), and zfs (the
+ * snapshots capture --from-snapshot reads from, zfs.h). Writing a
+ * compressor, a TLS stack or an OpenPGP implementation here would be
+ * hundreds of lines of exactly the code that should not be written twice;
+ * linking a library for them would end "links nothing but libc". As
+ * separate processes their code stays out of this address space.
  *
  * Each is found at a fixed absolute path -- never through $PATH, because
  * restate runs as root and a PATH reaching a user-writable directory would
@@ -50,11 +52,12 @@ enum rs_program {
     RS_PROG_SSH_KEYGEN,
     RS_PROG_PKG,
     RS_PROG_RPM,
+    RS_PROG_ZFS,
     RS_PROG_COUNT
 };
 
 /* "gzip", "curl", "gpgv", "gpg", "pigz", "gpgconf", "sh", "ssh-keygen", "pkg",
- * "rpm". */
+ * "rpm", "zfs". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or

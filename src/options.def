@@ -69,6 +69,10 @@ RS_OPT(OPT_DEB, "deb",              required_argument, "NAME=FILE",
 RS_OPT(OPT_QUIESCE, "quiesce",       no_argument,       NULL,
        "capture: pause each database, VM and container found running while its own "
        "files are copied, and resume it after, with the hooks for each (see LIVE SERVICES)")
+RS_OPT(OPT_FROM_SNAPSHOT, "from-snapshot", no_argument,   NULL,
+       "capture: read the tree from snapshots of its ZFS datasets, taken at one moment "
+       "and destroyed after; with --quiesce, what is paused is paused only while they are "
+       "taken (see SNAPSHOTS)")
 RS_OPT(OPT_QUIESCE_WITH, "quiesce-with", required_argument, "NAME",
        "capture: also run the hook NAME (/etc/restate/hooks.d/NAME, or one restate ships, "
        "such as unifi or nextcloud) around the walk, pausing what it names whether or not "
