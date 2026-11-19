@@ -2125,8 +2125,16 @@ check "its owner's alone" test "$(file_mode newrepo)" = 700
 contains "$(cat cr1.json)" '"created_repository": true' "and says so in the result"
 contains "$(cat cr1.json)" '"snapshot": "' "and captures into it"
 lacks "$(cat cr1.json)" '"full_disk_access"' "a tree that is not this machine's asks nothing of macOS"
-# --from-snapshot where the tree is on no ZFS: said, and nothing captured.
-if ! grep -q ' - zfs ' /proc/self/mountinfo 2> /dev/null; then
+# --from-snapshot not as root: said before anything is planned, wherever the
+# tree is. As root, where nothing is on ZFS (Linux): said, and nothing
+# captured. As root on FreeBSD the tree is on UFS, which it would snapshot:
+# tests/cli/ufs.sh does that.
+if [ "$(id -u)" -ne 0 ]; then
+  expect 2 "capture --from-snapshot, not as root" -- \
+    "$BIN" capture -N -r ptree -q -o fs.tar --from-snapshot
+  contains "$ERR" "snapshots are root's to take" "says so"
+  check "and writes nothing" test ! -e fs.tar
+elif [ "$(uname -s)" = Linux ] && ! grep -q ' - zfs ' /proc/self/mountinfo 2> /dev/null; then
   expect 2 "capture --from-snapshot of a tree on no ZFS" -- \
     "$BIN" capture -N -r ptree -q -o fs.tar --from-snapshot
   contains "$ERR" "is on ZFS" "says there is nothing to snapshot"

@@ -1049,6 +1049,15 @@ static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rul
     size_t                   i;
     bool                     ok;
 
+    /* Before anything is planned: a snapshot, its device and its mount are
+     * all root's to make. */
+    if (geteuid() != 0)
+    {
+        rs_buf_addstr(err, "--from-snapshot: snapshots are root's to take; run the capture as "
+                           "root");
+        free(name);
+        return false;
+    }
     rs_mounts_all(&mounts, &nmounts);
     ok = rs_snap_plan(root, mounts, nmounts, o->one_fs, name, z, err);
     rs_mounts_free(mounts, nmounts);
