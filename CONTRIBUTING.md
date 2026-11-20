@@ -77,6 +77,10 @@ installs them first whenever they differ.
   `make test-ufs` does the same on FreeBSD with UFS filesystems on memory
   disks of its own; CI runs the first on Linux and both on every FreeBSD
   release it tests. Neither captures anything but its own filesystems.
+  `make test-apfs` does it on macOS, where there is no throwaway volume to
+  snapshot: tmutil snapshots the Data volume itself, and restate deletes it
+  again after each capture. CI runs it on its macOS runner; run it on a Mac
+  of your own knowing that.
 - A change to the packaging builds and installs where it is built for: the
   RPM, Alpine and Homebrew packages are built and installed by CI and by
   the release workflow, and `make rpm` and `make apk` build them by hand.

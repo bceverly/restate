@@ -110,6 +110,17 @@ static void other_jobs(void)
           job.opts.keep_monthly == 12 &&
           job.opts.keep_yearly == 3 && job.opts.whole_packs && !job.opts.dry_run);
     CHECK_STR(job.opts.record, "/var/lib/r.record");
+    CHECK(parse(&job, "command = prune\nrepository = /r\nkeep_last = 3\n"
+                      "keep_snapshot = 20260101T000000Z\nkeep_snapshot = 20250601T120000Z\n",
+                &why));
+    free(why);
+    CHECK_INT(job.opts.nkeep_snapshots, 2);
+    CHECK_STR(job.opts.nkeep_snapshots == 2 ? job.opts.keep_snapshots[1] : "",
+              "20250601T120000Z");
+    refused("command = prune\nrepository = /r\nkeep_last = 3\nkeep_snapshot = ../x\n",
+            "a snapshot's name, as restate snapshots lists it");
+    refused("command = capture\nrepository = /r\nkeep_snapshot = 20260101T000000Z\n",
+            "keep_snapshot");
     CHECK(parse(&job, "command = check\nrepository = /r\nread_all = true\n"
                       "trusted_key = /k.asc\n", &why));
     free(why);

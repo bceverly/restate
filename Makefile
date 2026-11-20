@@ -275,6 +275,13 @@ test-ufs: build ## Capture --from-snapshot from throwaway UFS filesystems (FreeB
 	@if [ "$$(id -u)" -eq 0 ]; then tests/cli/ufs.sh ./$(BIN_DIR)/$(PROG); \
 	else sudo tests/cli/ufs.sh ./$(BIN_DIR)/$(PROG); fi
 
+# And on macOS's APFS, which snapshots the whole Data volume -- deleted
+# again after each capture -- and captures a directory of its own.
+.PHONY: test-apfs
+test-apfs: build ## Capture --from-snapshot from APFS (macOS, root, sudo; snapshots the Data volume)
+	@if [ "$$(id -u)" -eq 0 ]; then tests/cli/apfs.sh ./$(BIN_DIR)/$(PROG); \
+	else sudo tests/cli/apfs.sh ./$(BIN_DIR)/$(PROG); fi
+
 .PHONY: test-memory
 test-memory: ## Run everything again under ASan, UBSan, LSan and valgrind
 	@scripts/memcheck.sh

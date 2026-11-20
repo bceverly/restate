@@ -438,6 +438,20 @@ static void test_pure(void)
         k.last = 2;
         rs_repo_choose(names, 7, &k, kept);
         CHECK(kept[5] && kept[4] && !kept[3]);
+        {
+            /* Held, as well as the newest two, and counted toward neither. */
+            const char *const held[] = { "20251229T010000Z", "20260202T000000Z", "nowhere" };
+
+            k.held = held;
+            k.nheld = 3;
+            rs_repo_choose(names, 7, &k, kept);
+            CHECK(kept[5] && kept[4] && kept[3] && !kept[2] && kept[1] && !kept[0]);
+            k.last = 0;
+            k.yearly = 1;
+            /* 2026's newest is held, so its newest not held is the year's. */
+            rs_repo_choose(names, 7, &k, kept);
+            CHECK(kept[5] && kept[4] && !kept[3] && kept[1] && !kept[2] && !kept[0]);
+        }
         memset(&k, 0, sizeof(k));
         rs_repo_choose(names, 7, &k, kept);
         CHECK(!kept[5] && kept[6]);
@@ -3535,7 +3549,8 @@ static void test_protected(const char *top, enum rs_fsflags_mode as)
     CHECK_INT(mode_of(repo, "packs"), shared_mode(repo));
     CHECK_INT(mode_of(repo, "snapshots"), shared_mode(repo));
 #ifdef ACL_TESTS
-    if (nfs4_acls_here(repo))
+    /* The ACL only where there are no flags to protect with instead. */
+    if (!flags && nfs4_acls_here(repo))
     {
         CHECK(group_removes_nothing(repo));
         CHECK(group_removes_nothing(packs));

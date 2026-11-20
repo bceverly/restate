@@ -5,7 +5,7 @@
 /*
  * Running another program: the one place restate does.
  *
- * restate runs fifteen programs, each for something it should not do itself:
+ * restate runs seventeen programs, each for something it should not do itself:
  * gzip (compression), pigz (the same compression on every core, where it is
  * installed), curl (HTTPS), gpgv (OpenPGP signature checks), gpg (encrypting,
  * decrypting and signing images), gpgconf (stopping the gpg-agent a
@@ -13,8 +13,8 @@
  * --packages writes, which runs apt, snap and the rest as a person would)
  * ssh-keygen (new SSH host keys, for restore --as), FreeBSD's pkg and rpm
  * (what each package installed, which they keep in SQLite), and zfs, and
- * FreeBSD's mksnap_ffs, mdconfig, mount and umount (the snapshots capture
- * --from-snapshot reads from, snap.h). Writing a
+ * FreeBSD's mksnap_ffs, mdconfig, mount and umount, and macOS's tmutil and
+ * mount_apfs (the snapshots capture --from-snapshot reads from, snap.h). Writing a
  * compressor, a TLS stack or an OpenPGP implementation here would be
  * hundreds of lines of exactly the code that should not be written twice;
  * linking a library for them would end "links nothing but libc". As
@@ -58,11 +58,14 @@ enum rs_program {
     RS_PROG_MDCONFIG,
     RS_PROG_MOUNT,
     RS_PROG_UMOUNT,
+    RS_PROG_TMUTIL,
+    RS_PROG_MOUNT_APFS,
     RS_PROG_COUNT
 };
 
 /* "gzip", "curl", "gpgv", "gpg", "pigz", "gpgconf", "sh", "ssh-keygen", "pkg",
- * "rpm", "zfs", "mksnap_ffs", "mdconfig", "mount", "umount". */
+ * "rpm", "zfs", "mksnap_ffs", "mdconfig", "mount", "umount", "tmutil",
+ * "mount_apfs". */
 const char *rs_program_name(enum rs_program p);
 
 /* The first of the program's fixed paths that is an executable file, or

@@ -1035,6 +1035,19 @@ static enum rs_around around(const void *ctx, size_t group, bool before)
  * walk is done and they are destroyed (snapshot_release), and a signal ends
  * the walk instead, so no snapshot is left behind by a Ctrl-C.
  */
+/* What snapshot_take asks of each place a snapshot would be read. */
+struct snapshot_wanted {
+    const struct rs_rules   *rules;
+    const struct rs_options *o;
+};
+
+static bool snapshot_wanted(const char *tree, const void *ctx)
+{
+    const struct snapshot_wanted *w = ctx;
+
+    return matters(w->rules, w->o, tree);
+}
+
 static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rules,
                           const char *root, struct around_ctx *actx, bool live,
                           struct rs_snap *z, struct rs_buf *err)
@@ -1065,6 +1078,17 @@ static bool snapshot_take(const struct rs_options *o, const struct rs_rules *rul
     if (!ok)
     {
         return false;
+    }
+    /* Nothing snapshotted that the walk would leave out: macOS's VM and
+     * Preboot volumes, a dataset under an excluded directory. */
+    {
+        const struct snapshot_wanted w = { rules, o };
+
+        if (!rs_snap_keep(z, snapshot_wanted, &w, err))
+        {
+            rs_snap_free(z);
+            return false;
+        }
     }
     rs_snap_leftovers(z, &left, &nleft);
     for (i = 0; i < nleft; i++)
@@ -2803,6 +2827,34 @@ static void prune_result(const struct rs_options *o, const struct rs_repo *r,
             rs_jval_set_string(rs_jarr_add(kept), names[i]);
         }
     }
+    /* What --keep-snapshot held, each once, as it is still there: for a
+     * program that placed a hold to see it honored. */
+    kept = rs_jobj_add(res, "held");
+    rs_jval_set_array(kept);
+    for (i = 0; i < o->nkeep_snapshots; i++)
+    {
+        const char *held = o->keep_snapshots[i];
+        bool        there = false;
+        bool        said = false;
+        size_t      k;
+
+        for (k = 0; k < n && !there; k++)
+        {
+            there = strcmp(names[k], held) == 0;
+        }
+        for (k = 0; k < p->ndropped && there; k++)
+        {
+            there = strcmp(p->dropped[k], held) != 0;
+        }
+        for (k = 0; k < i && !said; k++)
+        {
+            said = strcmp(o->keep_snapshots[k], held) == 0;
+        }
+        if (there && !said)
+        {
+            rs_jval_set_string(rs_jarr_add(kept), held);
+        }
+    }
     rs_repo_free_names(names, n);
     rs_jobj_u64(res, "packs_removed", p->packs_removed);
     rs_jobj_u64(res, "packs_rewritten", p->packs_rewritten);
@@ -2827,10 +2879,17 @@ int rs_cmd_prune(const struct rs_options *o)
     keep.weekly = o->keep_weekly;
     keep.monthly = o->keep_monthly;
     keep.yearly = o->keep_yearly;
+    keep.held = o->keep_snapshots;
+    keep.nheld = o->nkeep_snapshots;
+    /* A hold keeps what it names as well, never instead: with nothing else
+     * to keep, every other snapshot would go. */
     if (keep.last + keep.daily + keep.weekly + keep.monthly + keep.yearly == 0)
     {
         rs_error("prune: say what to keep, with --keep-last, --keep-daily, --keep-weekly, "
-                 "--keep-monthly or --keep-yearly");
+                 "--keep-monthly or --keep-yearly%s",
+                 keep.nheld > 0 ? " (--keep-snapshot keeps what it names as well as those, "
+                                  "not in their place)"
+                                : "");
         log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
         return RESTATE_EXIT_TROUBLE;
     }
@@ -2854,6 +2913,22 @@ int rs_cmd_prune(const struct rs_options *o)
         log_outcome(o, busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE, began, "repository=%s",
                     o->args[0]);
         return busy ? RESTATE_EXIT_BUSY : RESTATE_EXIT_TROUBLE;
+    }
+    /* Every hold names a snapshot that is there, or nothing is pruned: a
+     * name mistyped must not let go of what it meant to keep. */
+    for (i = 0; i < o->nkeep_snapshots; i++)
+    {
+        char *found = rs_repo_resolve(r, o->keep_snapshots[i], &err);
+
+        if (!found)
+        {
+            rs_error("--keep-snapshot: %s; nothing was pruned", err.data);
+            rs_buf_free(&err);
+            rs_repo_close(r);
+            log_outcome(o, RESTATE_EXIT_TROUBLE, began, "repository=%s", o->args[0]);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        free(found);
     }
     rs_repo_set_recipients(r, o->recipients, o->nrecipients);
     if (!o->dry_run)
@@ -3845,7 +3920,8 @@ int rs_cmd_features(const struct rs_options *o)
 {
     static const enum rs_program programs[] = { RS_PROG_GZIP, RS_PROG_PIGZ, RS_PROG_GPG,
                                                 RS_PROG_GPGV, RS_PROG_CURL, RS_PROG_SSH_KEYGEN,
-                                                RS_PROG_ZFS,  RS_PROG_MKSNAP_FFS };
+                                                RS_PROG_ZFS,  RS_PROG_MKSNAP_FFS,
+                                                RS_PROG_TMUTIL };
     static const char *const members[] = { "capture.cache",          "diff.changes",
                                            "diff.from",              "diff.packages",
                                            "full_disk_access",       "list",
@@ -3959,6 +4035,8 @@ int rs_cmd_features(const struct rs_options *o)
     rs_jobj_bool(&doc, "du_keys", true);
     rs_jobj_bool(&doc, "chunk_key_reseal", true);
     rs_jobj_bool(&doc, "keep_yearly", true);
+    /* prune --keep-snapshot, and the "held" it says it kept. */
+    rs_jobj_bool(&doc, "keep_snapshot", true);
     /* --arch, and what it rebuilds for: this restate's own processor, and
      * that an image records the processor of each program it keeps. */
     rs_jobj_bool(&doc, "rebuild_arch", true);

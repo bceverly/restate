@@ -474,6 +474,11 @@ jobs:
       - name: make test-unit and test-cli
         run: make test-unit test-cli
 
+      # capture --from-snapshot from the runner's own Data volume, which is
+      # the runner's to snapshot: a throwaway machine.
+      - name: make test-apfs
+        run: make test-apfs
+
       # stat is spelled -f here, not -c; that is why this cannot reuse the
       # Linux check.
       - name: make install, staged and then for real

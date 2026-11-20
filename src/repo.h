@@ -280,15 +280,19 @@ bool    rs_repo_stream_close(struct rs_repo_stream *s, struct rs_buf *err);
  * the newest of each of the most recent `daily` days, `weekly` ISO weeks,
  * `monthly` months and `yearly` years that have one. */
 struct rs_repo_keep {
-    unsigned last;
-    unsigned daily;
-    unsigned weekly;
-    unsigned monthly;
-    unsigned yearly;
+    unsigned           last;
+    unsigned           daily;
+    unsigned           weekly;
+    unsigned           monthly;
+    unsigned           yearly;
+    const char *const *held;    /* kept whatever the rest say: a legal hold */
+    size_t             nheld;
 };
 
 /* Which of the snapshots `names` (oldest first, as rs_repo_snapshots gives
- * them) to keep, into kept[i]. A name that is not a time is always kept. */
+ * them) to keep, into kept[i]. A name that is not a time is always kept, and
+ * so is one keep->held names. The held are kept as well as what the rest
+ * choose, and count toward none of them. */
 void rs_repo_choose(char *const *names, size_t n, const struct rs_repo_keep *keep, bool *kept);
 
 struct rs_repo_pruned {

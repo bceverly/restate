@@ -18,6 +18,10 @@
  * Only the flags someone sets on purpose are recorded. The ones a filesystem
  * keeps for itself -- a UFS snapshot, macOS's compression, dataless files
  * and SIP's restricted -- are not: set by hand they mean nothing, or worse.
+ * Nor is uarch, the archive flag ZFS sets on every file it writes, as DOS
+ * did: a record of it would only say the file was written, and a restore
+ * writes it again anyway. An index from before that names it reads as
+ * though it did not.
  *
  * The bits below are restate's own, for every system alike; each is this
  * system's flag where it has it, and nothing where it does not. Linux has
@@ -54,6 +58,9 @@ enum {
 #define RS_CHF_BLOCKING                                                         \
     (RS_CHF_SCHG | RS_CHF_SAPPND | RS_CHF_SUNLNK | RS_CHF_UCHG | RS_CHF_UAPPND | \
      RS_CHF_UUNLNK)
+
+/* Known by name, but the filesystem's to keep: never recorded or set. */
+#define RS_CHF_FILESYSTEMS (RS_CHF_UARCH)
 
 /* Whether this system has file flags: a BSD or macOS, or the tests
  * pretending. */

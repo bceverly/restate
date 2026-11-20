@@ -170,7 +170,7 @@ unsigned rs_chflags_parse(const char *text, struct rs_buf *unknown)
         {
             if (strlen(flags[i].name) == len && strncmp(flags[i].name, p, len) == 0)
             {
-                bits |= flags[i].bit;
+                bits |= flags[i].bit & ~(unsigned)RS_CHF_FILESYSTEMS;
                 known = true;
             }
         }
@@ -194,7 +194,7 @@ unsigned rs_chflags_settable(void)
 
     for (i = 0; i < NFLAGS; i++)
     {
-        if (flags[i].native != 0 || pretending)
+        if ((flags[i].native != 0 || pretending) && (flags[i].bit & RS_CHF_FILESYSTEMS) == 0)
         {
             bits |= flags[i].bit;
         }
@@ -217,7 +217,8 @@ unsigned rs_chflags_of(const struct stat *st)
 
         for (i = 0; i < NFLAGS; i++)
         {
-            if (flags[i].native != 0 && ((unsigned long)st->st_flags & flags[i].native) != 0)
+            if (flags[i].native != 0 && (flags[i].bit & RS_CHF_FILESYSTEMS) == 0 &&
+                ((unsigned long)st->st_flags & flags[i].native) != 0)
             {
                 bits |= flags[i].bit;
             }
@@ -250,13 +251,18 @@ int rs_chflags_set(int fd, unsigned bits)
 
         for (i = 0; i < NFLAGS; i++)
         {
+            if (flags[i].bit & RS_CHF_FILESYSTEMS)
+            {
+                continue;
+            }
             ours |= flags[i].native;
             if (bits & flags[i].bit)
             {
                 native |= flags[i].native;
             }
         }
-        /* What restate does not record -- a snapshot, compression -- stays. */
+        /* What restate does not record -- a snapshot, compression, ZFS's
+         * archive flag -- stays. */
         native |= (unsigned long)st.st_flags & ~ours;
 #if defined(__OpenBSD__) || defined(__APPLE__)
         return fchflags(fd, (uint32_t)native);

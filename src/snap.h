@@ -22,6 +22,16 @@
  * usually well under a second -- and takes one filesystem's at a time, so
  * two UFS filesystems are each caught at a moment, not the same one.
  *
+ * APFS, on macOS: `tmutil localsnapshot` snapshots every volume Time Machine
+ * includes -- the Data volume, at least -- at one moment, as
+ * com.apple.TimeMachine.DATE.local; each is mounted with mount_apfs in a
+ * directory of restate's own under /var/run, and read there. The system
+ * volume, "/", is a sealed snapshot itself and read as it is; what changes
+ * is on the Data volume, which the walk reaches from "/" through the
+ * firmlinks /usr/share/firmlinks lists -- /Users, /private, /Applications --
+ * and so reads each of those from the Data volume's snapshot. macOS mounts
+ * a snapshot only for a program with Full Disk Access.
+ *
  * Everything is recorded at its live path, so the image is the one a
  * capture of the live tree would make. What is mounted under the root and
  * is neither -- an EFI partition, a tmpfs -- is read as it is, as without
@@ -30,9 +40,12 @@
  * Only the snapshots restate took in this capture are ever removed: ZFS's by
  * their full names, one at a time, never recursively or by pattern; UFS's by
  * unmounting what restate mounted, detaching the device it attached and
- * removing the file it made. One an earlier capture left -- killed before it
- * could -- is said, with the command that removes it, and left for a person
- * to.
+ * removing the file it made; APFS's by unmounting what restate mounted and
+ * `tmutil deletelocalsnapshots DATE`, its own date. One an earlier capture
+ * left -- killed before it could -- is said, with the command that removes
+ * it, and left for a person to; except on APFS, where restate's are named
+ * as Time Machine's are and cannot be told from them, and macOS thins them
+ * itself within a day.
  */
 #ifndef RESTATE_SNAP_H
 #define RESTATE_SNAP_H
@@ -48,18 +61,19 @@
 
 enum rs_snap_kind {
     RS_SNAP_ZFS = 0,
-    RS_SNAP_UFS
+    RS_SNAP_UFS,
+    RS_SNAP_APFS
 };
 
 struct rs_snap_fs {
     enum rs_snap_kind kind;
-    char             *name;      /* ZFS: the dataset, "rpool/ROOT/ubuntu"; UFS: its mount point */
+    char             *name;      /* ZFS: the dataset, "rpool/ROOT/ubuntu"; else its mount point */
     char             *snapdir;   /* where its snapshot is read */
     char             *file;      /* UFS: the snapshot file, MOUNTPOINT/.snap/NAME */
     char             *md;        /* UFS: the device it is attached as, "md3" */
     int               fd;        /* open on snapdir once taken, or -1 */
     bool              taken;     /* the snapshot is there */
-    bool              mounted;   /* UFS: mounted on snapdir */
+    bool              mounted;   /* UFS, APFS: mounted on snapdir */
 };
 
 struct rs_snap {
@@ -73,7 +87,8 @@ struct rs_snap {
     size_t                 nlive;
     char                 **owned;     /* the sources' paths, to free */
     size_t                 nowned;
-    char                  *mounts;    /* UFS: the directory its snapshots are mounted in */
+    char                  *mounts;    /* UFS, APFS: the directory its snapshots are mounted in */
+    char                  *apfs;      /* APFS, once taken: tmutil's date, "2026-11-18-030000" */
 };
 
 /* What an earlier capture left: its name, and the command that removes it. */
@@ -95,6 +110,15 @@ char *rs_snap_name(time_t when, pid_t pid);
 bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one_fs,
                   const char *snapshot, struct rs_snap *z, struct rs_buf *err);
 
+/*
+ * Leaves out of z what the walk will not read: each source whose path
+ * (as the walk names it) `wanted` says no to, and then each filesystem no
+ * source left reads -- so that none is snapshotted for nothing. False, with
+ * why, if that leaves nothing to snapshot.
+ */
+bool rs_snap_keep(struct rs_snap *z, bool (*wanted)(const char *tree, const void *ctx),
+                  const void *ctx, struct rs_buf *err);
+
 /* Takes the snapshots and opens each, for the walk. False, with why and
  * with every one it took removed again, if any could not be. */
 bool rs_snap_take(struct rs_snap *z, struct rs_buf *err);
@@ -104,7 +128,7 @@ bool rs_snap_take(struct rs_snap *z, struct rs_buf *err);
 bool rs_snap_release(struct rs_snap *z, struct rs_buf *err);
 
 /* "4 ZFS datasets", "1 UFS filesystem", "2 ZFS datasets and 1 UFS
- * filesystem": what z snapshots, for a message. */
+ * filesystem", "1 APFS volume": what z snapshots, for a message. */
 void rs_snap_describe(const struct rs_snap *z, struct rs_buf *out);
 
 /* The snapshots of the planned filesystems an earlier capture left behind:
@@ -117,16 +141,24 @@ void rs_snap_leftovers_free(struct rs_snap_leftover *l, size_t n);
 void rs_snap_parse_zfs_leftovers(const char *text, const char *snapshot, char ***out,
                                  size_t *n);
 
+/* The date in what `tmutil localsnapshot` printed -- "Created local
+ * snapshot with date: 2026-11-18-030000" -- or NULL. */
+char *rs_snap_parse_tmutil_date(const char *text);
+
 void rs_snap_free(struct rs_snap *z);
 
 /* For the tests: each filesystem's snapshot read from BASE/NAME, with every
  * '/' in its name a '_' -- UFS's taken with mksnap_ffs alone, neither
- * attached nor mounted -- and UFS planned on any system. NULL for the real
- * thing again. */
+ * attached nor mounted, APFS's taken with tmutil alone, not mounted -- and
+ * UFS and APFS planned on any system. NULL for the real thing again. */
 void rs_snap_pretend(const char *base);
 
-/* For the tests, while pretending: UFS's snapshots attached and mounted
- * too, through whatever mdconfig, mount and umount are set to. */
+/* For the tests, while pretending: macOS's firmlinks read from `path`. */
+void rs_snap_pretend_firmlinks(const char *path);
+
+/* For the tests, while pretending: UFS's and APFS's snapshots attached and
+ * mounted too, through whatever mdconfig, mount, mount_apfs and umount are
+ * set to. */
 void rs_snap_pretend_devices(bool on);
 
 #endif /* RESTATE_SNAP_H */

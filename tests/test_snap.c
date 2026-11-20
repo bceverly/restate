@@ -501,6 +501,204 @@ static void test_ufs(const char *dir)
     free(fs);
 }
 
+static bool not_system_volumes(const char *tree, const void *ctx)
+{
+    (void)ctx;
+    return strncmp(tree, "/System/Volumes", 15) != 0;
+}
+
+static bool nothing_wanted(const char *tree, const void *ctx)
+{
+    (void)tree;
+    (void)ctx;
+    return false;
+}
+
+static void test_apfs(const char *dir)
+{
+    static const char *const missing[] = { "/nonexistent/tmutil" };
+    static const char *const failing[] = { "/usr/bin/false", "/bin/false" };
+    static const char *const working[] = { "/usr/bin/true", "/bin/true" };
+    /* A Mac, more or less: the sealed system volume at /, the Data volume
+     * and the system's others under /System/Volumes, and a USB stick. */
+    const struct rs_mount mac[] = {
+        mount_of("/", "apfs", "/dev/disk3s1s1", false),
+        mount_of("/System/Volumes/Data", "apfs", "/dev/disk3s5", false),
+        mount_of("/System/Volumes/Preboot", "apfs", "/dev/disk3s2", false),
+        mount_of("/System/Volumes/VM", "apfs", "/dev/disk3s6", false),
+        mount_of("/Volumes/STICK", "msdos", "/dev/disk4s1", false),
+        mount_of("/dev", "devfs", "devfs", false),
+    };
+    char                        *base = rs_xasprintf("%s/apfs", dir);
+    char                        *links = rs_xasprintf("%s/firmlinks", dir);
+    char                        *data = rs_xasprintf("%s/_System_Volumes_Data", base);
+    char                        *users = rs_xasprintf("%s/Users", data);
+    char                        *pat = rs_xasprintf("%s/Users/pat", data);
+    const struct rs_scan_source *s;
+    struct rs_snap               z;
+    struct rs_buf                err;
+    struct rs_buf                said;
+    char                        *date;
+
+    rs_buf_init(&err);
+    rs_buf_init(&said);
+    CHECK(mkdir(base, 0755) == 0);
+    rs_test_write(dir, "firmlinks",
+                  "/Applications\tApplications\n/Users\tUsers\n/Volumes\tVolumes\n"
+                  "/private\tprivate\r\nno-tab\n/abs\t/Users\n/up\t../x\n",
+                  0644);
+
+    TEST_CASE("apfs: what tmutil said it made");
+    date = rs_snap_parse_tmutil_date("NOTE: local snapshots are considered purgeable\n"
+                                     "Created local snapshot with date: 2026-11-18-030000\n");
+    CHECK_STR(date ? date : "", "2026-11-18-030000");
+    free(date);
+    date = rs_snap_parse_tmutil_date("date: 2026-11-18-0300\ndate: 2026-11-18-030001");
+    CHECK_STR(date ? date : "", "2026-11-18-030001");
+    free(date);
+    CHECK(rs_snap_parse_tmutil_date("date: 2026-11-18-03000x") == NULL);
+    CHECK(rs_snap_parse_tmutil_date("date: 2026-11-18-0300001") == NULL);
+    CHECK(rs_snap_parse_tmutil_date("") == NULL);
+    CHECK(rs_snap_parse_tmutil_date(NULL) == NULL);
+
+#ifndef __APPLE__
+    TEST_CASE("apfs: read as it is but on macOS");
+    CHECK(!rs_snap_plan("/", mac, 6, false, "restate-T-1", &z, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "nothing at or under / is on ZFS");
+    rs_buf_reset(&err);
+#endif
+
+    TEST_CASE("apfs: the Data volume read from its snapshot, through the firmlinks too");
+    rs_snap_pretend(base);
+    rs_snap_pretend_firmlinks(links);
+    CHECK(rs_snap_plan("/", mac, 6, false, "restate-T-1", &z, &err));
+    CHECK_INT(z.nfs, 3);   /* not the sealed system volume */
+    CHECK(z.nfs > 0 && z.fs[0].kind == RS_SNAP_APFS);
+    CHECK_STR(z.nfs > 0 ? z.fs[0].name : "", "/System/Volumes/Data");
+    CHECK(source_for(&z, "/") == NULL);
+    s = source_for(&z, "/Users");
+    CHECK_STR(s ? s->dir : "", users);
+    CHECK(source_for(&z, "/private") != NULL && source_for(&z, "/Applications") != NULL);
+    CHECK(source_for(&z, "/Volumes") != NULL && source_for(&z, "/Volumes/STICK") != NULL);
+    CHECK(source_for(&z, "/abs") == NULL && source_for(&z, "/up") == NULL);
+    CHECK_INT(z.nlive, 2);   /* the stick and /dev */
+
+    TEST_CASE("apfs: kept to what the walk reads, and nothing else snapshotted");
+    CHECK(rs_snap_keep(&z, not_system_volumes, NULL, &err));
+    CHECK_INT(z.nfs, 1);
+    CHECK(source_for(&z, "/System/Volumes/VM") == NULL);
+    CHECK(source_for(&z, "/Users") != NULL && source_for(&z, "/Volumes/STICK") != NULL);
+    rs_snap_describe(&z, &said);
+    CHECK_STR(said.data ? said.data : "", "1 APFS volume");
+    rs_buf_reset(&said);
+    rs_snap_free(&z);
+    CHECK(rs_snap_plan("/", mac, 6, false, "restate-T-1", &z, &err));
+    CHECK(!rs_snap_keep(&z, nothing_wanted, NULL, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "nothing the rules leave in");
+    rs_buf_reset(&err);
+    rs_snap_free(&z);
+
+    TEST_CASE("apfs: a root beneath a firmlink, and --one-file-system");
+    CHECK(rs_snap_plan("/Users/pat", mac, 6, false, "restate-T-1", &z, &err));
+    CHECK_INT(z.nfs, 1);
+    s = source_for(&z, "/");
+    CHECK_STR(s ? s->dir : "", pat);
+    CHECK(rs_snap_keep(&z, nothing_wanted, NULL, &err));   /* the root's own, always */
+    rs_snap_free(&z);
+    CHECK(rs_snap_plan("/Users/pat", mac, 6, true, "restate-T-1", &z, &err));
+    CHECK_INT(z.nfs, 1);
+    rs_snap_free(&z);
+    CHECK(!rs_snap_plan("/", mac, 2, true, "restate-T-1", &z, &err));
+    rs_buf_reset(&err);
+
+    TEST_CASE("apfs: no tmutil to run");
+    rs_program_set_paths(RS_PROG_TMUTIL, missing, 1);
+    CHECK(rs_snap_plan("/Users/pat", mac, 6, false, "restate-T-1", &z, &err));
+    CHECK(!rs_snap_take(&z, &err));
+    CHECK_CONTAINS(err.data ? err.data : "", "there is no tmutil that restate would run");
+    rs_buf_reset(&err);
+    rs_snap_free(&z);
+
+    if (stands_in(RS_PROG_TMUTIL, working, 2, 0) && stands_in(RS_PROG_TMUTIL, failing, 2, 1))
+    {
+        TEST_CASE("apfs: a snapshot tmutil refuses");
+        rs_program_set_paths(RS_PROG_TMUTIL, failing, 2);
+        CHECK(rs_snap_plan("/", mac, 2, false, "restate-T-1", &z, &err));
+        CHECK(!rs_snap_take(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "tmutil localsnapshot: exit status 1");
+        CHECK(z.apfs == NULL && !z.fs[0].taken);
+        rs_buf_reset(&err);
+        rs_snap_free(&z);
+
+        TEST_CASE("apfs: taken, read, and deleted by its date after");
+        rs_program_set_paths(RS_PROG_TMUTIL, working, 2);
+        CHECK(mkdir(data, 0755) == 0);
+        CHECK(rs_snap_plan("/", mac, 2, false, "restate-T-1", &z, &err));
+        CHECK(rs_snap_take(&z, &err));
+        CHECK_STR(z.apfs ? z.apfs : "", "2026-01-01-000000");
+        CHECK(z.fs[0].taken && z.fs[0].fd >= 0);
+        CHECK(rs_snap_release(&z, &err));
+        CHECK(z.apfs == NULL && !z.fs[0].taken);
+        rs_snap_free(&z);
+        CHECK(rs_snap_plan("/", mac, 2, false, "restate-T-1", &z, &err));
+        CHECK(rs_snap_take(&z, &err));
+        rs_program_set_paths(RS_PROG_TMUTIL, failing, 2);
+        CHECK(!rs_snap_release(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "",
+                       "tmutil deletelocalsnapshots 2026-01-01-000000 removes it");
+        CHECK(z.apfs != NULL);
+        rs_buf_reset(&err);
+        rs_snap_free(&z);
+        CHECK(rmdir(data) == 0);
+
+        TEST_CASE("apfs: mounted, then unmounted");
+        rs_snap_pretend_devices(true);
+        rs_program_set_paths(RS_PROG_TMUTIL, working, 2);
+        rs_program_set_paths(RS_PROG_MOUNT_APFS, failing, 2);
+        rs_program_set_paths(RS_PROG_UMOUNT, working, 2);
+        CHECK(rs_snap_plan("/", mac, 2, false, "restate-T-1", &z, &err));
+        CHECK(!rs_snap_take(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "leave /System/Volumes/Data out with --exclude");
+        CHECK(z.apfs == NULL);   /* deleted again */
+        CHECK(access(data, F_OK) != 0);
+        rs_buf_reset(&err);
+        rs_snap_free(&z);
+        /* true for mount_apfs mounts nothing, but says it did. */
+        rs_program_set_paths(RS_PROG_MOUNT_APFS, working, 2);
+        CHECK(rs_snap_plan("/", mac, 2, false, "restate-T-1", &z, &err));
+        CHECK(rs_snap_take(&z, &err));
+        CHECK(z.fs[0].mounted && z.fs[0].fd >= 0);
+        rs_program_set_paths(RS_PROG_UMOUNT, failing, 2);
+        CHECK(!rs_snap_release(&z, &err));
+        CHECK_CONTAINS(err.data ? err.data : "", "was not unmounted");
+        CHECK_CONTAINS(err.data ? err.data : "", "still mounted");
+        CHECK(z.apfs != NULL && z.fs[0].mounted);
+        rs_buf_reset(&err);
+        rs_program_set_paths(RS_PROG_UMOUNT, working, 2);
+        CHECK(rs_snap_release(&z, &err));
+        CHECK(z.apfs == NULL && !z.fs[0].mounted);
+        CHECK(access(data, F_OK) != 0);
+        rs_snap_free(&z);
+        rs_snap_pretend_devices(false);
+        rs_program_set_paths(RS_PROG_MOUNT_APFS, NULL, 0);
+        rs_program_set_paths(RS_PROG_UMOUNT, NULL, 0);
+    } else
+    {
+        (void)printf("  (apfs snapshot tests skipped: true and false run as tmutil here do "
+                     "not exit 0 and 1)\n");
+    }
+
+    rs_program_set_paths(RS_PROG_TMUTIL, NULL, 0);
+    rs_snap_pretend(NULL);
+    rs_buf_free(&err);
+    rs_buf_free(&said);
+    free(pat);
+    free(users);
+    free(data);
+    free(links);
+    free(base);
+}
+
 /* A walk with `s` read from `dir`, into *st. */
 static void reread(const struct rs_scan_opts *o, struct rs_scan_source *s, const char *dir,
                    struct rs_scan_stats *st)
@@ -628,6 +826,7 @@ void test_snapshots(void)
     test_plan();
     test_take(dir);
     test_ufs(dir);
+    test_apfs(dir);
     test_walk(dir);
     rs_test_rmtree(dir);
     free(dir);

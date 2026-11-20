@@ -46,6 +46,9 @@ static const char *const mksnap_ffs_paths[] = { "/sbin/mksnap_ffs" };
 static const char *const mdconfig_paths[] = { "/sbin/mdconfig" };
 static const char *const mount_paths[] = { "/sbin/mount" };
 static const char *const umount_paths[] = { "/sbin/umount" };
+/* macOS's, for APFS snapshots. */
+static const char *const tmutil_paths[] = { "/usr/bin/tmutil" };
+static const char *const mount_apfs_paths[] = { "/sbin/mount_apfs" };
 
 /* The environment each program gets beyond PATH and LC_ALL: curl the proxy
  * settings, gpg what it needs to find the key that decrypts an image and to
@@ -95,6 +98,8 @@ static struct program programs[RS_PROG_COUNT] = {
     PROGRAM("mdconfig", mdconfig_paths, no_env),
     PROGRAM("mount", mount_paths, no_env),
     PROGRAM("umount", umount_paths, no_env),
+    PROGRAM("tmutil", tmutil_paths, no_env),
+    PROGRAM("mount_apfs", mount_apfs_paths, no_env),
 };
 
 #undef PROGRAM

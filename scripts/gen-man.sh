@@ -1425,7 +1425,7 @@ shipped hook is never taken for a program's: the
 command is not
 .BR dockerd .
 .SH SNAPSHOTS
-On ZFS, and on UFS on FreeBSD,
+On ZFS, on UFS on FreeBSD and on APFS on macOS,
 .B capture \-\-from\-snapshot
 reads the tree from snapshots of its filesystems rather than from files that
 change while they are read, so that all of it is as it was at one moment.
@@ -1458,6 +1458,32 @@ and
 are never captured on FreeBSD, with or without
 .BR \-\-from\-snapshot .
 .PP
+On macOS, the Data volume is snapshotted with
+.BR "tmutil localsnapshot" ,
+which snapshots every volume Time Machine includes at one moment, as
+.BI com.apple.TimeMachine. DATE .local ;
+it is mounted with
+.BR mount_apfs (8)
+in a directory of restate's own under
+.IR /var/run ,
+and read there, as is everything the walk reaches through the firmlinks
+.I /usr/share/firmlinks
+lists \-
+.IR /Users ,
+.IR /private ,
+.I /Applications
+and the rest. The system volume,
+.IR / ,
+is sealed, a snapshot already, and read as it is. macOS mounts a snapshot
+only for a program with Full Disk Access (see
+.BR "SECURITY CONSIDERATIONS" ).
+.PP
+What the rules leave out is not snapshotted: macOS's
+.I VM
+and
+.I Preboot
+volumes, a dataset under an excluded directory.
+.PP
 What is mounted under the root and is neither \- an EFI partition, a tmpfs,
 an ext4
 .I /boot
@@ -1474,10 +1500,15 @@ The snapshots are named
 .B restate:capture
 \- and are removed once the walk is done \- after a SIGINT, SIGTERM, SIGHUP
 or SIGQUIT too, which ends the walk first: ZFS's destroyed by their full
-names, UFS's unmounted, detached and their files removed. No snapshot
-restate did not take in that capture is ever removed: one an earlier capture
-left behind, killed by SIGKILL or a crash, is said, with the command that
-removes it, and left for a person to. One capture with
+names, UFS's unmounted, detached and their files removed, APFS's unmounted
+and deleted with
+.B tmutil deletelocalsnapshots
+and their own date. No snapshot restate did not take in that capture is
+ever removed: one an earlier capture left behind, killed by SIGKILL or a
+crash, is said, with the command that removes it, and left for a person to
+\- except on APFS, where restate's are named as Time Machine's are and
+cannot be told from them; macOS thins those itself within a day. One
+capture with
 .B \-\-from\-snapshot
 or
 .B \-\-quiesce
@@ -2612,8 +2643,10 @@ refuses
 too. A program holding the key elsewhere writes it there for the one run,
 and removes it after.
 .TP
-.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " keep_yearly ", " whole_packs
-prune;
+.BR keep_last ", " keep_daily ", " keep_weekly ", " keep_monthly ", " keep_yearly ", " keep_snapshot ", " whole_packs
+prune
+.RB ( keep_snapshot
+repeated, one snapshot each);
 .B dry_run
 for prune, repack and restore;
 .B record
@@ -2778,10 +2811,13 @@ the first 100 named, and leaves the run no less complete
 .RB ( \-v
 names each as it goes). Each command adds what it did:
 .BR prune ,
-.B pruned
-and
+.BR pruned ,
 .B kept_snapshots
-and the packs it removed and rewrote;
+and
+.B held
+(what
+.B \-\-keep\-snapshot
+held, each still there) and the packs it removed and rewrote;
 .BR repack ,
 .BR packs_rewritten ,
 .B packs_removed
@@ -3363,7 +3399,10 @@ granted in System Settings, Privacy & Security, Full Disk Access, to the app
 .B restate
 is run from \- Terminal, iTerm \- or, where launchd runs it, to
 .B restate
-itself.
+itself. Without it,
+.B capture \-\-from\-snapshot
+is refused before any snapshot is taken: macOS mounts one only for a program
+that has it.
 .PP
 An image or index is input when it is read back. The JSON and tar parsers
 are strict, bounded and fuzzed, and they reject any path that is not clean
@@ -3371,7 +3410,7 @@ and absolute, so that an index cannot name a location outside the tree it
 describes.
 .PP
 .B restate
-runs thirteen programs, each for something it should not do itself:
+runs fifteen programs, each for something it should not do itself:
 .BR gzip (1),
 .BR pigz (1)
 (the same compression on every core, used in place of gzip to write an
@@ -3397,7 +3436,11 @@ and on FreeBSD
 .BR mdconfig (8),
 .BR mount (8)
 and
-.BR umount (8)
+.BR umount (8),
+and on macOS
+.BR tmutil (8)
+and
+.BR mount_apfs (8)
 (the snapshots
 .B capture \-\-from\-snapshot
 reads from; zfs in
@@ -3405,6 +3448,8 @@ reads from; zfs in
 .I /usr/sbin
 or
 .IR /usr/local/sbin ,
+tmutil in
+.IR /usr/bin ,
 the others in
 .IR /sbin ).
 Each is run from a fixed absolute path \-

@@ -35,6 +35,10 @@ void test_chflags(void)
     CHECK_INT(rs_chflags_parse("uchg,,someday,rdonly,x", &unknown),
               RS_CHF_UCHG | RS_CHF_RDONLY);
     CHECK_STR(unknown.data, "someday,x");
+    /* ZFS's archive flag, in an index from before: known, and not kept. */
+    unknown.len = 0;
+    CHECK_INT(rs_chflags_parse("uarch,nodump", &unknown), RS_CHF_NODUMP);
+    CHECK_INT(unknown.len, 0);
     rs_buf_free(&unknown);
     CHECK_INT(rs_chflags_parse("", NULL), 0);
     CHECK_INT(rs_chflags_parse(NULL, NULL), 0);
@@ -72,7 +76,7 @@ void test_chflags(void)
     TEST_CASE("chflags: pretending, as the tests do where there are none");
     rs_chflags_pretend(true);
     CHECK(rs_chflags_supported());
-    CHECK_INT(rs_chflags_settable(), 0xffff);
+    CHECK_INT(rs_chflags_settable(), 0xffff & ~(unsigned)RS_CHF_UARCH);
     CHECK(fstat(fd, &st) == 0);
     CHECK_INT(rs_chflags_of(&st), 0);
     CHECK(!rs_chflags_thaw(fd));

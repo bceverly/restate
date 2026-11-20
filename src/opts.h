@@ -43,6 +43,7 @@ enum {
     OPT_KEEP_WEEKLY,
     OPT_KEEP_MONTHLY,
     OPT_KEEP_YEARLY,
+    OPT_KEEP_SNAPSHOT,
     OPT_SYSLOG,
     OPT_EXACT_VERSIONS,
     OPT_FETCH_SOURCES,
@@ -121,6 +122,8 @@ struct rs_options {
     unsigned        keep_weekly;
     unsigned        keep_monthly;
     unsigned        keep_yearly;
+    const char    **keep_snapshots;   /* --keep-snapshot: held, whatever the rest say */
+    size_t          nkeep_snapshots;
     bool            log_outcome;    /* --syslog */
     bool            exact_versions; /* --exact-versions */
     bool            fetch_sources;  /* --fetch-sources */

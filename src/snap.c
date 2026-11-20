@@ -23,6 +23,25 @@
 #define RS_SNAP_UFS_HERE false
 #endif
 
+#ifdef __APPLE__
+#define RS_SNAP_APFS_HERE true
+#include "fda.h"
+#else
+#define RS_SNAP_APFS_HERE false
+#endif
+
+/* macOS's Data volume, where what changes is, and the firmlinks that reach
+ * it from the system volume. */
+#define DATA_VOLUME "/System/Volumes/Data"
+#define FIRMLINKS   "/usr/share/firmlinks"
+
+/* What tmutil names the snapshot it makes on each volume. */
+#define TM_PREFIX "com.apple.TimeMachine."
+#define TM_SUFFIX ".local"
+
+/* tmutil's date, YYYY-MM-DD-HHMMSS. */
+#define TM_DATE_LEN 17
+
 /* What removing a snapshot, or unmounting one, is tried, a second apart:
  * Linux unmounts the one the walk had mounted first, and may find it busy a
  * moment longer; so may FreeBSD a UFS snapshot's mount. */
@@ -33,12 +52,21 @@
 
 static char *pretend_base;
 static bool  pretend_devices;
+static char *pretend_firmlinks;
 
 void rs_snap_pretend(const char *base)
 {
     free(pretend_base);
     pretend_base = base ? rs_xstrdup(base) : NULL;
     pretend_devices = false;
+    free(pretend_firmlinks);
+    pretend_firmlinks = NULL;
+}
+
+void rs_snap_pretend_firmlinks(const char *path)
+{
+    free(pretend_firmlinks);
+    pretend_firmlinks = path ? rs_xstrdup(path) : NULL;
 }
 
 void rs_snap_pretend_devices(bool on)
@@ -122,6 +150,28 @@ static bool is_ufs(const struct rs_mount *m)
     return strcmp(m->type, "ufs") == 0 && !m->part && (RS_SNAP_UFS_HERE || pretend_base);
 }
 
+/* An APFS volume's own mount, on macOS, where tmutil is. */
+static bool is_apfs(const struct rs_mount *m)
+{
+    return strcmp(m->type, "apfs") == 0 && !m->part && (RS_SNAP_APFS_HERE || pretend_base);
+}
+
+/* macOS's Data volume, or NULL where there is none: an older macOS, or not
+ * macOS. */
+static const struct rs_mount *data_volume(const struct rs_mount *m, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (strcmp(m[i].path, DATA_VOLUME) == 0 && is_apfs(&m[i]))
+        {
+            return &m[i];
+        }
+    }
+    return NULL;
+}
+
 /* The filesystem `name` of `kind` in z, added if it is not there, with its
  * snapshot read through `mountpoint`. Its index. */
 static size_t filesystem(struct rs_snap *z, enum rs_snap_kind kind, const char *name,
@@ -194,6 +244,65 @@ static void source(struct rs_snap *z, char *tree, char *dir, size_t of)
     z->nsources++;
 }
 
+/* A firmlink's two halves, as /usr/share/firmlinks gives them: the path on
+ * the system volume, absolute, and where it leads on the Data volume,
+ * relative -- "/Users" and "Users". */
+static bool firmlink_ok(const char *at, const char *to)
+{
+    return at[0] == '/' && at[1] != '\0' && to[0] != '\0' && to[0] != '/' &&
+           strstr(at, "..") == NULL && strstr(to, "..") == NULL;
+}
+
+/* What the walk of `root` reaches through macOS's firmlinks, read from the
+ * snapshot of the Data volume `data`: a firmlink under the root, or the
+ * root itself where it is under one (`on_system`: the root is on the
+ * system volume). With `one_fs`, none under the root: they lead to
+ * another volume, which the walk does not go into. */
+static void firmlinks(struct rs_snap *z, const char *root, bool one_fs, bool on_system,
+                      const struct rs_mount *data)
+{
+    FILE  *f = fopen(pretend_firmlinks ? pretend_firmlinks : FIRMLINKS, "re");
+    char  *line = NULL;
+    size_t cap = 0;
+
+    while (f && getline(&line, &cap, f) > 0)
+    {
+        char  *tab = strchr(line, '\t');
+        char  *to = tab ? tab + 1 : NULL;
+        char  *end;
+        size_t d;
+
+        if (!to)
+        {
+            continue;
+        }
+        *tab = '\0';
+        for (end = to; *end != '\0' && *end != '\r' && *end != '\n'; end++)
+        {
+        }
+        *end = '\0';
+        if (!firmlink_ok(line, to))
+        {
+            continue;
+        }
+        if (on_system && beneath(line, root))
+        {
+            d = filesystem(z, RS_SNAP_APFS, data->path, data->path);
+            source(z, rs_xstrdup("/"),
+                   rs_xasprintf("%s/%s%s", z->fs[d].snapdir, to, root + strlen(line)), SIZE_MAX);
+        } else if (!one_fs && beneath(root, line) && strcmp(line, root) != 0)
+        {
+            d = filesystem(z, RS_SNAP_APFS, data->path, data->path);
+            source(z, tree_of(root, line), rs_xasprintf("%s/%s", z->fs[d].snapdir, to), SIZE_MAX);
+        }
+    }
+    free(line);
+    if (f)
+    {
+        (void)fclose(f);
+    }
+}
+
 static int by_tree(const void *a, const void *b)
 {
     return strcmp(((const struct rs_scan_source *)a)->tree,
@@ -231,6 +340,8 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
                   const char *snapshot, struct rs_snap *z, struct rs_buf *err)
 {
     const struct rs_mount *cover = NULL;
+    const struct rs_mount *data = data_volume(m, n);
+    bool                   on_system = false;
     size_t                 i;
 
     memset(z, 0, sizeof(*z));
@@ -255,6 +366,13 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
         {
             continue;
         }
+        /* macOS's system volume: sealed, a snapshot already, and read as it
+         * is; what of it changes is through the firmlinks, below. */
+        if (data && is_apfs(at) && strcmp(at->path, "/") == 0)
+        {
+            on_system = on_system || is_root;
+            continue;
+        }
         if (is_dataset(at) && !dataset_name_ok(at->source))
         {
             rs_buf_addf(err, "--from-snapshot: %s is mounted from \"%s\", which is not a ZFS "
@@ -262,7 +380,7 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
             rs_snap_free(z);
             return false;
         }
-        if (!is_dataset(at) && !is_ufs(at))
+        if (!is_dataset(at) && !is_ufs(at) && !is_apfs(at))
         {
             z->live = rs_xreallocarray(z->live, z->nlive + 1, sizeof(*z->live));
             z->live[z->nlive++] = rs_xstrdup(is_root ? root : at->path);
@@ -273,7 +391,8 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
             continue;
         }
         d = is_dataset(at) ? filesystem(z, RS_SNAP_ZFS, at->source, at->path)
-                           : filesystem(z, RS_SNAP_UFS, at->path, at->path);
+            : is_ufs(at)   ? filesystem(z, RS_SNAP_UFS, at->path, at->path)
+                           : filesystem(z, RS_SNAP_APFS, at->path, at->path);
         if (is_root)
         {
             /* The root may be a directory inside the filesystem. */
@@ -288,10 +407,16 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
             source(z, tree_of(root, at->path), rs_xstrdup(z->fs[d].snapdir), d);
         }
     }
+    if (data)
+    {
+        firmlinks(z, root, one_fs, on_system, data);
+    }
     if (z->nfs == 0)
     {
         rs_buf_addf(err, "--from-snapshot: nothing at or under %s is on ZFS%s%s", root,
-                    RS_SNAP_UFS_HERE ? " or UFS" : "",
+                    RS_SNAP_UFS_HERE    ? " or UFS"
+                    : RS_SNAP_APFS_HERE ? " or APFS"
+                                        : "",
                     one_fs ? " (--one-file-system: only its own filesystem)" : "");
         rs_snap_free(z);
         return false;
@@ -300,30 +425,92 @@ bool rs_snap_plan(const char *root, const struct rs_mount *m, size_t n, bool one
     return true;
 }
 
+/* Whether source `k` reads filesystem `i`'s snapshot: all of it, or a
+ * directory in it. */
+static bool reads(const struct rs_snap *z, size_t k, size_t i)
+{
+    return z->of[k] == i || beneath(z->fs[i].snapdir, z->sources[k].dir);
+}
+
+bool rs_snap_keep(struct rs_snap *z, bool (*wanted)(const char *tree, const void *ctx),
+                  const void *ctx, struct rs_buf *err)
+{
+    size_t *now = rs_xreallocarray(NULL, z->nfs ? z->nfs : 1, sizeof(*now));
+    size_t  kept = 0;
+    size_t  i;
+    size_t  k;
+
+    /* The sources first: their strings stay in owned, freed with z. */
+    for (k = 0; k < z->nsources; k++)
+    {
+        if (strcmp(z->sources[k].tree, "/") == 0 || wanted(z->sources[k].tree, ctx))
+        {
+            z->sources[kept] = z->sources[k];
+            z->of[kept++] = z->of[k];
+        }
+    }
+    z->nsources = kept;
+    /* Then the filesystems, renumbered. */
+    kept = 0;
+    for (i = 0; i < z->nfs; i++)
+    {
+        bool used = false;
+
+        for (k = 0; k < z->nsources && !used; k++)
+        {
+            used = reads(z, k, i);
+        }
+        if (used)
+        {
+            now[i] = kept;
+            z->fs[kept++] = z->fs[i];
+        } else
+        {
+            now[i] = SIZE_MAX;
+            free(z->fs[i].name);
+            free(z->fs[i].snapdir);
+            free(z->fs[i].file);
+            free(z->fs[i].md);
+        }
+    }
+    for (k = 0; k < z->nsources; k++)
+    {
+        z->of[k] = z->of[k] == SIZE_MAX ? SIZE_MAX : now[z->of[k]];
+    }
+    z->nfs = kept;
+    free(now);
+    if (kept == 0)
+    {
+        rs_buf_addstr(err, "--from-snapshot: nothing the rules leave in is on a filesystem "
+                           "restate can snapshot");
+        return false;
+    }
+    return true;
+}
+
 void rs_snap_describe(const struct rs_snap *z, struct rs_buf *out)
 {
-    size_t zfs = 0;
-    size_t ufs = 0;
-    size_t i;
+    static const char *const one[] = { "ZFS dataset", "UFS filesystem", "APFS volume" };
+    size_t                   count[3] = { 0, 0, 0 };
+    size_t                   kinds = 0;
+    size_t                   said = 0;
+    size_t                   i;
 
     for (i = 0; i < z->nfs; i++)
     {
-        if (z->fs[i].kind == RS_SNAP_ZFS)
+        kinds += count[z->fs[i].kind]++ == 0 ? 1 : 0;
+    }
+    for (i = 0; i < 3; i++)
+    {
+        if (count[i] > 0)
         {
-            zfs++;
-        } else
-        {
-            ufs++;
+            said++;
+            rs_buf_addf(out, "%s%zu %s%s",
+                        said == 1      ? ""
+                        : said == kinds ? " and "
+                                        : ", ",
+                        count[i], one[i], count[i] == 1 ? "" : "s");
         }
-    }
-    if (zfs > 0)
-    {
-        rs_buf_addf(out, "%zu ZFS dataset%s", zfs, zfs == 1 ? "" : "s");
-    }
-    if (ufs > 0)
-    {
-        rs_buf_addf(out, "%s%zu UFS filesystem%s", zfs > 0 ? " and " : "", ufs,
-                    ufs == 1 ? "" : "s");
     }
 }
 
@@ -626,31 +813,170 @@ static bool ufs_take(struct rs_snap_fs *f, struct rs_buf *err)
     return true;
 }
 
+char *rs_snap_parse_tmutil_date(const char *text)
+{
+    const char *p;
+
+    for (p = text ? strstr(text, "date: ") : NULL; p; p = strstr(p + 1, "date: "))
+    {
+        const char *d = p + 6;
+        size_t      i;
+        bool        ok = strlen(d) >= TM_DATE_LEN;
+
+        /* YYYY-MM-DD-HHMMSS: digits, with dashes at 4, 7 and 10. */
+        for (i = 0; ok && i < TM_DATE_LEN; i++)
+        {
+            ok = (i == 4 || i == 7 || i == 10) ? d[i] == '-' : d[i] >= '0' && d[i] <= '9';
+        }
+        if (ok && (d[TM_DATE_LEN] == '\0' || d[TM_DATE_LEN] == '\n' || d[TM_DATE_LEN] == ' ' ||
+                   d[TM_DATE_LEN] == '\r'))
+        {
+            return rs_xstrndup(d, TM_DATE_LEN);
+        }
+    }
+    return NULL;
+}
+
+/* The snapshot tmutil made of each volume, by the name it gave them. */
+static char *tm_name(const struct rs_snap *z)
+{
+    return rs_xasprintf("%s%s%s", TM_PREFIX, z->apfs, TM_SUFFIX);
+}
+
+/* One tmutil localsnapshot, of every volume Time Machine includes at one
+ * moment, each of z's then mounted for the walk -- or, pretending, taken
+ * alone. */
+static bool apfs_take(struct rs_snap *z, struct rs_buf *err)
+{
+    char         *argv[8];
+    char         *name;
+    struct rs_buf why;
+    struct rs_buf out;
+    size_t        i;
+    bool          ok;
+
+    rs_buf_init(&why);
+    rs_buf_init(&out);
+    argv[0] = rs_xstrdup("tmutil");
+    argv[1] = rs_xstrdup("localsnapshot");
+    argv[2] = NULL;
+    ok = tool(RS_PROG_TMUTIL, argv, &out, &why);
+    free_args(argv);
+    if (!ok)
+    {
+        rs_buf_addf(err, "tmutil localsnapshot: %s", why.data ? why.data : "");
+        rs_buf_free(&why);
+        rs_buf_free(&out);
+        return false;
+    }
+    z->apfs = rs_snap_parse_tmutil_date(out.data);
+    if (!z->apfs && pretend_base)
+    {
+        z->apfs = rs_xstrdup("2026-01-01-000000");
+    }
+    if (!z->apfs)
+    {
+        rs_buf_addf(err, "tmutil localsnapshot said \"%s\", not the date of the snapshot it "
+                         "made", out.data ? out.data : "");
+        rs_buf_free(&why);
+        rs_buf_free(&out);
+        return false;
+    }
+    rs_buf_free(&out);
+    for (i = 0; i < z->nfs; i++)
+    {
+        z->fs[i].taken = z->fs[i].taken || z->fs[i].kind == RS_SNAP_APFS;
+    }
+    if (pretend_base && !pretend_devices)
+    {
+        rs_buf_free(&why);
+        return true;
+    }
+    name = tm_name(z);
+    for (i = 0; ok && i < z->nfs; i++)
+    {
+        struct rs_snap_fs *f = &z->fs[i];
+
+        if (f->kind != RS_SNAP_APFS)
+        {
+            continue;
+        }
+        if (mkdir(f->snapdir, 0700) != 0)
+        {
+            rs_buf_addf(err, "%s: %s", f->snapdir, strerror(errno));
+            ok = false;
+            break;
+        }
+        /* Read-only, as every snapshot is; and not shown in the Finder. */
+        argv[0] = rs_xstrdup("mount_apfs");
+        argv[1] = rs_xstrdup("-s");
+        argv[2] = rs_xstrdup(name);
+        argv[3] = rs_xstrdup("-o");
+        argv[4] = rs_xstrdup("nobrowse");
+        argv[5] = rs_xstrdup(f->name);
+        argv[6] = rs_xstrdup(f->snapdir);
+        argv[7] = NULL;
+        rs_buf_reset(&why);
+        ok = tool(RS_PROG_MOUNT_APFS, argv, NULL, &why);
+        free_args(argv);
+        if (ok)
+        {
+            f->mounted = true;
+        } else
+        {
+            rs_buf_addf(err, "mount_apfs -s %s %s: %s (tmutil snapshots only the volumes Time "
+                             "Machine includes; leave %s out with --exclude)",
+                        name, f->name, why.data ? why.data : "", f->name);
+        }
+    }
+    free(name);
+    rs_buf_free(&why);
+    return ok;
+}
+
 bool rs_snap_take(struct rs_snap *z, struct rs_buf *err)
 {
     bool   zfs = false;
     bool   ufs = false;
+    bool   apfs = false;
+    bool   devices = !pretend_base || pretend_devices;
     size_t i;
 
     for (i = 0; i < z->nfs; i++)
     {
         zfs = zfs || z->fs[i].kind == RS_SNAP_ZFS;
         ufs = ufs || z->fs[i].kind == RS_SNAP_UFS;
+        apfs = apfs || z->fs[i].kind == RS_SNAP_APFS;
     }
     if ((zfs && !have(RS_PROG_ZFS, "/sbin/zfs, /usr/sbin/zfs, /usr/local/sbin/zfs", err)) ||
         (ufs && !have(RS_PROG_MKSNAP_FFS, "/sbin/mksnap_ffs", err)) ||
-        (ufs && (!pretend_base || pretend_devices) &&
+        (ufs && devices &&
          (!have(RS_PROG_MDCONFIG, "/sbin/mdconfig", err) ||
-          !have(RS_PROG_MOUNT, "/sbin/mount", err) || !have(RS_PROG_UMOUNT, "/sbin/umount", err))))
+          !have(RS_PROG_MOUNT, "/sbin/mount", err) ||
+          !have(RS_PROG_UMOUNT, "/sbin/umount", err))) ||
+        (apfs && !have(RS_PROG_TMUTIL, "/usr/bin/tmutil", err)) ||
+        (apfs && devices &&
+         (!have(RS_PROG_MOUNT_APFS, "/sbin/mount_apfs", err) ||
+          !have(RS_PROG_UMOUNT, "/sbin/umount", err))))
     {
         return false;
     }
-    if (ufs && !pretend_base && mkdir(z->mounts, 0700) != 0)
+#ifdef __APPLE__
+    if (apfs && !pretend_base && rs_fda_state("/") == RS_FDA_DENIED)
+    {
+        rs_buf_addstr(err, "--from-snapshot: macOS mounts a snapshot only for a program with Full "
+                           "Disk Access; grant it in System Settings, Privacy & Security, Full "
+                           "Disk Access, to the app restate is run from (Terminal, iTerm) or, "
+                           "where launchd runs it, to restate itself");
+        return false;
+    }
+#endif
+    if ((ufs || apfs) && !pretend_base && mkdir(z->mounts, 0700) != 0)
     {
         rs_buf_addf(err, "%s: %s", z->mounts, strerror(errno));
         return false;
     }
-    if (!zfs_take(z, err))
+    if (!zfs_take(z, err) || (apfs && !apfs_take(z, err)))
     {
         (void)rs_snap_release(z, err);
         return false;
@@ -831,9 +1157,95 @@ static bool ufs_release(struct rs_snap_fs *f, struct rs_buf *err)
     return ok;
 }
 
+/* An APFS volume's snapshot, unmounted where restate mounted it. */
+static bool apfs_unmount(struct rs_snap_fs *f, struct rs_buf *err)
+{
+    struct rs_buf why;
+    char         *argv[3];
+    bool          ok = true;
+
+    if (!f->mounted)
+    {
+        /* Made for a mount that did not happen; pretending alone, the
+         * tests'. */
+        if (!pretend_base || pretend_devices)
+        {
+            (void)rmdir(f->snapdir);
+        }
+        return true;
+    }
+    rs_buf_init(&why);
+    argv[0] = rs_xstrdup("umount");
+    argv[1] = rs_xstrdup(f->snapdir);
+    argv[2] = NULL;
+    if (tries(RS_PROG_UMOUNT, argv, &why))
+    {
+        f->mounted = false;
+        (void)rmdir(f->snapdir);
+    } else
+    {
+        char *what = rs_xasprintf("the snapshot of %s mounted on %s was not unmounted", f->name,
+                                  f->snapdir);
+        char *command = rs_xasprintf("umount %s unmounts it", f->snapdir);
+
+        undone(err, what, &why, command);
+        free(what);
+        free(command);
+        ok = false;
+    }
+    free_args(argv);
+    rs_buf_free(&why);
+    return ok;
+}
+
+/* tmutil's snapshots of this capture's date, on every volume, once none
+ * is mounted. */
+static bool apfs_delete(struct rs_snap *z, bool unmounted, struct rs_buf *err)
+{
+    struct rs_buf why;
+    char         *argv[4];
+    bool          ok;
+
+    rs_buf_init(&why);
+    argv[0] = rs_xstrdup("tmutil");
+    argv[1] = rs_xstrdup("deletelocalsnapshots");
+    argv[2] = rs_xstrdup(z->apfs);
+    argv[3] = NULL;
+    ok = unmounted && tries(RS_PROG_TMUTIL, argv, &why);
+    if (ok)
+    {
+        size_t i;
+
+        for (i = 0; i < z->nfs; i++)
+        {
+            z->fs[i].taken = z->fs[i].kind == RS_SNAP_APFS ? false : z->fs[i].taken;
+        }
+        free(z->apfs);
+        z->apfs = NULL;
+    } else
+    {
+        char *name = tm_name(z);
+        char *what = rs_xasprintf("the snapshot %s was not removed", name);
+        char *command = rs_xasprintf("tmutil deletelocalsnapshots %s removes it", z->apfs);
+
+        if (!unmounted)
+        {
+            rs_buf_addstr(&why, "still mounted");
+        }
+        undone(err, what, &why, command);
+        free(name);
+        free(what);
+        free(command);
+    }
+    free_args(argv);
+    rs_buf_free(&why);
+    return ok;
+}
+
 bool rs_snap_release(struct rs_snap *z, struct rs_buf *err)
 {
     bool   ok = true;
+    bool   unmounted = true;
     size_t i;
 
     for (i = 0; i < z->nsources; i++)
@@ -856,7 +1268,15 @@ bool rs_snap_release(struct rs_snap *z, struct rs_buf *err)
         } else if (z->fs[i].kind == RS_SNAP_UFS)
         {
             ok = ufs_release(&z->fs[i], err) && ok;
+        } else if (z->fs[i].kind == RS_SNAP_APFS)
+        {
+            unmounted = apfs_unmount(&z->fs[i], err) && unmounted;
         }
+    }
+    ok = ok && unmounted;
+    if (z->apfs)
+    {
+        ok = apfs_delete(z, unmounted, err) && ok;
     }
     if (!pretend_base && z->mounts)
     {
@@ -1037,5 +1457,6 @@ void rs_snap_free(struct rs_snap *z)
     free(z->live);
     free(z->snapshot);
     free(z->mounts);
+    free(z->apfs);
     memset(z, 0, sizeof(*z));
 }

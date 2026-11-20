@@ -951,6 +951,25 @@ expect 2 "--keep-last is a number" -- "$BIN" prune --keep-last=x repo
 expect 0 "prune --dry-run --keep-yearly" -- "$BIN" prune --dry-run --keep-yearly 1 repo
 contains "$OUT" "would drop 20260101T000000Z" "keeps one snapshot of the year, its newest"
 expect 2 "--keep-yearly is a number" -- "$BIN" prune --keep-yearly=-1 repo
+# A hold: --keep-snapshot keeps what it names as well as the rest.
+expect 0 "prune --dry-run --keep-snapshot" -- \
+  "$BIN" prune --dry-run --keep-last 1 --keep-snapshot 20260101T000000Z \
+  --keep-snapshot 20260101T000000Z --result held.json repo
+if grep -qF "would drop 20260101T000000Z" "$OUT"; then
+  fail "keeps the snapshot it holds"
+else
+  ok
+fi
+check "the result says it held it, once" \
+  eval "tr -d ' \n' < held.json | grep -qF '\"held\":[\"20260101T000000Z\"]'"
+expect 2 "prune --keep-snapshot of a snapshot that is not there" -- \
+  "$BIN" prune --keep-last 1 --keep-snapshot 20260101T000000Y repo
+contains "$ERR" 'there is no snapshot "20260101T000000Y"' "says which"
+contains "$ERR" "nothing was pruned" "and that it pruned nothing"
+check "and drops nothing" test -d repo/snapshots/20260101T000000Z
+expect 2 "prune --keep-snapshot, keeping nothing else" -- \
+  "$BIN" prune --keep-snapshot 20260101T000000Z repo
+contains "$ERR" "keeps what it names as well as those" "says a hold is not a rule"
 if command -v flock > /dev/null 2>&1; then
   flock repo/lock sleep 3 &
   locker=$!
@@ -2061,6 +2080,7 @@ contains "$OUT" '"programs": {' "and the programs it can use"
 contains "$OUT" '"du_keys": true' "and that du names the keys a repository is encrypted to"
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
 contains "$OUT" '"keep_yearly": true' "and that prune keeps yearly snapshots"
+contains "$OUT" '"keep_snapshot": true' "and that prune holds a snapshot it is told to"
 contains "$OUT" '"rebuild_arch": true' "and that it rebuilds for another processor"
 contains "$OUT" '"program_arch": true' "and records each program's"
 contains "$OUT" '"snapshot_signer": true' "and that snapshots says who signed each"

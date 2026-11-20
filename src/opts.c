@@ -169,6 +169,9 @@ void rs_options_free(struct rs_options *o)
     free(o->recipients);
     o->recipients = NULL;
     o->nrecipients = 0;
+    free(o->keep_snapshots);
+    o->keep_snapshots = NULL;
+    o->nkeep_snapshots = 0;
     free(o->trusted);
     o->trusted = NULL;
     o->ntrusted = 0;
@@ -331,6 +334,11 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
                 return false;
             }
             o->mirror = optarg;
+            break;
+        case OPT_KEEP_SNAPSHOT:
+            o->keep_snapshots = rs_xreallocarray(o->keep_snapshots, o->nkeep_snapshots + 1,
+                                                 sizeof(*o->keep_snapshots));
+            o->keep_snapshots[o->nkeep_snapshots++] = optarg;
             break;
         case OPT_ENCRYPT_TO:
             o->recipients = rs_xreallocarray(o->recipients, o->nrecipients + 1,

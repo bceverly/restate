@@ -5632,7 +5632,11 @@ void rs_repo_choose(char *const *names, size_t n, const struct rs_repo_keep *kee
         size_t   k;
 
         kept[i] = false;
-        if (!date_of(names[i], &y, &m, &d))
+        for (k = 0; k < keep->nheld; k++)
+        {
+            kept[i] = kept[i] || strcmp(names[i], keep->held[k]) == 0;
+        }
+        if (kept[i] || !date_of(names[i], &y, &m, &d))
         {
             kept[i] = true;
             continue;
