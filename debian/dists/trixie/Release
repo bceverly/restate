@@ -1,0 +1,28 @@
+Architectures: amd64 arm64
+Codename: trixie
+Components: main
+Date: Fri, 20 Nov 2026 17:44:08 +0000
+Description: restate for Debian trixie
+Label: restate
+Origin: restate
+Suite: trixie
+MD5Sum:
+ c9368adc7e017ed67a95a30a0b15102b            17372 main/binary-amd64/Packages
+ d8dbc9caaf821b899650fe2fc9909e8a             3391 main/binary-amd64/Packages.gz
+ f880e55685aa98469de04530dc64e9bb            17372 main/binary-arm64/Packages
+ e1d7142b301ef7bb68527d06ad3876d9             3383 main/binary-arm64/Packages.gz
+SHA1:
+ 81dc64b6dd74baaa39e89b6c4d8a101a4318ddf4            17372 main/binary-amd64/Packages
+ 318aba6dc9affe2c16abd8218b90d5ffa4a15f83             3391 main/binary-amd64/Packages.gz
+ 78f239d8027d0e60c974fb9d65e9cfd2ace56339            17372 main/binary-arm64/Packages
+ 3f279edb05bed374505a5f807c5aa1ada7199ce7             3383 main/binary-arm64/Packages.gz
+SHA256:
+ 9ea956aa5bed33a92179e48b17efcb424a16dc965279b3c34a592a8fe671fa54            17372 main/binary-amd64/Packages
+ 66a4509447e2bb6b05c977a02a1e97a3e1a3c16b3a1996895c55c41f6c037abf             3391 main/binary-amd64/Packages.gz
+ d7bf76e5fed5f2ead4b6cf70ecbaa7bf099e2992779292f675448965658beeb8            17372 main/binary-arm64/Packages
+ 58e63c23e639f3644ea8170ffb5c5f839d6c077f6d731e21a32eb133adce1d26             3383 main/binary-arm64/Packages.gz
+SHA512:
+ 0369820064bdc781de76dcc2799c3d74dea21eee068907cc104004ba6b639026ba43575c94c4fbd2fcfe392b167a8c5f9bd4af202d23c97b02fd0390fdd456a2            17372 main/binary-amd64/Packages
+ 4263039c9776e7432dec5c9228902925eb8fd2b60858c6c64e642ef03e8ca65226b76e887e962b22eda921ad15222172da7f7ef56d2ad0e0d6eeae15283b7041             3391 main/binary-amd64/Packages.gz
+ 5f88f90a4623d39c14dea64c4d32bc213e52386c506ece7f2c73cb2cb994d4f9b836b41da1506e10e8e96403337c2548d5004aef58e4f244fd27cc38fcff950a            17372 main/binary-arm64/Packages
+ 725462a8fbed788f963dc4dca1d7b31e4005fd17901cf66992e6d7c0a751cf13ef80ca564e6abc3acddbe1a45398264bc641fd4b1d4b4bb4235ad6fda02c7233             3383 main/binary-arm64/Packages.gz

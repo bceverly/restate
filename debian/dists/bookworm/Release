@@ -1,0 +1,28 @@
+Architectures: amd64 arm64
+Codename: bookworm
+Components: main
+Date: Fri, 20 Nov 2026 17:44:07 +0000
+Description: restate for Debian bookworm
+Label: restate
+Origin: restate
+Suite: bookworm
+MD5Sum:
+ 68db970dbbb6db47fcc6c23abba8cfc7            17417 main/binary-amd64/Packages
+ bb7dd6278e46927a75f21d5b4788f43e             3392 main/binary-amd64/Packages.gz
+ 32c566b9ee21673e3439dcc57bae9b7c            17417 main/binary-arm64/Packages
+ 7bdbd9ae89676818a35feee1c549c210             3372 main/binary-arm64/Packages.gz
+SHA1:
+ dc08e21fc8ac124cf12ba78825d56ef0ec678132            17417 main/binary-amd64/Packages
+ 0db4a7129ec4ed76a0fe3e69fda0902ecd950524             3392 main/binary-amd64/Packages.gz
+ 960ba7df0b4a34691bd77c5db679bb2ff39db913            17417 main/binary-arm64/Packages
+ e33251c47606dbed763c37723468cb3c0ab17e34             3372 main/binary-arm64/Packages.gz
+SHA256:
+ e16c1584083148019c6a307772670961ef04feabc4f61e272032b62edce85c70            17417 main/binary-amd64/Packages
+ 5ab511e10a8ed1e956d94fe07847db06e256ac028622362bff4a1519162047a6             3392 main/binary-amd64/Packages.gz
+ 384790d261be3b42ea6391e495f523c844fcf1c83e63210902a1bf50325f779b            17417 main/binary-arm64/Packages
+ 31c5bf38ae4d46f389f29afa929f166dbd836715d967ad8ba952f540634dfd65             3372 main/binary-arm64/Packages.gz
+SHA512:
+ 3b8643f2cd22e3f31ad0b5517733aa6081286f3e877dd02387178fff1ffde6bc93abaabdd5765dda1f61169418a61cf1144e325e3dcc859049fd07903bef1dbb            17417 main/binary-amd64/Packages
+ 696ec2d9d1acb9d8214b51e8824a8e42f9a50ff6ef5e7248b3304d72baa1b94892b7a2f34eafbba7e7ac1dad925fb934156954829a93f7830eea2b8dc70dcfe1             3392 main/binary-amd64/Packages.gz
+ 57b1747ffffc31bd5795c9023006dd134d59ed8e80f05ec20734d0311537c224afdfd0c7ca5aa5df68e22ff672fdf267dd12930963a70b8128169ab4ec909ff4            17417 main/binary-arm64/Packages
+ f1d7074083a6ea5649757010cc71508d81aeea079faca7cf0ca0fd78f3bd9e23c23207c414ef0a71dc6e702a27d9fa7026aa155fb881c187583d9cf089c7a288             3372 main/binary-arm64/Packages.gz
