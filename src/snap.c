@@ -864,7 +864,9 @@ static bool apfs_take(struct rs_snap *z, struct rs_buf *err)
     free_args(argv);
     if (!ok)
     {
-        rs_buf_addf(err, "tmutil localsnapshot: %s", why.data ? why.data : "");
+        rs_buf_addf(err, "tmutil localsnapshot: %s (macOS took no snapshot; `sudo tmutil "
+                         "localsnapshot` run by hand fails the same way where this Mac takes "
+                         "none at all)", why.data ? why.data : "");
         rs_buf_free(&why);
         rs_buf_free(&out);
         return false;

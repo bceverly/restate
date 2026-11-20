@@ -96,6 +96,29 @@ mounted() { mount | grep -qE ' on (/private)?/var/run/restate-'; }
 
 printf '\n\033[1mcapture --from-snapshot on APFS\033[0m \033[2m(%s)\033[0m\n\n' "$BIN"
 
+# Whether this Mac takes local snapshots at all, asked of tmutil itself:
+# where it cannot -- some virtual machines, a TCC refusal -- there is
+# nothing of restate's to test, and what macOS says about it is shown
+# instead. The probe's own snapshot is deleted by its date.
+if probe="$(tmutil localsnapshot 2>&1)"; then
+  made="$(printf '%s\n' "$probe" | sed -n 's/.*date: \([0-9]\{4\}-[0-9-]\{12\}\).*/\1/p' | head -1)"
+  if [ -n "$made" ]; then
+    tmutil deletelocalsnapshots "$made" > /dev/null 2>&1 ||
+      echo "apfs.sh: the probe's snapshot $made was not deleted" >&2
+  fi
+else
+  printf '  skipped: tmutil cannot take a local snapshot on this machine, so restate cannot either:\n'
+  printf '%s\n' "$probe" | sed 's/^/        /' | head -6
+  printf '      macOS %s; Time Machine destinations:\n' "$(sw_vers -productVersion 2> /dev/null)"
+  tmutil destinationinfo 2>&1 | sed 's/^/        /' | head -6
+  printf '      what macOS logged:\n'
+  log show --last 2m --style compact \
+    --predicate 'process == "tmutil" OR subsystem BEGINSWITH "com.apple.TimeMachine" OR process == "backupd"' \
+    2> /dev/null | grep -iE 'snapshot|error|fail|denied|tcc' | tail -15 | sed 's/^/        /'
+  printf '\n'
+  exit 0
+fi
+
 mkdir -p "$TREE/etc" "$TREE/zzz" "$TREE/aaa"
 echo hosts > "$TREE/etc/hosts"
 echo before > "$TREE/zzz/changes"
