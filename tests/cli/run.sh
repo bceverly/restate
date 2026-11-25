@@ -597,6 +597,70 @@ expect 2 "autoinstall --image-from that is not a proxy's" -- \
 contains "$ERR" "--image-from" "says which option"
 expect 2 "autoinstall --image-pin-sha256 that is not one" -- \
   "$BIN" autoinstall --image-pin-sha256 nope layout.json
+# A snapshot of this machine's own root, with its description, and nothing
+# kept but its host name -- and, in its kit, the restate that made it: what
+# an installer reads the snapshot with.
+printf 'ephemeral /**\nstate /etc/hostname\n' > own.rules
+"$BIN" init ownrepo > /dev/null 2>&1
+"$BIN" capture -r / -N -R own.rules -q -o ownrepo > /dev/null 2>&1
+if [ -n "$(ls ownrepo/snapshots 2> /dev/null)" ]; then
+  expect 0 "machine of a snapshot of a machine's root" -- "$BIN" machine ownrepo
+  contains "$OUT" '"system"' "prints its description"
+  printf 'rsp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' > rb.token
+  chmod 600 rb.token
+  printf 'not a token\n' > bad.token
+  printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' > ca.pem
+  printf 'a key\n' > rb.key
+  RB=https://backup.example.com:8443/v1/rb01
+  expect 2 "--image-from with no token" -- "$BIN" autoinstall --image-from "$RB" ownrepo
+  contains "$ERR" "needs --image-token-file" "says what it needs"
+  expect 2 "--image-from with --image-at" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-at /x.tar --image-token-file rb.token ownrepo
+  contains "$ERR" "give one" "says to give one"
+  expect 2 "--image-from with no snapshot named" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token
+  expect 2 "--image-token-file that holds no token" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file bad.token ownrepo
+  contains "$ERR" "is not a token restate-proxy made" "says so"
+  expect 2 "--image-token-file that is not there" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file none.token ownrepo
+  expect 2 "--image-ca-file that is not there" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-ca-file none.pem \
+    ownrepo
+  expect 2 "--image-decrypt-with that is a directory" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-decrypt-with . \
+    ownrepo
+  contains "$ERR" "not a regular file" "says so"
+  case "$(uname -m)" in
+    x86_64 | amd64) OTHER_ARCH=aarch64 ;;
+    *) OTHER_ARCH=x86_64 ;;
+  esac
+  expect 2 "--image-from for another processor" -- \
+    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --target vm \
+    --arch "$OTHER_ARCH" ownrepo
+  contains "$ERR" "the restate in the snapshot's kit" "says the kit's restate is not that one's"
+  # On Ubuntu, the file; elsewhere autoinstall refuses the system, after it
+  # has made all the rest.
+  if grep -qx 'ID=ubuntu' /etc/os-release 2> /dev/null; then
+    expect 0 "autoinstall --image-from" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-ca-file ca.pem \
+      --image-pin-sha256 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= --image-decrypt-with rb.key \
+      --target vm -o own-user-data ownrepo
+    contains "$(cat own-user-data)" "/run/restate-installer/restate export $RB::" \
+      "the installer exports the snapshot named exactly"
+    contains "$(cat own-user-data)" "--repository-ca-file /run/restate-installer/ca.pem" \
+      "with the certificate"
+    contains "$(cat own-user-data)" "--decrypt-with /run/restate-installer/key.gpg" "and the key"
+    contains "$(cat own-user-data)" "rm -rf /target/var/tmp/restate-image.tar" \
+      "and removes it all after"
+  else
+    expect 2 "autoinstall --image-from of a system that is not Ubuntu" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-ca-file ca.pem \
+      --image-decrypt-with rb.key -o own-user-data ownrepo
+  fi
+else
+  printf '  - --image-from of a machine'"'"'s own snapshot not run: the capture of / made none here\n'
+fi
 # The same as jobs, as a management agent runs them.
 mkdir -m 700 rjobs
 printf 'command = machine\nimage = %s\noutput = %s\n' "$WORK/layout.json" \
