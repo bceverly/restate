@@ -599,10 +599,14 @@ expect 2 "autoinstall --image-pin-sha256 that is not one" -- \
   "$BIN" autoinstall --image-pin-sha256 nope layout.json
 # A snapshot of this machine's own root, with its description, and nothing
 # kept but its host name -- and, in its kit, the restate that made it: what
-# an installer reads the snapshot with.
+# an installer reads the snapshot with. Captured by a copy named restate,
+# the name the kit's restate is found by, whatever this one is called (the
+# sanitizers' build is restate-asan).
 printf 'ephemeral /**\nstate /etc/hostname\n' > own.rules
+mkdir -p kitbin
+cp "$BIN" kitbin/restate
 "$BIN" init ownrepo > /dev/null 2>&1
-"$BIN" capture -r / -N -R own.rules -q -o ownrepo > /dev/null 2>&1
+"$PWD/kitbin/restate" capture -r / -N -R own.rules -q -o ownrepo > /dev/null 2>&1
 if [ -n "$(ls ownrepo/snapshots 2> /dev/null)" ]; then
   expect 0 "machine of a snapshot of a machine's root" -- "$BIN" machine ownrepo
   contains "$OUT" '"system"' "prints its description"
