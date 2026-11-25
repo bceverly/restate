@@ -29,6 +29,7 @@
 #include "fsflags.h"
 #include "fstab.h"
 #include "grant.h"
+#include "gzip.h"
 #include "hooks.h"
 #include "identity.h"
 #include "image.h"
@@ -52,6 +53,8 @@
 #include "scan.h"
 #include "snap.h"
 #include "sources.h"
+#include "tar.h"
+#include "token.h"
 
 /* The paths a restore's result names, of all it puts back. */
 #define RESTORE_PLAN_MAX 1000
@@ -4037,6 +4040,16 @@ int rs_cmd_features(const struct rs_options *o)
     rs_jobj_bool(&doc, "keep_yearly", true);
     /* prune --keep-snapshot, and the "held" it says it kept. */
     rs_jobj_bool(&doc, "keep_snapshot", true);
+    /* Jobs of machine, buildsheet and autoinstall, and restore's as,
+     * target, arch, firmware and exact_versions keys; machine IMAGE. */
+    rs_jobj_bool(&doc, "rebuild_jobs", true);
+    rs_jobj_bool(&doc, "machine_of_image", true);
+    /* autoinstall --first-boot, and the job's first_boot. */
+    rs_jobj_bool(&doc, "first_boot", true);
+    /* autoinstall --image-from: the installer reads a snapshot through
+     * restate-proxy with a grant for one restore (grant_keys: snapshot,
+     * once). */
+    rs_jobj_bool(&doc, "image_from", true);
     /* --arch, and what it rebuilds for: this restate's own processor, and
      * that an image records the processor of each program it keeps. */
     rs_jobj_bool(&doc, "rebuild_arch", true);
@@ -5790,6 +5803,9 @@ int rs_cmd_restore(const struct rs_options *o)
 /* ------------------------------------------------------------------------- */
 
 OUTPUT_HELD_BEGIN
+static bool load_machine(const char *path, struct rs_jval *machine, struct rs_jval *packages,
+                         bool *old_image, bool *knows_trust, char **created);
+
 int rs_cmd_machine(const struct rs_options *o)
 {
     struct rs_jval machine;
@@ -5798,7 +5814,20 @@ int rs_cmd_machine(const struct rs_options *o)
     bool           ok;
 
     memset(&machine, 0, sizeof(machine));
-    rs_machine_describe("/", o->root ? o->root : "/", &machine);
+    /* The machine an image or snapshot was taken from, as it recorded it,
+     * with what the capture kept on each mount: read where it is, nothing
+     * restored. */
+    if (o->nargs > 0)
+    {
+        if (!load_machine(o->args[0], &machine, NULL, NULL, NULL, NULL))
+        {
+            rs_jval_free(&machine);
+            return RESTATE_EXIT_TROUBLE;
+        }
+    } else
+    {
+        rs_machine_describe("/", o->root ? o->root : "/", &machine);
+    }
     rs_buf_init(&text);
     rs_json_write(&text, &machine, 2, 0);
     rs_buf_addc(&text, '\n');
@@ -6681,27 +6710,493 @@ int rs_cmd_buildsheet(const struct rs_options *o)
     return emit(o, &text);
 }
 
+/* What --image-from carries, owned: freed by from_free. */
+struct from_owned {
+    struct rs_auto_from f;
+    char               *ref;
+    char               *restate;
+    char               *token;
+    char               *ca;
+    char               *key;
+};
+
+static void from_free(struct from_owned *fo)
+{
+    free(fo->ref);
+    free(fo->restate);
+    free(fo->token);
+    free(fo->ca);
+    free(fo->key);
+    memset(fo, 0, sizeof(*fo));
+}
+
+/* The most a file --image-from carries may be: a key, a token, a list of
+ * certificate authorities. */
+#define FROM_FILE_MAX ((size_t)1024 * 1024)
+
+/* The most the kit's restate may be, uncompressed. */
+#define KIT_RESTATE_MAX ((size_t)64 * 1024 * 1024)
+
+/* `path`, a regular file of at most `max` bytes, into `out`: false, having
+ * said why with `what`, if it is not one. */
+static bool read_whole(const char *what, const char *path, size_t max, struct rs_buf *out)
+{
+    int         fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    struct stat st;
+    char        chunk[8192];
+    ssize_t     n = 0;
+    const char *why = NULL;
+
+    if (fd < 0)
+    {
+        rs_error("%s %s: %s", what, path, strerror(errno));
+        return false;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        why = "not a regular file";
+    }
+    while (!why && (n = read(fd, chunk, sizeof(chunk))) > 0)
+    {
+        rs_buf_add(out, chunk, (size_t)n);
+        why = out->len > max ? "larger than such a file is" : NULL;
+    }
+    (void)close(fd);
+    if (!why && n < 0)
+    {
+        why = strerror(errno);
+    }
+    if (!why && out->len == 0)
+    {
+        why = "empty";
+    }
+    if (why)
+    {
+        rs_error("%s %s: %s", what, path, why);
+        return false;
+    }
+    return true;
+}
+
+static ssize_t read_kit(void *ctx, void *data, size_t n)
+{
+    return rs_image_read_files(ctx, data, n);
+}
+
+/*
+ * The restate in the snapshot `ref`'s kit -- the one that made the capture,
+ * on the machine, so of its release and its processor -- checked against its
+ * digest in the index, as restore checks a file, into `out`: from where
+ * restore looks for it first, in that order, then from wherever else it ran.
+ * False, having said why, if the kit has none.
+ */
+static bool kit_restate(const char *ref, struct rs_buf *out)
+{
+    static const char *const dirs[] = { "/usr/local/sbin", "/usr/local/bin", "/usr/sbin",
+                                        "/usr/bin" };
+    struct rs_index          ix;
+    struct rs_image_stream   s;
+    struct rs_tar_reader     r;
+    struct rs_tar_entry      m;
+    struct rs_buf            err;
+    struct rs_buf            found[5];
+    size_t                   k;
+    bool                     ok = false;
+
+    rs_index_init(&ix);
+    rs_buf_init(&err);
+    for (k = 0; k < 5; k++)
+    {
+        rs_buf_init(&found[k]);
+    }
+    if (!rs_index_load(&ix, ref, &err) || !rs_image_open_kit(ref, &ix, &s, &err))
+    {
+        rs_error("--image-from: %s: %s", ref, err.data ? err.data : "its kit cannot be read");
+        rs_buf_free(&err);
+        rs_index_free(&ix);
+        return false;
+    }
+    rs_tar_reader_init(&r, read_kit, &s);
+    rs_tar_entry_init(&m);
+    while (rs_tar_next(&r, &m, &err) == 1)
+    {
+        const char *in = m.name.data;
+        const char *base = strrchr(in, '/');
+
+        if (!rs_starts_with(in, RS_IMAGE_FILES_DIR "/") || !base || strcmp(base, "/restate") != 0)
+        {
+            continue;
+        }
+        in += strlen(RS_IMAGE_FILES_DIR);
+        for (k = 0; k < 5; k++)
+        {
+            char                  *path = k < 4 ? rs_xasprintf("%s/restate", dirs[k])
+                                                : rs_xstrdup(in);
+            const struct rs_entry *e = rs_index_find(&ix, path);
+
+            /* Each place once: the first of the others it ran from. */
+            if (strcmp(in, path) == 0 && (k < 4 || found[4].len == 0) && m.typeflag == '0' &&
+                e && e->hash_state == RS_HASH_PRESENT && m.size <= KIT_RESTATE_MAX)
+            {
+                unsigned char    chunk[8192];
+                struct rs_sha256 sha;
+                char             hex[RS_SHA256_HEX_SIZE];
+                ssize_t          n;
+
+                rs_sha256_init(&sha);
+                rs_buf_reset(&found[k]);
+                while ((n = rs_tar_read(&r, chunk, sizeof(chunk), &err)) > 0)
+                {
+                    rs_sha256_update(&sha, chunk, (size_t)n);
+                    rs_buf_add(&found[k], chunk, (size_t)n);
+                }
+                rs_sha256_final(&sha, hex);
+                if (n < 0 || strcmp(hex, e->hash) != 0)
+                {
+                    rs_buf_free(&found[k]);
+                    rs_buf_init(&found[k]);
+                }
+                free(path);
+                break;
+            }
+            free(path);
+        }
+    }
+    rs_tar_entry_free(&m);
+    (void)rs_image_close_files(&s, true, &err);
+    for (k = 0; k < 5; k++)
+    {
+        if (!ok && found[k].len > 0)
+        {
+            rs_buf_add(out, found[k].data, found[k].len);
+            ok = true;
+        }
+        rs_buf_free(&found[k]);
+    }
+    if (!ok)
+    {
+        rs_error("--image-from: %s has no restate in its kit, as it is, for the installer to "
+                 "read it with", ref);
+    }
+    rs_buf_free(&err);
+    rs_index_free(&ix);
+    return ok;
+}
+
+/* `data` gzip-compressed, into `out`: through gzip, into a file of its own
+ * that is gone as soon as it is made. */
+static bool gzip_bytes(const void *data, size_t len, struct rs_buf *out)
+{
+    const char    *tmp = getenv("TMPDIR"); /* Flawfinder: ignore -- only where a file is made */
+    char          *name = rs_xasprintf("%s/restate-kit.XXXXXX",
+                                       tmp && tmp[0] == '/' ? tmp : "/tmp");
+    int            fd = mkstemp(name);
+    struct rs_gzip gz;
+    struct rs_buf  err;
+    bool           ok;
+
+    rs_buf_init(&err);
+    if (fd < 0)
+    {
+        rs_error("%s: %s", name, strerror(errno));
+        free(name);
+        return false;
+    }
+    (void)unlink(name);
+    free(name);
+    ok = rs_gzip_compress(fd, &gz, &err);
+    if (ok)
+    {
+        const unsigned char *p = data;
+        size_t               left = len;
+
+        while (ok && left > 0)
+        {
+            ssize_t n = write(gz.fd, p, left);
+
+            ok = n > 0;
+            p += ok ? (size_t)n : 0;
+            left -= ok ? (size_t)n : 0;
+        }
+        ok = rs_gzip_finish(&gz, !ok, &err) && ok;
+    }
+    if (ok)
+    {
+        char    chunk[65536];
+        ssize_t n;
+        off_t   at = 0;
+
+        while ((n = pread(fd, chunk, sizeof(chunk), at)) > 0)
+        {
+            rs_buf_add(out, chunk, (size_t)n);
+            at += n;
+        }
+        ok = n == 0;
+    }
+    if (!ok)
+    {
+        rs_error("compressing the kit's restate: %s", err.data ? err.data : strerror(errno));
+    }
+    (void)close(fd);
+    rs_buf_free(&err);
+    return ok;
+}
+
+/*
+ * What --image-from carries, read and checked (docs/rebuild-from-proxy.md):
+ * the kit's restate of the snapshot `exact`, the token, the certificate
+ * authorities and the key, each in base64. False, having said why.
+ */
+static bool from_prepare(const struct rs_options *o, const char *exact, bool sealed, bool knows,
+                         struct from_owned *fo)
+{
+    const char   *name = strstr(rs_remote_sep_from(exact), "::");
+    struct rs_buf bytes;
+    struct rs_buf gz;
+    struct rs_buf b64;
+    bool          ok = false;
+
+    memset(fo, 0, sizeof(*fo));
+    if (o->image_at)
+    {
+        rs_error("--image-from and --image-at: the installer reads the snapshot from one of "
+                 "them; give one");
+        return false;
+    }
+    if (!o->image_token_file)
+    {
+        rs_error("--image-from needs --image-token-file: the rebuild's token "
+                 "(restate-proxy --restore-grant makes one)");
+        return false;
+    }
+    if (sealed && !o->image_decrypt_with)
+    {
+        rs_error("--image-from: the repository is encrypted, and the installer has to decrypt "
+                 "the snapshot: give it the key with --image-decrypt-with");
+        return false;
+    }
+    if (!knows)
+    {
+        rs_error("--image-from: the restate in the snapshot's kit is too old to check whom an "
+                 "image was signed by, which the installer's export needs");
+        return false;
+    }
+    rs_buf_init(&bytes);
+    rs_buf_init(&gz);
+    rs_buf_init(&b64);
+    fo->ref = rs_xasprintf("%s%s", o->image_from, name ? name : "");
+    if (kit_restate(exact, &bytes))
+    {
+        const struct rs_arch *built = rs_arch_of_elf((const unsigned char *)bytes.data, bytes.len);
+        const struct rs_arch *want = o->arch ? rs_arch_find(o->arch) : NULL;
+
+        if (want && built && want != built)
+        {
+            rs_error("--image-from with --arch %s: the restate in the snapshot's kit, which the "
+                     "installer reads it with, is %s's", o->arch, built->name);
+        } else if (gzip_bytes(bytes.data, bytes.len, &gz))
+        {
+            ok = true;
+        }
+    }
+    if (ok)
+    {
+        rs_base64_encode(&b64, gz.data, gz.len);
+        fo->restate = rs_buf_detach(&b64);
+        rs_buf_reset(&bytes);
+        ok = read_whole("--image-token-file", o->image_token_file, FROM_FILE_MAX, &bytes);
+        if (ok && !rs_token_valid(bytes.data, strcspn(bytes.data, "\r\n")))
+        {
+            rs_error("--image-token-file %s: its first line is not a token restate-proxy made",
+                     o->image_token_file);
+            ok = false;
+        }
+    }
+    if (ok)
+    {
+        rs_base64_encode(&b64, bytes.data, bytes.len);
+        fo->token = rs_buf_detach(&b64);
+        rs_buf_reset(&bytes);
+        if (o->image_ca_file)
+        {
+            ok = read_whole("--image-ca-file", o->image_ca_file, FROM_FILE_MAX, &bytes);
+            if (ok)
+            {
+                rs_base64_encode(&b64, bytes.data, bytes.len);
+                fo->ca = rs_buf_detach(&b64);
+                rs_buf_reset(&bytes);
+            }
+        }
+    }
+    if (ok && o->image_decrypt_with)
+    {
+        ok = read_whole("--image-decrypt-with", o->image_decrypt_with, FROM_FILE_MAX, &bytes);
+        if (ok)
+        {
+            rs_base64_encode(&b64, bytes.data, bytes.len);
+            fo->key = rs_buf_detach(&b64);
+        }
+    }
+    rs_buf_free(&bytes);
+    rs_buf_free(&gz);
+    rs_buf_free(&b64);
+    if (!ok)
+    {
+        from_free(fo);
+        return false;
+    }
+    fo->f.ref = fo->ref;
+    fo->f.restate = fo->restate;
+    fo->f.token = fo->token;
+    fo->f.ca = fo->ca;
+    fo->f.pins = o->image_pins;
+    fo->f.npins = o->nimage_pins;
+    fo->f.key = fo->key;
+    return true;
+}
+
+/* The largest --first-boot file: a script, which is carried in base64 in
+ * the autoinstall file the installer fetches. */
+#define FIRST_BOOT_MAX ((size_t)1024 * 1024)
+
+/* The --first-boot files, read into *out (the caller frees them with
+ * first_boot_free): each a regular file of text -- no NUL in it -- of at
+ * most FIRST_BOOT_MAX bytes. False, having said why, if one is not. */
+static bool first_boot_read(const struct rs_options *o, struct rs_first_boot **out)
+{
+    size_t i;
+
+    *out = rs_xcalloc(o->nfirst_boot + 1, sizeof(**out));
+    for (i = 0; i < o->nfirst_boot; i++)
+    {
+        const char   *path = o->first_boot[i];
+        int           fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        struct stat   st;
+        struct rs_buf text;
+        char          chunk[8192];
+        ssize_t       n = 0;
+        const char   *why = NULL;
+
+        (*out)[i].name = path;
+        if (fd < 0)
+        {
+            rs_error("--first-boot %s: %s", path, strerror(errno));
+            return false;
+        }
+        rs_buf_init(&text);
+        rs_buf_add(&text, "", 0);
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+            why = "not a regular file";
+        }
+        while (!why && (n = read(fd, chunk, sizeof(chunk))) > 0)
+        {
+            rs_buf_add(&text, chunk, (size_t)n);
+            why = text.len > FIRST_BOOT_MAX ? "larger than a mebibyte" : NULL;
+        }
+        (void)close(fd);
+        if (!why && n < 0)
+        {
+            why = strerror(errno);
+        }
+        if (!why && memchr(text.data, '\0', text.len))
+        {
+            why = "not text: a NUL is in it (a program to run is installed by a script, "
+                  "not carried whole)";
+        }
+        if (why)
+        {
+            rs_error("--first-boot %s: %s", path, why);
+            rs_buf_free(&text);
+            return false;
+        }
+        (*out)[i].text = rs_buf_detach(&text);
+    }
+    return true;
+}
+
+static void first_boot_free(struct rs_first_boot *fb, size_t n)
+{
+    size_t i;
+
+    for (i = 0; fb && i < n; i++)
+    {
+        free(fb[i].text);
+    }
+    free(fb);
+}
+
 int rs_cmd_autoinstall(const struct rs_options *o)
 {
-    const char         *image = o->nargs > 0 ? o->args[0] : NULL;
-    struct rs_jval      machine;
-    struct rs_buf       text;
-    struct rs_buf       err;
-    struct rs_auto_opts ao;
-    struct rs_jval      packages;
-    const char         *firmware = NULL;
-    bool                old_image;
-    bool                knows;
-    char               *trust = NULL;
-    char               *keyring = NULL;
-    char               *created = NULL;
-    char               *snapshot;
-    struct rs_clones    clones;
-    struct rs_buf       from;
-    bool                ok;
+    const char           *image = o->nargs > 0 ? o->args[0] : NULL;
+    struct rs_jval        machine;
+    struct rs_buf         text;
+    struct rs_buf         err;
+    struct rs_auto_opts   ao;
+    struct rs_jval        packages;
+    const char           *firmware = NULL;
+    bool                  old_image;
+    bool                  knows;
+    char                 *trust = NULL;
+    char                 *keyring = NULL;
+    char                 *created = NULL;
+    char                 *snapshot;
+    struct rs_clones      clones;
+    struct rs_buf         from;
+    struct rs_first_boot *fb = NULL;
+    struct from_owned     fo;
+    char                 *exact = NULL;
+    bool                  ok;
 
-    if (!from_a_file(image) || !firmware_ok(o))
+    memset(&fo, 0, sizeof(fo));
+    /* --image-from: a snapshot, named exactly, which the installer reads
+     * from the repository; otherwise an image's file. */
+    if (o->image_from)
     {
+        char *file = NULL;
+        bool  sealed = false;
+
+        if (!image || !snapshot_exact(image, &exact, &file, &sealed) || !exact)
+        {
+            if (image && !exact)
+            {
+                rs_error("--image-from: %s is not a snapshot in a repository, which the "
+                         "installer is to read: name one, REPO::NAME", image);
+            } else if (!image)
+            {
+                rs_error("--image-from: name the snapshot the installer is to read, "
+                         "REPO::NAME");
+            }
+            free(file);
+            return RESTATE_EXIT_TROUBLE;
+        }
+        free(file);
+        image = exact;
+        /* Whether the kit's restate can check signatures is the snapshot's
+         * to say; read once more below, with the rest. */
+        {
+            struct rs_jval m;
+            bool           oi;
+            bool           kn;
+
+            if (!machine_for(o, image, &m, NULL, &oi, &kn, NULL) ||
+                !from_prepare(o, exact, sealed, kn, &fo))
+            {
+                rs_jval_free(&m);
+                free(exact);
+                return RESTATE_EXIT_TROUBLE;
+            }
+            rs_jval_free(&m);
+        }
+    } else if (!from_a_file(image))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!firmware_ok(o) || !first_boot_read(o, &fb))
+    {
+        first_boot_free(fb, o->nfirst_boot);
+        from_free(&fo);
+        free(exact);
         return RESTATE_EXIT_TROUBLE;
     }
     rs_clones_init(&clones);
@@ -6713,6 +7208,9 @@ int rs_cmd_autoinstall(const struct rs_options *o)
         {
             rs_error("--clones: %s", err.data);
             rs_buf_free(&err);
+            first_boot_free(fb, o->nfirst_boot);
+            from_free(&fo);
+            free(exact);
             return RESTATE_EXIT_TROUBLE;
         }
         rs_buf_free(&err);
@@ -6726,6 +7224,9 @@ int rs_cmd_autoinstall(const struct rs_options *o)
         free(created);
         rs_clones_free(&clones);
         rs_buf_free(&from);
+        first_boot_free(fb, o->nfirst_boot);
+        from_free(&fo);
+        free(exact);
         return RESTATE_EXIT_TROUBLE;
     }
     snapshot = o->exact_versions ? rs_repo_snapshot_name(created) : NULL;
@@ -6742,9 +7243,15 @@ int rs_cmd_autoinstall(const struct rs_options *o)
     ao.image_at = o->image_at;
     ao.clones = o->clones ? &clones : NULL;
     ao.clones_from = from.data;
+    ao.first_boot = fb;
+    ao.nfirst_boot = o->nfirst_boot;
+    ao.from = o->image_from ? &fo.f : NULL;
     rs_buf_init(&text);
     rs_buf_init(&err);
     ok = rs_autoinstall(&machine, &ao, &text, &err);
+    first_boot_free(fb, o->nfirst_boot);
+    from_free(&fo);
+    free(exact);
     rs_clones_free(&clones);
     rs_buf_free(&from);
     rs_jval_free(&machine);

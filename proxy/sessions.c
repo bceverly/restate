@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "repo.h"
@@ -331,6 +332,96 @@ static bool allowed(const struct rs_grant *g, enum rs_proxy_kind kind)
     }
 }
 
+/*
+ * A once grant's use, kept where a proxy started again still finds it: a
+ * file for each of its tokens, STAGING/.spent/TOKEN_SHA256 -- never a
+ * client's name, so nothing cleaning the staging removes it. A grant written
+ * again with a new token is a new grant.
+ */
+static char *spent_file(const struct rs_sessions *s, const unsigned char d[RS_SHA256_SIZE])
+{
+    static const char digits[] = "0123456789abcdef";
+    char              hex[RS_SHA256_HEX_SIZE];
+    size_t            i;
+
+    for (i = 0; i < RS_SHA256_SIZE; i++)
+    {
+        hex[2 * i] = digits[d[i] >> 4];
+        hex[2 * i + 1] = digits[d[i] & 0x0f];
+    }
+    hex[RS_SHA256_HEX_SIZE - 1] = '\0';
+    return rs_xasprintf("%s/.spent/%s", s->staging, hex);
+}
+
+/* Whether a once grant `g` has had its read session. */
+static bool spent(const struct rs_sessions *s, const struct rs_grant *g)
+{
+    size_t i;
+    bool   yes = false;
+
+    for (i = 0; i < g->ntokens && i < RS_GRANT_TOKENS && !yes; i++)
+    {
+        char       *f = spent_file(s, g->tokens[i]);
+        struct stat st;
+
+        yes = lstat(f, &st) == 0;
+        free(f);
+    }
+    return yes;
+}
+
+/* Keeps that a once grant `g` has had its read session: false, and why,
+ * if it could not be kept, when the session is not to open. */
+static bool spend(const struct rs_sessions *s, const struct rs_grant *g, int64_t now,
+                  struct rs_buf *why)
+{
+    char  *dir = rs_xasprintf("%s/.spent", s->staging);
+    size_t i;
+    bool   ok = mkdir(dir, 0700) == 0 || errno == EEXIST;
+
+    if (!ok)
+    {
+        rs_buf_addf(why, "%s: %s", dir, strerror(errno));
+    }
+    for (i = 0; ok && i < g->ntokens && i < RS_GRANT_TOKENS; i++)
+    {
+        char  *f = spent_file(s, g->tokens[i]);
+        int    fd = open(f, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        char  *line = rs_xasprintf("client=%s at=%" PRId64 "\n", g->client, now);
+        size_t len = strlen(line);
+
+        ok = fd >= 0 && write(fd, line, len) == (ssize_t)len && fsync(fd) == 0;
+        if (!ok)
+        {
+            rs_buf_addf(why, "%s: %s", f, strerror(errno));
+        }
+        if (fd >= 0 && close(fd) != 0 && ok)
+        {
+            rs_buf_addf(why, "%s: %s", f, strerror(errno));
+            ok = false;
+        }
+        free(line);
+        free(f);
+    }
+    free(dir);
+    return ok;
+}
+
+/* Whether client `client` has a read session open. */
+static bool reading(const struct rs_sessions *s, const char *client)
+{
+    size_t i;
+
+    for (i = 0; i < s->n; i++)
+    {
+        if (s->s[i].kind == RS_PROXY_READ && strcmp(s->s[i].client, client) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Session `e`'s staging made, STAGING/CLIENT/ID, each only its owner's. */
 static bool make_staging(const struct rs_sessions *s, const struct session *e, struct rs_buf *why)
 {
@@ -365,6 +456,22 @@ int rs_sessions_open(struct rs_sessions *s, const struct rs_grant *g, enum rs_pr
     if (!allowed(g, kind))
     {
         return 403;
+    }
+    /* A once grant: one read session, and look sessions only while it is
+     * open -- a run reads indexes as it goes. Kept in the staging, without
+     * which it cannot be kept, and so is not had at all. */
+    if (g->once)
+    {
+        if (!s->staging)
+        {
+            rs_buf_addf(why, "client %s: a once grant needs --staging, where its use is "
+                        "kept", g->client);
+            return 500;
+        }
+        if (spent(s, g) && (kind == RS_PROXY_READ || !reading(s, g->client)))
+        {
+            return RS_PROXY_SPENT;
+        }
     }
     if (g->max_sessions > 0)
     {
@@ -429,6 +536,13 @@ int rs_sessions_open(struct rs_sessions *s, const struct rs_grant *g, enum rs_pr
     if (by_id(s, e->id))
     {
         rs_buf_addstr(why, "a session id came out twice");
+        rs_repo_close(repo);
+        return 500;
+    }
+    /* Kept before the session is answered: a proxy that stops now has had
+     * the grant's restore all the same. */
+    if (g->once && kind == RS_PROXY_READ && !spend(s, g, now, why))
+    {
         rs_repo_close(repo);
         return 500;
     }

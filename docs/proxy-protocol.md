@@ -155,6 +155,8 @@ bandwidth    = 20MiB/s
 | `label`        | optional: free text, up to 256 bytes, that the proxy ignores   |
 | `max_sessions` | optional: sessions the client may have open at once, 1 to 1024 |
 | `bandwidth`    | optional, repeatable: how fast its requests may move bytes, by the hour |
+| `snapshot`     | optional, with `operations = read` alone: the one snapshot it reads |
+| `once`         | optional, with `operations = read` alone: `true`, one restore, and nothing after it |
 
 A line is split at its first `=`: the key is what comes before it and the
 value everything after, blanks at either end aside, so a value may itself
@@ -167,9 +169,29 @@ prefix -- so that it can remove the ones it no longer wants without
 touching a file someone wrote by hand.
 
 Two tokens so that one can be rotated: the new one's hash is added, the
-client given the new token, and the old one's hash removed. A grant with an
-expiry is how a short-lived, read-only grant for one restore is made, with
-no change to the protocol. A client is added or removed by writing or
+client given the new token, and the old one's hash removed.
+
+### A rebuild's grant
+
+`snapshot` and `once` make a grant for one restore of one snapshot -- an
+installer's, which carries its token in a file others may read
+([rebuild-from-proxy.md](rebuild-from-proxy.md)):
+
+- **`snapshot = NAME`**: a listing of `snapshots/` holds that snapshot alone,
+  a listing of `packs/` the packs its pack list names, and every other
+  snapshot or pack is `404`, as if it were not there; the repository's top
+  is served as for any grant. A snapshot with no pack list (from before
+  restate 2.0) has none of its packs served.
+- **`once = true`**: one `read` session. The proxy keeps that it has opened
+  -- a file for each of the grant's tokens, `STAGING/.spent/TOKEN_SHA256`,
+  written before the session is answered, so a proxy started again knows it
+  too. `look` sessions go on while that session is open; after it has
+  ended, every session is refused, `403 grant-spent`. A proxy with no
+  staging refuses the `read` session, `500`: it could not keep the grant's
+  use.
+
+Both with an `expires` of hours. `restate-proxy --restore-grant` (below)
+writes one. A client is added or removed by writing or
 removing its file; the proxy reads them again when they change, and on
 `SIGHUP`. Many clients may have the same repository.
 
@@ -508,6 +530,7 @@ Restate-Reason: repository-version-1
 | `busy`                   | `423` | another capture, or a prune                        | 5             |
 | `sessions-full`          | `503` | the proxy is at its limit of sessions              | 5             |
 | `client-sessions-full`   | `503` | this client is at its grant's `max_sessions`       | 5             |
+| `grant-spent`            | `403` | a `once` grant that has had its restore            | 2             |
 | `storage-full`           | `507` | the session's staging, or the disk, is full        | 2             |
 | `quota-exceeded`         | `507` | the quota hook says the client may store no more   | 2             |
 | `bad-request`            | `400`, `405`, `411`, `416`, `417`, `431`, `505` | not a request this protocol has | 2 |
@@ -574,6 +597,19 @@ The token file is held to what `passphrase_file` is: a regular file, its
 owner's or root's, that nobody else can read.
 
 ## Running the proxy
+
+```
+restate-proxy --restore-grant CLIENT --repository DIR --snapshot NAME
+              --token-file FILE [--hours N] [--label TEXT] [--grants DIR]
+```
+
+writes a rebuild's grant: a new token into `FILE` (which must not exist,
+made `0600`, and never printed), and `DIR/CLIENT.conf` (`/etc/restate/proxy.d`)
+written beside its name and linked into place -- `operations = read`, the
+snapshot, `once = true`, `max_sessions = 2` and `expires` `N` hours from now
+(24, at most 168). It refuses a grant that is there already, a repository
+without the snapshot, and a snapshot with no pack list, and prints the
+grant's file name.
 
 ```
 restate-proxy --serve [--listen HOST:PORT]... [--cert FILE] [--key FILE]

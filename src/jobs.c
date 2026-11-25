@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "arch.h"
+#include "identity.h"
 #include "remote.h"
 #include "repo.h"
 #include "restate.h"
@@ -39,7 +41,12 @@ enum {
     J_LIST      = 1u << 11,
     J_SIGN      = 1u << 12,
     J_DIFF      = 1u << 13,
-    J_ANY       = 0x3fffu,
+    J_MACHINE   = 1u << 14,
+    J_SHEET     = 1u << 15,
+    J_AUTO      = 1u << 16,
+    J_ANY       = 0x1ffffu,
+    /* What describes a machine and its rebuild, from an image or this one. */
+    J_REBUILD   = J_SHEET | J_AUTO,
     /* Every one that can read what is encrypted, and so may need a key. */
     J_DECRYPTS  = J_ANY & ~(J_ESTIMATE | J_PROTECT | J_SIGN)
 };
@@ -56,6 +63,8 @@ static const struct {
     { "repack", CMD_REPACK, J_REPACK },          { "protect", CMD_PROTECT, J_PROTECT },
     { "status", CMD_STATUS, J_STATUS },          { "list", CMD_LIST, J_LIST },
     { "sign", CMD_SIGN, J_SIGN },               { "diff", CMD_DIFF, J_DIFF },
+    { "machine", CMD_MACHINE, J_MACHINE },       { "buildsheet", CMD_BUILDSHEET, J_SHEET },
+    { "autoinstall", CMD_AUTOINSTALL, J_AUTO },
 };
 
 enum kind {
@@ -70,7 +79,12 @@ enum kind {
     K_REPOSITORY, /* as K_PATH, or https://HOST[:PORT]/v1/CLIENT */
     K_PIN,        /* a public key's SHA-256, in base64 */
     /* A snapshot's name alone, as a repository has it. */
-    K_SNAPSHOT_NAME
+    K_SNAPSHOT_NAME,
+    K_HOST,       /* a host name, as --as takes it */
+    K_TARGET,     /* vm or metal */
+    K_ARCH,       /* a processor restate knows */
+    K_FIRMWARE,   /* uefi or bios */
+    K_URL         /* a repository behind restate-proxy alone */
 };
 
 enum key_id {
@@ -124,6 +138,20 @@ enum key_id {
     KEY_OUTPUT,
     KEY_INCLUDE_MOUNT,
     KEY_INCLUDE_REPOSITORY,
+    KEY_IMAGE,
+    KEY_AS,
+    KEY_TARGET,
+    KEY_ARCH,
+    KEY_FIRMWARE,
+    KEY_EXACT_VERSIONS,
+    KEY_IMAGE_AT,
+    KEY_CLONES,
+    KEY_FIRST_BOOT,
+    KEY_IMAGE_FROM,
+    KEY_IMAGE_TOKEN_FILE,
+    KEY_IMAGE_CA_FILE,
+    KEY_IMAGE_PIN_SHA256,
+    KEY_IMAGE_DECRYPT_WITH,
     KEY_NO_LOCK,
     KEY_REPOSITORY_TOKEN_FILE,
     KEY_REPOSITORY_CA_FILE,
@@ -138,9 +166,12 @@ static const struct key {
     unsigned    commands;
 } keys[KEY_COUNT] = {
     [KEY_COMMAND] = { "command", K_COMMAND, false, J_ANY },
+    /* autoinstall's only with image_from: otherwise the file it writes
+     * unpacks an image, exported (rebuild_args). */
     [KEY_REPOSITORY] = { "repository", K_REPOSITORY, false, J_ANY & ~J_ESTIMATE },
     [KEY_SNAPSHOT] = { "snapshot", K_SNAPSHOT, false,
-                       J_RESTORE | J_COPY | J_STATUS | J_LIST | J_SIGN },
+                       J_RESTORE | J_COPY | J_STATUS | J_LIST | J_SIGN | J_MACHINE | J_SHEET |
+                           J_AUTO },
     [KEY_PATH] = { "path", K_PATH, false, J_LIST },
     [KEY_ROOT] = { "root", K_PATH, false, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_RESTORE_ROOT] = { "restore_root", K_PATH, false, J_RESTORE },
@@ -157,7 +188,8 @@ static const struct key {
     [KEY_DECRYPT_WITH] = { "decrypt_with", K_PATH, true, J_DECRYPTS },
     [KEY_PASSPHRASE_FILE] = { "passphrase_file", K_PATH, false, J_DECRYPTS | J_SIGN },
     [KEY_TRUSTED_KEY] = { "trusted_key", K_PATH, true,
-                          J_RESTORE | J_CHECK | J_STATUS | J_LIST | J_SNAPSHOTS | J_DIFF },
+                          J_RESTORE | J_CHECK | J_STATUS | J_LIST | J_SNAPSHOTS | J_DIFF |
+                              J_REBUILD },
     [KEY_ALLOW_UNVERIFIED] = { "allow_unverified", K_BOOL, false, J_RESTORE },
     [KEY_APPEND_ONLY] = { "append_only", K_BOOL, false, J_CAPTURE },
     [KEY_CREATE] = { "create", K_BOOL, false, J_CAPTURE },
@@ -188,10 +220,24 @@ static const struct key {
     [KEY_FROM] = { "from", K_SNAPSHOT, false, J_DIFF },
     [KEY_TO] = { "to", K_SNAPSHOT, false, J_DIFF },
     [KEY_PACKAGES] = { "packages", K_BOOL, false, J_DIFF | J_RESTORE },
-    [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF },
+    [KEY_OUTPUT] = { "output", K_PATH, false, J_DIFF | J_MACHINE | J_REBUILD },
     [KEY_INCLUDE_MOUNT] = { "include_mount", K_PATH, true, J_CAPTURE | J_ESTIMATE | J_STATUS },
     [KEY_INCLUDE_REPOSITORY] = { "include_repository", K_PATH, true,
                                  J_CAPTURE | J_ESTIMATE | J_STATUS },
+    [KEY_IMAGE] = { "image", K_PATH, false, J_MACHINE | J_REBUILD },
+    [KEY_AS] = { "as", K_HOST, false, J_RESTORE },
+    [KEY_TARGET] = { "target", K_TARGET, false, J_REBUILD },
+    [KEY_ARCH] = { "arch", K_ARCH, false, J_REBUILD | J_RESTORE },
+    [KEY_FIRMWARE] = { "firmware", K_FIRMWARE, false, J_REBUILD },
+    [KEY_EXACT_VERSIONS] = { "exact_versions", K_BOOL, false, J_REBUILD | J_RESTORE },
+    [KEY_IMAGE_AT] = { "image_at", K_PATH, false, J_AUTO },
+    [KEY_CLONES] = { "clones", K_PATH, false, J_AUTO },
+    [KEY_FIRST_BOOT] = { "first_boot", K_PATH, true, J_AUTO },
+    [KEY_IMAGE_FROM] = { "image_from", K_URL, false, J_AUTO },
+    [KEY_IMAGE_TOKEN_FILE] = { "image_token_file", K_PATH, false, J_AUTO },
+    [KEY_IMAGE_CA_FILE] = { "image_ca_file", K_PATH, false, J_AUTO },
+    [KEY_IMAGE_PIN_SHA256] = { "image_pin_sha256", K_PIN, true, J_AUTO },
+    [KEY_IMAGE_DECRYPT_WITH] = { "image_decrypt_with", K_PATH, false, J_AUTO },
     [KEY_NO_LOCK] = { "no_lock", K_BOOL, false,
                       J_RESTORE | J_CHECK | J_COPY | J_DIFF | J_LIST | J_SNAPSHOTS | J_STATUS },
     [KEY_REPOSITORY_TOKEN_FILE] = { "repository_token_file", K_PATH, false, J_ANY & ~J_ESTIMATE },
@@ -459,6 +505,24 @@ static bool value_ok(enum kind kind, const char *v)
         return rs_remote_pin_ok(v);
     case K_SNAPSHOT_NAME:
         return rs_repo_name_valid(v);
+    case K_HOST:
+        return rs_identity_name_ok(v);
+    case K_TARGET:
+        return strcmp(v, "vm") == 0 || strcmp(v, "metal") == 0;
+    case K_ARCH:
+        return rs_arch_find(v) != NULL;
+    case K_FIRMWARE:
+        return strcmp(v, "uefi") == 0 || strcmp(v, "bios") == 0;
+    case K_URL:
+    {
+        struct rs_buf why;
+        bool          ok;
+
+        rs_buf_init(&why);
+        ok = rs_remote_url_ok(v, &why);
+        rs_buf_free(&why);
+        return ok;
+    }
     case K_COMMAND:
     default:
         return true;
@@ -491,6 +555,18 @@ static const char *kind_words(enum kind kind)
         return "a public key's SHA-256 in base64, as openssl prints it";
     case K_SNAPSHOT_NAME:
         return "a snapshot's name, as restate snapshots lists it";
+    case K_HOST:
+        return "a host name: letters, digits and hyphens, in labels of at most 63 separated "
+               "by dots";
+    case K_TARGET:
+        return "vm or metal";
+    case K_ARCH:
+        return "a processor restate knows (x86_64, aarch64, ppc64le, riscv64, s390x, ppc64, "
+               "i686, armv7l)";
+    case K_FIRMWARE:
+        return "uefi or bios";
+    case K_URL:
+        return "a repository behind restate-proxy, https://HOST[:PORT]/v1/CLIENT";
     case K_COMMAND:
     default:
         return "a command";
@@ -596,6 +672,47 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
     case KEY_KEEP_SNAPSHOT:
         add(&o->keep_snapshots, &o->nkeep_snapshots, v);
         break;
+    case KEY_IMAGE:
+        break;   /* made into the argument once the whole job is read */
+    case KEY_AS:
+        o->as = v;
+        break;
+    case KEY_TARGET:
+        o->target = v;
+        break;
+    case KEY_ARCH:
+        o->arch = v;
+        break;
+    case KEY_FIRMWARE:
+        o->firmware = v;
+        break;
+    case KEY_EXACT_VERSIONS:
+        o->exact_versions = b;
+        break;
+    case KEY_IMAGE_AT:
+        o->image_at = v;
+        break;
+    case KEY_CLONES:
+        o->clones = v;
+        break;
+    case KEY_FIRST_BOOT:
+        add(&o->first_boot, &o->nfirst_boot, v);
+        break;
+    case KEY_IMAGE_FROM:
+        o->image_from = v;
+        break;
+    case KEY_IMAGE_TOKEN_FILE:
+        o->image_token_file = v;
+        break;
+    case KEY_IMAGE_CA_FILE:
+        o->image_ca_file = v;
+        break;
+    case KEY_IMAGE_PIN_SHA256:
+        add(&o->image_pins, &o->nimage_pins, v);
+        break;
+    case KEY_IMAGE_DECRYPT_WITH:
+        o->image_decrypt_with = v;
+        break;
     case KEY_WHOLE_PACKS:
         o->whole_packs = b;
         break;
@@ -656,9 +773,10 @@ static void apply(struct rs_job *job, enum key_id k, const char *v)
         o->packages = b;
         break;
     case KEY_OUTPUT:
-        /* The whole diff, as JSON; the result has the first changes. */
+        /* A diff's whole, as JSON (the result has the first changes); a
+         * machine's description, a build sheet, an autoinstall file. */
         o->output = v;
-        o->json = true;
+        o->json = o->command == CMD_DIFF;
         break;
     case KEY_COUNT:
     default:
@@ -714,6 +832,60 @@ static bool diff_args(struct rs_job *job, const char *const *vals, const char *n
     job->args[1] = to;
     job->opts.nargs = 2;
     job->opts.args = job->args;
+    return true;
+}
+
+/* What a machine, buildsheet or autoinstall job describes: the image it
+ * names, a snapshot in a repository (not autoinstall's: the file it writes
+ * unpacks an exported image), or else this machine. */
+static bool rebuild_args(struct rs_job *job, const char *const *vals, const char *name,
+                         struct rs_buf *err)
+{
+    struct rs_options *o = &job->opts;
+    const char        *repo = vals[KEY_REPOSITORY];
+    const char        *snap = vals[KEY_SNAPSHOT];
+    const char        *image = vals[KEY_IMAGE];
+
+    if (o->command == CMD_AUTOINSTALL && (repo || snap) && !vals[KEY_IMAGE_FROM])
+    {
+        rs_buf_addf(err, "%s: an autoinstall job's file unpacks an image: it takes image, or "
+                    "repository and snapshot with image_from, for the installer to read the "
+                    "snapshot from", name);
+        return false;
+    }
+    if (image && (repo || snap))
+    {
+        rs_buf_addf(err, "%s: image names what to describe, and %s does as well; give one of "
+                    "them", name, repo ? "repository" : "snapshot");
+        return false;
+    }
+    if (snap && strstr(snap, "::"))
+    {
+        if (repo)
+        {
+            rs_buf_addf(err, "%s: snapshot names its repository (REPO::NAME), and repository "
+                        "is given as well; give one of them", name);
+            return false;
+        }
+        job->ref = rs_xstrdup(snap);
+    } else if (snap)
+    {
+        if (!repo)
+        {
+            rs_buf_addf(err, "%s: snapshot needs repository, or to be REPO::NAME", name);
+            return false;
+        }
+        job->ref = rs_xasprintf("%s::%s", repo, snap);
+    } else if (repo)
+    {
+        job->ref = rs_xstrdup(repo);
+    } else if (image)
+    {
+        job->ref = rs_xstrdup(image);
+    }
+    job->args[0] = job->ref;
+    o->nargs = job->ref ? 1 : 0;
+    o->args = job->args;
     return true;
 }
 
@@ -775,6 +947,10 @@ static bool make_args(struct rs_job *job, const char *const *vals, const char *n
         break;
     case CMD_DIFF:
         return diff_args(job, vals, name, err);
+    case CMD_MACHINE:
+    case CMD_BUILDSHEET:
+    case CMD_AUTOINSTALL:
+        return rebuild_args(job, vals, name, err);
     case CMD_ESTIMATE:
     default:
         break;
@@ -976,7 +1152,8 @@ bool rs_job_parse(const char *text, size_t len, const char *name, struct rs_job 
             {
                 rs_buf_addf(err, "%s:%u: command: \"%.40s\" is not one a job can run (capture, "
                             "prune, check, copy, snapshots, restore, estimate, du, repack, "
-                            "protect, status, list, sign, diff)", name, lineno, value);
+                            "protect, status, list, sign, diff, machine, buildsheet, "
+                            "autoinstall)", name, lineno, value);
                 return false;
             }
         } else if (!value_ok(keys[k].kind, value))
@@ -1046,7 +1223,10 @@ static bool only_reporting(const struct rs_options *o)
                 o->fetch_sources || o->ndebs || o->nexcludes || o->dry_run || o->check_first ||
                 o->plan_only ||
                 o->packages || o->numeric_owner || o->image_fstab || o->offline || o->image_at ||
-                o->as || o->clones || o->read_all || o->metadata_only || o->record ||
+                o->as || o->clones || o->nfirst_boot || o->image_from || o->image_token_file ||
+                o->image_ca_file || o->nimage_pins || o->image_decrypt_with || o->read_all ||
+                o->metadata_only ||
+                o->record ||
                 o->whole_packs || o->nquiesce_with || o->nhook_options || o->append_only ||
                 o->create || o->json ||
                 o->nincludes || o->tmpdir || o->one_fs || o->no_hash || o->group ||
@@ -1221,6 +1401,18 @@ int rs_job_load(const struct rs_options *given, struct rs_job *job)
     if (!why && job->opts.repository_token_file)
     {
         why = secret_refused(path, "repository_token_file", job->opts.repository_token_file);
+    }
+    if (!why && job->opts.image_token_file)
+    {
+        why = secret_refused(path, "image_token_file", job->opts.image_token_file);
+    }
+    if (!why && job->opts.image_decrypt_with)
+    {
+        why = secret_refused(path, "image_decrypt_with", job->opts.image_decrypt_with);
+    }
+    if (!why && job->opts.nimage_pins > 2)
+    {
+        why = rs_xasprintf("run %s: image_pin_sha256 is given at most twice", path);
     }
     if (!why && job->opts.nrepository_pins > 2)
     {

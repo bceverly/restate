@@ -139,10 +139,12 @@ static void test_names(void)
         size_t             n = 0;
         const char *const *keys = rs_grant_keys(&n);
 
-        CHECK(n == 7);
+        CHECK(n == 9);
         CHECK_STR(keys[0], "repository");
         CHECK_STR(keys[5], "max_sessions");
         CHECK_STR(keys[6], "bandwidth");
+        CHECK_STR(keys[7], "snapshot");
+        CHECK_STR(keys[8], "once");
     }
 
     TEST_CASE("grant: client names and grant file names");
@@ -323,6 +325,54 @@ static void test_parsing(void)
             CHECK(!parses(text, &why));
             CHECK_CONTAINS(why.data, "max_sessions");
             free(text);
+        }
+    }
+
+    TEST_CASE("grant: a rebuild's, for one snapshot and one restore");
+    {
+        char *one = rs_xasprintf("repository   = /srv/restate/web01\n"
+                                 "operations   = read\n"
+                                 "token_sha256 = %s\n"
+                                 "snapshot     = 20261120T030000Z\n"
+                                 "once         = true\n"
+                                 "expires      = 2026-11-21T09:00:00Z\n",
+                                 hex_a);
+
+        CHECK(rs_grant_parse("web01", one, strlen(one), &g, &why));
+        CHECK_STR(g.snapshot ? g.snapshot : "", "20261120T030000Z");
+        CHECK(g.once);
+        rs_grant_free(&g);
+        free(one);
+        text = grant_text("");
+        CHECK(rs_grant_parse("web01", text, strlen(text), &g, &why));
+        CHECK(g.snapshot == NULL && !g.once);
+        rs_grant_free(&g);
+        free(text);
+        /* Not with append: a rebuild's grant reads alone. */
+        text = grant_text("snapshot = 20261120T030000Z\n");
+        CHECK(!parses(text, &why));
+        CHECK_CONTAINS(why.data, "snapshot is for a grant whose operations is read alone");
+        free(text);
+        text = grant_text("once = true\n");
+        CHECK(!parses(text, &why));
+        CHECK_CONTAINS(why.data, "once is for a grant whose operations is read alone");
+        free(text);
+        {
+            static const char *const bad[] = { "snapshot = ../x\n", "snapshot = .hidden\n",
+                                               "once = yes\n", "once = 1\n",
+                                               "once = true\nonce = true\n",
+                                               "snapshot = a\nsnapshot = b\n" };
+            size_t                   i;
+
+            for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+            {
+                char *t = rs_xasprintf("repository = /r\noperations = read\n"
+                                       "token_sha256 = %s\n%s",
+                                       hex_a, bad[i]);
+
+                CHECK(!parses(t, &why));
+                free(t);
+            }
         }
     }
 

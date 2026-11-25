@@ -54,6 +54,12 @@ enum {
     OPT_OFFLINE,
     OPT_AS,
     OPT_CLONES,
+    OPT_FIRST_BOOT,
+    OPT_IMAGE_FROM,
+    OPT_IMAGE_TOKEN_FILE,
+    OPT_IMAGE_CA_FILE,
+    OPT_IMAGE_PIN_SHA256,
+    OPT_IMAGE_DECRYPT_WITH,
     OPT_READ_ALL,
     OPT_QUIESCE_WITH,
     OPT_HOOK_OPTION,
@@ -142,6 +148,16 @@ struct rs_options {
     const char     *image_at;       /* --image-at */
     const char     *as;             /* restore --as: the copy's host name */
     const char     *clones;         /* autoinstall --clones: the CSV of copies */
+    const char    **first_boot;     /* autoinstall --first-boot: run at the first boot */
+    size_t          nfirst_boot;
+    /* autoinstall --image-from: the repository as the installer reaches it,
+     * and what it reaches it with (docs/rebuild-from-proxy.md). */
+    const char     *image_from;
+    const char     *image_token_file;
+    const char     *image_ca_file;
+    const char    **image_pins;
+    size_t          nimage_pins;
+    const char     *image_decrypt_with;
     bool            read_all;       /* check: every snapshot read, as restore would */
     bool            metadata_only;  /* check: no index read, no key needed */
     const char     *record;         /* check, prune: what was there at the last check */

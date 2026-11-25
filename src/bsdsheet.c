@@ -2241,11 +2241,13 @@ bool rs_bsdsheet_autoinstall(const struct rs_jval *machine, const struct rs_auto
                            "instead (restate buildsheet)");
         return false;
     }
-    if (ao->clones || ao->firmware || ao->image_at)
+    if (ao->clones || ao->firmware || ao->image_at || ao->from)
     {
         rs_buf_addf(err, "%s is for Ubuntu's autoinstall files; %s's installs the system, and "
-                    "the restore follows by hand", ao->clones ? "--clones"
-                                                    : ao->firmware ? "--firmware" : "--image-at",
+                    "the restore follows by hand", ao->clones     ? "--clones"
+                                                    : ao->firmware ? "--firmware"
+                                                    : ao->from     ? "--image-from"
+                                                                   : "--image-at",
                     os_names[b.os]);
         return false;
     }

@@ -7,7 +7,8 @@
  *
  * --serve runs the server (server.h). The rest is what an administrator
  * needs to set one up, and needs no server running: checking the grants in
- * proxy.d, and making a client's token.
+ * proxy.d, making a client's token, and making a rebuild's grant for one
+ * restore of one snapshot (docs/rebuild-from-proxy.md).
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -16,9 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "grant.h"
+#include "repo.h"
 #include "restate.h"
 #include "server.h"
 #include "sha256.h"
@@ -68,6 +71,9 @@ static void usage(FILE *out)
                   "                     [--quota-hook PROGRAM]\n"
                   "       restate-proxy --check-grants [DIR] [--json]\n"
                   "       restate-proxy --new-token FILE\n"
+                  "       restate-proxy --restore-grant CLIENT --repository DIR --snapshot NAME\n"
+                  "                     --token-file FILE [--hours N] [--label TEXT]\n"
+                  "                     [--grants DIR]\n"
                   "       restate-proxy --version | --help\n"
                   "\n"
                   "  --serve               serve the repositories the grants allow over HTTPS,\n"
@@ -93,6 +99,11 @@ static void usage(FILE *out)
                   "  --json                say it as JSON, schema 1\n"
                   "  --new-token FILE      write a new client token into FILE, which must\n"
                   "                        not exist, and print its token_sha256 line\n"
+                  "  --restore-grant CLIENT\n"
+                  "                        a grant for one restore of one snapshot, read only,\n"
+                  "                        for N hours (24, at most 168): its token into\n"
+                  "                        --token-file, which must not exist, and the grant\n"
+                  "                        DIR/CLIENT.conf, which must not either\n"
                   "  --version             print the version and the TLS library\n"
                   "  --help                print this\n");
 }
@@ -182,6 +193,193 @@ static int new_token(const char *file)
     wipe(line, sizeof line);
     (void)printf("token_sha256 = %s\n", hex);
     return finish(RESTATE_EXIT_OK);
+}
+
+/* The most hours a rebuild's grant lasts: a week. */
+#define RESTORE_HOURS_MAX 168u
+
+struct restore_grant {
+    const char *client;
+    const char *repository;
+    const char *snapshot;
+    const char *token_file;
+    const char *label;
+    const char *grants;
+    unsigned    hours;
+};
+
+static bool number(const char *s, unsigned max, unsigned *out);
+
+/* Whether `dir` holds the snapshot `name` -- its index, and the pack list a
+ * grant for it alone serves its packs by -- saying why not. */
+static bool restorable(const char *dir, const char *name)
+{
+    char       *index = rs_xasprintf("%s/snapshots/%s/index.json.gz", dir, name);
+    char       *packs = rs_xasprintf("%s/snapshots/%s/packs", dir, name);
+    struct stat st;
+    bool        ok = false;
+
+    if (!rs_repo_is(dir))
+    {
+        complain("--repository %s: not a restate repository", dir);
+    } else if (lstat(index, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        complain("--snapshot %s: %s has no such snapshot (restate snapshots %s lists them)",
+                 name, dir, dir);
+    } else if (lstat(packs, &st) != 0 || !S_ISREG(st.st_mode))
+    {
+        complain("--snapshot %s: it has no pack list -- it was written before restate 2.0 -- "
+                 "so a grant for it alone could serve none of its content", name);
+    } else
+    {
+        ok = true;
+    }
+    free(index);
+    free(packs);
+    return ok;
+}
+
+/* `text` written whole into the new file `path`, mode `mode`, and synced:
+ * false, having said why, with nothing left of it. */
+static bool write_new(const char *path, const char *text, mode_t mode)
+{
+    int    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    size_t len = strlen(text);
+    bool   ok = fd >= 0 && fchmod(fd, mode) == 0 && write(fd, text, len) == (ssize_t)len &&
+              fsync(fd) == 0;
+
+    if (!ok)
+    {
+        complain("%s: %s", path, strerror(errno));
+    }
+    if (fd >= 0 && close(fd) != 0 && ok)
+    {
+        complain("%s: %s", path, strerror(errno));
+        ok = false;
+    }
+    if (!ok && fd >= 0)
+    {
+        (void)unlink(path);
+    }
+    return ok;
+}
+
+/*
+ * A rebuild's grant: a new token into its file, and the grant -- read only,
+ * the one snapshot, once, two sessions at once at the most, and expiring
+ * `hours` from now -- written beside its name and linked into place, so
+ * that neither one there already nor the proxy reading half of it can be.
+ * The token is never printed; the grant's file name is.
+ */
+static int restore_grant(const struct restore_grant *rg)
+{
+    char            token[RS_TOKEN_SIZE];
+    char            hex[RS_SHA256_HEX_SIZE];
+    char            until[32];
+    char           *line;
+    char           *text;
+    char           *conf;
+    char           *tmp;
+    struct rs_grant g;
+    struct rs_buf   why;
+    struct tm       tm;
+    struct stat     st;
+    time_t          when = time(NULL) + (time_t)rg->hours * 3600;
+    int             status = RESTATE_EXIT_TROUBLE;
+
+    if (!rs_grant_client_valid(rg->client))
+    {
+        complain("--restore-grant: \"%s\" is not a client's name (1 to 64 of A-Z a-z 0-9 . _ "
+                 "-, not beginning with . or -)", rg->client);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!rs_repo_name_valid(rg->snapshot))
+    {
+        complain("--snapshot: \"%s\" is not a snapshot's name", rg->snapshot);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (rg->repository[0] != '/')
+    {
+        complain("--repository: \"%s\" is not an absolute path", rg->repository);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!restorable(rg->repository, rg->snapshot))
+    {
+        return RESTATE_EXIT_TROUBLE;
+    }
+    conf = rs_xasprintf("%s/%s.conf", rg->grants, rg->client);
+    tmp = rs_xasprintf("%s/.%s.conf.tmp", rg->grants, rg->client);
+    if (lstat(conf, &st) == 0)
+    {
+        complain("%s: a grant for %s is there already; remove it first, or choose another "
+                 "client's name", conf, rg->client);
+        free(conf);
+        free(tmp);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!gmtime_r(&when, &tm) || strftime(until, sizeof(until), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0)
+    {
+        complain("the time %d hours from now cannot be written", (int)rg->hours);
+        free(conf);
+        free(tmp);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    if (!rs_token_new(token))
+    {
+        complain("making a token: the system's random source could not be read");
+        free(conf);
+        free(tmp);
+        return RESTATE_EXIT_TROUBLE;
+    }
+    rs_sha256_hex(token, RS_TOKEN_LEN, hex);
+    line = rs_xasprintf("%s\n", token);
+    text = rs_xasprintf("# Written by restate-proxy --restore-grant: one restore of one snapshot.\n"
+                        "repository   = %s\n"
+                        "operations   = read\n"
+                        "snapshot     = %s\n"
+                        "once         = true\n"
+                        "max_sessions = 2\n"
+                        "token_sha256 = %s\n"
+                        "expires      = %s\n"
+                        "%s%s%s",
+                        rg->repository, rg->snapshot, hex, until,
+                        rg->label ? "label        = " : "", rg->label ? rg->label : "",
+                        rg->label ? "\n" : "");
+    rs_buf_init(&why);
+    /* Read back as the proxy will read it: a label it would refuse, a
+     * repository path it would, is said now. */
+    if (!rs_grant_parse(rg->client, text, strlen(text), &g, &why))
+    {
+        complain("the grant would not be read: %s", why.data ? why.data : "");
+    } else if (write_new(rg->token_file, line, 0600))
+    {
+        (void)unlink(tmp);
+        if (write_new(tmp, text, 0644))
+        {
+            if (link(tmp, conf) == 0)
+            {
+                (void)printf("%s\n", conf);
+                status = finish(RESTATE_EXIT_OK);
+            } else
+            {
+                complain("%s: %s", conf, strerror(errno));
+            }
+            (void)unlink(tmp);
+        }
+        if (status != RESTATE_EXIT_OK)
+        {
+            (void)unlink(rg->token_file);
+        }
+    }
+    rs_grant_free(&g);
+    rs_buf_free(&why);
+    wipe(token, sizeof token);
+    wipe(line, strlen(line));
+    free(line);
+    free(text);
+    free(conf);
+    free(tmp);
+    return status;
 }
 
 /* `s` as a number from 1 to `max`, or false. */
@@ -372,6 +570,56 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--new-token") == 0 && argv[2][0] != '\0')
     {
         return new_token(argv[2]);
+    }
+    if (argc >= 3 && strcmp(argv[1], "--restore-grant") == 0)
+    {
+        struct restore_grant rg;
+        int                  i;
+
+        memset(&rg, 0, sizeof(rg));
+        rg.client = argv[2];
+        rg.grants = GRANTS_DIR;
+        rg.hours = 24;
+        /* Each option with its value: two at a time. */
+        for (i = 3; i < argc; i += 2)
+        {
+            const char *opt = argv[i];
+            const char *v = i + 1 < argc ? argv[i + 1] : NULL;
+            const char **to = strcmp(opt, "--repository") == 0   ? &rg.repository
+                              : strcmp(opt, "--snapshot") == 0   ? &rg.snapshot
+                              : strcmp(opt, "--token-file") == 0 ? &rg.token_file
+                              : strcmp(opt, "--label") == 0      ? &rg.label
+                              : strcmp(opt, "--grants") == 0     ? &rg.grants
+                                                                 : NULL;
+
+            if (!v)
+            {
+                complain("--restore-grant: %s needs a value", opt);
+                return RESTATE_EXIT_TROUBLE;
+            }
+            if (strcmp(opt, "--hours") == 0)
+            {
+                if (!number(v, RESTORE_HOURS_MAX, &rg.hours))
+                {
+                    complain("--hours: not a number from 1 to %u", RESTORE_HOURS_MAX);
+                    return RESTATE_EXIT_TROUBLE;
+                }
+            } else if (to)
+            {
+                *to = v;
+            } else
+            {
+                complain("--restore-grant: unexpected %s", opt);
+                usage(stderr);
+                return RESTATE_EXIT_TROUBLE;
+            }
+        }
+        if (!rg.repository || !rg.snapshot || !rg.token_file)
+        {
+            complain("--restore-grant needs --repository, --snapshot and --token-file");
+            return RESTATE_EXIT_TROUBLE;
+        }
+        return restore_grant(&rg);
     }
     usage(stderr);
     return RESTATE_EXIT_TROUBLE;

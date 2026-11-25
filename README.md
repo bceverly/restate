@@ -164,7 +164,8 @@ update, and diff the two.
 **What is actually on this box?** Before decommissioning, handing over or
 auditing a machine, `restate machine` documents the hardware, firmware, disk
 layout, encryption, LVM, RAID and mounts, and an index lists every file with
-its owner, mode, times and SHA-256.
+its owner, mode, times and SHA-256. `restate machine IMAGE` says the same of
+the machine an image or snapshot was taken from.
 
 **A safety net before an upgrade.** Capture before a release upgrade, keep the
 image, and diff afterwards to see what the upgrade changed -- by package, with
@@ -338,8 +339,10 @@ Commands:
   restore IMAGE           put an image's files back under the root (--root,
                           default /): each checked against the index before it
                           is put in place, with its owner, mode and times
-  machine                 describe this machine: hardware, firmware, disks,
-                          partitions, encryption, LVM, RAID, mounts
+  machine [IMAGE]         describe this machine, or the one IMAGE (or a
+                          snapshot in a repository) was taken from, as JSON:
+                          hardware, firmware, disks, partitions, encryption,
+                          LVM, RAID, mounts, network
   packages [IMAGE]        list what is installed, and where each package came
                           from -- apt, snap, flatpak, pip, npm, cargo -- here,
                           or on the machine IMAGE was taken from
@@ -510,6 +513,34 @@ Options:
       --image-at=PATH     autoinstall: where the installer will find the image
                           (a mounted disk or share); the file then installs the
                           packages and restores the files from it
+      --image-from=URL    autoinstall: the installer reads the snapshot from
+                          this repository behind restate-proxy,
+                          https://HOST[:PORT]/v1/CLIENT, rather than from an
+                          image (--image-at): exported there by the restate in
+                          the snapshot's own kit, with a grant for that one
+                          restore (see REBUILDING)
+      --image-token-file=FILE
+                          autoinstall --image-from: the token the installer
+                          reaches the proxy with, carried in the file: a
+                          rebuild's, from restate-proxy --restore-grant
+      --image-ca-file=FILE
+                          autoinstall --image-from: the certificate authorities
+                          the installer trusts the proxy by, rather than the
+                          system's, carried in the file
+      --image-pin-sha256=SHA256
+                          autoinstall --image-from: the proxy's public key, as
+                          --repository-pin-sha256 takes it, for the installer;
+                          at most twice
+      --image-decrypt-with=KEYFILE
+                          autoinstall --image-from: the secret key, with no
+                          passphrase, the installer decrypts the snapshot with,
+                          carried in the file; needed where the repository is
+                          encrypted
+      --first-boot=FILE   autoinstall: run FILE, a script or program, on the
+                          new system at its first boot, after the restore and
+                          the snaps, as root; repeatable, run in the order
+                          given. It is carried in the autoinstall file, which
+                          whoever can fetch that file can read: no secret in it
       --clones=FILE       autoinstall: one file for the copies FILE lists, a
                           CSV of name, mac, serial, address, gateway and dns:
                           the installer finds the machine it is on in FILE by a
@@ -1158,9 +1189,55 @@ comes up as it was. The snaps go in at its first boot, by a one-time
 `restate-firstboot` service: the desktop installer ignores an autoinstall
 file's `snaps` section, and snapd does not run during an install.
 
+`--first-boot FILE` (repeatable) adds to that service: each file -- a script,
+say, that installs a management agent, configures it and reports in -- runs
+as root at the first boot, after the restore and the snaps, in the order
+given, and the service then removes them and itself; what they say goes to
+the journal (`journalctl -u restate-firstboot`), and one that fails is said
+there and the rest still run. A file is carried in the autoinstall file
+itself, in base64, so whoever can fetch that file can read it: put no secret
+in one, or only one that is good for that single use. (FreeBSD's and
+OpenBSD's install files don't take it yet.)
+
 ```console
 $ restate autoinstall --target vm --image-at /restate/web01.tar web01.tar -o user-data
+$ restate autoinstall --image-at /restate/web01.tar --first-boot enroll.sh web01.tar -o user-data
 ```
+
+`--image-from URL` has the installer read the snapshot straight from its
+repository, through `restate-proxy`, rather than from an image someone
+exported and put where it could reach it. The file carries the restate in
+the snapshot's own kit -- the one that made the capture, so of the
+machine's release and processor -- and the late-commands export the snapshot
+with it onto the new disk, checked for whom it was signed by
+(`--trusted-key`), restore from that, and remove it. The token
+(`--image-token-file`) is a rebuild's, made on the storage host by
+`restate-proxy --restore-grant`: read only, for that one snapshot, good for
+one restore, for a few hours. Whoever can fetch the autoinstall file can
+read it, and the key (`--image-decrypt-with`) where the repository is
+encrypted; the token is worth nothing once the restore has had it, and the
+key opens nothing without a grant to the packs. The snapshot itself is read
+by the restate making the file, with access of its own -- never the
+rebuild's token, which reading it would spend.
+[docs/rebuild-from-proxy.md](docs/rebuild-from-proxy.md) has the whole of
+it.
+
+```console
+storage$ sudo restate-proxy --restore-grant web01-rebuild --repository /srv/restate/web01 \
+           --snapshot 20261120T030000Z --token-file /run/restate/web01-rebuild.token --hours 6
+storage$ sudo restate autoinstall /srv/restate/web01::20261120T030000Z \
+           --image-from https://backup.example.com:8443/v1/web01-rebuild \
+           --image-token-file /run/restate/web01-rebuild.token \
+           --image-decrypt-with /etc/restate/keys/web01-rebuild.gpg \
+           --trusted-key /etc/restate/keys/signing.pub --target vm -o user-data
+```
+
+`restate machine IMAGE` prints the machine an image, a snapshot
+(`REPO::NAME`, or `REPO` for its newest) or a saved description was taken
+from, as JSON -- its system and release, processor, firmware, disks with
+their sizes and what the capture kept on each mount, network interfaces with
+their MAC addresses, host name -- read where it is, with nothing restored: to
+fill in what a rebuild elsewhere will need.
 
 ## Restoring
 
@@ -1899,6 +1976,10 @@ sudo restate capture --encrypt-to backup.pub \
   line, and the proxy's certificate trusted as the system trusts it, by
   `--repository-ca-file`, or pinned with `--repository-pin-sha256`.
 
+A grant can also be a rebuild's -- one snapshot, one restore -- for an
+installer that restores a machine straight from its repository
+(`autoinstall --image-from`, under [Rebuilding](#rebuilding)).
+
 [docs/proxy-guide.md](docs/proxy-guide.md) is how to set it up: choosing it
 or a share, grants, certificates, and a way in from outside, with pfSense's
 HAProxy routing by SNI as the worked example.
@@ -1928,7 +2009,8 @@ report_group = restate-report
 ```
 
 A job can be a `capture`, `prune`, `check`, `copy`, `snapshots`, `restore`,
-`estimate`, `du`, `repack`, `protect`, `status`, `list`, `sign` or `diff`; a
+`estimate`, `du`, `repack`, `protect`, `status`, `list`, `sign`, `diff`,
+`machine`, `buildsheet` or `autoinstall`; a
 `status`, `list` or `sign` job reads the newest snapshot unless `snapshot`
 names one. A `diff` job compares `from` with `to` -- each a snapshot's name in
 `repository`, or `REPO::NAME` -- `to` the newest if not given, and `from` the
@@ -1940,6 +2022,30 @@ each with a `truncated` flag), and the `output`; like `restate diff`, it exits
 1 when they differ. A `restore` job takes `packages`, as `--packages`: with
 `plan` or `dry_run`, its result's `packages.script` is the script it would
 run.
+A `restore` job takes `as` (`--as`: a copy with an identity of its own),
+`arch` and `exact_versions` too.
+
+A `machine`, `buildsheet` or `autoinstall` job describes a machine, or writes
+its rebuild, into `output`: the machine `image` names (an image, or a saved
+description), or a snapshot -- `repository`, and `snapshot` if not the newest
+(for `autoinstall`, only with `image_from`: otherwise its file unpacks an exported image) -- or else
+this machine. `buildsheet` and `autoinstall` take `target`, `arch`,
+`firmware`, `exact_versions` and `trusted_key`, and `autoinstall` takes
+`image_at`, `clones` and `first_boot` (repeatable), and `image_from`,
+`image_token_file`, `image_ca_file`, `image_pin_sha256` and
+`image_decrypt_with` -- with which it takes `repository` and `snapshot` --
+as their options do:
+
+```ini
+# /etc/restate/jobs.d/rebuild-web01.conf
+command    = autoinstall
+image      = /srv/restate/web01.tar
+target     = vm
+image_at   = /media/restate/web01.tar
+first_boot = /etc/restate/first-boot/enroll.sh
+output     = /srv/pxe/web01/user-data
+```
+
 A `sign` job signs it with `sign_with` (and `passphrase_file`, if the key has
 a passphrase) -- as a storage host does after a capture, before `protect` --
 and its result says which snapshot (`signed`, `REPO::NAME`) and whose key

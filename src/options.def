@@ -139,6 +139,27 @@ RS_OPT(OPT_EXACT_VERSIONS, "exact-versions", no_argument, NULL,
 RS_OPT(OPT_IMAGE_AT, "image-at", required_argument, "PATH",
        "autoinstall: where the installer will find the image (a mounted disk or "
        "share); the file then installs the packages and restores the files from it")
+RS_OPT(OPT_IMAGE_FROM, "image-from", required_argument, "URL",
+       "autoinstall: the installer reads the snapshot from this repository behind "
+       "restate-proxy, https://HOST[:PORT]/v1/CLIENT, rather than from an image "
+       "(--image-at): exported there by the restate in the snapshot's own kit, with a grant "
+       "for that one restore (see REBUILDING)")
+RS_OPT(OPT_IMAGE_TOKEN_FILE, "image-token-file", required_argument, "FILE",
+       "autoinstall --image-from: the token the installer reaches the proxy with, carried in "
+       "the file: a rebuild's, from restate-proxy --restore-grant")
+RS_OPT(OPT_IMAGE_CA_FILE, "image-ca-file", required_argument, "FILE",
+       "autoinstall --image-from: the certificate authorities the installer trusts the proxy "
+       "by, rather than the system's, carried in the file")
+RS_OPT(OPT_IMAGE_PIN_SHA256, "image-pin-sha256", required_argument, "SHA256",
+       "autoinstall --image-from: the proxy's public key, as --repository-pin-sha256 takes it, "
+       "for the installer; at most twice")
+RS_OPT(OPT_IMAGE_DECRYPT_WITH, "image-decrypt-with", required_argument, "KEYFILE",
+       "autoinstall --image-from: the secret key, with no passphrase, the installer decrypts "
+       "the snapshot with, carried in the file; needed where the repository is encrypted")
+RS_OPT(OPT_FIRST_BOOT, "first-boot", required_argument, "FILE",
+       "autoinstall: run FILE, a script or program, on the new system at its first boot, after "
+       "the restore and the snaps, as root; repeatable, run in the order given. It is carried "
+       "in the autoinstall file, which whoever can fetch that file can read: no secret in it")
 RS_OPT(OPT_CLONES, "clones",          required_argument, "FILE",
        "autoinstall: one file for the copies FILE lists, a CSV of name, mac, serial, "
        "address, gateway and dns: the installer finds the machine it is on in FILE by a "

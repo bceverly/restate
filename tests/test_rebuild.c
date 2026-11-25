@@ -410,6 +410,12 @@ static void server(struct rs_jval *m)
 
 /* Whether the sheets are for an image from before 1.1, in one stream. */
 static bool old_layout;
+/* The --first-boot files autoinst_with gives, and how many. */
+static const struct rs_first_boot *first_boots;
+static size_t                      nfirst_boots;
+/* --image-from, for autoinst_with, and the keyring it gives. */
+static const struct rs_auto_from *from_src;
+static const char                *from_keyring;
 
 static char *sheet_with(const struct rs_jval *m, enum rs_target t, const char *image,
                         const struct rs_jval *packages)
@@ -450,6 +456,15 @@ static char *autoinst_with(const struct rs_jval *m, enum rs_target t,
     o.packages = packages;
     o.image_at = image_at;
     o.old_image = old_layout;
+    o.first_boot = first_boots;
+    o.nfirst_boot = nfirst_boots;
+    o.from = from_src;
+    if (from_src)
+    {
+        o.image_at = NULL;
+        o.trust = "--trusted-key " RS_AUTO_TRUSTED_KEYRING;
+        o.trust_keyring = from_keyring;
+    }
     rs_buf_init(&out);
     rs_buf_init(&err);
     CHECK(rs_autoinstall(m, &o, &out, &err));
@@ -965,7 +980,7 @@ static void autoinstall_package_cases(void)
         CHECK_CONTAINS(fb, "snap disable code\n");
         /* From restate's directory: snapd clears its own of strangers. */
         CHECK_CONTAINS(fb, "snap install --dangerous /var/lib/restate/snaps/asana_x1.snap || ");
-        CHECK_CONTAINS(fb, "rm -rf /var/lib/restate/snaps\n");
+        CHECK_CONTAINS(fb, "rm -rf /var/lib/restate/snaps /var/lib/restate/first-boot\n");
         CHECK(strstr(fb, "core22") == NULL);
         CHECK(strstr(fb, "snap install core24") == NULL);
         CHECK(strstr(fb, "snap install mine") == NULL);
@@ -975,6 +990,111 @@ static void autoinstall_package_cases(void)
         free(fb);
         free(unit);
     }
+    free(s);
+
+    TEST_CASE("autoinstall: --first-boot files, run after the snaps, in order");
+    {
+        char                 agent[] = "#!/bin/sh\napt-get install -y agent\n";
+        char                 back[] = "curl -s https://example.com/ready\n";
+        struct rs_first_boot fb[2];
+        char                *sh;
+
+        fb[0].name = "/etc/rebuild/agent.sh";
+        fb[0].text = agent;
+        fb[1].name = "/etc/rebuild/call back";
+        fb[1].text = back;
+        first_boots = fb;
+        nfirst_boots = 2;
+        s = autoinst_with(&m, RS_TARGET_VM, &pk, "/media/restate/web 01.tgz");
+        sh = late_file_text(s, "/usr/local/sbin/restate-firstboot");
+        CHECK_CONTAINS(sh, "snap wait system seed.loaded\n");
+        CHECK_CONTAINS(sh, "if ! /var/lib/restate/first-boot/01-agent.sh; then echo 'restate: "
+                           "the first-boot file 01-agent.sh failed' >&2; fi\n"
+                           "if ! /var/lib/restate/first-boot/02-call_back; then");
+        /* After the snaps, and before it removes itself. */
+        CHECK(strstr(sh, "01-agent.sh") > strstr(sh, "snap install firefox"));
+        CHECK(strstr(sh, "systemctl disable") > strstr(sh, "02-call_back"));
+        free(sh);
+        sh = late_file_text(s, "/var/lib/restate/first-boot/01-agent.sh");
+        CHECK_STR(sh ? sh : "", agent);
+        free(sh);
+        sh = late_file_text(s, "/var/lib/restate/first-boot/02-call_back");
+        CHECK_STR(sh ? sh : "", back);
+        free(sh);
+        CHECK_CONTAINS(s, "chmod 0700 /target/var/lib/restate/first-boot/01-agent.sh");
+        /* Written after the files are restored, so that none is put over. */
+        CHECK(strstr(s, "base64 -d > /target/var/lib/restate/first-boot/01-agent.sh") >
+              strstr(s, "--strip-components=2"));
+        free(s);
+        /* With no snaps, the service is there for the files alone. */
+        s = autoinst_with(&m, RS_TARGET_VM, NULL, NULL);
+        sh = late_file_text(s, "/usr/local/sbin/restate-firstboot");
+        CHECK(sh && strstr(sh, "snap wait") == NULL);
+        CHECK_CONTAINS(sh ? sh : "", "if ! /var/lib/restate/first-boot/01-agent.sh; then");
+        CHECK_CONTAINS(s, "multi-user.target.wants/restate-firstboot.service");
+        free(sh);
+        free(s);
+        first_boots = NULL;
+        nfirst_boots = 0;
+    }
+
+    TEST_CASE("autoinstall: --image-from, the snapshot read through restate-proxy");
+    {
+        static const char *const pins[] = { "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" };
+        struct rs_auto_from      f;
+        const char              *exp;
+        const char              *rst;
+        const char              *gone;
+
+        memset(&f, 0, sizeof(f));
+        f.ref = "https://backup.example.com:8443/v1/rb01::20261120T030000Z";
+        f.restate = "UkVTVEFURQ==";
+        f.token = "VE9LRU4K";
+        f.ca = "Q0EK";
+        f.key = "S0VZ";
+        f.pins = pins;
+        f.npins = 1;
+        from_src = &f;
+        from_keyring = "S0VZUklORw==";
+        s = autoinst_with(&m, RS_TARGET_VM, &pk, NULL);
+        CHECK_CONTAINS(s, "read the snapshot from https://backup.example.com:8443/v1/rb01::");
+        CHECK_CONTAINS(s, "umask 077 && echo UkVTVEFURQ== | base64 -d | gzip -dc > "
+                          "/run/restate-installer/restate");
+        CHECK_CONTAINS(s, "chmod 0700 /run/restate-installer/restate");
+        CHECK_CONTAINS(s, "echo VE9LRU4K | base64 -d > /run/restate-installer/token");
+        CHECK_CONTAINS(s, "echo Q0EK | base64 -d > /run/restate-installer/ca.pem");
+        CHECK_CONTAINS(s, "echo S0VZ | base64 -d > /run/restate-installer/key.gpg");
+        CHECK_CONTAINS(s, "echo S0VZUklORw== | base64 -d > " RS_AUTO_TRUSTED_KEYRING);
+        CHECK_CONTAINS(s, "/run/restate-installer/restate export "
+                          "https://backup.example.com:8443/v1/rb01::20261120T030000Z -o "
+                          "/target/var/tmp/restate-image.tar --repository-token-file "
+                          "/run/restate-installer/token --repository-ca-file "
+                          "/run/restate-installer/ca.pem --repository-pin-sha256 "
+                          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= --decrypt-with "
+                          "/run/restate-installer/key.gpg --trusted-key " RS_AUTO_TRUSTED_KEYRING);
+        /* Then everything --image-at does, from the image it made... */
+        CHECK_CONTAINS(s, "test -f /target/var/tmp/restate-image.tar");
+        CHECK_CONTAINS(s, "--allow-unverified");
+        /* ...which is checked as it is exported, and not again. */
+        exp = strstr(s, "restate export ");
+        rst = strstr(s, "restore -q");
+        gone = strstr(s, "rm -rf /target/var/tmp/restate-image.tar /run/restate-installer");
+        CHECK(exp && gone && exp < gone);
+        CHECK(!rst || (exp < rst && rst < gone));
+        CHECK(strstr(s, "--image-at") == NULL || strstr(s, "image at ") == NULL);
+        free(s);
+        /* With no key or certificate, none is written or named. */
+        f.ca = NULL;
+        f.key = NULL;
+        f.npins = 0;
+        s = autoinst_with(&m, RS_TARGET_VM, &pk, NULL);
+        CHECK(strstr(s, "ca.pem") == NULL && strstr(s, "key.gpg") == NULL);
+        CHECK(strstr(s, "--repository-pin-sha256") == NULL);
+        free(s);
+        from_src = NULL;
+        from_keyring = NULL;
+    }
+    s = autoinst_with(&m, RS_TARGET_VM, &pk, "/media/restate/web 01.tgz");
     CHECK_CONTAINS(s, "ln -sf /etc/systemd/system/restate-firstboot.service "
                       "/target/etc/systemd/system/multi-user.target.wants/");
     CHECK_CONTAINS(s, "test -f '/media/restate/web 01.tgz' || { echo 'restate: the image is not at "
@@ -1154,7 +1274,7 @@ static void autoinstall_cases(void)
     TEST_CASE("autoinstall: what it refuses");
     {
         struct rs_auto_opts o = { RS_TARGET_SAME, "x.tgz", NULL, NULL, NULL, false,
-                                  NULL, NULL, NULL, NULL, NULL, NULL };
+                                  NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL };
         struct rs_buf       out;
         struct rs_buf       err;
 

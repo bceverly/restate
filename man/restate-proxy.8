@@ -45,6 +45,22 @@ restate-proxy \- serve restate repositories over HTTPS, append-only
 .I FILE
 .br
 .B restate-proxy
+.B \-\-restore\-grant
+.I CLIENT
+.B \-\-repository
+.I DIR
+.B \-\-snapshot
+.I NAME
+.B \-\-token\-file
+.I FILE
+.RB [ \-\-hours
+.IR N ]
+.RB [ \-\-label
+.IR TEXT ]
+.RB [ \-\-grants
+.IR DIR ]
+.br
+.B restate-proxy
 .BR \-\-version " | " \-\-help
 .SH DESCRIPTION
 .B restate-proxy
@@ -147,6 +163,40 @@ which must not exist, readable only by its owner, and print the
 .B token_sha256
 line for the client's grant.
 .TP
+.BI \-\-restore\-grant " CLIENT"
+Write a rebuild's grant for client
+.IR CLIENT ,
+for one restore of one snapshot (see
+.BR GRANTS ):
+a new token into
+.B \-\-token\-file
+.IR FILE ,
+which must not exist, readable only by its owner and never printed; and
+.IB DIR / CLIENT .conf
+in
+.B \-\-grants
+.I DIR
+.RI ( /etc/restate/proxy.d ),
+which must not exist either, written beside its name and linked into
+place:
+.B "operations = read" ,
+.B snapshot
+.BR \-\-snapshot 's
+.IR NAME ,
+.BR "once = true" ,
+.B "max_sessions = 2"
+and an
+.B expires
+.B \-\-hours
+.I N
+from now (24, at most 168), with
+.B \-\-label
+.I TEXT
+if given.
+.B \-\-repository
+.I DIR
+has to hold the snapshot, with its pack list. Print the grant's file name.
+.TP
 .B \-\-version
 Print the version, the protocol version and the TLS library.
 .TP
@@ -198,6 +248,31 @@ to the start of the second,
 .B 22-06
 across midnight; given alone, for every hour no range names. With none,
 there is no limit. The client's requests being answered at once share it.
+.PP
+.B snapshot
+and
+.BR once ,
+for a grant whose
+.B operations
+is
+.B read
+alone, make it a rebuild's: for an installer, which carries its token in a
+file others may read.
+.B snapshot
+.I NAME
+is the one snapshot it reads: a listing of
+.I snapshots/
+holds it alone, a listing of
+.I packs/
+the packs its pack list names, and every other snapshot or pack is 404.
+.B "once = true"
+is one read session: kept, for each of the grant's tokens, in
+.IB STAGING /.spent/ TOKEN_SHA256
+before the session is answered, so that a proxy started again knows it;
+look sessions go on while it is open, and once it has ended every session
+is refused, 403
+.BR grant\-spent .
+A proxy with no staging refuses a once grant's read session.
 .PP
 A second
 .B token_sha256

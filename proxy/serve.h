@@ -68,6 +68,10 @@ struct rs_proxy_session {
  * a status of the protocol's, which says it as 503 client-sessions-full. */
 #define RS_PROXY_CLIENT_FULL 429
 
+/* What opening a session says of a once grant that has had its restore:
+ * said as 403 grant-spent. */
+#define RS_PROXY_SPENT 430
+
 /* What rs_proxy_conn.bind made of a connection. */
 enum rs_proxy_bound {
     RS_PROXY_BOUND,         /* bound to the client */

@@ -59,6 +59,9 @@ static const struct builtin common_rules[] = {
     { X, "/var/log",        "useful, but not needed to rebuild the machine" },
     { X, "/var/cache",      "regenerated on demand" },
     { I, "/etc/ssh/ssh_host_*", "SSH host keys: how clients know this machine" },
+    { I, "/etc/sysmanage-agent.yaml", "the SysManage agent's settings, an enrollment token "
+                                      "among them" },
+    { I, "/var/db/sysmanage-agent/agent.db", "the SysManage agent's registration" },
 };
 
 static const struct builtin linux_rules[] = {
@@ -204,6 +207,8 @@ static const struct builtin linux_rules[] = {
     { I, "/var/lib/netdata/registry/netdata.public.unique.id", "the Netdata agent's ID" },
     { I, "/var/lib/sysmanage-agent/agent.db", "the SysManage agent's registration" },
     { I, "/var/snap/sysmanage-agent/common/agent.db", "the SysManage agent's registration" },
+    { I, "/var/snap/sysmanage-agent-strict/common/agent.db",
+      "the SysManage agent's registration, its strictly confined snap's" },
 };
 
 static const struct builtin freebsd_rules[] = {

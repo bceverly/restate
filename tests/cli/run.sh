@@ -575,6 +575,46 @@ expect 0 "autoinstall --target=metal" -- "$BIN" autoinstall --target=metal layou
 contains "$OUT" "size: largest" "autoinstall on new hardware picks the largest disk"
 expect 2 "autoinstall for another system" -- "$BIN" autoinstall openbsd.json
 contains "$ERR" "autoinstall files are for Ubuntu" "autoinstall says what it is for"
+expect 0 "machine of a description" -- "$BIN" machine layout.json
+contains "$OUT" '"root-uuid"' "prints the machine it describes"
+# What the new system runs at its first boot, after the restore.
+printf '#!/bin/sh\necho enrolled\n' > first.sh
+expect 0 "autoinstall --first-boot" -- "$BIN" autoinstall --first-boot first.sh layout.json
+contains "$OUT" "/target/var/lib/restate/first-boot/01-first.sh" "carries the file"
+contains "$OUT" "restate-firstboot.service" "and the service that runs it"
+printf 'a\0b' > binary.sh
+expect 2 "autoinstall --first-boot of what is not text" -- \
+  "$BIN" autoinstall --first-boot binary.sh layout.json
+contains "$ERR" "not text" "says why"
+expect 2 "autoinstall --first-boot of nothing" -- \
+  "$BIN" autoinstall --first-boot no-such.sh layout.json
+# --image-from: the installer reads a snapshot through restate-proxy.
+expect 2 "autoinstall --image-from of an image file" -- \
+  "$BIN" autoinstall --image-from https://backup.example.com/v1/rb01 --image-token-file x layout.json
+contains "$ERR" "is not a snapshot in a repository" "says it reads a snapshot"
+expect 2 "autoinstall --image-from that is not a proxy's" -- \
+  "$BIN" autoinstall --image-from /srv/restate/web01 layout.json
+contains "$ERR" "--image-from" "says which option"
+expect 2 "autoinstall --image-pin-sha256 that is not one" -- \
+  "$BIN" autoinstall --image-pin-sha256 nope layout.json
+# The same as jobs, as a management agent runs them.
+mkdir -m 700 rjobs
+printf 'command = machine\nimage = %s\noutput = %s\n' "$WORK/layout.json" \
+  "$WORK/rjobs/machine.json" > rjobs/machine.conf
+chmod 644 rjobs/machine.conf
+expect 0 "run a machine job" -- "$BIN" run -q "$WORK/rjobs/machine.conf"
+contains "$(cat rjobs/machine.json 2> /dev/null)" '"root-uuid"' "writes the description"
+printf 'command = autoinstall\nimage = %s\ntarget = vm\nfirst_boot = %s\noutput = %s\n' \
+  "$WORK/layout.json" "$WORK/first.sh" "$WORK/rjobs/user-data" > rjobs/auto.conf
+chmod 644 rjobs/auto.conf
+expect 0 "run an autoinstall job" -- "$BIN" run -q "$WORK/rjobs/auto.conf"
+contains "$(cat rjobs/user-data 2> /dev/null)" "#cloud-config" "writes the file"
+contains "$(cat rjobs/user-data 2> /dev/null)" "first-boot/01-first.sh" "with its first-boot file"
+printf 'command = buildsheet\nimage = %s\ntarget = metal\noutput = %s\n' \
+  "$WORK/layout.json" "$WORK/rjobs/sheet.txt" > rjobs/sheet.conf
+chmod 644 rjobs/sheet.conf
+expect 0 "run a buildsheet job" -- "$BIN" run -q "$WORK/rjobs/sheet.conf"
+check "writes the sheet" test -s rjobs/sheet.txt
 
 expect 0 "scan --all" -- "$BIN" scan -r tree --os=linux --all -q
 contains "$OUT" '"class": "expendable"' "--all records expendable paths"
@@ -935,6 +975,8 @@ check "and keeps the kit" eval 'tar -tf exported.tar | grep -x restate/kit.tar.g
 expect 2 "buildsheet from a snapshot of a tree, not a machine" -- "$BIN" buildsheet repo
 contains "$ERR" "::20260102T000000Z has no machine description" \
   "reads the newest snapshot where it is, and says what it lacks"
+expect 2 "machine of a snapshot of a tree" -- "$BIN" machine repo::20260101T000000Z
+contains "$ERR" "has no machine description" "says it has none"
 expect 2 "autoinstall from a snapshot" -- "$BIN" autoinstall repo::20260101T000000Z
 expect 0 "packages from a snapshot" -- "$BIN" packages repo
 expect 2 "export with nowhere to write" -- "$BIN" export repo
@@ -2081,6 +2123,10 @@ contains "$OUT" '"du_keys": true' "and that du names the keys a repository is en
 contains "$OUT" '"chunk_key_reseal": true' "and that a capture seals the chunking key to its keys"
 contains "$OUT" '"keep_yearly": true' "and that prune keeps yearly snapshots"
 contains "$OUT" '"keep_snapshot": true' "and that prune holds a snapshot it is told to"
+contains "$OUT" '"rebuild_jobs": true' "and that jobs can describe and rebuild a machine"
+contains "$OUT" '"first_boot": true' "and that autoinstall runs files at the first boot"
+contains "$OUT" '"image_from": true' "and that an installer can read a snapshot through a proxy"
+contains "$OUT" '"once"' "and a proxy's grant can be for one restore"
 contains "$OUT" '"rebuild_arch": true' "and that it rebuilds for another processor"
 contains "$OUT" '"program_arch": true' "and records each program's"
 contains "$OUT" '"snapshot_signer": true' "and that snapshots says who signed each"

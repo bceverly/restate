@@ -44,6 +44,32 @@
 #include "layout.h"
 #include "util.h"
 
+/*
+ * With --image-from, what the installer reads the snapshot with
+ * (docs/rebuild-from-proxy.md): each file's content in base64, as the
+ * autoinstall file carries it.
+ */
+struct rs_auto_from {
+    const char         *ref;       /* URL::NAME, as the installer reaches it */
+    const char         *restate;   /* the kit's restate, gzip-compressed */
+    const char         *token;     /* the token file */
+    const char         *ca;        /* the certificate authorities, or NULL */
+    const char *const  *pins;      /* the proxy's public keys, as given */
+    size_t              npins;
+    const char         *key;       /* the secret key to decrypt with, or NULL */
+};
+
+/* Where the installer keeps what --image-from gives it, root's alone, and
+ * the image it exports onto the new disk. */
+#define RS_AUTO_FROM_DIR   "/run/restate-installer"
+#define RS_AUTO_FROM_IMAGE "/target/var/tmp/restate-image.tar"
+
+/* A --first-boot file, read. */
+struct rs_first_boot {
+    const char *name;
+    char       *text;
+};
+
 struct rs_auto_opts {
     enum rs_target        target;
     const char           *image;      /* the image it was made from, or NULL */
@@ -65,6 +91,14 @@ struct rs_auto_opts {
      * from in the file's header; NULL for the one machine. */
     const struct rs_clones *clones;
     const char             *clones_from;
+    /* With --first-boot, what the new system runs at its first boot, after
+     * the restore and its snaps, in this order: each file's name, and what
+     * is in it. */
+    const struct rs_first_boot *first_boot;
+    size_t                      nfirst_boot;
+    /* With --image-from, the snapshot as the installer reads it, in place
+     * of image_at; NULL otherwise. */
+    const struct rs_auto_from  *from;
 };
 
 /* What the configuration of the copies says where the copy's own name goes,

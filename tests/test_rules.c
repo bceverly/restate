@@ -158,9 +158,20 @@ void test_rules(void)
     CHECK(rs_rules_add_builtin(&rs, "freebsd"));
     CHECK_INT(classify(&rs, "/usr/local/bin/nginx"), RS_CLASS_BASELINE);
     CHECK_INT(classify(&rs, "/usr/local/etc/nginx/nginx.conf"), RS_CLASS_STATE);
+    /* A management agent's registration is the machine's own: an --as copy
+     * enrolls as itself. */
+    CHECK_INT(classify(&rs, "/var/db/sysmanage-agent/agent.db"), RS_CLASS_IDENTITY);
+    CHECK_INT(classify(&rs, "/etc/sysmanage-agent.yaml"), RS_CLASS_IDENTITY);
+    rs_rules_free(&rs);
+    rs_rules_init(&rs);
+    CHECK(rs_rules_add_builtin(&rs, "linux"));
+    CHECK_INT(classify(&rs, "/var/snap/sysmanage-agent-strict/common/agent.db"),
+              RS_CLASS_IDENTITY);
+    CHECK_INT(classify(&rs, "/etc/sysmanage-agent.yaml"), RS_CLASS_IDENTITY);
     rs_rules_free(&rs);
     rs_rules_init(&rs);
     CHECK(rs_rules_add_builtin(&rs, "netbsd"));
+    CHECK_INT(classify(&rs, "/var/db/sysmanage-agent/agent.db"), RS_CLASS_IDENTITY);
     CHECK_INT(classify(&rs, "/usr/pkg/bin/bash"), RS_CLASS_BASELINE);
     CHECK_INT(classify(&rs, "/usr/pkg/etc/x"), RS_CLASS_STATE);
     rs_rules_free(&rs);

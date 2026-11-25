@@ -996,6 +996,81 @@ EOF
     left "a capture over its quota"
     rm -f over tree3/etc/quota.conf tree3/etc/quota2.conf
     stop
+
+    # A rebuild's grant (docs/rebuild-from-proxy.md): one snapshot, one
+    # restore, made by --restore-grant.
+    expect 2 "--restore-grant of a snapshot that is not there" -- \
+      "$BIN" --restore-grant rb01 --repository "$WORK/dst" --snapshot 19990101T000000Z \
+      --token-file rb01.token --grants proxy.d
+    contains "$ERR" "has no such snapshot" "says so"
+    if [ ! -e rb01.token ] && [ ! -e proxy.d/rb01.conf ]; then ok; else fail "and writes nothing"; fi
+    expect 2 "--restore-grant for too long" -- \
+      "$BIN" --restore-grant rb01 --repository "$WORK/dst" --snapshot "$SNAP3" \
+      --token-file rb01.token --grants proxy.d --hours 169
+    expect 0 "--restore-grant" -- \
+      "$BIN" --restore-grant rb01 --repository "$WORK/dst" --snapshot "$SNAP3" \
+      --token-file rb01.token --grants proxy.d --hours 2 --label "rebuild of up01"
+    contains "$OUT" "proxy.d/rb01.conf" "names the grant it wrote"
+    contains "$(cat proxy.d/rb01.conf)" "once         = true" "for one restore"
+    contains "$(cat proxy.d/rb01.conf)" "snapshot     = $SNAP3" "of the one snapshot"
+    contains "$(cat proxy.d/rb01.conf)" "operations   = read" "read only"
+    lacks "$(cat proxy.d/rb01.conf)" "$(cat rb01.token)" "with the token's digest, not the token"
+    if [ "$(file_mode rb01.token)" = 600 ]; then ok; else fail "the token only its owner's"; fi
+    expect 2 "--restore-grant over a grant that is there" -- \
+      "$BIN" --restore-grant rb01 --repository "$WORK/dst" --snapshot "$SNAP3" \
+      --token-file rb02.token --grants proxy.d
+    contains "$ERR" "a grant for rb01 is there already" "says so"
+    if [ ! -e rb02.token ]; then ok; else fail "and makes no token"; fi
+    expect 0 "--check-grants reads it" -- "$BIN" --check-grants proxy.d
+    start
+    RB="Authorization: Bearer $(cat rb01.token)"
+    RURL="https://127.0.0.1:$PORT/v1/rb01"
+    RON=(--repository-token-file "$WORK/rb01.token" --repository-ca-file "$WORK/cert.pem")
+    expect 0 "snapshots with a rebuild's grant" -- "${RUN[@]}" snapshots "${RON[@]}" "$RURL"
+    contains "$OUT" "$SNAP3" "lists its snapshot"
+    lacks "$OUT" "$SNAP " "and no other"
+    ask -H "$RB" -d look /v1/rb01/sessions
+    RS="$(printf '%s\n' "$OUT" | tail -n 1)"
+    ask -H "$RB" -H "Restate-Session: $RS" "/v1/rb01/f/snapshots/$SNAP/info"
+    is 404 "another snapshot's file is not there"
+    ask -H "$RB" -H "Restate-Session: $RS" "/v1/rb01/list/snapshots/$SNAP/"
+    is 404 "nor its directory"
+    ask -H "$RB" -H "Restate-Session: $RS" "/v1/rb01/f/snapshots/$SNAP3/info"
+    is 200 "its own snapshot's is"
+    ask -H "$RB" -H "Restate-Session: $RS" /v1/rb01/list/packs/
+    is 200 "the packs are listed"
+    # The pack list: its format's line, then a pack's name a line.
+    NEEDED="$(tail -n +2 "dst/snapshots/$SNAP3/packs" | wc -l | tr -d ' ')"
+    LISTED="$(printf '%s\n' "$OUT" | sed -n 's/^f [0-9]* [0-9]* \([^.]*\)\.idx$/\1/p' | wc -l | tr -d ' ')"
+    if [ "$LISTED" = "$NEEDED" ]; then ok; else fail "only the snapshot's: $LISTED, wanted $NEEDED"; fi
+    OTHER=
+    for f in dst/packs/*.idx; do
+      b="$(basename "$f" .idx)"
+      grep -qxF "$b" "dst/snapshots/$SNAP3/packs" || OTHER="$b"
+    done
+    if [ -n "$OTHER" ]; then
+      ask -H "$RB" -H "Restate-Session: $RS" "/v1/rb01/f/packs/$OTHER.idx"
+      is 404 "a pack it does not need is not there"
+    fi
+    ask -X POST -H "$RB" "/v1/rb01/sessions/$RS/end"
+    if [ ! -e staging/.spent ] || [ -z "$(ls staging/.spent)" ]; then ok; else fail "looking spends nothing"; fi
+    rm -rf rout7 && mkdir rout7
+    expect 0 "the rebuild's restore" -- \
+      "${RUN[@]}" restore -q --allow-unverified --root rout7 "${RON[@]}" "$RURL::$SNAP3"
+    if cmp -s tree3/etc/big.bin rout7/etc/big.bin; then ok; else fail "puts it back whole"; fi
+    if [ -n "$(ls staging/.spent 2> /dev/null)" ]; then ok; else fail "its use is kept"; fi
+    rm -rf rout7 && mkdir rout7
+    expect 2 "a second restore with it" -- \
+      "${RUN[@]}" restore -q --allow-unverified --root rout7 "${RON[@]}" "$RURL::$SNAP3"
+    contains "$ERR" "grant-spent" "is refused: the grant is spent"
+    contains "$ERR" "this grant was for one restore" "saying what that is"
+    stop
+    start
+    RURL="https://127.0.0.1:$PORT/v1/rb01"
+    expect 2 "and with the proxy started again" -- "${RUN[@]}" snapshots "${RON[@]}" "$RURL"
+    contains "$ERR" "grant-spent" "still spent"
+    stop
+    rm -f proxy.d/rb01.conf rb01.token
   else
     printf '  - uploads not run: restate is not beside %s\n' "$BIN"
   fi

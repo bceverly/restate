@@ -172,6 +172,12 @@ void rs_options_free(struct rs_options *o)
     free(o->keep_snapshots);
     o->keep_snapshots = NULL;
     o->nkeep_snapshots = 0;
+    free(o->first_boot);
+    o->first_boot = NULL;
+    o->nfirst_boot = 0;
+    free(o->image_pins);
+    o->image_pins = NULL;
+    o->nimage_pins = 0;
     free(o->trusted);
     o->trusted = NULL;
     o->ntrusted = 0;
@@ -468,6 +474,46 @@ bool rs_options_parse(int argc, char **argv, struct rs_options *o, struct rs_buf
             break;
         case OPT_CLONES:
             o->clones = optarg;
+            break;
+        case OPT_IMAGE_FROM:
+        {
+            struct rs_buf why;
+
+            rs_buf_init(&why);
+            if (!rs_remote_url_ok(optarg, &why))
+            {
+                rs_buf_addf(err, "--image-from: %s", why.data ? why.data : optarg);
+                rs_buf_free(&why);
+                return false;
+            }
+            rs_buf_free(&why);
+            o->image_from = optarg;
+            break;
+        }
+        case OPT_IMAGE_TOKEN_FILE:
+            o->image_token_file = optarg;
+            break;
+        case OPT_IMAGE_CA_FILE:
+            o->image_ca_file = optarg;
+            break;
+        case OPT_IMAGE_PIN_SHA256:
+            if (!rs_remote_pin_ok(optarg) || o->nimage_pins >= 2)
+            {
+                rs_buf_addf(err, "--image-pin-sha256: \"%s\" is not a public key's SHA-256 in "
+                            "base64, or a third one", optarg);
+                return false;
+            }
+            o->image_pins = rs_xreallocarray(o->image_pins, o->nimage_pins + 1,
+                                             sizeof(*o->image_pins));
+            o->image_pins[o->nimage_pins++] = optarg;
+            break;
+        case OPT_IMAGE_DECRYPT_WITH:
+            o->image_decrypt_with = optarg;
+            break;
+        case OPT_FIRST_BOOT:
+            o->first_boot = rs_xreallocarray(o->first_boot, o->nfirst_boot + 1,
+                                             sizeof(*o->first_boot));
+            o->first_boot[o->nfirst_boot++] = optarg;
             break;
         case OPT_READ_ALL:
             o->read_all = true;

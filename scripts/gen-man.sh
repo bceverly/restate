@@ -382,7 +382,15 @@ of
 .B """machine"""
 object, so that it can be rebuilt before the files are put back.
 .B restate machine
-prints the same description on its own.
+prints the same description on its own, as JSON;
+.B restate machine
+.I IMAGE
+prints the one an image, a snapshot
+.RI ( REPO :: NAME ,
+or
+.I REPO
+for its newest) or a saved description holds, with what the capture kept on
+each mount, read where it is and nothing restored.
 .PP
 It records the operating system (from
 .IR os\-release ),
@@ -996,7 +1004,42 @@ behind
 which removes itself; what it says is in its journal): the desktop
 installer ignores an autoinstall file's
 .B snaps
-section, and snapd does not run while the system is being installed. Given
+section, and snapd does not run while the system is being installed. Each
+.B \-\-first\-boot
+.I FILE
+(repeatable) runs in that service too, as root, after the restore and the
+snaps, in the order given; one that fails is said in the journal and the
+rest still run. A file is carried in the autoinstall file, in base64, which
+whoever can fetch the file can read: it is no place for a secret.
+.PP
+With
+.B \-\-image\-from
+.IR URL ,
+a repository behind restate\-proxy, the installer reads the snapshot
+itself, rather than an image at
+.BR \-\-image\-at :
+the late\-commands write the restate in the snapshot's own kit \- the one
+that made the capture, of the machine's release and processor \- with the
+token
+.RB ( \-\-image\-token\-file ),
+the certificate authorities or pins
+.RB ( \-\-image\-ca\-file ", " \-\-image\-pin\-sha256 )
+and the key
+.RB ( \-\-image\-decrypt\-with ,
+needed where the repository is encrypted) into a directory under
+.IR /run ,
+export the snapshot onto the new disk, checked as it is for whom it was
+signed by
+.RB ( \-\-trusted\-key ),
+restore from that, and remove it all. The image argument is the snapshot,
+read where it is by the restate making the file with access of its own;
+the token is a rebuild's, from
+.BR "restate\-proxy \-\-restore\-grant" :
+read only, for that snapshot alone, good for one restore, for hours
+(see
+.BR restate\-proxy (8)).
+Whoever can fetch the file can read the token and the key; the token is
+worth nothing once the restore has had it. Given
 .B \-\-image\-at
 .IR PATH ,
 where the installer will find the image (a disk or share mounted there), its
@@ -2572,13 +2615,18 @@ and the commands each means something to:
 .BR protect ,
 .BR status ,
 .BR list ,
-.B sign
+.BR sign ,
+.BR diff ,
+.BR machine ,
+.B buildsheet
 or
-.BR diff .
+.BR autoinstall .
 .TP
 .B repository
 the repository \- a directory, or a repository behind restate\-proxy (see
-REMOTE REPOSITORIES); every command but estimate.
+REMOTE REPOSITORIES); every command but estimate and autoinstall (whose file
+unpacks an exported image). For machine and buildsheet it is optional: the
+snapshot to describe, or else this machine.
 .TP
 .BR repository_token_file ", " repository_ca_file ", " repository_pin_sha256 " (at most twice)"
 every command but estimate: as
@@ -2591,7 +2639,7 @@ The token file is held to what
 is held to, below.
 .TP
 .B snapshot
-restore, copy, status, list, sign: the snapshot's name, or
+restore, copy, status, list, sign, machine, buildsheet: the snapshot's name, or
 .IR REPO :: NAME
 in place of
 .BR repository ;
@@ -2655,7 +2703,44 @@ for prune, repack and check.
 .BR read_all ", " metadata_only
 check;
 .BR trusted_key " (repeatable)"
-for check, restore, status, list, snapshots and diff.
+for check, restore, status, list, snapshots and diff, and buildsheet and
+autoinstall, whose restore it goes into.
+.TP
+.B image
+machine, buildsheet, autoinstall: the image, or a saved description, to
+describe or rebuild, in place of
+.BR repository ;
+this machine if neither is given.
+.TP
+.BR target ", " firmware ", " arch ", " exact_versions
+buildsheet and autoinstall, as their options;
+.B arch
+and
+.B exact_versions
+for restore too.
+.TP
+.BR image_at ", " clones ", " first_boot " (repeatable)"
+autoinstall, as
+.BR \-\-image\-at ,
+.B \-\-clones
+and
+.BR \-\-first\-boot .
+.TP
+.BR image_from ", " image_token_file ", " image_ca_file ", " image_pin_sha256 " (at most twice), " image_decrypt_with
+autoinstall, as their options; with
+.BR image_from ,
+an autoinstall job takes
+.B repository
+and
+.B snapshot
+too. The token file and the key are held to what
+.B decrypt_with
+is held to, below.
+.TP
+.B as
+restore: as
+.BR \-\-as ,
+a copy with an identity of its own.
 .TP
 .BR include ", " exclude " (repeatable), " check_first ", " plan ", " allow_unverified
 restore;
@@ -2697,7 +2782,7 @@ the script it would run, as
 .B output
 diff: the whole diff, as JSON, readable by
 .B report_group
-as the result is.
+as the result is; machine, buildsheet and autoinstall: what they write.
 .TP
 .B copy_to
 copy: where to \- a repository's directory, or a repository behind

@@ -325,6 +325,78 @@ static void other_jobs(void)
     free(why);
     CHECK(job.opts.packages && job.opts.plan_only);
     rs_job_free(&job);
+    CHECK(parse(&job, "command = restore\nrepository = /r\nas = web02.example.com\n"
+                      "arch = aarch64\nexact_versions = true\npackages = true\n",
+                &why));
+    free(why);
+    CHECK_STR(job.opts.as ? job.opts.as : "", "web02.example.com");
+    CHECK_STR(job.opts.arch ? job.opts.arch : "", "aarch64");
+    CHECK(job.opts.exact_versions);
+    rs_job_free(&job);
+    refused("command = restore\nrepository = /r\nas = not_a_host\n", "as: not a host name");
+
+    TEST_CASE("jobs: machine, buildsheet and autoinstall, of this machine or an image");
+    CHECK(parse(&job, "command = machine\noutput = /var/lib/m.json\n", &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_MACHINE);
+    CHECK_INT(job.opts.nargs, 0);
+    CHECK_STR(job.opts.output ? job.opts.output : "", "/var/lib/m.json");
+    CHECK(!job.opts.json);
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = machine\nrepository = /r\nsnapshot = 20261020T030000Z\n",
+                &why));
+    free(why);
+    CHECK_INT(job.opts.nargs, 1);
+    CHECK_STR(job.opts.nargs ? job.opts.args[0] : "", "/r::20261020T030000Z");
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = buildsheet\nsnapshot = /r::a\ntarget = vm\n"
+                      "firmware = uefi\narch = x86_64\nexact_versions = yes\n"
+                      "trusted_key = /k.asc\noutput = /var/lib/b.txt\n",
+                &why));
+    free(why);
+    CHECK_STR(job.opts.nargs ? job.opts.args[0] : "", "/r::a");
+    CHECK_STR(job.opts.target ? job.opts.target : "", "vm");
+    CHECK_STR(job.opts.firmware ? job.opts.firmware : "", "uefi");
+    CHECK(job.opts.exact_versions && job.opts.ntrusted == 1);
+    rs_job_free(&job);
+    CHECK(parse(&job, "command = autoinstall\nimage = /srv/web01.tar\n"
+                      "image_at = /media/image/web01.tar\nclones = /etc/restate/c.csv\n"
+                      "target = metal\noutput = /srv/pxe/user-data\n",
+                &why));
+    free(why);
+    CHECK_INT(job.opts.command, CMD_AUTOINSTALL);
+    CHECK_STR(job.opts.nargs ? job.opts.args[0] : "", "/srv/web01.tar");
+    CHECK_STR(job.opts.image_at ? job.opts.image_at : "", "/media/image/web01.tar");
+    CHECK_STR(job.opts.clones ? job.opts.clones : "", "/etc/restate/c.csv");
+    rs_job_free(&job);
+    refused("command = autoinstall\nrepository = /r\n", "with image_from");
+    CHECK(parse(&job, "command = autoinstall\nrepository = /srv/restate/web01\n"
+                      "snapshot = 20261120T030000Z\n"
+                      "image_from = https://backup.example.com:8443/v1/web01-rebuild\n"
+                      "image_token_file = /run/restate/rb.token\n"
+                      "image_ca_file = /etc/restate/ca.pem\n"
+                      "image_decrypt_with = /etc/restate/keys/rb.gpg\n"
+                      "output = /srv/pxe/web01/user-data\n",
+                &why));
+    free(why);
+    CHECK_STR(job.opts.nargs ? job.opts.args[0] : "", "/srv/restate/web01::20261120T030000Z");
+    CHECK_STR(job.opts.image_from ? job.opts.image_from : "",
+              "https://backup.example.com:8443/v1/web01-rebuild");
+    CHECK_STR(job.opts.image_token_file ? job.opts.image_token_file : "",
+              "/run/restate/rb.token");
+    CHECK(job.opts.image_ca_file && job.opts.image_decrypt_with);
+    rs_job_free(&job);
+    refused("command = autoinstall\nimage = /i.tar\nimage_from = /srv/r\n",
+            "image_from: not a repository behind restate-proxy");
+    refused("command = restore\nrepository = /r\nimage_from = https://h/v1/c\n",
+            "image_from means nothing");
+    refused("command = buildsheet\nimage = /i.tar\nrepository = /r\n", "give one of them");
+    refused("command = buildsheet\nsnapshot = a\n", "snapshot needs repository");
+    refused("command = buildsheet\ntarget = cloud\n", "target: not vm or metal");
+    refused("command = buildsheet\nfirmware = coreboot\n", "firmware: not uefi or bios");
+    refused("command = buildsheet\narch = vax\n", "arch: not a processor");
+    refused("command = machine\ntarget = vm\n", "target means nothing to a machine job");
+    refused("command = capture\nrepository = /r\nas = x\n", "as means nothing");
 }
 
 static void bad_jobs(void)

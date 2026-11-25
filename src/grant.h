@@ -16,6 +16,10 @@
  *   bandwidth    = 08-18 2MiB/s
  *   bandwidth    = 20MiB/s
  *
+ * And for a rebuild's one restore (docs/rebuild-from-proxy.md), with
+ * operations = read alone: snapshot = NAME, the one snapshot it reads, and
+ * once = true, one read session and none after it has ended.
+ *
  * Read as strictly as a job file: an unknown key, a key given twice that may
  * not be, a value of the wrong kind, a line that is not "key = value" -- any
  * of them, and the file grants nothing. Only a file named CLIENT.conf is a
@@ -60,6 +64,8 @@ struct rs_grant {
     uint64_t      bandwidth[RS_GRANT_HOURS];
     uint32_t      bandwidth_hours;
     bool          bandwidth_default; /* whether a RATE alone was given */
+    char         *snapshot;         /* the one snapshot it reads, or NULL for all */
+    bool          once;             /* one read session, and none after it */
 };
 
 /* Whether `name` is a client's name: 1 to 64 of A-Z a-z 0-9 . _ -, not

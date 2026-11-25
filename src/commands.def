@@ -77,9 +77,10 @@ RS_CMD(CMD_EXPORT,   "export",   "SNAPSHOT",   1,  1,
 RS_CMD(CMD_RESTORE,  "restore",  "IMAGE",      1,  1,
        "put an image's files back under the root (--root, default /): each checked "
        "against the index before it is put in place, with its owner, mode and times")
-RS_CMD(CMD_MACHINE,  "machine",  "",           0,  0,
-       "describe this machine: hardware, firmware, disks, partitions, encryption, "
-       "LVM, RAID, mounts")
+RS_CMD(CMD_MACHINE,  "machine",  "[IMAGE]",    0,  1,
+       "describe this machine, or the one IMAGE (or a snapshot in a repository) was taken "
+       "from, as JSON: hardware, firmware, disks, partitions, encryption, LVM, RAID, mounts, "
+       "network")
 RS_CMD(CMD_PACKAGES, "packages", "[IMAGE]",    0,  1,
        "list what is installed, and where each package came from -- apt, snap, "
        "flatpak, pip, npm, cargo -- here, or on the machine IMAGE was taken from")

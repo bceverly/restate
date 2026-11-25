@@ -317,6 +317,47 @@ void test_sessions(void)
         rs_grant_free(&one);
     }
 
+    TEST_CASE("sessions: a once grant, one read session and none after it");
+    {
+        struct rs_grant     once;
+        struct rs_sessions *t;
+        struct rs_sessions *bare;
+        char                x[RS_SESSION_LEN + 1];
+        char                y[RS_SESSION_LEN + 1];
+        char               *spent_dir = rs_xasprintf("%s/.spent", staging);
+
+        grant_of("rb01", repo, "read", &once);
+        once.once = true;
+        t = rs_sessions_new(8, 10, staging, NULL, NULL);
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_LOOK, 1000, x, &why), 201);
+        CHECK_INT(rs_sessions_end(t, "rb01", x, 1000), 204);
+        /* Looking spends nothing. */
+        CHECK(access(spent_dir, F_OK) != 0);
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_READ, 1001, x, &why), 201);
+        CHECK(access(spent_dir, F_OK) == 0);
+        /* While it is open, looking goes on; another read does not. */
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_LOOK, 1001, y, &why), 201);
+        CHECK_INT(rs_sessions_end(t, "rb01", y, 1001), 204);
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_READ, 1001, y, &why), RS_PROXY_SPENT);
+        CHECK_INT(rs_sessions_end(t, "rb01", x, 1002), 204);
+        /* Once it has ended, nothing. */
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_LOOK, 1003, y, &why), RS_PROXY_SPENT);
+        rs_sessions_free(t, 1004);
+        /* Kept for a proxy started again. */
+        t = rs_sessions_new(8, 10, staging, NULL, NULL);
+        CHECK_INT(rs_sessions_open(t, &once, RS_PROXY_READ, 1005, x, &why), RS_PROXY_SPENT);
+        rs_sessions_free(t, 1006);
+        /* With no staging to keep it in, a once grant reads nothing. */
+        bare = rs_sessions_new(8, 10, NULL, NULL, NULL);
+        rs_buf_reset(&why);
+        CHECK_INT(rs_sessions_open(bare, &once, RS_PROXY_READ, 1007, x, &why), 500);
+        CHECK_CONTAINS(why.data ? why.data : "", "a once grant needs --staging");
+        rs_sessions_free(bare, 1008);
+        rs_test_rmtree(spent_dir);
+        free(spent_dir);
+        rs_grant_free(&once);
+    }
+
     rs_grant_free(&rw);
     rs_grant_free(&ro);
     rs_grant_free(&other);

@@ -165,6 +165,11 @@ static const char *error_text(int status, const char *reason)
     {
         return "this client has as many sessions open as its grant allows; try again later\n";
     }
+    if (strcmp(reason, "grant-spent") == 0)
+    {
+        return "this grant was for one restore, which it has had: the storage host writes "
+               "another for the next\n";
+    }
     if (strcmp(reason, "quota-exceeded") == 0)
     {
         return "this client is over its quota on the storage host\n";
@@ -399,6 +404,90 @@ static char *full_name(const char *dir, const char *name)
     return *dir ? rs_xasprintf("%s/%s", dir, name) : rs_xstrdup(name);
 }
 
+/*
+ * What a grant for one snapshot reaches (docs/rebuild-from-proxy.md): that
+ * snapshot, the packs its pack list names, and the repository's top -- its
+ * marker and chunk keys. Anything else is as if it were not there.
+ */
+struct scope {
+    const char *repository;
+    const char *snapshot;
+    char      **packs;      /* sorted, as a pack list is */
+    size_t      npacks;
+    bool        loaded;
+};
+
+/* The most a pack list is read to: far more names than a snapshot needs. */
+#define PACK_LIST_MAX ((size_t)64 * 1024 * 1024)
+
+static void scope_free(struct scope *sc)
+{
+    rs_repo_free_names(sc->packs, sc->npacks);
+    sc->packs = NULL;
+    sc->npacks = 0;
+}
+
+static int by_name(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* Whether the pack `base` ("20261020T030000Z-4012-0001") is one the
+ * snapshot needs; its pack list read the first time. A snapshot with no
+ * pack list -- from before restate 2.0 -- needs none that can be told. */
+static bool scope_pack(struct scope *sc, const char *base)
+{
+    const char *key = base;
+
+    if (!sc->loaded)
+    {
+        struct rs_store *st = rs_store_local(sc->repository);
+        char            *path = rs_xasprintf("snapshots/%s/packs", sc->snapshot);
+        struct rs_buf    text;
+        struct rs_buf    err;
+
+        rs_buf_init(&text);
+        rs_buf_init(&err);
+        if (!rs_store_read(st, path, PACK_LIST_MAX, &text, &err) ||
+            !rs_repo_parse_pack_list(text.data ? text.data : "", text.len, &sc->packs,
+                                     &sc->npacks))
+        {
+            sc->packs = NULL;
+            sc->npacks = 0;
+        }
+        sc->loaded = true;
+        rs_buf_free(&text);
+        rs_buf_free(&err);
+        free(path);
+        rs_store_free(st);
+    }
+    return sc->npacks > 0 &&
+           bsearch(&key, sc->packs, sc->npacks, sizeof(*sc->packs), by_name) != NULL;
+}
+
+/* Whether `name`, a file or directory in the repository, is in the scope:
+ * the top and the two directories to list (filtered as they are listed),
+ * the snapshot's own directory and files, and its packs' files. */
+static bool in_scope(struct scope *sc, const char *name)
+{
+    if (strncmp(name, "snapshots/", 10) == 0)
+    {
+        const char *rest = name + 10;
+        size_t      len = strcspn(rest, "/");
+
+        return len == strlen(sc->snapshot) && memcmp(rest, sc->snapshot, len) == 0;
+    }
+    if (strncmp(name, "packs/", 6) == 0)
+    {
+        char *base = rs_xstrndup(name + 6, strcspn(name + 6, "."));
+        bool  yes = scope_pack(sc, base);
+
+        free(base);
+        return yes;
+    }
+    return true;
+}
+
 /* Whether a listing of `dir` names `name`: only what the protocol's table of
  * names knows, never a name beginning with "." -- in the top, the marker and
  * the chunk keys; in packs, a pack's files; in snapshots, a snapshot's
@@ -406,17 +495,23 @@ static char *full_name(const char *dir, const char *name)
 static bool listed(const struct rs_store *st, const char *dir, const char *name, void *ctx,
                    char **out)
 {
-    bool keep;
+    struct scope *sc = ctx;
+    bool          keep;
 
     (void)st;
-    (void)ctx;
     if (name[0] == '.')
     {
         return false;
     }
     if (strcmp(dir, "snapshots") == 0)
     {
-        keep = rs_repo_name_valid(name);
+        keep = rs_repo_name_valid(name) && (!sc || strcmp(name, sc->snapshot) == 0);
+    } else if (sc && strcmp(dir, "packs") == 0)
+    {
+        char *full = full_name(dir, name);
+
+        keep = rs_file_kind_of(full) != RS_FK_NONE && in_scope(sc, full);
+        free(full);
     } else
     {
         enum rs_file_kind k;
@@ -433,8 +528,10 @@ static bool listed(const struct rs_store *st, const char *dir, const char *name,
     return keep;
 }
 
-/* The listing of `dir` in the repository of `s`. */
-static void list(const struct rs_proxy_session *s, const char *dir, struct answer *a)
+/* The listing of `dir` in the repository of `s`, of what `sc` reaches if
+ * it is not NULL. */
+static void list(const struct rs_proxy_session *s, const char *dir, struct scope *sc,
+                 struct answer *a)
 {
     struct rs_store     *st = rs_store_local(s->repository);
     struct rs_store_stat is;
@@ -450,7 +547,7 @@ static void list(const struct rs_proxy_session *s, const char *dir, struct answe
         return;
     }
     errno = 0;
-    names = rs_store_list(st, dir, listed, NULL, &n);
+    names = rs_store_list(st, dir, listed, sc, &n);
     if (!names && errno != 0)
     {
         rs_store_free(st);
@@ -607,6 +704,8 @@ static const char *reason_of(int status)
         return "sessions-full";
     case RS_PROXY_CLIENT_FULL:
         return "client-sessions-full";
+    case RS_PROXY_SPENT:
+        return "grant-spent";
     case 507:
         return "quota-exceeded";
     default:
@@ -727,7 +826,8 @@ static void open_session(const struct rs_proxy_conn *c, const struct rs_request 
     {
         /* A client's own limit is said as the proxy's is, 503, which a
          * restate that does not know the reason takes as busy all the same. */
-        fail(a, status == RS_PROXY_CLIENT_FULL ? 503 : status, reason_of(status));
+        fail(a, status == RS_PROXY_CLIENT_FULL ? 503 : status == RS_PROXY_SPENT ? 403 : status,
+             reason_of(status));
         said(a, &message);
         rs_buf_free(&message);
         return;
@@ -1080,6 +1180,7 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
                    char held[RS_SESSION_LEN + 1], char **bound, struct paced *p)
 {
     struct rs_proxy_session s;
+    struct scope            sc;
     const struct rs_grant  *g;
     const char             *sid;
     int64_t                 now = c->now ? c->now : (int64_t)time(NULL);
@@ -1184,6 +1285,7 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
     /* The session: given, the client's own, and not ended -- in the path,
      * for an upload and a commit, and in its header for the rest. */
     memset(&s, 0, sizeof(s));
+    memset(&sc, 0, sizeof(sc));
     sid = route->session[0] ? route->session : req->session;
     if (sid[0] == '\0')
     {
@@ -1206,10 +1308,20 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         fail(a, 404, "not-found");
         return;
     }
+    /* A grant for one snapshot: nothing else of the repository is there. */
+    sc.repository = s.repository;
+    sc.snapshot = g->snapshot;
+    if (g->snapshot && (route->endpoint == RS_EP_LIST || route->endpoint == RS_EP_FILE) &&
+        !in_scope(&sc, route->name ? route->name : ""))
+    {
+        scope_free(&sc);
+        fail(a, 404, "not-found");
+        return;
+    }
     switch (route->endpoint)
     {
     case RS_EP_LIST:
-        list(&s, route->name, a);
+        list(&s, route->name, g->snapshot ? &sc : NULL, a);
         break;
     case RS_EP_UPLOAD:
         upload(c, req, route, &s, b, a);
@@ -1222,6 +1334,7 @@ static void decide(const struct rs_proxy_conn *c, const struct rs_request *req,
         file(&s, req, route->name, route->kind, a);
         break;
     }
+    scope_free(&sc);
 }
 
 static const char *method_name(enum rs_method m)

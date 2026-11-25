@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "json.h"
+#include "repo.h"
 #include "store.h"
 #include "token.h"
 
@@ -83,6 +84,7 @@ void rs_grant_free(struct rs_grant *g)
     free(g->client);
     free(g->repository);
     free(g->label);
+    free(g->snapshot);
     memset(g, 0, sizeof(*g));
 }
 
@@ -427,12 +429,14 @@ enum key {
     KEY_LABEL,
     KEY_MAX_SESSIONS,
     KEY_BANDWIDTH,
+    KEY_SNAPSHOT,
+    KEY_ONCE,
     KEYS
 };
 
 static const char *const key_names[KEYS] = { "repository", "operations", "token_sha256",
                                               "expires", "label", "max_sessions",
-                                              "bandwidth" };
+                                              "bandwidth", "snapshot", "once" };
 
 const char *const *rs_grant_keys(size_t *n)
 {
@@ -513,6 +517,32 @@ static bool take_value(enum key k, const char *v, size_t vlen, struct rs_grant *
     }
     case KEY_BANDWIDTH:
         return bandwidth_of(v, vlen, g, err);
+    case KEY_SNAPSHOT:
+    {
+        char *name = rs_xstrndup(v, vlen);
+
+        if (!rs_repo_name_valid(name))
+        {
+            rs_buf_addstr(err, "snapshot: not a snapshot's name, as restate snapshots lists it");
+            free(name);
+            return false;
+        }
+        g->snapshot = name;
+        return true;
+    }
+    case KEY_ONCE:
+        if (vlen == 4 && memcmp(v, "true", 4) == 0)
+        {
+            g->once = true;
+            return true;
+        }
+        if (vlen == 5 && memcmp(v, "false", 5) == 0)
+        {
+            g->once = false;
+            return true;
+        }
+        rs_buf_addstr(err, "once: not true or false");
+        return false;
     case KEYS:
     default:
         break;
@@ -624,6 +654,13 @@ bool rs_grant_parse(const char *client, const char *text, size_t len, struct rs_
             rs_buf_addf(err, "it has no %s, which every grant has", key_names[k]);
             ok = false;
         }
+    }
+    /* A rebuild's grant reads, and only reads. */
+    if (ok && (g->snapshot || g->once) && g->operations != RS_GRANT_READ)
+    {
+        rs_buf_addf(err, "%s is for a grant whose operations is read alone",
+                    g->snapshot ? "snapshot" : "once");
+        ok = false;
     }
     if (!ok)
     {

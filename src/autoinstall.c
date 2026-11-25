@@ -213,7 +213,18 @@ static void header(struct gen *g)
                   "# The installer formats the volumes itself, so the restore keeps its\n"
                   "# /etc/fstab and /etc/crypttab rather than the old ones.\n");
     other_processor(g);
-    if (g->o->packages && g->o->image_at)
+    if (g->o->packages && g->o->from)
+    {
+        rs_buf_addf(g->out,
+                    "#\n"
+                    "# The late-commands read the snapshot from %s\n"
+                    "# through restate-proxy, export it onto the new disk, install the packages\n"
+                    "# and restore the files from it, then remove it. They carry the restate\n"
+                    "# that does it -- the snapshot's own -- the proxy's token%s; so whoever can\n"
+                    "# fetch this file can read them. The token is a rebuild's, good for one\n"
+                    "# restore of this snapshot alone (restate-proxy --restore-grant).\n",
+                    g->o->from->ref, g->o->from->key ? " and the key that decrypts it" : "");
+    } else if (g->o->packages && g->o->image_at)
     {
         rs_buf_addf(g->out,
                     "#\n"
@@ -767,6 +778,13 @@ static void storage(struct gen *g)
 
 /* A late-command: run by the installer with sh -c, on the installer's side,
  * the new system mounted at /target. */
+/* The image the late-commands restore from: --image-at's, or the one
+ * --image-from exports onto the new disk; NULL for none. */
+static const char *source_image(const struct gen *g)
+{
+    return g->o->from ? RS_AUTO_FROM_IMAGE : g->o->image_at;
+}
+
 static void late(struct gen *g, const char *cmd)
 {
     rs_buf_addstr(&g->late, "    - ");
@@ -874,19 +892,41 @@ static bool snap_word(const char *s)
            strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789-./_") == strlen(s);
 }
 
+/* A --first-boot file's name as the new system keeps it: its own, with
+ * anything but letters, digits, '.', '-' and '_' made '_'. */
+static char *first_boot_name(size_t i, const char *name)
+{
+    const char *base = strrchr(name, '/') ? strrchr(name, '/') + 1 : name;
+    char       *out = rs_xasprintf("/var/lib/restate/first-boot/%02zu-%s", i + 1,
+                                   base[0] && base[0] != '.' ? base : "file");
+    char       *p;
+
+    for (p = out + strlen("/var/lib/restate/first-boot/"); *p; p++)
+    {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+              *p == '.' || *p == '-' || *p == '_'))
+        {
+            *p = '_';
+        }
+    }
+    return out;
+}
+
 /*
- * The snaps, at the new system's first boot. Not in the installer's snaps
- * section: the desktop installer ignores it ("not interactive for desktop"),
- * and snapd does not run in the installer's chroot. So a service is left in
- * the new system that installs them once snapd has seeded, then removes
- * itself; what it says goes to the journal (journalctl -u restate-firstboot).
+ * What is left to the new system's first boot: the snaps, and the
+ * --first-boot files. The snaps are not in the installer's snaps section:
+ * the desktop installer ignores it ("not interactive for desktop"), and
+ * snapd does not run in the installer's chroot. So a service is left in the
+ * new system that installs them once snapd has seeded, then runs each
+ * --first-boot file in the order given, then removes itself; what they say
+ * goes to the journal (journalctl -u restate-firstboot).
  */
-static void first_boot_snaps(struct gen *g)
+static void first_boot_service(struct gen *g)
 {
     static const char *const implied[] = { "base", "core", "os", "snapd", "gadget", "kernel" };
     static const char        unit[] =
         "[Unit]\n"
-        "Description=restate: install the snaps the old machine had\n"
+        "Description=restate: finish the rebuild at the first boot\n"
         "Wants=network-online.target\n"
         "After=network-online.target snapd.seeded.service\n"
         "ConditionPathExists=/usr/local/sbin/restate-firstboot\n"
@@ -897,7 +937,7 @@ static void first_boot_snaps(struct gen *g)
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n";
-    const struct rs_jval *arr = rs_jobject_get(g->o->packages, "snap");
+    const struct rs_jval *arr = g->o->packages ? rs_jobject_get(g->o->packages, "snap") : NULL;
     struct rs_buf         sh;
     struct rs_buf         copies;   /* late-commands copying kept snaps */
     size_t                i;
@@ -906,11 +946,6 @@ static void first_boot_snaps(struct gen *g)
 
     rs_buf_init(&sh);
     rs_buf_init(&copies);
-    rs_buf_addstr(&sh, "#!/bin/sh\n"
-                       "# Written by restate: the snaps the old machine had, installed once\n"
-                       "# the new one is running, by restate-firstboot.service, which this\n"
-                       "# then removes.\n"
-                       "snap wait system seed.loaded\n");
     for (i = 0; arr && arr->type == RS_JARRAY && i < arr->n; i++)
     {
         const struct rs_jval *sn = &arr->items[i];
@@ -984,12 +1019,62 @@ static void first_boot_snaps(struct gen *g)
         }
         any++;
     }
-    rs_buf_addstr(&sh, "systemctl disable restate-firstboot.service\n"
-                       "rm -rf /var/lib/restate/snaps\n"
-                       "rm -f /etc/systemd/system/restate-firstboot.service \"$0\"\n");
-    if (any > 0)
+    if (any == 0 && g->o->nfirst_boot == 0)
     {
-        late_comment(g, "The snaps, at the first boot: a service that installs them, then goes.");
+        rs_buf_free(&sh);
+        rs_buf_free(&copies);
+        return;
+    }
+    {
+        struct rs_buf script;
+
+        rs_buf_init(&script);
+        rs_buf_addstr(&script, "#!/bin/sh\n"
+                               "# Written by restate: what the old machine had that is put back\n"
+                               "# once the new one is running -- its snaps, then each first-boot\n"
+                               "# file, in order -- by restate-firstboot.service, which this then\n"
+                               "# removes.\n");
+        if (any > 0)
+        {
+            rs_buf_addstr(&script, "snap wait system seed.loaded\n");
+            rs_buf_add(&script, sh.data, sh.len);
+        }
+        for (i = 0; i < g->o->nfirst_boot; i++)
+        {
+            char *kept = first_boot_name(i, g->o->first_boot[i].name);
+
+            rs_buf_addstr(&script, "if ! ");
+            rs_shell_word(&script, kept);
+            rs_buf_addstr(&script, "; then echo 'restate: the first-boot file ");
+            rs_buf_addstr(&script, kept + strlen("/var/lib/restate/first-boot/"));
+            rs_buf_addstr(&script, " failed' >&2; fi\n");
+            free(kept);
+        }
+        rs_buf_addstr(&script, "systemctl disable restate-firstboot.service\n"
+                               "rm -rf /var/lib/restate/snaps /var/lib/restate/first-boot\n"
+                               "rm -f /etc/systemd/system/restate-firstboot.service \"$0\"\n");
+        rs_buf_free(&sh);
+        sh = script;
+    }
+    {
+        const char *says = "At the first boot, a service that runs the first-boot files, then "
+                           "goes.";
+
+        if (any > 0)
+        {
+            says = g->o->nfirst_boot > 0 ? "At the first boot, a service that installs the "
+                                           "snaps, runs the first-boot files, then goes."
+                                         : "The snaps, at the first boot: a service that "
+                                           "installs them, then goes.";
+        }
+        late_comment(g, says);
+        for (i = 0; i < g->o->nfirst_boot; i++)
+        {
+            char *kept = first_boot_name(i, g->o->first_boot[i].name);
+
+            late_file(g, kept, g->o->first_boot[i].text, "0700");
+            free(kept);
+        }
         {
             const char *p = copies.data;
 
@@ -1179,7 +1264,7 @@ static void late_packages(struct gen *g)
     const struct rs_jval *fp = rs_jobject_get(pk, "flatpak");
     const struct rs_jval *alts = rs_jobject_get(pk, "alternatives");
     const struct rs_jval *skip = NULL;
-    const char           *img = g->o->image_at;
+    const char           *img = source_image(g);
     struct rs_buf         b;
     char                **words;
     size_t                n;
@@ -1316,7 +1401,7 @@ static void late_packages(struct gen *g)
     {
         /* restate restore, from the kit -- each file checked against the
          * index before it lands -- or tar, if the kit had no restate. */
-        if (g->o->trust_keyring)
+        if (!g->o->from && g->o->trust_keyring)
         {
             struct rs_buf k;
 
@@ -1326,12 +1411,13 @@ static void late_packages(struct gen *g)
             late_comment(g, "The keys the image must be signed with, for restore to check.");
             late(g, k.data);
             rs_buf_free(&k);
-        } else if (g->o->trust && strcmp(g->o->trust, "--allow-unverified") == 0)
+        } else if (!g->o->from && g->o->trust && strcmp(g->o->trust, "--allow-unverified") == 0)
         {
             late_comment(g, "Not checked for whom it was signed by: autoinstall was given no "
                             "--trusted-key.");
         }
-        rs_image_restore_command(&b, img, "/target", true, g->o->trust,
+        rs_image_restore_command(&b, img, "/target", true,
+                                 g->o->from ? "--allow-unverified" : g->o->trust,
                                  g->o->clones ? RS_AUTO_COPY : NULL);
     }
     late(g, b.data);
@@ -1388,17 +1474,103 @@ static void extras(struct gen *g)
     }
 }
 
+/* `name`, `b64` decoded into a file of its own under RS_AUTO_FROM_DIR. */
+static void late_secret(struct gen *g, const char *name, const char *b64, bool gunzip)
+{
+    struct rs_buf cmd;
+
+    rs_buf_init(&cmd);
+    rs_buf_addf(&cmd, "umask 077 && echo %s | base64 -d %s> " RS_AUTO_FROM_DIR "/%s", b64,
+                gunzip ? "| gzip -dc " : "", name);
+    late(g, cmd.data);
+    rs_buf_free(&cmd);
+}
+
+/*
+ * --image-from: the snapshot exported from the repository onto the new disk,
+ * by the restate in its own kit, with the token, certificate and key the file
+ * carries, checked for whom it was signed by as it is: the image the rest of
+ * the late-commands restore from.
+ */
+static void late_fetch(struct gen *g)
+{
+    const struct rs_auto_from *f = g->o->from;
+    struct rs_buf              cmd;
+    size_t                     i;
+
+    late_comment(g, "The snapshot, from the repository through restate-proxy, by the restate "
+                    "in its own kit.");
+    late(g, "umask 077 && rm -rf " RS_AUTO_FROM_DIR " && mkdir -p " RS_AUTO_FROM_DIR);
+    late_secret(g, "restate", f->restate, true);
+    late(g, "chmod 0700 " RS_AUTO_FROM_DIR "/restate");
+    late_secret(g, "token", f->token, false);
+    if (f->ca)
+    {
+        late_secret(g, "ca.pem", f->ca, false);
+    }
+    if (f->key)
+    {
+        late_secret(g, "key.gpg", f->key, false);
+    }
+    rs_buf_init(&cmd);
+    if (g->o->trust_keyring)
+    {
+        rs_buf_addf(&cmd, "umask 077 && echo %s | base64 -d > %s", g->o->trust_keyring,
+                    RS_AUTO_TRUSTED_KEYRING);
+        late(g, cmd.data);
+        rs_buf_reset(&cmd);
+    } else
+    {
+        late_comment(g, "Not checked for whom it was signed by: autoinstall was given no "
+                        "--trusted-key.");
+    }
+    rs_buf_addstr(&cmd, "mkdir -p /target/var/tmp && " RS_AUTO_FROM_DIR "/restate export ");
+    rs_shell_word(&cmd, f->ref);
+    rs_buf_addstr(&cmd, " -o " RS_AUTO_FROM_IMAGE
+                        " --repository-token-file " RS_AUTO_FROM_DIR "/token");
+    if (f->ca)
+    {
+        rs_buf_addstr(&cmd, " --repository-ca-file " RS_AUTO_FROM_DIR "/ca.pem");
+    }
+    for (i = 0; i < f->npins; i++)
+    {
+        rs_buf_addstr(&cmd, " --repository-pin-sha256 ");
+        rs_shell_word(&cmd, f->pins[i]);
+    }
+    if (f->key)
+    {
+        rs_buf_addstr(&cmd, " --decrypt-with " RS_AUTO_FROM_DIR "/key.gpg");
+    }
+    if (g->o->trust_keyring)
+    {
+        rs_buf_addstr(&cmd, " --trusted-key " RS_AUTO_TRUSTED_KEYRING);
+    }
+    rs_buf_addstr(&cmd, " || { echo 'restate: the snapshot could not be exported from the "
+                        "repository' >&2; exit 1; }");
+    late(g, cmd.data);
+    rs_buf_free(&cmd);
+}
+
+/* What --image-from left: the image, and what the installer read it with. */
+static void late_fetched(struct gen *g)
+{
+    late_comment(g, "The exported image, the token and the key, gone.");
+    late(g, "rm -rf " RS_AUTO_FROM_IMAGE " " RS_AUTO_FROM_DIR " " RS_AUTO_TRUSTED_KEYRING);
+}
+
 /* Every late-command, under one key. */
 static void late_commands(struct gen *g)
 {
-    if (g->o->packages && g->o->image_at)
+    if (g->o->packages && g->o->from)
+    {
+        late_fetch(g);
+        late_packages(g);
+        late_fetched(g);
+    } else if (g->o->packages && g->o->image_at)
     {
         late_packages(g);
     }
-    if (g->o->packages)
-    {
-        first_boot_snaps(g);
-    }
+    first_boot_service(g);
     if (g->late.len)
     {
         rs_buf_addstr(g->out, "  late-commands:\n");
@@ -1534,7 +1706,7 @@ static void copies_file(struct gen *g, const struct rs_buf *config)
                 "#\n"
                 "#   %-20s %-17s %-20s %s\n",
                 c->count, g->o->clones_from ? g->o->clones_from : "a list",
-                g->o->packages && g->o->image_at
+                g->o->packages && source_image(g)
                     ? "# The restore is made with --as, so that each copy has an identity of its\n"
                       "# own, and keeps the network the installer gave it.\n"
                     : "# Restore each with restate restore --as NAME, so that it has an identity\n"
@@ -1637,6 +1809,13 @@ bool rs_autoinstall(const struct rs_jval *machine, const struct rs_auto_opts *o,
     g.out = out;
     if (rs_bsdsheet_for(rs_jobject_str(g.sys, "kernel_name")))
     {
+        if (o->nfirst_boot > 0)
+        {
+            rs_buf_addstr(err, "--first-boot is for Ubuntu's autoinstall files, for now: "
+                               "FreeBSD's and OpenBSD's are to have it with their unattended "
+                               "restore");
+            return false;
+        }
         /* FreeBSD's bsdinstall script, OpenBSD's install.conf. */
         return rs_bsdsheet_autoinstall(machine, o, out, err);
     }
