@@ -1,0 +1,370 @@
+Package: restate-proxy
+Architecture: amd64
+Version: 3.2.1.14~bookworm1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1052
+Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/bookworm/restate-proxy_3.2.1.14~bookworm1_amd64.deb
+Size: 421208
+MD5sum: 96ac5ba689bd5c239aef137c63c156eb
+SHA1: 4f62805ed67afe7cd3dc01b45ce0a55f746418f5
+SHA256: e3d98197b871929cd2cb4181da465b207b14570365913477afb33bee53cbf693
+SHA512: f6e021404b145a4827fa1d0baf2aeef69cad136b41e6f6571d5bf3d941ef51a14c30f2290ce231f842ce66a8163e8faf22c02dc40e2903b4a8834820b457249e
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: amd64
+Version: 3.2.1.15~bookworm1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1052
+Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/bookworm/restate-proxy_3.2.1.15~bookworm1_amd64.deb
+Size: 420856
+MD5sum: 9b0a6aeac8b5f5af578749485154dad1
+SHA1: 9cce37b757f07314b9cf180a923acfc51f658c9c
+SHA256: 09ce30a17382910178bb4c560caf4821696c00d98f33e03c67c1ff29d3aa0593
+SHA512: 3f965bab271b01b927fada4c649028756ec5312f7951e83971189639ba0566b1b3347b7cbb3947e771ef6606734a4455e9bd4d23cb2b6af3e7feddf12798944e
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: amd64
+Version: 3.3.0.2~bookworm1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1072
+Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/bookworm/restate-proxy_3.3.0.2~bookworm1_amd64.deb
+Size: 429204
+MD5sum: 02f4d3c8483009589714a9c1da4a116f
+SHA1: 9691c113c76b2c8d67c9bc580a7fa23b0cd95e00
+SHA256: 020abec56b29a8a98a4bb0106c80e134b387b8fbe5e6e9d7a6b95d6860c7fc4d
+SHA512: 6803610cbb0fd6ed7b020a9a0413250a3f978f3644cf8bcf7b77f9b14ea70868b2ead7c9dc475937f54abe503f17ad378a14a2a65c15e7eb9816de516368aa02
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: amd64
+Version: 3.4.0.1~bookworm1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1076
+Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/bookworm/restate-proxy_3.4.0.1~bookworm1_amd64.deb
+Size: 432548
+MD5sum: 3daa69ce5dbf4d461bc04eb5060422e4
+SHA1: 6d74f22913061e559bbe16e9d07b0adec3215d37
+SHA256: bf71e25e3265f733a6e68bc83f87ee45a6492b6ab273a7c0708e7726ace82878
+SHA512: 596ecaba6b4effbe80370b8f6112ba62b7b2cf58f6587577bf454d25a8e02976241024e97b4bd60098b684b0235d4d9701b8a195fc84d00628ffd03627963904
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: amd64
+Version: 3.5.0.2~bookworm1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1100
+Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/bookworm/restate-proxy_3.5.0.2~bookworm1_amd64.deb
+Size: 441952
+MD5sum: 4c0064b6f66d0ad00a03998ff7be9038
+SHA1: edfa1b1d151874d940fe7cf1227e27706fb13cf0
+SHA256: a4705409bd8965b6650b6ac976f567fc248ec9e9292b4d4af6c74f08c7a9df22
+SHA512: f7174ea45cc7d9e0a54c1ecdeb28150c1f167570b7665c3b2b72123f4c12fa8967a780a81285260a1cc34305f2bedc80cf7fcd5d1ea3a65e894e90faba37822c
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate
+Architecture: amd64
+Version: 3.2.1.14~bookworm1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1069
+Depends: libc6 (>= 2.34), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/bookworm/restate_3.2.1.14~bookworm1_amd64.deb
+Size: 446260
+MD5sum: 6e32db15cf2b22c96cd8009fffc8329c
+SHA1: 2100fbbd35412109b6be810b672dfca32a1b5b8c
+SHA256: fcc52d0fbb0cb3a07d0b2cdb4a3eb51572120bce4fad0f2016deb99c39e3c2ee
+SHA512: 94cb948b40181f5122c8ddeabb1a6529e1d90c8d85efde9eb005f8ad7fc6c36ce9790a9e01c9ce8377faa5663bc14b4c00fc6b3c6c56132cb942c75696c827c7
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: amd64
+Version: 3.2.1.15~bookworm1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1074
+Depends: libc6 (>= 2.34), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/bookworm/restate_3.2.1.15~bookworm1_amd64.deb
+Size: 447172
+MD5sum: fbb77793ca05b646543719d7cc08084b
+SHA1: 88b150002d59adbef4d35eb5ba3a4160370313b2
+SHA256: 78f7078ccaf3e80ceaa82d5159c3b4ce8a52394b9f1de2dfb04894c8958e718b
+SHA512: 1e655a4b65040ba8cdde4d3dd17dc56baacceb5eb85df365b9e1f8b9471d437e13b574691f1335ed9d57e3d954dd1b0b564782cf61392ff86aeb59b28e7f7f19
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: amd64
+Version: 3.3.0.2~bookworm1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1091
+Depends: libc6 (>= 2.34), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/bookworm/restate_3.3.0.2~bookworm1_amd64.deb
+Size: 456372
+MD5sum: 711c5f14b547bba3d855fe7ab08c8c7e
+SHA1: d9c601c7d1d806432f2371924008bab4d44e4bc5
+SHA256: 175f2710ab21c0f9acf6cb1cb37c6305e4cc28a9737c316b22ab67a1f28782ad
+SHA512: 95b39a76b4db491c89fcc02e3451385681c97cb5f8b0dd6b932d589b04d3cba2ab608ccec44aeda0d26d65ca859e13708f6dfd486f1bd2a959d93ef28178c231
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: amd64
+Version: 3.4.0.1~bookworm1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1095
+Depends: libc6 (>= 2.34), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/bookworm/restate_3.4.0.1~bookworm1_amd64.deb
+Size: 459800
+MD5sum: 677087c2ee435e2b73a9dfdcbc3530b5
+SHA1: 913b64775e56b4b0179dff01aa8c8148b6232779
+SHA256: 3366c3d052526a5e4bd091b61352a9932269d09569cf8eb748a5ff73e5355414
+SHA512: 7d07a9a1d04b3855325c336b25057b19e75d262d6a07c44eb596f9b63c5f3e36f753bc7ba03cc68b0143fb1f7767631612368c19507b6be4908a86ac789295c0
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: amd64
+Version: 3.5.0.2~bookworm1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1116
+Depends: libc6 (>= 2.34), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/bookworm/restate_3.5.0.2~bookworm1_amd64.deb
+Size: 466952
+MD5sum: 9d496cb73f7e4d1ee2c39adade545764
+SHA1: 10dfb05b2ba787c7abdb15ae6fc2778ba84cecc2
+SHA256: ba25b85b0a5ebcc6d8912a11f8ee29478a13aeb77f79a83f4e455ce813b98a39
+SHA512: 5995bc5cb7cabd5cf6637b33f892f8cbaba423d0675fbb3e3008c3dff1c5b114fbf4266596b392974dd8c7249263d8a4d1be78d65fea9756d32040fa450b546a
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+

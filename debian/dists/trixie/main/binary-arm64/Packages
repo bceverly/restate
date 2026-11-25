@@ -1,0 +1,370 @@
+Package: restate-proxy
+Architecture: arm64
+Version: 3.2.1.14~trixie1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1060
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/trixie/restate-proxy_3.2.1.14~trixie1_arm64.deb
+Size: 391028
+MD5sum: 1d0d6b35ca8d42195635799efd589309
+SHA1: 384ba52d1cd7c1d8df9efc56e3bdfb275ce4031a
+SHA256: 16bdf653113aeb610f3095c92655f8b0e559ef76bb07d78b66d4651dcfc3c32d
+SHA512: 6b9ca5bb8ca9d510fded4c1daef7bc915316ad764be30f22ddc017dd25d3ebeb4c25ae03544cd14899eac72268e926d904b03bd5dc51875087db31b95e1bd532
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: arm64
+Version: 3.2.1.15~trixie1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1060
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/trixie/restate-proxy_3.2.1.15~trixie1_arm64.deb
+Size: 390596
+MD5sum: 10a3a8be532d47824c42267bcf22b4a5
+SHA1: c8adaa96f7d38a79909099f3fb72805c1cbc7a98
+SHA256: e63db41b3cc3f2448ade4fc0b2f7bc781eb6f0d2bbbc3cbc3ba228ecf76a7025
+SHA512: ee4eacb003b39da877596dd7a73aef62592144dbcad6158ac973710af44ea3a02e6d7599c13c133e3538b7f3d1ca4b4433d462d8e4ffe3c7f9007542fe960346
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: arm64
+Version: 3.3.0.2~trixie1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1124
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/trixie/restate-proxy_3.3.0.2~trixie1_arm64.deb
+Size: 398624
+MD5sum: 5cde34d1bfbaa6b0fcd3bc98d7c50a6e
+SHA1: 01672252d7504c9efffd6165efe2f85fcb10ae91
+SHA256: 201694bd9114efc1db35a629f78b2fc2261825cb08f78d52233175128909541c
+SHA512: 50beaa8226e51f497f8e28ad45d181205c618c4ad2f625f5cf4a637013c601c408f515908d43774a1aa7fe07ceb0b8cd276c28ab0c373cee49076545495dfaed
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: arm64
+Version: 3.4.0.1~trixie1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1124
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/trixie/restate-proxy_3.4.0.1~trixie1_arm64.deb
+Size: 401584
+MD5sum: 0649db78aa28d84766833f70ad190d48
+SHA1: 93b7fbab4b144f919c63ae477a23a88f366fb9f9
+SHA256: 04355330835d30599f218cdaa3e66e6f08824705f2a7e1598c8e55301d7df602
+SHA512: 87de8423161939ee54bbe2c70da1fc463ef07bc39d94212d4a30b727c711f2778a6a3de085654989dd28c1de214d9a5af37a42dce9692a91a3f586b3c20515da
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate-proxy
+Architecture: arm64
+Version: 3.5.0.2~trixie1
+Priority: optional
+Section: admin
+Source: restate
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1124
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0), adduser
+Suggests: restate
+Filename: pool/trixie/restate-proxy_3.5.0.2~trixie1_arm64.deb
+Size: 408752
+MD5sum: 265953f5f6ba8683151748ae62d39ff8
+SHA1: c0e82f086cc4a4c282b69e2a22499a9b1f2012ac
+SHA256: 5d1a7fa1999bb68b930383a6f997993c5f338f8e4c20dd18263b5b42ba81be89
+SHA512: 26d8b430cb0793b77004831253827c68420330c45ac4fa2f4ef551ae132159c0b7f334d37426d4586ba728f14f42890b3ff006732b90edfcb8b1664db66998f4
+Homepage: https://github.com/bceverly/restate
+Description: serve restate repositories over HTTPS, append-only
+ restate-proxy runs on the machine that stores restate repositories, and
+ lets the machines that capture into them reach them over HTTPS without
+ being able to remove or change what is there: a client may add a snapshot,
+ and read, list and restore what its grant allows, and a capture cut off
+ part way leaves nothing of itself behind.
+ .
+ Each client has a grant of its own in /etc/restate/proxy.d, naming its
+ repository, what it may do and the hash of its token. Each connection is
+ served by a process of its own, confined by Landlock and seccomp.
+ .
+ The package installs the restate-proxy service but neither enables nor
+ starts it: it needs a certificate, its key and a grant first. See
+ restate-proxy(8).
+
+Package: restate
+Architecture: arm64
+Version: 3.2.1.14~trixie1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1081
+Depends: libc6 (>= 2.38), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/trixie/restate_3.2.1.14~trixie1_arm64.deb
+Size: 418304
+MD5sum: 2db00188555e84732dd7876bdc86eb0c
+SHA1: 319a5e7449cc547bb9b6cabb00030102a4980820
+SHA256: c17c250a17f80f569544e35990e200e096e66c489379b9401108cd9af70ad2aa
+SHA512: 50a10e1876dcefcbbca2f240cbd6d4119c72d2e45b728ad0a3b6900342558ac5e1b349e68988191c8eb4a552fed93624e00fa9e4cc739c3898ef117f4b55de45
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: arm64
+Version: 3.2.1.15~trixie1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1082
+Depends: libc6 (>= 2.38), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/trixie/restate_3.2.1.15~trixie1_arm64.deb
+Size: 419520
+MD5sum: 2b0e449ebc0bbeb48d6f11ceff61a020
+SHA1: e05d89884ac404ee13fbf77ba0f2a27f789b9027
+SHA256: 5bc3ddb0fb518b679cc044e1db06ecf7f953e38d237a7e2a37f729dcfa8c1644
+SHA512: 0fd7b887a9d9825c05413131aa5660c27e83087842bd7441be3c3b61582ff52deed37e6715ae7de0f48d29e83fc25a8f30ce8c97750fed3562ac651e46df6a37
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: arm64
+Version: 3.3.0.2~trixie1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1147
+Depends: libc6 (>= 2.38), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/trixie/restate_3.3.0.2~trixie1_arm64.deb
+Size: 427344
+MD5sum: 076ea315aca02c8e1be7b424a3af59c5
+SHA1: 3566028ca74cd6c723709719af1205bb42552c81
+SHA256: 4b85f85b377dc44768e590d1ae074c71a0d25615325fcf340f2774089c31faf2
+SHA512: 90cb8d5cf8b488ea1520b5589f69f05a9d0ffdabd606455b08cb1ab51c0c8d5900bf6546a25a775e1cae9266ba0eafe24af50edd54f81760babab09fc64603ed
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: arm64
+Version: 3.4.0.1~trixie1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1147
+Depends: libc6 (>= 2.38), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/trixie/restate_3.4.0.1~trixie1_arm64.deb
+Size: 430980
+MD5sum: e3ede66b6ed9b103180406900b019582
+SHA1: d64e885991a400f669074e1192b39e86e6edb75e
+SHA256: 6a5ee218125bbc6f8099f31f7349abec57f2d055ecc0ddcabc1ccc312cbb948c
+SHA512: a18f33a0a8f13b19d8cc2fd6902e006f34d2e4f9efce1084e717540ed69b5df0d552d0f5798d7df92ca4a5d1853edc86dd5da90a95a0c4f1e01cfaeaab3e8921
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+
+Package: restate
+Architecture: arm64
+Version: 3.5.0.2~trixie1
+Priority: optional
+Section: admin
+Maintainer: Bryan C. Everly <bryan@theeverlys.com>
+Installed-Size: 1148
+Depends: libc6 (>= 2.38), gpgv
+Recommends: curl, gpg, pigz
+Suggests: dpkg-repack
+Filename: pool/trixie/restate_3.5.0.2~trixie1_arm64.deb
+Size: 437204
+MD5sum: 3ad2e2dc1d1e58d98e68aa90d19cee2c
+SHA1: e30cd5d53c902cba91dbfa71185efa32f9a8d5e2
+SHA256: 3eeaa8aaa9d8b03ab20441012f23f210daadede519857cc3d3d3b1156f1f2961
+SHA512: 5d2bd38f6c9eec4268abc2fcf507eaa448bfef0579623e2818386bb9504193c39d8965a5c5e740abe74310c9a7abb04dec78177e35becae58c0b90254b720cd5
+Homepage: https://github.com/bceverly/restate
+Description: record what makes a machine different from a fresh install
+ restate records what makes a machine different from a fresh install of its
+ operating system, and puts that difference back after a reinstall: onto the
+ same machine, a new one, or a virtual machine.
+ .
+ Every file is classified: what the system regenerates, what is safe to lose,
+ what the installed packages provide unmodified, and the state that makes
+ the machine itself -- configuration changed from what its package shipped,
+ and the files no package owns. Only that state is kept. The packages are
+ recorded instead -- each at its version, with the repositories and keys it
+ came from -- along with the disk layout, LUKS, LVM and RAID, and the
+ machine's hardware.
+ .
+ From that record restate writes a build sheet and an Ubuntu autoinstall
+ file to rebuild the machine, fetches the installer and the exact packages,
+ verified against their vendors' signatures, and restores: the packages
+ first, from the archive or with no network at all, then the files, each
+ checked against the image's signed index.
+ .
+ Captures can go into a repository that stores each file once, encrypted
+ if wanted, with snapshots pruned on a schedule. Databases and virtual
+ machines are paused for exactly as long as their own files take to copy.
+ .
+ One C program that links only libc.
+

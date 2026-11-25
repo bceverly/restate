@@ -1,0 +1,47 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64 arm64
+Codename: trixie
+Components: main
+Date: Wed, 25 Nov 2026 23:07:30 +0000
+Description: restate for Debian trixie
+Label: restate
+Origin: restate
+Suite: trixie
+MD5Sum:
+ 5d85316f6028fce5fb273e634fcbc715            17368 main/binary-amd64/Packages
+ fe6eff3076eb6c022c2605c0c17b383b             3385 main/binary-amd64/Packages.gz
+ 45b0ecf749041440880736f47b1e2ea9            17368 main/binary-arm64/Packages
+ f9479477b803b7a0e9857d8ff49c978f             3383 main/binary-arm64/Packages.gz
+SHA1:
+ 31f40f191137c84d5c2bbd7847dd49f633dc785e            17368 main/binary-amd64/Packages
+ cd3533f5bccd7ea54f863e99fbd80351d33dee32             3385 main/binary-amd64/Packages.gz
+ 1b9114a447045d8e25e056ab954e6ef3844ee316            17368 main/binary-arm64/Packages
+ beed372f6536a3541de53aba310bfb36cefe41a5             3383 main/binary-arm64/Packages.gz
+SHA256:
+ 32b3ca8e3230310d4d9217791a956949ea577ad8f17ba6d61fc7fee62d9f7118            17368 main/binary-amd64/Packages
+ 8eca7e1c1b514d7a17a40500eb22604de2787eb7f63b1a5d8f5caf37062a87c2             3385 main/binary-amd64/Packages.gz
+ 9298bd1cca98155be467b5f8a7b2dc8a913316cd60259065030d06a5d25fcead            17368 main/binary-arm64/Packages
+ ad5bfab0d055d9e2cc3f9aaf26900272b19b79efddd02f3f671b8994d97e84a4             3383 main/binary-arm64/Packages.gz
+SHA512:
+ fd3d4c68c61f002dca42e534437139cdc3ecd36a6de3dc3b4bba79d717eced8b7b2bce6fe34d420663213c59a80502be32920f2fbb44dcab2a01cefa9587f133            17368 main/binary-amd64/Packages
+ 5fcb38c724d7580be8c7cdb489c68a373f4a81046b44b480c601baf08a0cae6be7a80abe3fd4046bdaa84edd5df1a021942dbd656c7868ed8ad9689b6a47016d             3385 main/binary-amd64/Packages.gz
+ a6a1898aef380e7841b916cf7a6e86b7e7b0445e868d4476a4274e63e126f9c535d9df240f1e6c1df84a53e6ad11db7d0b61f8383d758dd4f1ba3094bcbaf12c            17368 main/binary-arm64/Packages
+ 7394f5a03fe0f2348b50a99ae9b3f37c585f4f10f1a11983a9022a500a2e6b4312b9b8bf6e3b3fd59e494b5340486c57d01c264d24fd733a3181e0563214bbbb             3383 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEwxfip8SCDAWS0lcMBTn5K1/1O04FAmsHajIACgkQBTn5K1/1
+O06FoQ//QDYD/GCnuKywCY6+BXXJnFHRV3DW7KCCBsI8LEElklqm5RYwtoduqWif
+Qod8wrs40XEQl0cshrWRtWqJrIqwpydavDk49eGILus0ekHVkvb3HTnEGU41C3qg
+52wvUAMuRrd2mSi7n5jNtLbZCCqeQ8Rn3dnr4oUffc+UA6YMANWhidiogOODxxiG
+SThZseA7hFvj9kFbCEIYyhOYFDWxgIc5zoX5HLJ3JF5gx/4gJfIqqtJ5cbuRSouA
+VdBR1a3UtPvqAMeVgRVx40BB2yLDM2U2L4d71FHQ/foMsi9fhF7xW5yNppO52+sQ
+fYcLq58hSNF5ZViKdh4RHNyXew19Xyfz28DdMSn3NCUBKYipKTcIidX7Hl0ypwLL
+W3/+JttRDciTZfRrBo0IA7BnYMO9LAFOMozve011gnwa1EOZKjx8VeN4gJLrYu/A
+ek9s8dOMurs95uKUK5pnCZx/nncqbLVdzpqKn9oBRIUNgaYsrFKbLKzKXUG+g5Zt
+5edpyYeTvdVjvMOH/pZOfqabFws7Wj3Aqa+fZJtZ3PmhL8OM5XRWKkp7YLBrkfKX
+BWzf8hdtENYk9dsi/9+Wsb5yV4yyckLb7l+ify1pvIuXNFppyh6zXgas4EvH0b5i
+iSKPcuJe4h2wu5hsrzHYSJWaoS5qagHwn0OgC1wgw3bPfgKT0Eo=
+=tVPF
+-----END PGP SIGNATURE-----
