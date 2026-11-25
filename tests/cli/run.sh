@@ -616,6 +616,16 @@ if [ -n "$(ls ownrepo/snapshots 2> /dev/null)" ]; then
   printf -- '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n' > ca.pem
   printf 'a key\n' > rb.key
   RB=https://backup.example.com:8443/v1/rb01
+  # Whether the capture kept the restate that made it in its kit: where the
+  # system says where a program runs from (Linux's /proc), or restate is
+  # installed where restore looks for it. Elsewhere --image-from refuses the
+  # snapshot first, before what follows is read.
+  KIT=yes
+  "$BIN" autoinstall --image-from "$RB" --image-token-file bad.token ownrepo > /dev/null \
+    2> kitprobe.err
+  if grep -qF "has no restate in its kit" kitprobe.err; then
+    KIT=no
+  fi
   expect 2 "--image-from with no token" -- "$BIN" autoinstall --image-from "$RB" ownrepo
   contains "$ERR" "needs --image-token-file" "says what it needs"
   expect 2 "--image-from with --image-at" -- \
@@ -623,29 +633,37 @@ if [ -n "$(ls ownrepo/snapshots 2> /dev/null)" ]; then
   contains "$ERR" "give one" "says to give one"
   expect 2 "--image-from with no snapshot named" -- \
     "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token
-  expect 2 "--image-token-file that holds no token" -- \
-    "$BIN" autoinstall --image-from "$RB" --image-token-file bad.token ownrepo
-  contains "$ERR" "is not a token restate-proxy made" "says so"
+  if [ "$KIT" = yes ]; then
+    expect 2 "--image-token-file that holds no token" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file bad.token ownrepo
+    contains "$ERR" "is not a token restate-proxy made" "says so"
+  else
+    expect 2 "--image-from of a snapshot whose kit has no restate" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token ownrepo
+    contains "$ERR" "has no restate in its kit" "says so"
+  fi
   expect 2 "--image-token-file that is not there" -- \
     "$BIN" autoinstall --image-from "$RB" --image-token-file none.token ownrepo
   expect 2 "--image-ca-file that is not there" -- \
     "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-ca-file none.pem \
     ownrepo
-  expect 2 "--image-decrypt-with that is a directory" -- \
-    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-decrypt-with . \
-    ownrepo
-  contains "$ERR" "not a regular file" "says so"
-  case "$(uname -m)" in
-    x86_64 | amd64) OTHER_ARCH=aarch64 ;;
-    *) OTHER_ARCH=x86_64 ;;
-  esac
-  expect 2 "--image-from for another processor" -- \
-    "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --target vm \
-    --arch "$OTHER_ARCH" ownrepo
-  contains "$ERR" "the restate in the snapshot's kit" "says the kit's restate is not that one's"
+  if [ "$KIT" = yes ]; then
+    expect 2 "--image-decrypt-with that is a directory" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-decrypt-with . \
+      ownrepo
+    contains "$ERR" "not a regular file" "says so"
+    case "$(uname -m)" in
+      x86_64 | amd64) OTHER_ARCH=aarch64 ;;
+      *) OTHER_ARCH=x86_64 ;;
+    esac
+    expect 2 "--image-from for another processor" -- \
+      "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --target vm \
+      --arch "$OTHER_ARCH" ownrepo
+    contains "$ERR" "the restate in the snapshot's kit" "says the kit's restate is not that one's"
+  fi
   # On Ubuntu, the file; elsewhere autoinstall refuses the system, after it
   # has made all the rest.
-  if grep -qx 'ID=ubuntu' /etc/os-release 2> /dev/null; then
+  if [ "$KIT" = yes ] && grep -qx 'ID=ubuntu' /etc/os-release 2> /dev/null; then
     expect 0 "autoinstall --image-from" -- \
       "$BIN" autoinstall --image-from "$RB" --image-token-file rb.token --image-ca-file ca.pem \
       --image-pin-sha256 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= --image-decrypt-with rb.key \
